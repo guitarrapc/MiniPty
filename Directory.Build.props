@@ -1,0 +1,34 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>14.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)opensource.snk</AssemblyOriginatorKeyFile>
+
+    <!-- NuGet -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <Description>NativeAOT-friendly minimal cross-platform pseudo-terminal library.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IsPackable>false</IsPackable>
+    <Version>0.1.0</Version>
+    <Authors>guitarrapc</Authors>
+    <Copyright>© guitarrapc</Copyright>
+    <PackageTags>pty</PackageTags>
+    <PackageVersion>$(Version)</PackageVersion>
+    <PackageProjectUrl>https://github.com/guitarrapc/MiniPty</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>$(PackageProjectUrl)</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <NeutralLanguage>en</NeutralLanguage>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" />
+    <EmbeddedResource Include="$(MSBuildThisFileDirectory)LICENSE" />
+  </ItemGroup>
+</Project>
