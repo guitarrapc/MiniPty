@@ -60,11 +60,10 @@ static PtyStartInfo CreateEchoStartInfo()
         };
     }
 
-    var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
     return new PtyStartInfo
     {
-        FileName = shell,
-        Arguments = ["-lc", "printf minipty-capture-sample"],
+        FileName = "/bin/sh",
+        Arguments = ["-c", "printf minipty-capture-sample"],
         Size = new PtySize(80, 24),
     };
 }

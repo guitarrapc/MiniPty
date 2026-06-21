@@ -81,7 +81,8 @@ static int spawn_pty_child(
 
     posix_spawnattr_setflags(&attrs, flags);
 
-    res = posix_spawn(pid_out, file, &actions, &attrs, argv, environ);
+    /* posix_spawnp searches PATH; posix_spawn requires an absolute path on macOS. */
+    res = posix_spawnp(pid_out, file, &actions, &attrs, argv, environ);
     posix_spawn_file_actions_destroy(&actions);
     posix_spawnattr_destroy(&attrs);
     close(slave);
