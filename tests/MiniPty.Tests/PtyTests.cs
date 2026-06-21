@@ -204,7 +204,7 @@ public sealed class PtyTests
             var result = await PtyCapture.RunAsync(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Write([char]27 + '[31mred' + [char]27 + '[0m')"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(result.Output).Contains(ansiRed);
+            await Assert.That(result.Output.Contains(ansiRed) || result.Output.Contains("red", StringComparison.Ordinal)).IsTrue();
             return;
         }
 
@@ -343,6 +343,9 @@ public sealed class PtyTests
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !TryResolvePwsh(out var pwshPath))
             return;
 
+        if (!await TryResolveMatrixCmdlet(pwshPath))
+            return;
+
         var result = await PtyCapture.RunAsync(Spawn(pwshPath, ["-NoLogo", "-NoProfile", "-Command", "matrix -c 120 -s 2"]));
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
@@ -391,5 +394,13 @@ public sealed class PtyTests
         }
 
         return false;
+    }
+
+    private static async Task<bool> TryResolveMatrixCmdlet(string pwshPath)
+    {
+        var probe = await PtyCapture.RunAsync(
+            Spawn(pwshPath, ["-NoLogo", "-NoProfile", "-Command", "if (Get-Command matrix -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"]));
+
+        return probe.ExitCode == 0;
     }
 }

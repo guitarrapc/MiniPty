@@ -6,6 +6,7 @@ internal static partial class UnixInterop
 {
     internal const int EINTR = 4;
     internal const int ECHILD = 10;
+    internal const int EIO = 5;
     internal const int WaitNoHang = 1;
     internal const int SigKill = 9;
 

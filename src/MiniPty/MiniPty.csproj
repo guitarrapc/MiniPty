@@ -9,6 +9,8 @@
     <MiniPtyBuildUnixNative Condition="$([MSBuild]::IsOSPlatform('Linux')) Or $([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD'))">true</MiniPtyBuildUnixNative>
     <MiniPtyUnixNativeLibraryName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libminipty_unix.dylib</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLibraryName Condition="'$(MiniPtyUnixNativeLibraryName)' == ''">libminipty_unix.so</MiniPtyUnixNativeLibraryName>
+    <MiniPtyUnixNativeLinkFlags Condition="$([MSBuild]::IsOSPlatform('Linux'))">-lutil</MiniPtyUnixNativeLinkFlags>
+    <MiniPtyUnixNativeLinkFlags Condition="'$(MiniPtyUnixNativeLinkFlags)' == ''"></MiniPtyUnixNativeLinkFlags>
     <_MiniPtyUnixNativeOutput Condition="'$(MiniPtyBuildUnixNative)' == 'true'">$(OutputPath)$(MiniPtyUnixNativeLibraryName)</_MiniPtyUnixNativeOutput>
   </PropertyGroup>
 
@@ -21,7 +23,7 @@
   <Target Name="BuildMiniPtyUnixNative" BeforeTargets="AssignTargetPaths"
           Condition="'$(MiniPtyBuildUnixNative)' == 'true'">
     <MakeDir Directories="$(OutputPath)" Condition="!Exists('$(OutputPath)')" />
-    <Exec Command="cc -shared -fPIC -O2 -o &quot;$(_MiniPtyUnixNativeOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix.c&quot;" />
+    <Exec Command="cc -shared -fPIC -O2 $(MiniPtyUnixNativeLinkFlags) -o &quot;$(_MiniPtyUnixNativeOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix.c&quot;" />
     <ItemGroup>
       <FileWrites Include="$(_MiniPtyUnixNativeOutput)" />
       <None Include="$(_MiniPtyUnixNativeOutput)">

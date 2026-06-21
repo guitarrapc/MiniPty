@@ -122,11 +122,12 @@ internal sealed class PtyFdReadStream : Stream
                 var read = UnixInterop.Read(_fd, ptr, (nuint)buffer.Length);
                 if (read < 0)
                 {
-                    if (Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
+                    var errno = Marshal.GetLastPInvokeError();
+                    if (errno == UnixInterop.EINTR)
                         continue;
-                    if (Marshal.GetLastPInvokeError() == 0)
+                    if (errno is 0 or UnixInterop.EIO)
                         return 0;
-                    throw new IOException($"read failed (errno {Marshal.GetLastPInvokeError()})");
+                    throw new IOException($"read failed (errno {errno})");
                 }
 
                 return read;
@@ -164,6 +165,47 @@ internal sealed class PtyFdWriteStream : Stream
         Write(buffer.AsSpan(offset, count));
 
     public override void Write(ReadOnlySpan<byte> buffer) => PtyIo.WriteAll(_fd, buffer);
+
+    protected override void Dispose(bool disposing) { }
+}
+
+/// <summary>Notifies when the first non-empty write occurs (stdin EOF staging).</summary>
+internal sealed class InputTrackingWriteStream : Stream
+{
+    private readonly Stream _inner;
+    private readonly Action _onWrite;
+
+    public InputTrackingWriteStream(Stream inner, Action onWrite)
+    {
+        _inner = inner;
+        _onWrite = onWrite;
+    }
+
+    public override bool CanRead => _inner.CanRead;
+    public override bool CanSeek => _inner.CanSeek;
+    public override bool CanWrite => _inner.CanWrite;
+    public override long Length => _inner.Length;
+    public override long Position { get => _inner.Position; set => _inner.Position = value; }
+
+    public override void Flush() => _inner.Flush();
+
+    public override int Read(byte[] buffer, int offset, int count) =>
+        _inner.Read(buffer, offset, count);
+
+    public override long Seek(long offset, SeekOrigin origin) =>
+        _inner.Seek(offset, origin);
+
+    public override void SetLength(long value) => _inner.SetLength(value);
+
+    public override void Write(byte[] buffer, int offset, int count) =>
+        Write(buffer.AsSpan(offset, count));
+
+    public override void Write(ReadOnlySpan<byte> buffer)
+    {
+        if (!buffer.IsEmpty)
+            _onWrite();
+        _inner.Write(buffer);
+    }
 
     protected override void Dispose(bool disposing) { }
 }
