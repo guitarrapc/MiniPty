@@ -1,5 +1,4 @@
 ﻿using System.Runtime.InteropServices;
-using System.Text;
 using MiniPty;
 using MiniPty.Capture;
 using TUnit.Assertions;
@@ -23,8 +22,7 @@ public sealed class PtyTests
             return;
         }
 
-        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-        var unix = await PtyCapture.RunAsync(Spawn(shell, ["-lc", "printf pty-layer-echo"]));
+        var unix = await PtyCapture.RunAsync(UnixShell("printf pty-layer-echo"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output).Contains("pty-layer-echo");
@@ -33,13 +31,23 @@ public sealed class PtyTests
     [Test]
     public async Task PtyTtyCheck()
     {
-        if (!TryResolvePwsh(out var pwsh))
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            if (!TryResolveWindowsPowerShell(out var powershell))
+                return;
+
+            var result = await PtyCapture.RunAsync(
+                Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "Write-Output (\"redirected=$([Console]::IsOutputRedirected)\")"]));
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Output).Contains("redirected=False").IgnoringCase();
             return;
+        }
 
-        var result = await PtyCapture.RunAsync(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "Write-Output (\"redirected=$([Console]::IsOutputRedirected)\")"]));
+        var unix = await PtyCapture.RunAsync(UnixShell("test -t 1 && printf redirected=False || printf redirected=True"));
 
-        await Assert.That(result.ExitCode).IsEqualTo(0);
-        await Assert.That(result.Output).Contains("redirected=False").IgnoringCase();
+        await Assert.That(unix.ExitCode).IsEqualTo(0);
+        await Assert.That(unix.Output).Contains("redirected=False").IgnoringCase();
     }
 
     [Test]
@@ -59,10 +67,10 @@ public sealed class PtyTests
             return;
         }
 
-        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
+        // Canonical PTY line discipline needs a submitted line before EOT signals EOF; run cat directly (not a login shell).
         var unix = await PtyCapture.RunAsync(
-            Spawn(shell, ["-lc", "cat"]),
-            new PtyCaptureOptions { Completion = new() { Input = marker } });
+            Spawn("cat", []),
+            new PtyCaptureOptions { Completion = new() { Input = $"{marker}\n" } });
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output).Contains(marker);
@@ -75,11 +83,8 @@ public sealed class PtyTests
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            if (!TryResolvePwsh(out var pwsh))
-                return;
-
             var result = await PtyCapture.RunAsync(
-                Spawn(pwsh, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]),
+                WindowsCommand($"find /v \"\" >nul & echo {marker}"),
                 new PtyCaptureOptions { Completion = new() { Input = string.Empty } });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
@@ -102,11 +107,8 @@ public sealed class PtyTests
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            if (!TryResolvePwsh(out var pwsh))
-                return;
-
             var result = await PtyCapture.RunAsync(
-                Spawn(pwsh, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]),
+                WindowsCommand($"find /v \"\" >nul & echo {marker}"),
                 new PtyCaptureOptions { Completion = new() { Input = "line 1\r\nline 2\r\n" } });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
@@ -127,10 +129,11 @@ public sealed class PtyTests
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            if (!TryResolvePwsh(out var pwsh))
+            if (!TryResolveWindowsPowerShell(out var powershell))
                 return;
 
-            var result = await PtyCapture.RunAsync(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Out.Write(('x' * 1000000))"]));
+            var result = await PtyCapture.RunAsync(
+                Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Out.Write(('x' * 1000000))"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output.Length).IsGreaterThan(999_999);
@@ -175,10 +178,11 @@ public sealed class PtyTests
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            if (!TryResolvePwsh(out var pwsh))
+            if (!TryResolveWindowsPowerShell(out var powershell))
                 return;
 
-            var result = await PtyCapture.RunAsync(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::WriteLine([Console]::IsOutputRedirected)"]));
+            var result = await PtyCapture.RunAsync(
+                Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "[Console]::WriteLine([Console]::IsOutputRedirected)"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output).Contains("False").IgnoringCase();
@@ -198,10 +202,11 @@ public sealed class PtyTests
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            if (!TryResolvePwsh(out var pwsh))
+            if (!TryResolveWindowsPowerShell(out var powershell))
                 return;
 
-            var result = await PtyCapture.RunAsync(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Write([char]27 + '[31mred' + [char]27 + '[0m')"]));
+            var result = await PtyCapture.RunAsync(
+                Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Write([char]27 + '[31mred' + [char]27 + '[0m')"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output.Contains(ansiRed) || result.Output.Contains("red", StringComparison.Ordinal)).IsTrue();
@@ -228,8 +233,7 @@ public sealed class PtyTests
             return;
         }
 
-        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "exit 0"]));
+        using var unixSession = Pty.Start(Spawn("true", []));
 
         await WaitUntilExited(unixSession);
 
@@ -253,8 +257,7 @@ public sealed class PtyTests
             return;
         }
 
-        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 8"]));
+        using var unixSession = Pty.Start(Spawn("sleep", ["8"]));
 
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
             unixSession.CompleteAsync(new PtyCompleteOptions { KillOnCancellation = true }, cts.Token));
@@ -277,8 +280,7 @@ public sealed class PtyTests
             return;
         }
 
-        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 8"]));
+        using var unixSession = Pty.Start(Spawn("sleep", ["8"]));
 
         await Assert.ThrowsAsync<OperationCanceledException>(() => unixSession.WaitForExitAsync(cts.Token));
         await Assert.That(unixSession.HasExited).IsFalse();
@@ -299,8 +301,7 @@ public sealed class PtyTests
             return;
         }
 
-        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "exit 0"]));
+        using var unixSession = Pty.Start(Spawn("true", []));
 
         unixSession.Resize(new(100, 30));
 
@@ -313,15 +314,13 @@ public sealed class PtyTests
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            if (!TryResolvePwsh(out var pwsh))
+            if (!TryResolveWindowsPowerShell(out var powershell))
                 return;
 
-            await using var session = Pty.Start(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::ReadLine() > $null; [Console]::WriteLine(\"{0} {1}\" -f [Console]::WindowWidth, [Console]::WindowHeight)"]));
+            await using var session = Pty.Start(
+                Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "$s = $Host.UI.RawUI.WindowSize; Start-Sleep -Milliseconds 200; Write-Output (\"{0} {1}\" -f $s.Width, $s.Height); exit 0"]));
             session.Resize(new(100, 30));
-            await session.WriteInputAsync("go\n");
-            await Task.Delay(500);
-            session.SendEof();
-            var result = await session.CompleteAsync(new PtyCompleteOptions { SendEofAfterInput = false });
+            var result = await session.CompleteAsync();
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output).Contains("100 30");
@@ -364,16 +363,20 @@ public sealed class PtyTests
         return Spawn(cmd, ["/c", command]);
     }
 
-    private static async Task WriteLineAsync(PtySession session, string line)
-    {
-        await using var writer = new StreamWriter(session.Input, leaveOpen: true) { AutoFlush = true };
-        await writer.WriteLineAsync(line);
-    }
-
     private static async Task WaitUntilExited(PtySession session)
     {
         for (var attempt = 0; attempt < 50 && !session.HasExited; attempt++)
             await Task.Delay(20);
+    }
+
+    private static bool TryResolveWindowsPowerShell(out string path)
+    {
+        path = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        return File.Exists(path);
     }
 
     private static bool TryResolvePwsh(out string path)
