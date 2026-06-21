@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="TUnit" />
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
   </ItemGroup>
 

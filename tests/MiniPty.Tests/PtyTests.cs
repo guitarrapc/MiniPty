@@ -1,211 +1,198 @@
-using System.Diagnostics;
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using MiniPty;
+using TUnit.Assertions;
+using TUnit.Core;
 
-var failures = 0;
+namespace MiniPty.Tests;
 
-failures += Run("PtyEchoOutput", PtyEchoOutput);
-failures += Run("PtyTtyCheck", PtyTtyCheck);
-failures += Run("PtyStdinEof", PtyStdinEof);
-failures += Run("PtyHasExitedPolls", PtyHasExitedPolls);
-failures += Run("PtyCancellationKill", PtyCancellationKill);
-failures += Run("PtyCancellationWait", PtyCancellationWait);
-failures += Run("PtyResizeUpdatesSize", PtyResizeUpdatesSize);
-if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && TryResolvePwsh(out var pwshPath))
-    failures += Run("PtyMatrixPwsh", () => PtyMatrixPwsh(pwshPath));
-
-return failures == 0 ? 0 : 1;
-
-static PtyOptions Spawn(string fileName, IReadOnlyList<string> arguments) =>
-    new() { FileName = fileName, Arguments = arguments, Columns = 40, Rows = 8 };
-
-static int Run(string name, Func<bool> test)
+[NotInParallel]
+public sealed class PtyTests
 {
-    try
+    [Test]
+    public async Task PtyEchoOutput()
     {
-        if (test())
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            Console.Error.WriteLine($"ok {name}");
-            return 0;
+            var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+            var result = await Pty.Run(Spawn(cmd, ["/c", "echo pty-layer-echo"]));
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Output).Contains("pty-layer-echo");
+            return;
         }
 
-        Console.Error.WriteLine($"FAIL {name}");
-        return 1;
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"FAIL {name}: {ex.Message}");
-        return 1;
-    }
-}
+        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
+        var unix = await Pty.Run(Spawn(shell, ["-lc", "printf pty-layer-echo"]));
 
-static bool PtyEchoOutput()
-{
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-    {
-        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        var result = Pty.Run(Spawn(cmd, ["/c", "echo pty-layer-echo"])).GetAwaiter().GetResult();
-        return result.ExitCode == 0 && result.Output.Contains("pty-layer-echo", StringComparison.Ordinal);
+        await Assert.That(unix.ExitCode).IsEqualTo(0);
+        await Assert.That(unix.Output).Contains("pty-layer-echo");
     }
 
-    var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-    var unix = Pty.Run(Spawn(shell, ["-lc", "printf pty-layer-echo"])).GetAwaiter().GetResult();
-    return unix.ExitCode == 0 && unix.Output.Contains("pty-layer-echo", StringComparison.Ordinal);
-}
-
-static bool PtyStdinEof()
-{
-    const string marker = "pty-stdin-eof";
-
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    [Test]
+    public async Task PtyTtyCheck()
     {
-        var sort = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "sort.exe");
-        var spawn = Spawn(sort, []);
-        var result = Pty.Run(spawn with { Input = $"zzz\r\n{marker}\r\naaa\r\n" }).GetAwaiter().GetResult();
-        return result.Output.Contains(marker, StringComparison.Ordinal)
-            && result.Output.Contains("aaa", StringComparison.Ordinal);
+        if (!TryResolvePwsh(out var pwsh))
+            return;
+
+        var result = await Pty.Run(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "Write-Output (\"redirected=$([Console]::IsOutputRedirected)\")"]));
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.Output).Contains("redirected=False").IgnoringCase();
     }
 
-    var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-    var unix = Pty.Run(Spawn(shell, ["-lc", "cat"]) with { Input = marker }).GetAwaiter().GetResult();
-    return unix.ExitCode == 0 && unix.Output.Contains(marker, StringComparison.Ordinal);
-}
-
-static bool PtyHasExitedPolls()
-{
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    [Test]
+    public async Task PtyStdinEof()
     {
-        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        using var session = Pty.Start(Spawn(cmd, ["/c", "exit 0"]));
-        for (var i = 0; i < 50 && !session.HasExited; i++)
-            Thread.Sleep(20);
-        return session.HasExited;
-    }
+        const string marker = "pty-stdin-eof";
 
-    var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-    using var unixSession = Pty.Start(Spawn(shell, ["-lc", "exit 0"]));
-    for (var i = 0; i < 50 && !unixSession.HasExited; i++)
-        Thread.Sleep(20);
-    return unixSession.HasExited;
-}
-
-static bool PtyCancellationKill()
-{
-    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-    {
-        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 30 127.0.0.1 >nul"]));
-        try
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            session.WaitForExitOrKillAsync(cts.Token).GetAwaiter().GetResult();
-            return false;
+            var sort = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "sort.exe");
+            var result = await Pty.Run(Spawn(sort, []) with { Input = $"zzz\r\n{marker}\r\naaa\r\n" });
+
+            await Assert.That(result.Output).Contains(marker);
+            await Assert.That(result.Output).Contains("aaa");
+            return;
         }
-        catch (OperationCanceledException)
-        {
-            Thread.Sleep(200);
-            return session.HasExited;
-        }
+
+        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
+        var unix = await Pty.Run(Spawn(shell, ["-lc", "cat"]) with { Input = marker });
+
+        await Assert.That(unix.ExitCode).IsEqualTo(0);
+        await Assert.That(unix.Output).Contains(marker);
     }
 
-    var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-    using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 30"]));
-    try
+    [Test]
+    public async Task PtyHasExitedPolls()
     {
-        unixSession.WaitForExitOrKillAsync(cts.Token).GetAwaiter().GetResult();
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+            using var session = Pty.Start(Spawn(cmd, ["/c", "exit 0"]));
+
+            await WaitUntilExited(session);
+
+            await Assert.That(session.HasExited).IsTrue();
+            return;
+        }
+
+        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
+        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "exit 0"]));
+
+        await WaitUntilExited(unixSession);
+
+        await Assert.That(unixSession.HasExited).IsTrue();
+    }
+
+    [Test]
+    public async Task PtyCancellationKill()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+            using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 30 127.0.0.1 >nul"]));
+
+            await Assert.ThrowsAsync<OperationCanceledException>(() => session.WaitForExitOrKillAsync(cts.Token));
+            await Task.Delay(200);
+            await Assert.That(session.HasExited).IsTrue();
+            return;
+        }
+
+        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
+        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 30"]));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => unixSession.WaitForExitOrKillAsync(cts.Token));
+        await Task.Delay(200);
+        await Assert.That(unixSession.HasExited).IsTrue();
+    }
+
+    [Test]
+    public async Task PtyCancellationWait()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+            using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 30 127.0.0.1 >nul"]));
+
+            await Assert.ThrowsAsync<OperationCanceledException>(() => session.WaitForExitAsync(cts.Token));
+            await Assert.That(session.HasExited).IsFalse();
+            return;
+        }
+
+        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
+        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 30"]));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => unixSession.WaitForExitAsync(cts.Token));
+        await Assert.That(unixSession.HasExited).IsFalse();
+    }
+
+    [Test]
+    public async Task PtyResizeUpdatesSize()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+            using var session = Pty.Start(Spawn(cmd, ["/c", "exit 0"]));
+
+            session.Resize(100, 30);
+
+            await Assert.That(session.Size.Columns).IsEqualTo(100);
+            await Assert.That(session.Size.Rows).IsEqualTo(30);
+            return;
+        }
+
+        var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
+        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "exit 0"]));
+
+        unixSession.Resize(100, 30);
+
+        await Assert.That(unixSession.Size.Columns).IsEqualTo(100);
+        await Assert.That(unixSession.Size.Rows).IsEqualTo(30);
+    }
+
+    [Test]
+    public async Task PtyMatrixPwsh()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !TryResolvePwsh(out var pwshPath))
+            return;
+
+        var result = await Pty.Run(Spawn(pwshPath, ["-NoLogo", "-NoProfile", "-Command", "matrix -c 120 -s 2"]));
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.Chunks.Count).IsGreaterThan(1);
+    }
+
+    private static PtyOptions Spawn(string fileName, IReadOnlyList<string> arguments) =>
+        new() { FileName = fileName, Arguments = arguments, Columns = 40, Rows = 8 };
+
+    private static async Task WaitUntilExited(PtySession session)
+    {
+        for (var attempt = 0; attempt < 50 && !session.HasExited; attempt++)
+            await Task.Delay(20);
+    }
+
+    private static bool TryResolvePwsh(out string path)
+    {
+        path = "";
+        var env = Environment.GetEnvironmentVariable("PWSH");
+        if (!string.IsNullOrWhiteSpace(env) && File.Exists(env))
+        {
+            path = env;
+            return true;
+        }
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var candidate = Path.Combine(programFiles, "PowerShell", "7", "pwsh.exe");
+        if (File.Exists(candidate))
+        {
+            path = candidate;
+            return true;
+        }
+
         return false;
     }
-    catch (OperationCanceledException)
-    {
-        Thread.Sleep(200);
-        return unixSession.HasExited;
-    }
-}
-
-static bool PtyCancellationWait()
-{
-    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-    {
-        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 30 127.0.0.1 >nul"]));
-        try
-        {
-            session.WaitForExitAsync(cts.Token).GetAwaiter().GetResult();
-            return false;
-        }
-        catch (OperationCanceledException)
-        {
-            return !session.HasExited;
-        }
-    }
-
-    var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-    using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 30"]));
-    try
-    {
-        unixSession.WaitForExitAsync(cts.Token).GetAwaiter().GetResult();
-        return false;
-    }
-    catch (OperationCanceledException)
-    {
-        return !unixSession.HasExited;
-    }
-}
-
-static bool PtyResizeUpdatesSize()
-{
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-    {
-        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        using var session = Pty.Start(Spawn(cmd, ["/c", "exit 0"]));
-        session.Resize(100, 30);
-        return session.Size.Columns == 100 && session.Size.Rows == 30;
-    }
-
-    var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-    using var unixSession = Pty.Start(Spawn(shell, ["-lc", "exit 0"]));
-    unixSession.Resize(100, 30);
-    return unixSession.Size.Columns == 100 && unixSession.Size.Rows == 30;
-}
-
-static bool PtyTtyCheck()
-{
-    if (!TryResolvePwsh(out var pwsh))
-    {
-        Console.Error.WriteLine("skip PtyTtyCheck: pwsh not found");
-        return true;
-    }
-
-    var result = Pty.Run(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "Write-Output (\"redirected=$([Console]::IsOutputRedirected)\")"])).GetAwaiter().GetResult();
-    return result.ExitCode == 0 && result.Output.Contains("redirected=False", StringComparison.OrdinalIgnoreCase);
-}
-
-static bool PtyMatrixPwsh(string pwshPath)
-{
-    var result = Pty.Run(Spawn(pwshPath, ["-NoLogo", "-NoProfile", "-Command", "matrix -c 120 -s 2"])).GetAwaiter().GetResult();
-    return result.ExitCode == 0 && result.Chunks.Count > 1;
-}
-
-static bool TryResolvePwsh(out string path)
-{
-    path = "";
-    var env = Environment.GetEnvironmentVariable("PWSH");
-    if (!string.IsNullOrWhiteSpace(env) && File.Exists(env))
-    {
-        path = env;
-        return true;
-    }
-
-    var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-    var candidate = Path.Combine(programFiles, "PowerShell", "7", "pwsh.exe");
-    if (File.Exists(candidate))
-    {
-        path = candidate;
-        return true;
-    }
-
-    return false;
 }

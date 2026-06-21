@@ -6,9 +6,6 @@
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
 
-    <SignAssembly>true</SignAssembly>
-    <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)opensource.snk</AssemblyOriginatorKeyFile>
-
     <!-- NuGet -->
     <IsAotCompatible>true</IsAotCompatible>
     <Description>NativeAOT-friendly minimal cross-platform pseudo-terminal library.</Description>
