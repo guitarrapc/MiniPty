@@ -466,13 +466,13 @@ internal static partial class UnixPtyBackend
         internal const ulong TIOCSWINSZ = 0x80087467;
     }
 
-    [LibraryImport("libc", SetLastError = true)]
+    [LibraryImport("libc", EntryPoint = "openpty", SetLastError = true)]
     private static partial int LinuxOpenPty(out int amaster, out int aslave, IntPtr name, IntPtr termp, ref Winsize winp);
 
-    [LibraryImport("libutil", SetLastError = true)]
+    [LibraryImport("libutil", EntryPoint = "openpty", SetLastError = true)]
     private static partial int MacOSOpenPty(out int amaster, out int aslave, IntPtr name, IntPtr termp, ref Winsize winp);
 
-    [LibraryImport("libutil", SetLastError = true)]
+    [LibraryImport("libutil", EntryPoint = "openpty", SetLastError = true)]
     private static partial int FreeBSDOpenPty(out int amaster, out int aslave, IntPtr name, IntPtr termp, ref Winsize winp);
 
     [LibraryImport("libc", SetLastError = true)]
