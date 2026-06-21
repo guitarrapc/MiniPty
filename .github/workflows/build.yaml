@@ -75,3 +75,11 @@ jobs:
           fi
           test -f "$exe"
           "$exe"
+
+  build-complete:
+    needs: [run]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo "Build and run completed successfully on all platforms."
