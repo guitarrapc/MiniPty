@@ -60,7 +60,7 @@ internal struct WindowsSecurityAttributes
     public bool bInheritHandle;
 }
 
-public static class WindowsPtyBackend
+internal static class WindowsPtyBackend
 {
     private const int ProcThreadAttributePseudoConsole = 0x00020016;
     private const uint ExtendedStartupInfoPresent = 0x00080000;

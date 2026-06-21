@@ -4,6 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Description>Timestamped PTY output capture for MiniPty.</Description>
   </PropertyGroup>
 

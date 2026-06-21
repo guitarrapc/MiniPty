@@ -1,6 +1,11 @@
 namespace MiniPty.Capture;
 
-/// <summary>A timestamped slice of PTY output.</summary>
-/// <param name="Time">Elapsed time since the capture session started.</param>
-/// <param name="Data">Decoded text captured in this slice.</param>
+/// <summary>
+/// A single timestamped slice of PTY output produced by one read from the master output stream.
+/// </summary>
+/// <param name="Time">
+/// Elapsed time since the capture session started (immediately after <see cref="Pty.Start"/>).
+/// Suitable for asciicast-style timelines when combined with an external session origin.
+/// </param>
+/// <param name="Data">Text decoded from the bytes read in this slice.</param>
 public readonly record struct PtyCaptureChunk(TimeSpan Time, string Data);

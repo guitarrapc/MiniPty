@@ -4,6 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Description>NativeAOT-friendly minimal cross-platform pseudo-terminal library.</Description>
   </PropertyGroup>
 

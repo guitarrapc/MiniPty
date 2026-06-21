@@ -3,7 +3,7 @@ using System.Text;
 
 namespace MiniPty.Internal;
 
-public static partial class UnixPtyBackend
+internal static partial class UnixPtyBackend
 {
     private const byte InputEot = 0x04;
     private const int WaitPollMs = 100;

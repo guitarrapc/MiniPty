@@ -5,13 +5,31 @@ using MiniPty.Internal;
 
 namespace MiniPty.Capture;
 
-/// <summary>Timestamped PTY output capture built on <see cref="Pty"/>.</summary>
+/// <summary>
+/// High-level API for spawning a PTY child and capturing timestamped output in one call.
+/// </summary>
+/// <remarks>
+/// Built on <see cref="Pty.Start"/> and <see cref="PtySession.CompleteAsync"/>.
+/// Each <see cref="PtyCaptureChunk"/> records elapsed time from session start (immediately after spawn).
+/// </remarks>
 public static class PtyCapture
 {
     /// <summary>
-    /// Spawns a child, captures timestamped output, and waits for exit.
-    /// Chunk timestamps are measured from session start.
+    /// Spawns a child in a pseudo-terminal, captures timestamped output, waits for exit, and disposes the session.
     /// </summary>
+    /// <param name="startInfo">Executable, arguments, working directory, and initial terminal size.</param>
+    /// <param name="options">Capture and completion options, or <see langword="null"/> for defaults.</param>
+    /// <param name="cancellationToken">
+    /// When canceled, the child is killed when <see cref="PtyCompleteOptions.KillOnCancellation"/> is
+    /// <see langword="true"/> (default).
+    /// </param>
+    /// <returns>
+    /// A <see cref="PtyCaptureResult"/> containing merged output, exit code, and per-read chunks with timestamps.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="startInfo"/> is <see langword="null"/>.</exception>
+    /// <exception cref="PlatformNotSupportedException">The current operating system is not supported.</exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
+    /// <exception cref="TimeoutException">Exit or output drain timeout was exceeded.</exception>
     public static async Task<PtyCaptureResult> RunAsync(
         PtyStartInfo startInfo,
         PtyCaptureOptions? options = null,
