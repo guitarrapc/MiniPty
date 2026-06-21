@@ -11,7 +11,7 @@ All public types live in the `MiniPty` namespace. The static entry type is `Pty`
 | `Pty.Start(PtyOptions)` | Spawn child → `PtySession` (stream I/O, no wait) |
 | `Pty.Run(PtyOptions)` | One-shot → `PtyCaptureResult` |
 | `Pty.RunExitCodeAsync` | Exit code only |
-| `PtySession` | `Input` / `Output` streams, `SignalEof`, wait, `Kill` |
+| `PtySession` | `Input` / `Output` streams, `SignalEof`, `Resize`, wait, `Kill` |
 | `PtyOptions` | Spawn + capture options |
 | `PtySize` | Terminal dimensions |
 | `PtyCaptureResult` | `Output`, `ExitCode`, `Chunks` |

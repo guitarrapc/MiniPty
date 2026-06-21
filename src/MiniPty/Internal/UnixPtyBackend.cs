@@ -117,12 +117,13 @@ public static partial class UnixPtyBackend
         private bool _exited;
         private int _exitCode;
         private bool _disposed;
+        private PtySize _size;
 
         public UnixPtyBackendInstance(int master, int pid, PtySize size)
         {
             _master = master;
             _pid = pid;
-            Size = size;
+            _size = size;
             _inputStream = new InputTrackingWriteStream(master, () => _inputWritten = true);
             Input = _inputStream;
             Output = new PtyFdReadStream(master);
@@ -150,10 +151,22 @@ public static partial class UnixPtyBackend
             }
         }
 
-        public PtySize Size { get; }
+        public PtySize Size => _size;
 
-        public void Resize(int columns, int rows) =>
-            throw new NotSupportedException("PTY resize is not supported on this platform.");
+        public void Resize(int columns, int rows)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_masterClosed)
+                throw new InvalidOperationException("Cannot resize after the PTY has been closed.");
+
+            columns = Math.Clamp(columns, 1, 512);
+            rows = Math.Clamp(rows, 1, 512);
+            var winsize = new Winsize { ws_row = (ushort)rows, ws_col = (ushort)columns };
+            if (ioctl(_master, TiocSwinsz(), ref winsize) != 0)
+                throw new IOException($"TIOCSWINSZ failed (errno {Marshal.GetLastPInvokeError()})");
+
+            _size = new PtySize(columns, rows);
+        }
 
         public void SignalEof()
         {
@@ -423,19 +436,34 @@ public static partial class UnixPtyBackend
         throw new PlatformNotSupportedException("PTY is not supported on this Unix operating system.");
     }
 
+    private static ulong TiocSwinsz()
+    {
+        if (OperatingSystem.IsLinux())
+            return Linux.TIOCSWINSZ;
+        if (OperatingSystem.IsMacOS())
+            return MacOS.TIOCSWINSZ;
+        if (OperatingSystem.IsFreeBSD())
+            return FreeBSD.TIOCSWINSZ;
+
+        throw new PlatformNotSupportedException("PTY is not supported on this Unix operating system.");
+    }
+
     private static class Linux
     {
         internal const ulong TIOCSCTTY = 0x540E;
+        internal const ulong TIOCSWINSZ = 0x5414;
     }
 
     private static class MacOS
     {
         internal const ulong TIOCSCTTY = 0x20007461;
+        internal const ulong TIOCSWINSZ = 0x80087467;
     }
 
     private static class FreeBSD
     {
         internal const ulong TIOCSCTTY = 0x20007461;
+        internal const ulong TIOCSWINSZ = 0x80087467;
     }
 
     [LibraryImport("libc", SetLastError = true)]
@@ -455,6 +483,9 @@ public static partial class UnixPtyBackend
 
     [LibraryImport("libc", SetLastError = true)]
     private static partial int ioctl(int fd, ulong request, int arg);
+
+    [LibraryImport("libc", SetLastError = true)]
+    private static partial int ioctl(int fd, ulong request, ref Winsize winp);
 
     [LibraryImport("libc", SetLastError = true)]
     private static partial int dup2(int oldfd, int newfd);

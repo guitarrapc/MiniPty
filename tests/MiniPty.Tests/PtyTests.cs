@@ -10,6 +10,7 @@ failures += Run("PtyStdinEof", PtyStdinEof);
 failures += Run("PtyHasExitedPolls", PtyHasExitedPolls);
 failures += Run("PtyCancellationKill", PtyCancellationKill);
 failures += Run("PtyCancellationWait", PtyCancellationWait);
+failures += Run("PtyResizeUpdatesSize", PtyResizeUpdatesSize);
 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && TryResolvePwsh(out var pwshPath))
     failures += Run("PtyMatrixPwsh", () => PtyMatrixPwsh(pwshPath));
 
@@ -152,6 +153,22 @@ static bool PtyCancellationWait()
     {
         return !unixSession.HasExited;
     }
+}
+
+static bool PtyResizeUpdatesSize()
+{
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+        using var session = Pty.Start(Spawn(cmd, ["/c", "exit 0"]));
+        session.Resize(100, 30);
+        return session.Size.Columns == 100 && session.Size.Rows == 30;
+    }
+
+    var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
+    using var unixSession = Pty.Start(Spawn(shell, ["-lc", "exit 0"]));
+    unixSession.Resize(100, 30);
+    return unixSession.Size.Columns == 100 && unixSession.Size.Rows == 30;
 }
 
 static bool PtyTtyCheck()

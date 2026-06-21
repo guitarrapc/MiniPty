@@ -179,7 +179,7 @@ public static class WindowsPtyBackend
         private readonly SafePseudoConsoleHandle _hpc;
         private readonly IntPtr _attrList;
         private readonly WindowsProcessInformation _processInfo;
-        private readonly PtySize _size;
+        private PtySize _size;
         private bool _inputClosed;
         private bool _outputClosed;
         private bool _eofSignaled;
@@ -230,8 +230,22 @@ public static class WindowsPtyBackend
 
         public PtySize Size => _size;
 
-        public void Resize(int columns, int rows) =>
-            throw new NotSupportedException();
+        public void Resize(int columns, int rows)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_hpcClosed)
+                throw new InvalidOperationException("Cannot resize after the pseudo-console has been closed.");
+
+            columns = Math.Clamp(columns, 1, 512);
+            rows = Math.Clamp(rows, 1, 512);
+            var hr = WindowsInterop.ResizePseudoConsole(
+                _hpc.DangerousGetHandle(),
+                new WindowsCoord((short)columns, (short)rows));
+            if (hr < 0)
+                throw new Win32Exception(hr, "ResizePseudoConsole failed");
+
+            _size = new PtySize(columns, rows);
+        }
 
         public void SignalEof()
         {
@@ -514,6 +528,9 @@ internal static partial class WindowsInterop
         SafeFileHandle hOutput,
         uint dwFlags,
         out IntPtr phPC);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial int ResizePseudoConsole(IntPtr hPC, WindowsCoord size);
 
     [LibraryImport("kernel32.dll")]
     internal static partial void ClosePseudoConsole(IntPtr hPC);
