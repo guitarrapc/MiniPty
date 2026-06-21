@@ -17,11 +17,12 @@ jobs:
   build:
     timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-          - os: windows-latest
-          - os: macos-latest
+          - os: ubuntu-24.04
+          - os: windows-2025
+          - os: macos-26
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
@@ -44,13 +45,14 @@ jobs:
   run:
     needs: [build]
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             rid: linux-x64
-          - os: windows-latest
+          - os: windows-2025
             rid: win-x64
-          - os: macos-latest
+          - os: macos-26
             rid: osx-arm64
     permissions:
       contents: read
@@ -78,7 +80,8 @@ jobs:
 
   build-complete:
     needs: [run]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
