@@ -1,103 +1,175 @@
-# PTY Recording Specification
+# MiniPty Specification
 
-Status: **Implemented**
+Status: **Implemented** (MiniPty 0.3.x, MiniPty.Capture 0.3.x)
+
+User-facing API contracts for the **MiniPty** and **MiniPty.Capture** NuGet packages. OS-level implementation notes live in [references/pty_crossplatform.md](references/pty_crossplatform.md).
 
 ## Motivation
 
-Some CLI tools and terminal UIs behave differently when stdout is not a TTY: they disable color, skip animations, or refuse to run. scenetake records demos as asciinema casts; for commands that need a real terminal session, `pty: true` on a step runs the command inside a pseudo-terminal and records the byte stream that would appear on screen.
+Many CLI tools and terminal UIs behave differently when stdout is not a TTY: they disable color, skip animations, or refuse to run. A pseudo-terminal gives the child real terminal semantics while the parent reads and writes a byte stream.
 
-PTY mode is opt-in so ordinary steps keep predictable pipe-based stdout/stderr capture and declarative highlighting. See [spec_scenario.md](spec_scenario.md) for where `pty` appears in YAML.
+MiniPty exists as a **standalone, NativeAOT-friendly** library so any .NET program—not only scenetake—can spawn PTY children without bundling winpty or external helpers. Recording semantics (per-read timestamps) are split into **MiniPty.Capture** so core callers that only need streams and exit codes are not forced to depend on capture types.
 
 ## Scope
 
-### In scope (P0 / P1)
+### Packages
 
-| Priority | Goal | Examples |
-|---|---|---|
-| **P0** | Child process sees a TTY; TUI output is captured | `matrix` / `cmatrix`-style programs |
-| **P1** | Single commands run through the scenario shell with TTY semantics | `echo`, `Write-Output`, `[Console]::IsOutputRedirected` checks |
+| Package | Responsibility |
+|---|---|
+| **MiniPty** | Spawn child in PTY; `Input` / `Output` streams; lifecycle (`WaitForExitAsync`, `CompleteAsync`, `Dispose`) |
+| **MiniPty.Capture** | One-shot `PtyCapture.RunAsync` → merged output, exit code, and timestamped `Chunks` |
+
+Timestamped chunks are **not** part of the core API. Consumers that need cast timelines (e.g. [scenetake](https://github.com/guitarrapc/scenetake)) take a dependency on both packages.
+
+### In scope (current)
+
+| Goal | Examples |
+|---|---|
+| Child sees a TTY; TUI output is readable | Short `matrix` / `cmatrix` runs |
+| Spawn with executable, arguments, cwd, terminal size | Shell one-liners, `echo`, `Write-Output` |
+| Optional one-shot stdin with EOF | `cat`, `sort`, pipelines through a shell |
+| Terminal resize after spawn | `PtySession.Resize` |
+| Cooperative vs forced shutdown | `WaitForExitAsync` (cancel = stop waiting) vs `CompleteAsync` (cancel may kill) |
 
 ### Out of scope (for now)
 
 - Long-lived interactive sessions (vim, less, REPLs)
-- Bidirectional input beyond optional initial stdin bytes
+- Bidirectional input beyond optional initial stdin text
 - Remote shells (`ssh`)
-- Spilling PTY capture to disk (Phase 1 keeps chunks in memory)
-
-## What `pty: true` Does
-
-When a step has `pty: true`:
-
-1. **No simulated typing** — the cast does not emit the prompt, per-character typing, or a synthetic Enter for that step. (Other steps without `pty` keep the usual typing recording.)
-2. **PTY-sized session** — the pseudo-terminal uses the scenario `width` and `height` (same as the cast header).
-3. **Shell interpretation** — the `run` string is passed to the scenario `shell` the same way as non-PTY execution (`pwsh -Command`, `cmd /c`, `bash -lc`, etc.). PTY does not bypass the shell.
-4. **Terminal stream output** — stdout and stderr are merged into one byte stream. `stderr-color` is ignored for that step.
-5. **Timestamped chunks** — while the child runs, scenetake reads the PTY and attaches elapsed seconds to each chunk. After the child exits, those chunks become cast output events using `command_start + chunk_time`.
-6. **Raw byte stream** — output is captured as a terminal byte stream. scenetake does not normalize newlines or split on lines; ANSI sequences may span chunk boundaries.
-7. **No fallback** — if a PTY cannot be created, the run fails immediately. scenetake does not silently fall back to redirected pipes or simulated typing.
-
-PTY capture records bytes from the child session. Terminal rendering (ANSI parsing, SVG) is a separate layer. See [references/pty_crossplatform.md](references/pty_crossplatform.md).
+- Spilling capture to disk when memory is exhausted
+- Capture tuning (`TimeProvider`, max chunk size, chunk timestamp modes)
 
 ## Platform Support
 
 | OS | Backend | Minimum |
 |---|---|---|
 | Windows | ConPTY (`CreatePseudoConsole`) | Windows 10 1809+, Windows 11 |
-| Linux | `openpty` + `fork` | Common glibc/musl targets |
-| macOS | `openpty` + `fork` | Supported macOS runners (BSD `TIOCSCTTY`, `libutil`) |
-| FreeBSD | `openpty` + `fork` | `libutil` + BSD `TIOCSCTTY` (CI coverage TBD) |
+| Linux | `openpty` + `fork` + `execvp` | Common glibc/musl targets |
+| macOS | `openpty` + `fork` + `execvp` | Supported runners (BSD `TIOCSCTTY`, `libutil`) |
+| FreeBSD | `openpty` + `fork` + `execvp` | `libutil` + BSD `TIOCSCTTY` |
 
-Windows does **not** use winpty or third-party PTY libraries. scenetake ships as a NativeAOT binary; the PTY backend is in-process P/Invoke only.
+Pipe redirect **without** ConPTY is not a PTY. On Windows, TUI tools require ConPTY-backed spawn.
 
-## Failure and Diagnostics
+MiniPty does **not** use winpty or third-party PTY binaries. Backends are in-process `[LibraryImport]` only.
 
-PTY creation or child launch failures abort the scenario run (non-zero exit).
+## Core API (`MiniPty`)
 
-**Always on failure (stderr):**
+### Entry: `Pty.Start(PtyStartInfo)` → `PtySession`
 
-- Failed step name (e.g. `CreatePseudoConsole`, `CreateProcess`, `openpty`)
-- OS error code / message
-- Shell identifier and terminal size (`cols` × `rows`)
+Spawns a child attached to a new pseudo-terminal. Does **not** wait for exit.
 
-**With `--verbose`:**
+`PtyStartInfo` supplies:
 
-- Resolved executable and arguments
-- Working directory
-- Child process id (when available)
-- Chunk count and total captured bytes on success
+- `FileName` — executable path or name (required)
+- `Arguments` — argv after the executable (default empty)
+- `WorkingDirectory` — optional; inherits parent when null
+- `Size` — initial columns × rows in character cells (default 80×24; clamped to 1–512 per dimension at spawn)
 
-Successful runs do not emit PTY diagnostics unless `--verbose` is set.
+### Session contract
+
+| Member | Behavior |
+|---|---|
+| `Input` / `Output` | Byte streams; no line-ending translation; stdout and stderr merged on `Output` |
+| `WriteInputAsync` | Write UTF-8 (default) or raw bytes; does not close stdin |
+| `SendEof()` | End stdin (platform-specific; see reference doc) |
+| `Resize(PtySize)` | Resize terminal after spawn |
+| `WaitForExitAsync` | Wait for child exit; **cancellation stops waiting only—the child keeps running** |
+| `CompleteAsync` | Pump output, optional stdin, wait, drain, return `PtyResult` (no timestamps) |
+| `Kill()` | `TerminateProcess` / `SIGKILL`; does not release handles |
+| `HasExited` / `ExitCode?` | Poll exit; `ExitCode` is null until exited |
+| `Dispose` / `DisposeAsync` | **Kill child if still running**, then release handles |
+
+### `PtyCompleteOptions`
+
+Used by `CompleteAsync`. `MiniPty.Capture` composes the same type via `PtyCaptureOptions.Completion`.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `OutputEncoding` | UTF-8 | Decode PTY bytes to text |
+| `Input` | null | Stdin text; null = leave open (TUI); `""` = EOF with no bytes |
+| `SendEofAfterInput` | true | Call `SendEof` after writing `Input` |
+| `ExitTimeout` | null | Max wait for child exit; null = wait until exit or cancel |
+| `OutputDrainGrace` | 1s | Drain after exit before closing transport |
+| `OutputReaderCloseTimeout` | 5s | Wait for reader after transport close |
+| `KillOnCancellation` | true | **CompleteAsync only** — cancel kills child |
+
+### Backpressure
+
+A PTY has backpressure. If the child writes output and nothing reads `PtySession.Output`, the child may block when the terminal buffer fills. Callers must use `CompleteAsync`, `PtyCapture.RunAsync`, or continuously read `Output`.
+
+## Capture API (`MiniPty.Capture`)
+
+```csharp
+PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
+// result.Output   — merged text (concatenation of chunk data)
+// result.ExitCode
+// result.Chunks   — PtyCaptureChunk(TimeSpan Time, string Data)
+```
+
+- `PtyCaptureOptions.Completion` wraps `PtyCompleteOptions`.
+- Each chunk's `Time` is elapsed since **session start** (immediately after `Pty.Start`).
+- The session is disposed when `RunAsync` completes (child killed on dispose if still running).
+
+PTY output is a **raw byte stream**. MiniPty does not normalize newlines or parse ANSI; sequences may span chunk boundaries.
+
+## Cancellation
+
+| API | On cancel |
+|---|---|
+| `WaitForExitAsync` | Waiting stops (`OperationCanceledException`); child **continues** |
+| `CompleteAsync` | When `KillOnCancellation` is true (default), child is killed, then `OperationCanceledException` |
+| `PtyCapture.RunAsync` | Same as `CompleteAsync` (uses completion options) |
+
+This split lets embedders observe cancellation without tearing down long-running children, while one-shot capture runs default to killing on cancel.
+
+## Failure Behavior
+
+| Condition | Behavior |
+|---|---|
+| Unsupported OS | `PlatformNotSupportedException` from `Pty.Start` |
+| Spawn / ConPTY / `openpty` failure | OS exception with error code (run aborts) |
+| Child non-zero exit | Returned as `ExitCode`; not thrown by MiniPty |
+| `ExitTimeout` exceeded | `TimeoutException` |
+| Output drain / reader close timeout | `TimeoutException` |
+| `Dispose` while child running | Child killed |
+
+MiniPty does not fall back to pipe redirect when PTY creation fails.
 
 ## Verification
 
-PTY behavior is checked in CI on Linux, macOS, and Windows:
+CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows:
 
-| Layer | What it checks |
+| Check | Why |
 |---|---|
-| **PTY backend** | `PseudoTerminal.Run` — TTY detection strings, simple command output, multiple chunks |
-| **End-to-end** | Fixture scenarios → `.cast` — property assertions (substring presence, chunk/event count, ANSI), not golden cast files |
+| TTY detection (`redirected=False`, `isatty`) | Confirms real PTY semantics |
+| Simple command output | Confirms spawn + decode |
+| Stdin + EOF (`cat`, `sort`) | Confirms staged EOF |
+| Multiple capture chunks + ANSI | Confirms concurrent read + timestamps |
+| `WaitForExitAsync` cancel vs `CompleteAsync` cancel | Confirms cancellation contract |
+| Resize | Confirms `TIOCSWINSZ` / `ResizePseudoConsole` |
 
-Fixture scenarios live under `tests/fixtures/` (e.g. `pty-tty-check.yaml`, `pty-cmd.yaml`, `matrix-pwsh-pty.yaml`). Integration tests run against a published binary via the `SCENETAKE_BIN` environment variable (set in CI after `dotnet publish`).
+Tests use property assertions, not golden byte captures, to reduce OS/timing flake.
 
-## Cross-Document Notes
-
-- [spec_scenario.md](spec_scenario.md) — `pty` key on steps, terminal dimensions
-- [spec_cast.md](spec_cast.md) — how output events are written
-- [spec_cli.md](spec_cli.md) — `--verbose`, exit codes
-- [spec_highlight.md](spec_highlight.md) — why post-hoc coloring remains the default for non-PTY steps
-- [references/pty_crossplatform.md](references/pty_crossplatform.md) — cross-platform PTY implementation design (`PseudoTerminal.cs`)
+[scenetake](https://github.com/guitarrapc/scenetake) adds end-to-end fixture scenarios (`tests/fixtures/pty-*.yaml`) via `SCENETAKE_BIN`; that layer is documented in scenetake's [spec_pty.md](https://github.com/guitarrapc/scenetake/blob/main/.github/docs/spec_pty.md).
 
 ## Lessons Learned
 
-- **Pipe redirect is not a PTY.** `CreateProcess` with redirected stdin/stdout captures bytes but children report "not a TTY". Tools like `matrix` skip rendering.
-- **ConPTY pipes are transport, not the terminal.** On Windows, `HPCON` is the pseudo-console; pipes connect the parent to ConPTY. Passing pipe handles to `STARTF_USESTDHANDLES` without ConPTY does not satisfy TTY checks.
-- **ConPTY handle lifetime matters.** The pipe ends handed to `CreatePseudoConsole` must be closed in the parent immediately after creation. Leaving them open, or marking the wrong ends non-inheritable, leads to missing output, hangs, or leaks to the parent console. `CREATE_NEW_CONSOLE` alongside ConPTY is inappropriate.
-- **winpty is a poor fit for scenetake.** Bundled `winpty.exe` expects a real console for its own stdin; running from a non-interactive parent fails with `stdin is not a tty`. It also adds environment dependency against the NativeAOT goal.
-- **Shell path must match non-PTY semantics.** Direct execution of resolved `.exe` paths bypasses shell builtins and PowerShell cmdlets; P1 requires always going through the scenario shell.
-- **Child stdin must not be closed before launch completes (Windows).** Closing the ConPTY input pipe too early yields `STATUS_CONTROL_C_EXIT` (0xC000013A). Pipe close is always deferred to the first `WaitForExitAsync` poll or `CloseTransport` — even after `WriteInput` succeeds. **Unix** uses staged EOT: immediate after `WriteInput`, deferred when there were no bytes.
-- **Stdin EOF must be signaled for one-shot input.** After writing bytes, call `SendEof()` before waiting. Windows closes the ConPTY input pipe; Unix writes EOT (`0x04`, Ctrl-D) because PTY master fds cannot be half-closed — EOT is only EOF in canonical terminal mode. Do not close the input pipe via `FileStream` disposal on the write handle; use `WriteFile` and an explicit `SendEof()`.
-- **Parent console attachment leaks child output.** When scenetake runs attached to a console, a ConPTY child may duplicate the parent's standard handles unless `STARTUPINFO` sets `STARTF_USESTDHANDLES` with `INVALID_HANDLE_VALUE` for stdin/stdout/stderr. `CREATE_NO_WINDOW` alone was not sufficient in testing; the invalid-handle workaround was required for pipe capture while attached to a console.
-- **Fork before exec must stay async-signal-safe.** Prepare `argv` / `cwd` with `NativeMemory` in the parent; the child only calls libc (`dup2`, `execvp`, `_exit`, etc.). Managed allocation or runtime APIs in the child after `fork()` can deadlock or corrupt locks.
-- **Capture timing vs cast emission.** Reading the PTY concurrently while the child runs (with per-chunk timestamps) is required for animated TUIs. Batching reads only after exit loses timing; failing to attach ConPTY loses content entirely.
-- **Output drain after child exit.** `Complete()` must not block forever on the read task. After `waitpid`, Unix keeps the master open so buffered output can flush naturally; if the read does not finish within `OutputDrainTimeout`, the master is closed and `OutputCloseGrace` is applied before `TimeoutException`. `Dispose()` always closes transport first (same as Windows).
-- **Phase 1 memory is sufficient.** P0/P1 outputs (short `matrix` runs, single-shot commands) are bounded; disk spill can wait until a real out-of-memory case appears.
+These constraints shaped the API and backends; details are in the reference doc.
+
+- **Pipe redirect is not a PTY.** Redirected stdin/stdout captures bytes but children report "not a TTY". Tools like `matrix` skip rendering on Windows without ConPTY.
+- **ConPTY pipes are transport, not the terminal.** `HPCON` is the pseudo-console; mishandling pipe ends after `CreatePseudoConsole` causes missing output, hangs, or leaks to the parent console.
+- **winpty is a poor fit for NativeAOT single-binary goals.** Bundled helpers add environment dependency; in-process ConPTY avoids that.
+- **Child stdin must not be closed before launch completes (Windows).** Early ConPTY input pipe close yields `STATUS_CONTROL_C_EXIT` (0xC000013A). EOF is always staged to the first wait poll or transport close.
+- **Unix PTY master fds cannot be half-closed.** `SendEof()` writes EOT (`0x04`); closing the master ends both read and write. EOT is reliable only in canonical line discipline—not for raw-mode TUIs or REPLs.
+- **Fork before exec must stay async-signal-safe.** Build `argv` / `cwd` in the parent with `NativeMemory`; the child only calls libc before `execvp`.
+- **Capture timing requires concurrent reads.** Reading only after exit loses TUI animation timing; failing to attach ConPTY loses content entirely.
+- **Output drain after child exit needs bounded waits.** `OutputDrainGrace` then transport close, then `OutputReaderCloseTimeout`, prevents hung readers without dropping slow flushes.
+- **Session vs capture split reduced API awkwardness.** A blocking `Run` that mixed streams, timestamps, and cancellation forced `GetAwaiter().GetResult()` in tests; `PtySession` + optional Capture package keeps async paths natural.
+- **Cancel semantics differ by use case.** Library callers needed `WaitForExitAsync` that does not kill on cancel; one-shot capture defaults to killing so hung children do not leak.
+
+## Related Documents
+
+- [spec_index.md](spec_index.md) — document map
+- [references/pty_crossplatform.md](references/pty_crossplatform.md) — ConPTY, `openpty`, EOF staging, interop
+- [README.md](../../README.md) — quick-start examples
+- [scenetake spec_pty.md](https://github.com/guitarrapc/scenetake/blob/main/.github/docs/spec_pty.md) — `pty: true` YAML and cast integration
