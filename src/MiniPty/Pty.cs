@@ -1,14 +1,14 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using MiniPty.Internal;
-using MiniPty.Recording;
 
 namespace MiniPty;
 
 /// <summary>Cross-platform pseudo-terminal factory and convenience APIs.</summary>
 public static class Pty
 {
-    /// <summary>Whether PTY sessions are supported on the current operating system.</summary>
+    /// <summary>Whether the current operating system supports pseudo-terminals.</summary>
     public static bool IsSupported =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ||
         RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ||
@@ -16,17 +16,15 @@ public static class Pty
         RuntimeInformation.IsOSPlatform(OSPlatform.FreeBSD);
 
     /// <summary>Spawns a child in a new pseudo-terminal. Does not wait for exit.</summary>
-    public static PtySession Start(PtySpawnOptions options)
+    /// <param name="options">Process and terminal options.</param>
+    /// <returns>A session with <see cref="PtySession.Input"/> and <see cref="PtySession.Output"/> streams.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <exception cref="PlatformNotSupportedException">PTY is not supported on this operating system.</exception>
+    public static PtySession Start(PtyOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
         if (!IsSupported)
             throw new PlatformNotSupportedException("PTY is not supported on this operating system.");
-
-        options = options with
-        {
-            Columns = options.Size.Columns,
-            Rows = options.Size.Rows,
-        };
 
         IPtyBackend backend;
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -40,13 +38,15 @@ public static class Pty
     /// <summary>
     /// Spawns a child, optionally writes stdin, records timestamped output, and waits for exit.
     /// </summary>
-    public static async Task<PtyRecording> RecordAsync(
-        PtySpawnOptions spawn,
-        PtyRecordOptions? options = null,
+    /// <param name="options">Process, terminal, and capture options.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Merged PTY output, exit code, and timestamped chunks.</returns>
+    public static async Task<PtyCaptureResult> Run(
+        PtyOptions options,
         CancellationToken cancellationToken = default)
     {
-        options ??= new PtyRecordOptions();
-        var session = Start(spawn);
+        ArgumentNullException.ThrowIfNull(options);
+        var session = Start(options);
         await using var _ = session.ConfigureAwait(false);
 
         var stopwatch = Stopwatch.StartNew();
@@ -74,34 +74,19 @@ public static class Pty
             transportAlreadyClosed: false,
             cancellationToken).ConfigureAwait(false);
 
-        return new PtyRecording
-        {
-            ExitCode = exitCode,
-            Chunks = chunks,
-        };
-    }
-
-    /// <summary>One-shot capture: merged text output without exposing chunks.</summary>
-    public static async Task<PtyCapture> CaptureAsync(
-        PtySpawnOptions spawn,
-        PtyRecordOptions? options = null,
-        CancellationToken cancellationToken = default)
-    {
-        var recording = await RecordAsync(spawn, options, cancellationToken).ConfigureAwait(false);
-        return new PtyCapture
-        {
-            ExitCode = recording.ExitCode,
-            Text = recording.Text,
-        };
+        var output = string.Concat(chunks.Select(static c => c.Data));
+        return new PtyCaptureResult(output, exitCode, chunks);
     }
 
     /// <summary>Runs a child to completion and returns only the exit code.</summary>
-    public static async Task<int> RunAsync(
-        PtySpawnOptions spawn,
-        PtyRecordOptions? options = null,
+    /// <param name="options">Process, terminal, and capture options.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The child process exit code.</returns>
+    public static async Task<int> RunExitCodeAsync(
+        PtyOptions options,
         CancellationToken cancellationToken = default)
     {
-        var recording = await RecordAsync(spawn, options, cancellationToken).ConfigureAwait(false);
-        return recording.ExitCode;
+        var result = await Run(options, cancellationToken).ConfigureAwait(false);
+        return result.ExitCode;
     }
 }

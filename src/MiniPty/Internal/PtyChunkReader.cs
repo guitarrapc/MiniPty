@@ -1,14 +1,13 @@
 using System.Diagnostics;
 using System.Text;
-using MiniPty.Recording;
 
 namespace MiniPty.Internal;
 
 internal static class PtyChunkReader
 {
-    internal static List<PtyChunk> Read(Stream stream, Stopwatch stopwatch, Encoding outputEncoding)
+    internal static List<PtyOutputChunk> Read(Stream stream, Stopwatch stopwatch, Encoding outputEncoding)
     {
-        var chunks = new List<PtyChunk>();
+        var chunks = new List<PtyOutputChunk>();
         var bytes = new byte[4096];
         var chars = new char[outputEncoding.GetMaxCharCount(bytes.Length)];
         var decoder = outputEncoding.GetDecoder();
@@ -21,12 +20,12 @@ internal static class PtyChunkReader
 
             var charCount = decoder.GetChars(bytes, 0, read, chars, 0, flush: false);
             if (charCount > 0)
-                chunks.Add(new PtyChunk(stopwatch.Elapsed.TotalSeconds, new string(chars, 0, charCount)));
+                chunks.Add(new PtyOutputChunk(stopwatch.Elapsed.TotalSeconds, new string(chars, 0, charCount)));
         }
 
         var trailing = decoder.GetChars(Array.Empty<byte>(), 0, 0, chars, 0, flush: true);
         if (trailing > 0)
-            chunks.Add(new PtyChunk(stopwatch.Elapsed.TotalSeconds, new string(chars, 0, trailing)));
+            chunks.Add(new PtyOutputChunk(stopwatch.Elapsed.TotalSeconds, new string(chars, 0, trailing)));
 
         return chunks;
     }
@@ -34,8 +33,8 @@ internal static class PtyChunkReader
 
 internal static class PtyOutputDrain
 {
-    internal static async Task<IReadOnlyList<PtyChunk>> AwaitPumpAsync(
-        Task<List<PtyChunk>> pump,
+    internal static async Task<IReadOnlyList<PtyOutputChunk>> AwaitPumpAsync(
+        Task<List<PtyOutputChunk>> pump,
         Action closeOutputTransport,
         TimeSpan drainTimeout,
         TimeSpan closeGrace,

@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using MiniPty;
-using MiniPty.Recording;
 
 var failures = 0;
 
@@ -16,7 +15,7 @@ if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && TryResolvePwsh(out va
 
 return failures == 0 ? 0 : 1;
 
-static PtySpawnOptions Spawn(string fileName, IReadOnlyList<string> arguments) =>
+static PtyOptions Spawn(string fileName, IReadOnlyList<string> arguments) =>
     new() { FileName = fileName, Arguments = arguments, Columns = 40, Rows = 8 };
 
 static int Run(string name, Func<bool> test)
@@ -44,13 +43,13 @@ static bool PtyEchoOutput()
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        var recording = Pty.RecordAsync(Spawn(cmd, ["/c", "echo pty-layer-echo"])).GetAwaiter().GetResult();
-        return recording.ExitCode == 0 && recording.Text.Contains("pty-layer-echo", StringComparison.Ordinal);
+        var result = Pty.Run(Spawn(cmd, ["/c", "echo pty-layer-echo"])).GetAwaiter().GetResult();
+        return result.ExitCode == 0 && result.Output.Contains("pty-layer-echo", StringComparison.Ordinal);
     }
 
     var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-    var unix = Pty.RecordAsync(Spawn(shell, ["-lc", "printf pty-layer-echo"])).GetAwaiter().GetResult();
-    return unix.ExitCode == 0 && unix.Text.Contains("pty-layer-echo", StringComparison.Ordinal);
+    var unix = Pty.Run(Spawn(shell, ["-lc", "printf pty-layer-echo"])).GetAwaiter().GetResult();
+    return unix.ExitCode == 0 && unix.Output.Contains("pty-layer-echo", StringComparison.Ordinal);
 }
 
 static bool PtyStdinEof()
@@ -60,18 +59,15 @@ static bool PtyStdinEof()
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         var sort = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "sort.exe");
-        var recording = Pty.RecordAsync(
-            Spawn(sort, []),
-            new PtyRecordOptions { Input = $"zzz\r\n{marker}\r\naaa\r\n" }).GetAwaiter().GetResult();
-        return recording.Text.Contains(marker, StringComparison.Ordinal)
-            && recording.Text.Contains("aaa", StringComparison.Ordinal);
+        var spawn = Spawn(sort, []);
+        var result = Pty.Run(spawn with { Input = $"zzz\r\n{marker}\r\naaa\r\n" }).GetAwaiter().GetResult();
+        return result.Output.Contains(marker, StringComparison.Ordinal)
+            && result.Output.Contains("aaa", StringComparison.Ordinal);
     }
 
     var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-    var unix = Pty.RecordAsync(
-        Spawn(shell, ["-lc", "cat"]),
-        new PtyRecordOptions { Input = marker }).GetAwaiter().GetResult();
-    return unix.ExitCode == 0 && unix.Text.Contains(marker, StringComparison.Ordinal);
+    var unix = Pty.Run(Spawn(shell, ["-lc", "cat"]) with { Input = marker }).GetAwaiter().GetResult();
+    return unix.ExitCode == 0 && unix.Output.Contains(marker, StringComparison.Ordinal);
 }
 
 static bool PtyHasExitedPolls()
@@ -166,16 +162,14 @@ static bool PtyTtyCheck()
         return true;
     }
 
-    var recording = Pty.RecordAsync(
-        Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "Write-Output (\"redirected=$([Console]::IsOutputRedirected)\")"])).GetAwaiter().GetResult();
-    return recording.ExitCode == 0 && recording.Text.Contains("redirected=False", StringComparison.OrdinalIgnoreCase);
+    var result = Pty.Run(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "Write-Output (\"redirected=$([Console]::IsOutputRedirected)\")"])).GetAwaiter().GetResult();
+    return result.ExitCode == 0 && result.Output.Contains("redirected=False", StringComparison.OrdinalIgnoreCase);
 }
 
 static bool PtyMatrixPwsh(string pwshPath)
 {
-    var recording = Pty.RecordAsync(
-        Spawn(pwshPath, ["-NoLogo", "-NoProfile", "-Command", "matrix -c 120 -s 2"])).GetAwaiter().GetResult();
-    return recording.ExitCode == 0 && recording.Chunks.Count > 1;
+    var result = Pty.Run(Spawn(pwshPath, ["-NoLogo", "-NoProfile", "-Command", "matrix -c 120 -s 2"])).GetAwaiter().GetResult();
+    return result.ExitCode == 0 && result.Chunks.Count > 1;
 }
 
 static bool TryResolvePwsh(out string path)

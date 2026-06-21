@@ -2,40 +2,38 @@ using System.Diagnostics;
 using System.Text;
 using MiniPty.Internal;
 
-namespace MiniPty.Recording;
+namespace MiniPty;
 
 /// <summary>Drains <see cref="PtySession.Output"/> into timestamped chunks while the session runs.</summary>
 public sealed class PtyOutputRecorder
 {
     private readonly PtySession _session;
-    private readonly Stopwatch _stopwatch;
-    private readonly Task<List<PtyChunk>> _pump;
+    private readonly Task<List<PtyOutputChunk>> _pump;
 
-    private PtyOutputRecorder(PtySession session, Stopwatch stopwatch, Task<List<PtyChunk>> pump)
+    private PtyOutputRecorder(PtySession session, Task<List<PtyOutputChunk>> pump)
     {
         _session = session;
-        _stopwatch = stopwatch;
         _pump = pump;
     }
 
-    /// <summary>Starts reading the session output stream on a background thread.</summary>
+    /// <summary>Starts background output capture for <paramref name="session"/>.</summary>
+    /// <param name="session">An active PTY session.</param>
+    /// <param name="outputEncoding">Encoding used to decode PTY bytes (default UTF-8).</param>
+    /// <returns>A recorder that collects chunks via <see cref="CollectAsync"/>.</returns>
     public static PtyOutputRecorder Start(PtySession session, Encoding? outputEncoding = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         outputEncoding ??= Encoding.UTF8;
         var stopwatch = Stopwatch.StartNew();
         var pump = Task.Run(() => PtyChunkReader.Read(session.Output, stopwatch, outputEncoding));
-        return new PtyOutputRecorder(session, stopwatch, pump);
+        return new PtyOutputRecorder(session, pump);
     }
 
-    /// <summary>Elapsed time since recording started.</summary>
-    public TimeSpan Elapsed => _stopwatch.Elapsed;
-
-    /// <summary>
-    /// Waits for the read pump to finish after the child has exited.
-    /// Call after <see cref="PtySession.WaitForExitAsync"/>.
-    /// </summary>
-    public Task<IReadOnlyList<PtyChunk>> CollectAsync(
+    /// <summary>Waits for the output pump to finish and returns captured chunks.</summary>
+    /// <param name="drainTimeout">Maximum wait after the child exits.</param>
+    /// <param name="closeGrace">Grace period after closing the output transport.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public Task<IReadOnlyList<PtyOutputChunk>> CollectAsync(
         TimeSpan? drainTimeout = null,
         TimeSpan? closeGrace = null,
         CancellationToken cancellationToken = default)

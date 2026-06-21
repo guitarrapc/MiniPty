@@ -69,7 +69,7 @@ public static class WindowsPtyBackend
     private const uint WaitPollMs = 100;
     private const uint HandleFlagInherit = 0x00000001;
 
-    internal static IPtyBackend Start(PtySpawnOptions options)
+    internal static IPtyBackend Start(PtyOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
 

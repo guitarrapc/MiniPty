@@ -14,7 +14,7 @@
     <Description>NativeAOT-friendly minimal cross-platform pseudo-terminal library.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <IsPackable>false</IsPackable>
-    <Version>0.1.0</Version>
+    <Version>0.2.1</Version>
     <Authors>guitarrapc</Authors>
     <Copyright>© guitarrapc</Copyright>
     <PackageTags>pty</PackageTags>

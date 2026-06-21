@@ -2,60 +2,49 @@
 
 NativeAOT-friendly minimal cross-platform pseudo-terminal library for .NET.
 
-Windows uses ConPTY (`CreatePseudoConsole`). Linux, macOS, and FreeBSD use `openpty` + `fork` + `execvp`.
+All public types live in the `MiniPty` namespace. The static entry type is `Pty` (a namespace cannot share the same name as a type in C#).
 
-## Packages
+## API
 
-| Layer | API | Purpose |
-|-------|-----|---------|
-| **Core** | `Pty.Start` → `PtySession` | `Stream` I/O, process lifecycle, `SignalEof`, `Resize` (stub) |
-| **Recording** | `Pty.RecordAsync` → `PtyRecording` | Timestamped chunks for cast/recording tools |
-| **Convenience** | `Pty.CaptureAsync`, `Pty.RunAsync` | Merged text or exit code only |
+| Type | Role |
+|------|------|
+| `Pty.Start(PtyOptions)` | Spawn child → `PtySession` (stream I/O, no wait) |
+| `Pty.Run(PtyOptions)` | One-shot → `PtyCaptureResult` |
+| `Pty.RunExitCodeAsync` | Exit code only |
+| `PtySession` | `Input` / `Output` streams, `SignalEof`, wait, `Kill` |
+| `PtyOptions` | Spawn + capture options |
+| `PtySize` | Terminal dimensions |
+| `PtyCaptureResult` | `Output`, `ExitCode`, `Chunks` |
+| `PtyOutputChunk` | `Time`, `Data` |
+| `PtyOutputRecorder` | `Start` + `CollectAsync` for session-based capture |
 
-## Core API
+PTY merges stdout/stderr into a single `Output` stream — there is no separate stderr field.
+
+## Example
 
 ```csharp
-await using var session = Pty.Start(new PtySpawnOptions
+using MiniPty;
+
+PtyCaptureResult result = await Pty.Run(new PtyOptions
 {
     FileName = "/bin/bash",
     Arguments = ["-lc", "echo hello"],
-    Columns = 80,
+    Columns = 120,
     Rows = 24,
 });
 
-// session.Input / session.Output are read/write streams
-await session.Input.WriteAsync(Encoding.UTF8.GetBytes("input\n"));
-session.SignalEof();
-var code = await session.WaitForExitAsync();
+Console.Write(result.Output);
+foreach (var chunk in result.Chunks)
+    Console.WriteLine($"{chunk.Time:F3}s {chunk.Data.Length} chars");
 ```
 
-## Recording API
+## scenetake
 
-```csharp
-PtyRecording recording = await Pty.RecordAsync(
-    new PtySpawnOptions { FileName = "cmd.exe", Arguments = ["/c", "echo hi"], Columns = 120, Rows = 24 },
-    new PtyRecordOptions { Input = null }); // null stdin = TUI / no EOF
+scenetake uses `PtyCaptureResult` for PTY commands and a separate `CommandExecution` wrapper for pipe-redirected commands (real stdout/stderr).
 
-// recording.ExitCode
-// recording.Chunks — IReadOnlyList<PtyChunk> with TimeSeconds + Data
-// recording.Text — concatenated output
-```
-
-### `PtyRecording`
-
-| Member | Description |
-|--------|-------------|
-| `ExitCode` | Child exit code (`128 + signal` on Unix signals) |
-| `Chunks` | Timestamped output slices (`PtyChunk`) |
-| `Text` | All chunk text merged |
-
-## scenetake integration
-
-scenetake maps `PtyRecording` to its own `CommandOutput` / `CommandOutputChunk` types — those live in scenetake, not MiniPty.
-
-## Build & test
+## Build
 
 ```bash
-dotnet build src/MiniPty.csproj
-dotnet run --project tests/MiniPty.Tests.csproj
+dotnet build src/MiniPty/MiniPty.csproj
+dotnet pack src/MiniPty/MiniPty.csproj -o artifacts -c Release
 ```

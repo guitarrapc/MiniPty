@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using System.Text;
-using MiniPty;
 
 namespace MiniPty.Internal;
 
@@ -11,7 +10,7 @@ public static partial class UnixPtyBackend
     private const int ReapPollMs = 10;
     private const int ReapDeadlineMs = 1_000;
 
-    internal static IPtyBackend Start(PtySpawnOptions options)
+    internal static IPtyBackend Start(PtyOptions options)
     {
         var size = options.Size;
         var winsize = new Winsize { ws_col = (ushort)size.Columns, ws_row = (ushort)size.Rows };
