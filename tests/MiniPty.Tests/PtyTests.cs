@@ -79,7 +79,7 @@ public sealed class PtyTests
                 return;
 
             var result = await PtyCapture.RunAsync(
-                Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]),
+                Spawn(pwsh, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]),
                 new PtyCaptureOptions { Completion = new() { Input = string.Empty } });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
@@ -106,7 +106,7 @@ public sealed class PtyTests
                 return;
 
             var result = await PtyCapture.RunAsync(
-                Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]),
+                Spawn(pwsh, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]),
                 new PtyCaptureOptions { Completion = new() { Input = "line 1\r\nline 2\r\n" } });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
@@ -244,7 +244,7 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-            using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 30 127.0.0.1 >nul"]));
+            using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 8 127.0.0.1 >nul"]));
 
             await Assert.ThrowsAsync<OperationCanceledException>(() =>
                 session.CompleteAsync(new PtyCompleteOptions { KillOnCancellation = true }, cts.Token));
@@ -254,7 +254,7 @@ public sealed class PtyTests
         }
 
         var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 30"]));
+        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 8"]));
 
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
             unixSession.CompleteAsync(new PtyCompleteOptions { KillOnCancellation = true }, cts.Token));
@@ -270,7 +270,7 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-            using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 30 127.0.0.1 >nul"]));
+            using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 8 127.0.0.1 >nul"]));
 
             await Assert.ThrowsAsync<OperationCanceledException>(() => session.WaitForExitAsync(cts.Token));
             await Assert.That(session.HasExited).IsFalse();
@@ -278,7 +278,7 @@ public sealed class PtyTests
         }
 
         var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 30"]));
+        using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 8"]));
 
         await Assert.ThrowsAsync<OperationCanceledException>(() => unixSession.WaitForExitAsync(cts.Token));
         await Assert.That(unixSession.HasExited).IsFalse();
@@ -319,6 +319,7 @@ public sealed class PtyTests
             await using var session = Pty.Start(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::ReadLine() > $null; [Console]::WriteLine(\"{0} {1}\" -f [Console]::WindowWidth, [Console]::WindowHeight)"]));
             session.Resize(new(100, 30));
             await session.WriteInputAsync("go\n");
+            await Task.Delay(500);
             session.SendEof();
             var result = await session.CompleteAsync(new PtyCompleteOptions { SendEofAfterInput = false });
 

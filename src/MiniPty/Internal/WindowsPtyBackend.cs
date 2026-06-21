@@ -68,7 +68,8 @@ internal static class WindowsPtyBackend
     private static readonly IntPtr InvalidHandleValue = new(-1);
     private const uint WaitPollMs = 100;
     private const uint HandleFlagInherit = 0x00000001;
-    private const int EofDeferPolls = 3;
+    private const int EofDeferPollsAfterInput = 3;
+    private const int EofDeferPollsEmptyInput = 40;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
@@ -260,7 +261,7 @@ internal static class WindowsPtyBackend
             if (_inputWritten)
             {
                 _eofSignaled = true;
-                _eofDeferPollsRemaining = EofDeferPolls;
+                _eofDeferPollsRemaining = EofDeferPollsAfterInput;
                 return;
             }
 
@@ -396,7 +397,7 @@ internal static class WindowsPtyBackend
 
             _eofPending = false;
             _eofSignaled = true;
-            _eofDeferPollsRemaining = EofDeferPolls;
+            _eofDeferPollsRemaining = EofDeferPollsEmptyInput;
         }
 
         private void CloseInputPipeIfEofSignaled()

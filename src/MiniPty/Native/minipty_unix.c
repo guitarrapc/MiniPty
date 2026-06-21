@@ -8,6 +8,7 @@
 #if defined(__linux__)
 #include <pty.h>
 #elif defined(__APPLE__)
+#include <stdlib.h>
 #include <util.h>
 #include <spawn.h>
 #include <sys/ioctl.h>
@@ -70,8 +71,13 @@ static int spawn_pty_child(
     posix_spawn_file_actions_addclose(&actions, slave);
     posix_spawn_file_actions_addclose(&actions, *master);
 
-    if (cwd != NULL && cwd[0] != '\0')
+    if (cwd != NULL && cwd[0] != '\0') {
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+        posix_spawn_file_actions_addchdir(&actions, cwd);
+#else
         posix_spawn_file_actions_addchdir_np(&actions, cwd);
+#endif
+    }
 
     posix_spawnattr_setflags(&attrs, flags);
 
