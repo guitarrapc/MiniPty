@@ -327,14 +327,13 @@ public sealed class PtyTests
             return;
         }
 
-        await using var unixSession = Pty.Start(UnixShell("read line; stty size"));
+        await using var unixSession = Pty.Start(
+            UnixShell("sleep 0.1; printf 'SIZE:%s:%s\\n' \"$(stty rows)\" \"$(stty columns)\""));
         unixSession.Resize(new(100, 30));
-        await unixSession.WriteInputAsync("go\n");
-        unixSession.SendEof();
-        var unixResult = await unixSession.CompleteAsync(new PtyCompleteOptions { SendEofAfterInput = false });
+        var unixResult = await unixSession.CompleteAsync();
 
         await Assert.That(unixResult.ExitCode).IsEqualTo(0);
-        await Assert.That(unixResult.Output).Contains("30 100");
+        await Assert.That(unixResult.Output).Contains("SIZE:30:100");
     }
 
     [Test]

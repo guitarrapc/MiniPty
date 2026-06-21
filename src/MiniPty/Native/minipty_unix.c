@@ -8,104 +8,10 @@
 #if defined(__linux__)
 #include <pty.h>
 #elif defined(__APPLE__)
-#include <stdlib.h>
 #include <util.h>
-#include <spawn.h>
-#include <sys/ioctl.h>
-#include <termios.h>
 #elif defined(__FreeBSD__)
 #include <libutil.h>
 #endif
-
-#if defined(__APPLE__)
-extern char **environ;
-
-#ifndef POSIX_SPAWN_SETSID
-#define POSIX_SPAWN_SETSID 1024
-#endif
-
-static int spawn_pty_child(
-    int *master,
-    const struct winsize *winp,
-    const char *cwd,
-    const char *file,
-    char *const *argv,
-    pid_t *pid_out)
-{
-    char slave_name[128];
-    int slave = -1;
-    int res;
-    posix_spawn_file_actions_t actions;
-    posix_spawnattr_t attrs;
-    short flags = POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSID;
-
-    *master = posix_openpt(O_RDWR | O_NOCTTY);
-    if (*master == -1)
-        return -1;
-
-    if (grantpt(*master) == -1)
-        goto fail;
-    if (unlockpt(*master) == -1)
-        goto fail;
-
-    if (ioctl(*master, TIOCPTYGNAME, slave_name) == -1)
-        goto fail;
-
-    slave = open(slave_name, O_RDWR | O_NOCTTY);
-    if (slave == -1)
-        goto fail;
-
-    if (winp != NULL && ioctl(slave, TIOCSWINSZ, winp) == -1)
-        goto fail;
-
-    if (posix_spawn_file_actions_init(&actions) != 0)
-        goto fail;
-    if (posix_spawnattr_init(&attrs) != 0) {
-        posix_spawn_file_actions_destroy(&actions);
-        goto fail;
-    }
-
-    posix_spawn_file_actions_adddup2(&actions, slave, STDIN_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, slave, STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, slave, STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&actions, slave);
-    posix_spawn_file_actions_addclose(&actions, *master);
-
-    if (cwd != NULL && cwd[0] != '\0') {
-#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
-        posix_spawn_file_actions_addchdir(&actions, cwd);
-#else
-        posix_spawn_file_actions_addchdir_np(&actions, cwd);
-#endif
-    }
-
-    posix_spawnattr_setflags(&attrs, flags);
-
-    /* posix_spawnp searches PATH; posix_spawn requires an absolute path on macOS. */
-    res = posix_spawnp(pid_out, file, &actions, &attrs, argv, environ);
-    posix_spawn_file_actions_destroy(&actions);
-    posix_spawnattr_destroy(&attrs);
-    close(slave);
-    slave = -1;
-
-    if (res != 0) {
-        errno = res;
-        goto fail;
-    }
-
-    return 0;
-
-fail:
-    if (slave != -1)
-        close(slave);
-    if (*master != -1) {
-        close(*master);
-        *master = -1;
-    }
-    return -1;
-}
-
-#else
 
 static int spawn_pty_child(
     int *master,
@@ -130,8 +36,8 @@ static int spawn_pty_child(
         return -1;
 
     if (pid == 0) {
-        if (cwd != NULL && cwd[0] != '\0')
-            chdir(cwd);
+        if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
+            _exit(126);
         execvp(file, argv);
         _exit(127);
     }
@@ -139,8 +45,6 @@ static int spawn_pty_child(
     *pid_out = pid;
     return 0;
 }
-
-#endif
 
 int minipty_fork_pty_exec(
     int *master,
