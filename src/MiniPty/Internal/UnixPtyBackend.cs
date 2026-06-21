@@ -22,16 +22,19 @@ internal static partial class UnixPtyBackend
         var exec = UnixExecPayload.Create(startInfo.FileName, arguments, startInfo.WorkingDirectory);
         try
         {
-            var pid = fork();
+            var pid = ForkChildExec(
+                master,
+                slave,
+                tiocSetCtty,
+                exec.WorkingDirectory,
+                exec.Executable,
+                exec.Argv);
             if (pid < 0)
             {
                 UnixInterop.close(master);
                 UnixInterop.close(slave);
                 throw new IOException($"fork failed (errno {Marshal.GetLastPInvokeError()})");
             }
-
-            if (pid == 0)
-                ChildMainAfterFork(master, slave, tiocSetCtty, exec.Executable, exec.Argv, exec.WorkingDirectory);
 
             UnixInterop.close(slave);
             return new UnixPtyBackendInstance(master, pid, size);
@@ -42,30 +45,20 @@ internal static partial class UnixPtyBackend
         }
     }
 
-    /// <summary>
-    /// Child path after <c>fork()</c>. Only async-signal-safe libc calls — no managed allocation or runtime APIs.
-    /// </summary>
-    private static unsafe void ChildMainAfterFork(
+    private static unsafe int ForkChildExec(
         int master,
         int slave,
         ulong tiocSetCtty,
+        IntPtr workingDirectory,
         IntPtr executable,
-        IntPtr argv,
-        IntPtr workingDirectory)
-    {
-        close(master);
-        setsid();
-        ioctl(slave, tiocSetCtty, 0);
-        dup2(slave, 0);
-        dup2(slave, 1);
-        dup2(slave, 2);
-        if (slave > 2)
-            close(slave);
-        if (workingDirectory != IntPtr.Zero)
-            chdir((byte*)workingDirectory);
-        execvp((byte*)executable, (byte**)argv);
-        _exit(127);
-    }
+        IntPtr argv) =>
+        minipty_fork_child_exec(
+            master,
+            slave,
+            tiocSetCtty,
+            (byte*)workingDirectory,
+            (byte*)executable,
+            (byte**)argv);
 
     private sealed class UnixExecPayload : IDisposable
     {
@@ -475,32 +468,20 @@ internal static partial class UnixPtyBackend
     [LibraryImport("libutil", EntryPoint = "openpty", SetLastError = true)]
     private static partial int FreeBSDOpenPty(out int amaster, out int aslave, IntPtr name, IntPtr termp, ref Winsize winp);
 
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int fork();
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int setsid();
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    private static unsafe partial int minipty_fork_child_exec(
+        int master,
+        int slave,
+        ulong tioc_setctty,
+        byte* working_directory,
+        byte* file,
+        byte** argv);
 
     [LibraryImport("libc", SetLastError = true)]
     private static partial int ioctl(int fd, ulong request, int arg);
 
     [LibraryImport("libc", SetLastError = true)]
     private static partial int ioctl(int fd, ulong request, ref Winsize winp);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int dup2(int oldfd, int newfd);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static unsafe partial int chdir(byte* path);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static unsafe partial int execvp(byte* file, byte** argv);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int close(int fd);
-
-    [LibraryImport("libc")]
-    private static partial void _exit(int status);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Winsize
