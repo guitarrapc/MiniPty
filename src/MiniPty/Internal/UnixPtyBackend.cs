@@ -10,16 +10,16 @@ public static partial class UnixPtyBackend
     private const int ReapPollMs = 10;
     private const int ReapDeadlineMs = 1_000;
 
-    internal static IPtyBackend Start(PtyOptions options)
+    internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
-        var size = options.Size;
+        var size = startInfo.ClampedSize;
         var winsize = new Winsize { ws_col = (ushort)size.Columns, ws_row = (ushort)size.Rows };
         if (OpenPty(out var master, out var slave, ref winsize) != 0)
             throw new IOException($"openpty failed (errno {Marshal.GetLastPInvokeError()})");
 
         var tiocSetCtty = TiocSetCtty();
-        var arguments = options.Arguments as string[] ?? options.Arguments.ToArray();
-        var exec = UnixExecPayload.Create(options.FileName, arguments, options.WorkingDirectory);
+        var arguments = startInfo.Arguments as string[] ?? startInfo.Arguments.ToArray();
+        var exec = UnixExecPayload.Create(startInfo.FileName, arguments, startInfo.WorkingDirectory);
         try
         {
             var pid = fork();
@@ -168,7 +168,7 @@ public static partial class UnixPtyBackend
             _size = new PtySize(columns, rows);
         }
 
-        public void SignalEof()
+        public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (TryRefreshExitState() || _eofSent)

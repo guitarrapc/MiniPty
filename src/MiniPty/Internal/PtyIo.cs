@@ -87,6 +87,27 @@ internal static class PtyIo
         WriteAll(fd, Encoding.UTF8.GetBytes(input));
     }
 
+    internal static async Task WriteTextAsync(
+        Stream stream,
+        string text,
+        Encoding encoding,
+        CancellationToken cancellationToken)
+    {
+        var byteCount = encoding.GetByteCount(text);
+        if (byteCount == 0)
+            return;
+
+        if (byteCount <= Utf8StackThreshold)
+        {
+            Span<byte> buffer = stackalloc byte[byteCount];
+            encoding.GetBytes(text, buffer);
+            await stream.WriteAsync(buffer.ToArray(), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await stream.WriteAsync(encoding.GetBytes(text), cancellationToken).ConfigureAwait(false);
+    }
+
     internal static async Task WriteUtf8Async(Stream stream, string input, CancellationToken cancellationToken)
     {
         var byteCount = Encoding.UTF8.GetByteCount(input);

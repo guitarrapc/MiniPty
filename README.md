@@ -2,49 +2,68 @@
 
 NativeAOT-friendly minimal cross-platform pseudo-terminal library for .NET.
 
-All public types live in the `MiniPty` namespace. The static entry type is `Pty` (a namespace cannot share the same name as a type in C#).
+## Packages
 
-## API
+| Package | Role |
+|---------|------|
+| **MiniPty** | PTY session: streams, lifecycle, `CompleteAsync` |
+| **MiniPty.Capture** | Timestamped output capture for asciicast-style tools |
 
-| Type | Role |
-|------|------|
-| `Pty.Start(PtyOptions)` | Spawn child → `PtySession` (stream I/O, no wait) |
-| `Pty.Run(PtyOptions)` | One-shot → `PtyCaptureResult` |
-| `Pty.RunExitCodeAsync` | Exit code only |
-| `PtySession` | `Input` / `Output` streams, `SignalEof`, `Resize`, wait, `Kill` |
-| `PtyOptions` | Spawn + capture options |
-| `PtySize` | Terminal dimensions |
-| `PtyCaptureResult` | `Output`, `ExitCode`, `Chunks` |
-| `PtyOutputChunk` | `Time`, `Data` |
-| `PtyOutputRecorder` | `Start` + `CollectAsync` for session-based capture |
-
-PTY merges stdout/stderr into a single `Output` stream — there is no separate stderr field.
-
-## Example
+## MiniPty (core)
 
 ```csharp
 using MiniPty;
 
-PtyCaptureResult result = await Pty.Run(new PtyOptions
+await using var session = Pty.Start(new PtyStartInfo
 {
     FileName = "/bin/bash",
-    Arguments = ["-lc", "echo hello"],
-    Columns = 120,
-    Rows = 24,
+    Arguments = ["-lc", "stty size && echo hello"],
+    Size = new PtySize(120, 30),
 });
 
-Console.Write(result.Output);
-foreach (var chunk in result.Chunks)
-    Console.WriteLine($"{chunk.Time:F3}s {chunk.Data.Length} chars");
+await session.WriteInputAsync("echo ok\n");
+session.SendEof();
+var exitCode = await session.WaitForExitAsync();
 ```
 
-## scenetake
+Or use `CompleteAsync` to drain output without timestamps:
 
-scenetake uses `PtyCaptureResult` for PTY commands and a separate `CommandExecution` wrapper for pipe-redirected commands (real stdout/stderr).
+```csharp
+var result = await session.CompleteAsync(new PtyCompleteOptions
+{
+    Input = "echo ok\n",
+});
+// result.Output, result.ExitCode
+```
+
+**Backpressure:** If the child writes output and nobody reads `PtySession.Output`, the child may block once the PTY buffer fills. Use `CompleteAsync`, `MiniPty.Capture`, or read `Output` yourself.
+
+**Dispose:** Disposing a `PtySession` kills the child if it is still running.
+
+## MiniPty.Capture
+
+```csharp
+using MiniPty;
+using MiniPty.Capture;
+
+var result = await PtyCapture.RunAsync(new PtyStartInfo
+{
+    FileName = "/bin/bash",
+    Arguments = ["-lc", "printf '\\e[31mred\\e[0m\\n'"],
+    Size = new PtySize(120, 30),
+});
+
+foreach (var chunk in result.Chunks)
+    Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Data}");
+```
+
+Chunk timestamps are measured from session start (`SessionStart`).
 
 ## Build
 
 ```bash
 dotnet build src/MiniPty/MiniPty.csproj
+dotnet build src/MiniPty.Capture/MiniPty.Capture.csproj
 dotnet pack src/MiniPty/MiniPty.csproj -o artifacts -c Release
+dotnet pack src/MiniPty.Capture/MiniPty.Capture.csproj -o artifacts -c Release
 ```

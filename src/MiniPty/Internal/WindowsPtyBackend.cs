@@ -69,15 +69,15 @@ public static class WindowsPtyBackend
     private const uint WaitPollMs = 100;
     private const uint HandleFlagInherit = 0x00000001;
 
-    internal static IPtyBackend Start(PtyOptions options)
+    internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
-        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(startInfo);
 
         CreateConPtyPipes(out var inputRead, out var inputWrite, out var outputRead, out var outputWrite);
         var inputWriteHandle = inputWrite;
         var outputReadHandle = outputRead;
 
-        var size = options.Size;
+        var size = startInfo.ClampedSize;
         var coord = new WindowsCoord((short)size.Columns, (short)size.Rows);
         var hr = WindowsInterop.CreatePseudoConsole(coord, inputRead, outputWrite, 0, out var pseudoConsoleHandle);
         if (hr < 0)
@@ -125,10 +125,10 @@ public static class WindowsPtyBackend
                 lpAttributeList = attrList,
             };
 
-            var arguments = options.Arguments;
+            var arguments = startInfo.Arguments;
             var commandLineText = arguments.Count == 0
-                ? QuoteArg(options.FileName)
-                : QuoteArg(options.FileName) + " " + string.Join(" ", arguments.Select(QuoteArg));
+                ? QuoteArg(startInfo.FileName)
+                : QuoteArg(startInfo.FileName) + " " + string.Join(" ", arguments.Select(QuoteArg));
             var commandLine = (commandLineText + '\0').ToCharArray();
             if (!WindowsInterop.CreateProcessW(
                     null,
@@ -138,7 +138,7 @@ public static class WindowsPtyBackend
                     false,
                     ExtendedStartupInfoPresent,
                     IntPtr.Zero,
-                    string.IsNullOrWhiteSpace(options.WorkingDirectory) ? null : options.WorkingDirectory,
+                    string.IsNullOrWhiteSpace(startInfo.WorkingDirectory) ? null : startInfo.WorkingDirectory,
                     ref startupInfo,
                     out processInfo))
             {
@@ -247,7 +247,7 @@ public static class WindowsPtyBackend
             _size = new PtySize(columns, rows);
         }
 
-        public void SignalEof()
+        public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (TryRefreshExitState() || _inputClosed)

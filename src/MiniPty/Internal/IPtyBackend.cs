@@ -9,7 +9,7 @@ internal interface IPtyBackend : IDisposable
     int ExitCode { get; }
     PtySize Size { get; }
     void Resize(int columns, int rows);
-    void SignalEof();
+    void SendEof();
     void Kill();
     Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation);
     void CloseOutputTransport();

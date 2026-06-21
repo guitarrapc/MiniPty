@@ -8,10 +8,9 @@
 
     <!-- NuGet -->
     <IsAotCompatible>true</IsAotCompatible>
-    <Description>NativeAOT-friendly minimal cross-platform pseudo-terminal library.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <IsPackable>false</IsPackable>
-    <Version>0.2.2</Version>
+    <Version>0.3.0</Version>
     <Authors>guitarrapc</Authors>
     <Copyright>© guitarrapc</Copyright>
     <PackageTags>pty</PackageTags>

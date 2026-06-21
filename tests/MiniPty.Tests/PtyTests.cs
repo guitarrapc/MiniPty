@@ -1,5 +1,7 @@
 ﻿using System.Runtime.InteropServices;
+using System.Text;
 using MiniPty;
+using MiniPty.Capture;
 using TUnit.Assertions;
 using TUnit.Core;
 
@@ -14,7 +16,7 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-            var result = await Pty.Run(Spawn(cmd, ["/c", "echo pty-layer-echo"]));
+            var result = await PtyCapture.RunAsync(Spawn(cmd, ["/c", "echo pty-layer-echo"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output).Contains("pty-layer-echo");
@@ -22,7 +24,7 @@ public sealed class PtyTests
         }
 
         var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-        var unix = await Pty.Run(Spawn(shell, ["-lc", "printf pty-layer-echo"]));
+        var unix = await PtyCapture.RunAsync(Spawn(shell, ["-lc", "printf pty-layer-echo"]));
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output).Contains("pty-layer-echo");
@@ -34,7 +36,7 @@ public sealed class PtyTests
         if (!TryResolvePwsh(out var pwsh))
             return;
 
-        var result = await Pty.Run(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "Write-Output (\"redirected=$([Console]::IsOutputRedirected)\")"]));
+        var result = await PtyCapture.RunAsync(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "Write-Output (\"redirected=$([Console]::IsOutputRedirected)\")"]));
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
         await Assert.That(result.Output).Contains("redirected=False").IgnoringCase();
@@ -48,7 +50,9 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             var sort = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "sort.exe");
-            var result = await Pty.Run(Spawn(sort, []) with { Input = $"zzz\r\n{marker}\r\naaa\r\n" });
+            var result = await PtyCapture.RunAsync(
+                Spawn(sort, []),
+                new PtyCaptureOptions { Completion = new() { Input = $"zzz\r\n{marker}\r\naaa\r\n" } });
 
             await Assert.That(result.Output).Contains(marker);
             await Assert.That(result.Output).Contains("aaa");
@@ -56,7 +60,9 @@ public sealed class PtyTests
         }
 
         var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
-        var unix = await Pty.Run(Spawn(shell, ["-lc", "cat"]) with { Input = marker });
+        var unix = await PtyCapture.RunAsync(
+            Spawn(shell, ["-lc", "cat"]),
+            new PtyCaptureOptions { Completion = new() { Input = marker } });
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output).Contains(marker);
@@ -72,14 +78,18 @@ public sealed class PtyTests
             if (!TryResolvePwsh(out var pwsh))
                 return;
 
-            var result = await Pty.Run(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]) with { Input = string.Empty });
+            var result = await PtyCapture.RunAsync(
+                Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]),
+                new PtyCaptureOptions { Completion = new() { Input = string.Empty } });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output).Contains(marker);
             return;
         }
 
-        var unix = await Pty.Run(UnixShell($"cat >/dev/null; printf {marker}") with { Input = string.Empty });
+        var unix = await PtyCapture.RunAsync(
+            UnixShell($"cat >/dev/null; printf {marker}"),
+            new PtyCaptureOptions { Completion = new() { Input = string.Empty } });
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output).Contains(marker);
@@ -95,14 +105,18 @@ public sealed class PtyTests
             if (!TryResolvePwsh(out var pwsh))
                 return;
 
-            var result = await Pty.Run(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]) with { Input = "line 1\r\nline 2\r\n" });
+            var result = await PtyCapture.RunAsync(
+                Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", $"[Console]::In.ReadToEnd() > $null; [Console]::Write('{marker}')"]),
+                new PtyCaptureOptions { Completion = new() { Input = "line 1\r\nline 2\r\n" } });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output).Contains(marker);
             return;
         }
 
-        var unix = await Pty.Run(UnixShell($"cat >/dev/null; printf {marker}") with { Input = "line 1\nline 2\n" });
+        var unix = await PtyCapture.RunAsync(
+            UnixShell($"cat >/dev/null; printf {marker}"),
+            new PtyCaptureOptions { Completion = new() { Input = "line 1\nline 2\n" } });
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output).Contains(marker);
@@ -116,14 +130,14 @@ public sealed class PtyTests
             if (!TryResolvePwsh(out var pwsh))
                 return;
 
-            var result = await Pty.Run(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Out.Write(('x' * 1000000))"]));
+            var result = await PtyCapture.RunAsync(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Out.Write(('x' * 1000000))"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output.Length).IsGreaterThan(999_999);
             return;
         }
 
-        var unix = await Pty.Run(UnixShell("yes x | head -c 1000000"));
+        var unix = await PtyCapture.RunAsync(UnixShell("yes x | head -c 1000000"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output.Length).IsGreaterThan(999_999);
@@ -134,13 +148,13 @@ public sealed class PtyTests
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            var result = await Pty.Run(WindowsCommand("exit /b 42"));
+            var result = await PtyCapture.RunAsync(WindowsCommand("exit /b 42"));
 
             await Assert.That(result.ExitCode).IsEqualTo(42);
             return;
         }
 
-        var unix = await Pty.Run(UnixShell("exit 42"));
+        var unix = await PtyCapture.RunAsync(UnixShell("exit 42"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(42);
     }
@@ -151,7 +165,7 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
 
-        var result = await Pty.Run(UnixShell("kill -TERM $$"));
+        var result = await PtyCapture.RunAsync(UnixShell("kill -TERM $$"));
 
         await Assert.That(result.ExitCode).IsEqualTo(143);
     }
@@ -164,14 +178,14 @@ public sealed class PtyTests
             if (!TryResolvePwsh(out var pwsh))
                 return;
 
-            var result = await Pty.Run(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::WriteLine([Console]::IsOutputRedirected)"]));
+            var result = await PtyCapture.RunAsync(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::WriteLine([Console]::IsOutputRedirected)"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output).Contains("False").IgnoringCase();
             return;
         }
 
-        var unix = await Pty.Run(UnixShell("test -t 1 && printf true || printf false"));
+        var unix = await PtyCapture.RunAsync(UnixShell("test -t 1 && printf true || printf false"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output).Contains("true");
@@ -187,14 +201,14 @@ public sealed class PtyTests
             if (!TryResolvePwsh(out var pwsh))
                 return;
 
-            var result = await Pty.Run(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Write([char]27 + '[31mred' + [char]27 + '[0m')"]));
+            var result = await PtyCapture.RunAsync(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Write([char]27 + '[31mred' + [char]27 + '[0m')"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Output).Contains(ansiRed);
             return;
         }
 
-        var unix = await Pty.Run(UnixShell("printf '\\033[31mred\\033[0m'"));
+        var unix = await PtyCapture.RunAsync(UnixShell("printf '\\033[31mred\\033[0m'"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output).Contains(ansiRed);
@@ -232,7 +246,8 @@ public sealed class PtyTests
             var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
             using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 30 127.0.0.1 >nul"]));
 
-            await Assert.ThrowsAsync<OperationCanceledException>(() => session.WaitForExitOrKillAsync(cts.Token));
+            await Assert.ThrowsAsync<OperationCanceledException>(() =>
+                session.CompleteAsync(new PtyCompleteOptions { KillOnCancellation = true }, cts.Token));
             await Task.Delay(200);
             await Assert.That(session.HasExited).IsTrue();
             return;
@@ -241,7 +256,8 @@ public sealed class PtyTests
         var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
         using var unixSession = Pty.Start(Spawn(shell, ["-lc", "sleep 30"]));
 
-        await Assert.ThrowsAsync<OperationCanceledException>(() => unixSession.WaitForExitOrKillAsync(cts.Token));
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            unixSession.CompleteAsync(new PtyCompleteOptions { KillOnCancellation = true }, cts.Token));
         await Task.Delay(200);
         await Assert.That(unixSession.HasExited).IsTrue();
     }
@@ -276,7 +292,7 @@ public sealed class PtyTests
             var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
             using var session = Pty.Start(Spawn(cmd, ["/c", "exit 0"]));
 
-            session.Resize(100, 30);
+            session.Resize(new(100, 30));
 
             await Assert.That(session.Size.Columns).IsEqualTo(100);
             await Assert.That(session.Size.Rows).IsEqualTo(30);
@@ -286,7 +302,7 @@ public sealed class PtyTests
         var shell = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash";
         using var unixSession = Pty.Start(Spawn(shell, ["-lc", "exit 0"]));
 
-        unixSession.Resize(100, 30);
+        unixSession.Resize(new(100, 30));
 
         await Assert.That(unixSession.Size.Columns).IsEqualTo(100);
         await Assert.That(unixSession.Size.Rows).IsEqualTo(30);
@@ -300,29 +316,25 @@ public sealed class PtyTests
             if (!TryResolvePwsh(out var pwsh))
                 return;
 
-            using var session = Pty.Start(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::ReadLine() > $null; [Console]::WriteLine(\"{0} {1}\" -f [Console]::WindowWidth, [Console]::WindowHeight)"]));
-            var recorder = PtyOutputRecorder.Start(session);
+            await using var session = Pty.Start(Spawn(pwsh, ["-NoLogo", "-NoProfile", "-Command", "[Console]::ReadLine() > $null; [Console]::WriteLine(\"{0} {1}\" -f [Console]::WindowWidth, [Console]::WindowHeight)"]));
+            session.Resize(new(100, 30));
+            await session.WriteInputAsync("go\n");
+            session.SendEof();
+            var result = await session.CompleteAsync(new PtyCompleteOptions { SendEofAfterInput = false });
 
-            session.Resize(100, 30);
-            await WriteLineAsync(session, "go");
-            var exitCode = await session.WaitForExitAsync();
-            var output = string.Concat((await recorder.CollectAsync()).Select(static chunk => chunk.Data));
-
-            await Assert.That(exitCode).IsEqualTo(0);
-            await Assert.That(output).Contains("100 30");
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Output).Contains("100 30");
             return;
         }
 
-        using var unixSession = Pty.Start(UnixShell("read line; stty size"));
-        var unixRecorder = PtyOutputRecorder.Start(unixSession);
+        await using var unixSession = Pty.Start(UnixShell("read line; stty size"));
+        unixSession.Resize(new(100, 30));
+        await unixSession.WriteInputAsync("go\n");
+        unixSession.SendEof();
+        var unixResult = await unixSession.CompleteAsync(new PtyCompleteOptions { SendEofAfterInput = false });
 
-        unixSession.Resize(100, 30);
-        await WriteLineAsync(unixSession, "go");
-        var unixExitCode = await unixSession.WaitForExitAsync();
-        var unixOutput = string.Concat((await unixRecorder.CollectAsync()).Select(static chunk => chunk.Data));
-
-        await Assert.That(unixExitCode).IsEqualTo(0);
-        await Assert.That(unixOutput).Contains("30 100");
+        await Assert.That(unixResult.ExitCode).IsEqualTo(0);
+        await Assert.That(unixResult.Output).Contains("30 100");
     }
 
     [Test]
@@ -331,18 +343,18 @@ public sealed class PtyTests
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !TryResolvePwsh(out var pwshPath))
             return;
 
-        var result = await Pty.Run(Spawn(pwshPath, ["-NoLogo", "-NoProfile", "-Command", "matrix -c 120 -s 2"]));
+        var result = await PtyCapture.RunAsync(Spawn(pwshPath, ["-NoLogo", "-NoProfile", "-Command", "matrix -c 120 -s 2"]));
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
         await Assert.That(result.Chunks.Count).IsGreaterThan(1);
     }
 
-    private static PtyOptions Spawn(string fileName, IReadOnlyList<string> arguments) =>
-        new() { FileName = fileName, Arguments = arguments, Columns = 40, Rows = 8 };
+    private static PtyStartInfo Spawn(string fileName, IReadOnlyList<string> arguments) =>
+        new() { FileName = fileName, Arguments = arguments, Size = new(40, 8) };
 
-    private static PtyOptions UnixShell(string command) => Spawn("sh", ["-c", command]);
+    private static PtyStartInfo UnixShell(string command) => Spawn("sh", ["-c", command]);
 
-    private static PtyOptions WindowsCommand(string command)
+    private static PtyStartInfo WindowsCommand(string command)
     {
         var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
         return Spawn(cmd, ["/c", command]);

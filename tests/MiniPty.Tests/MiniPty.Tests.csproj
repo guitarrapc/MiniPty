@@ -8,6 +8,7 @@
   <ItemGroup>
     <PackageReference Include="TUnit" />
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
+    <ProjectReference Include="..\..\src\MiniPty.Capture\MiniPty.Capture.csproj" />
   </ItemGroup>
 
 </Project>

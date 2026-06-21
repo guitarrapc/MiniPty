@@ -1,10 +1,11 @@
+using System.Text;
 using MiniPty.Internal;
 
 namespace MiniPty;
 
 /// <summary>
 /// A running pseudo-terminal child session.
-/// <see cref="Dispose"/> kills the child if it is still running, then releases handles.
+/// Disposing kills the child if it is still running, then releases handles.
 /// </summary>
 public sealed class PtySession : IAsyncDisposable, IDisposable
 {
@@ -13,48 +14,70 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
     internal PtySession(IPtyBackend backend) => _backend = backend;
 
+    /// <summary>Operating-system process identifier of the child.</summary>
+    public int ProcessId => _backend.ProcessId;
+
+    /// <summary>Current terminal dimensions.</summary>
+    public PtySize Size => _backend.Size;
+
     /// <summary>Write-only stream to the child stdin (PTY input).</summary>
     public Stream Input => _backend.Input;
 
     /// <summary>Read-only stream from the child stdout/stderr (PTY output).</summary>
     public Stream Output => _backend.Output;
 
-    /// <summary>Operating-system process identifier of the child.</summary>
-    public int ProcessId => _backend.ProcessId;
-
-    /// <summary>Polls the OS for child exit (<c>WaitForSingleObject(0)</c> / <c>waitpid(WNOHANG)</c>).</summary>
+    /// <summary>Polls the OS for child exit.</summary>
     public bool HasExited => _backend.HasExited;
 
-    /// <summary>Exit code after <see cref="HasExited"/> is <see langword="true"/>.</summary>
-    public int ExitCode => _backend.ExitCode;
+    /// <summary>Exit code when <see cref="HasExited"/> is <see langword="true"/>; otherwise <see langword="null"/>.</summary>
+    public int? ExitCode => _backend.HasExited ? _backend.ExitCode : null;
 
-    /// <summary>Current terminal dimensions.</summary>
-    public PtySize Size => _backend.Size;
+    /// <summary>Writes bytes to the PTY stdin.</summary>
+    public async ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
+    {
+        if (!bytes.IsEmpty)
+            await Input.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+    }
 
-    /// <summary>Resizes the pseudo-terminal.</summary>
-    /// <param name="columns">Width in character cells.</param>
-    /// <param name="rows">Height in character cells.</param>
-    public void Resize(int columns, int rows) => _backend.Resize(columns, rows);
+    /// <summary>Writes text to the PTY stdin using the specified encoding (UTF-8 by default).</summary>
+    public ValueTask WriteInputAsync(
+        string text,
+        Encoding? encoding = null,
+        CancellationToken cancellationToken = default) =>
+        new(PtyIo.WriteTextAsync(Input, text, encoding ?? Encoding.UTF8, cancellationToken));
 
     /// <summary>
     /// Signals end of stdin. Windows defers pipe close until wait; Unix writes EOT (staged).
     /// </summary>
-    public void SignalEof() => _backend.SignalEof();
+    public void SendEof() => _backend.SendEof();
+
+    /// <summary>Resizes the pseudo-terminal.</summary>
+    public void Resize(PtySize size) => _backend.Resize(size.Columns, size.Rows);
 
     /// <summary>Terminates the child process.</summary>
     public void Kill() => _backend.Kill();
 
-    /// <summary>Cancellation stops waiting only; the child keeps running.</summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The child exit code.</returns>
+    /// <summary>Waits for the child to exit. Cancellation stops waiting only; the child keeps running.</summary>
     public Task<int> WaitForExitAsync(CancellationToken cancellationToken = default) =>
-        _backend.WaitForExitAsync(cancellationToken, killOnCancellation: false);
+        WaitForExitInternalAsync(cancellationToken, killOnCancellation: false);
 
-    /// <summary>Cancellation calls <see cref="Kill"/> then throws <see cref="OperationCanceledException"/>.</summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The child exit code.</returns>
-    public Task<int> WaitForExitOrKillAsync(CancellationToken cancellationToken = default) =>
-        _backend.WaitForExitAsync(cancellationToken, killOnCancellation: true);
+    /// <summary>
+    /// Drains <see cref="Output"/>, optionally writes stdin, waits for exit, and returns merged output.
+    /// </summary>
+    public async Task<PtyResult> CompleteAsync(
+        PtyCompleteOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        options ??= new PtyCompleteOptions();
+        var encoding = options.OutputEncoding;
+        var (output, exitCode) = await PtyCompletion.RunAsync(
+            this,
+            options,
+            (stream, ct) => PtyTextPump.ReadAllAsync(stream, encoding, ct),
+            cancellationToken).ConfigureAwait(false);
+
+        return new PtyResult(output, exitCode);
+    }
 
     /// <inheritdoc />
     public void Dispose()
@@ -72,6 +95,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         Dispose();
         return ValueTask.CompletedTask;
     }
+
+    internal Task<int> WaitForExitInternalAsync(CancellationToken cancellationToken, bool killOnCancellation) =>
+        _backend.WaitForExitAsync(cancellationToken, killOnCancellation);
 
     internal void CloseOutputTransport() => _backend.CloseOutputTransport();
 }

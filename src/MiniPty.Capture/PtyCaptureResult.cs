@@ -1,10 +1,10 @@
-namespace MiniPty;
+namespace MiniPty.Capture;
 
-/// <summary>Result of <see cref="Pty.Run"/> — merged PTY output and timestamped chunks.</summary>
+/// <summary>Result of <see cref="PtyCapture.RunAsync"/>.</summary>
 /// <param name="Output">Merged stdout/stderr text from the PTY.</param>
 /// <param name="ExitCode">Child process exit code.</param>
 /// <param name="Chunks">Timestamped output slices recorded during the run.</param>
-public readonly record struct PtyCaptureResult(
+public sealed record PtyCaptureResult(
     string Output,
     int ExitCode,
-    IReadOnlyList<PtyOutputChunk> Chunks);
+    IReadOnlyList<PtyCaptureChunk> Chunks);

@@ -2,9 +2,15 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <RootNamespace>MiniPty</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
+    <Description>NativeAOT-friendly minimal cross-platform pseudo-terminal library.</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>MiniPty.Capture</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
 
 </Project>
