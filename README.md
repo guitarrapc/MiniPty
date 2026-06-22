@@ -70,9 +70,7 @@ Chunk timestamps are measured from session start (immediately after `Pty.Start`)
 NativeAOT smoke (same as CI `run` job):
 
 ```bash
-dotnet publish samples/Capture.cs -c Release -r <rid> --self-contained true \
-  -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o artifacts/capture-aot
-./artifacts/capture-aot/Capture   # Capture.exe on Windows
+dotnet samples/Capture.cs -c Release --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
 ```
 
 JIT run for local development:
