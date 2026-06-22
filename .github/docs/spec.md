@@ -45,7 +45,7 @@ Timestamped chunks are **not** part of the core API. Consumers that need cast ti
 |---|---|---|
 | Windows | ConPTY (`CreatePseudoConsole`) | Windows 10 1809+, Windows 11 |
 | Linux | `openpty` + `fork` + `execvp` | Common glibc/musl targets |
-| macOS | `openpty` + `fork` + `execvp` | Supported runners (BSD `TIOCSCTTY`, `libutil`) |
+| macOS | `forkpty` + `execvp` (`libutil`) | Supported runners (BSD `TIOCSCTTY`, `libutil`) |
 | FreeBSD | `openpty` + `fork` + `execvp` | `libutil` + BSD `TIOCSCTTY` |
 
 Pipe redirect **without** ConPTY is not a PTY. On Windows, TUI tools require ConPTY-backed spawn.
@@ -144,11 +144,24 @@ CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows:
 | TTY detection (`redirected=False`, `isatty`) | Confirms real PTY semantics |
 | Simple command output | Confirms spawn + decode |
 | Stdin + EOF (`cat`, `sort`) | Confirms staged EOF |
+| Empty stdin EOF | Confirms deferred EOF with no bytes |
 | Multiple capture chunks + ANSI | Confirms concurrent read + timestamps |
 | `WaitForExitAsync` cancel vs `CompleteAsync` cancel | Confirms cancellation contract |
-| Resize | Confirms `TIOCSWINSZ` / `ResizePseudoConsole` |
+| Resize (parent + child-visible) | Confirms `TIOCSWINSZ` / `ResizePseudoConsole` |
 
 Tests use property assertions, not golden byte captures, to reduce OS/timing flake.
+
+### Platform-specific test constraints
+
+These are **verification choices**, not API requirements—but they document pitfalls that broke CI when ignored:
+
+| OS | Pitfall | Mitigation in tests |
+|---|---|---|
+| **Linux** | `bash -lc` on a PTY often stays interactive after `-c` completes; login shells wait for more input | Prefer `sh -c`, or spawn utilities directly (`cat`, `sleep`, `true`) |
+| **Linux** | A single EOT with no trailing newline does not signal EOF in canonical mode—the buffered line is delivered first | One-shot stdin tests that use EOT must end input with `\n` before `SendEof()` (e.g. `cat`) |
+| **macOS** | Spawning via `posix_openpt` + `posix_spawn` without `forkpty` does not attach a controlling terminal; `stty` and resize probes return nonsense | Native spawn uses `forkpty` + `execvp` on all Unix targets, including macOS (`-lutil`) |
+| **Windows** | Closing ConPTY stdin while a child is still attaching stdin yields `STATUS_CONTROL_C_EXIT` (0xC000013A); PowerShell `ReadToEnd` / `ReadLine` + `SendEof()` is especially prone to this | Stdin-drain checks use `cmd /c find /v ""` (built-in); resize checks use `$Host.UI.RawUI.WindowSize`, not `[Console]::WindowWidth` |
+| **Windows** | `pwsh` (PowerShell 7) is optional on runners | Prefer built-in `powershell.exe` under `System32\WindowsPowerShell\v1.0` unless a test needs pwsh-only features |
 
 [scenetake](https://github.com/guitarrapc/scenetake) adds end-to-end fixture scenarios (`tests/fixtures/pty-*.yaml`) via `SCENETAKE_BIN`; that layer is documented in scenetake's [spec_pty.md](https://github.com/guitarrapc/scenetake/blob/main/.github/docs/spec_pty.md).
 
@@ -159,13 +172,18 @@ These constraints shaped the API and backends; details are in the reference doc.
 - **Pipe redirect is not a PTY.** Redirected stdin/stdout captures bytes but children report "not a TTY". Tools like `matrix` skip rendering on Windows without ConPTY.
 - **ConPTY pipes are transport, not the terminal.** `HPCON` is the pseudo-console; mishandling pipe ends after `CreatePseudoConsole` causes missing output, hangs, or leaks to the parent console.
 - **winpty is a poor fit for NativeAOT single-binary goals.** Bundled helpers add environment dependency; in-process ConPTY avoids that.
-- **Child stdin must not be closed before launch completes (Windows).** Early ConPTY input pipe close yields `STATUS_CONTROL_C_EXIT` (0xC000013A). EOF is always staged to the first wait poll or transport close.
+- **Child stdin must not be closed before launch completes (Windows).** Early ConPTY input pipe close yields `STATUS_CONTROL_C_EXIT` (0xC000013A). EOF is always staged to the first wait poll or transport close. Interactive readers (e.g. PowerShell `ReadToEnd` / `ReadLine`) are especially sensitive—pipe close is interpreted as Ctrl+C, not EOF.
 - **Unix PTY master fds cannot be half-closed.** `SendEof()` writes EOT (`0x04`); closing the master ends both read and write. EOT is reliable only in canonical line discipline—not for raw-mode TUIs or REPLs.
+- **Canonical EOT is not kernel EOF (Unix).** With line discipline enabled, one EOT on a non-empty line buffer delivers the buffered bytes but does not end input; callers need a submitted line (`\n`) before EOT, or a second EOT on an empty buffer. Windows pipe-close EOF does not have this quirk.
+- **Login shells on a PTY can outlive `-c` (Linux).** `bash -lc "cat"` may return from `cat` yet keep bash waiting at a prompt because the session is a TTY. Prefer `sh -c` or direct spawn for one-shot capture tests and samples.
+- **macOS spawn must establish a controlling terminal.** A `posix_openpt` + `posix_spawn` path left the slave without a controlling tty: `stty` and resize probes reported garbage sizes. All Unix targets now use `forkpty` + `execvp` (linked with `-lutil` on macOS and FreeBSD). An abandoned approach used `posix_spawnp` only to fix PATH lookup (`ENOENT`); that did not fix tty semantics.
+- **macOS `posix_spawn` does not search PATH.** `posix_spawn` requires an absolute executable path; `posix_spawnp` searches PATH. Irrelevant once spawn unified on `forkpty`/`execvp`, but worth remembering if reintroducing a spawn-based path.
 - **Fork before exec must stay async-signal-safe.** Build `argv` / `cwd` in the parent with `NativeMemory`; the child only calls libc before `execvp`.
 - **Capture timing requires concurrent reads.** Reading only after exit loses TUI animation timing; failing to attach ConPTY loses content entirely.
 - **Output drain after child exit needs bounded waits.** `OutputDrainGrace` then transport close, then `OutputReaderCloseTimeout`, prevents hung readers without dropping slow flushes.
 - **Session vs capture split reduced API awkwardness.** A blocking `Run` that mixed streams, timestamps, and cancellation forced `GetAwaiter().GetResult()` in tests; `PtySession` + optional Capture package keeps async paths natural.
 - **Cancel semantics differ by use case.** Library callers needed `WaitForExitAsync` that does not kill on cancel; one-shot capture defaults to killing so hung children do not leak.
+- **PTY output includes terminal echo.** Tests that drive stdin manually (`WriteInputAsync` + `SendEof`) may capture echoed input and control characters (`^D`, backspace). Prefer `CompleteAsync` input options or commands that do not need interactive stdin when asserting on captured text.
 
 ## Related Documents
 
