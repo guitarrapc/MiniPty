@@ -40,6 +40,17 @@ Ubuntu 24.04, .NET 10
 - Full terminal emulation, TUI replay, or faithfully preserving `\r` overwrite lines
 - Falling back to pipe redirect when PTY creation fails—if you need a PTY, MiniPty either gives you one or throws
 
+## Platform backends
+
+MiniPty creates a real PTY on each supported OS; it does not fall back to redirected pipes when PTY creation fails.
+
+| OS | Backend | Notes |
+|----|---------|-------|
+| Windows | ConPTY (`CreatePseudoConsole`) | Uses Win32 ConPTY directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. Requires Windows 10 1809+ / Windows 11. No winpty or helper process is used. |
+| Ubuntu / Linux | `forkpty` | Uses the small `libminipty_unix` native shim to call the platform PTY API, then `execvp` the child inside the PTY. Resize uses `TIOCSWINSZ`. |
+| macOS | `forkpty` | Uses the same Unix backend shape through `libminipty_unix.dylib`, backed by macOS `forkpty` / libutil. Resize uses `TIOCSWINSZ`. |
+| FreeBSD | `forkpty` | Uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle. |
+
 ## Quick start
 
 Install NuGet packages by running the following commands.
@@ -140,7 +151,7 @@ Use `dotnet` for local development, debugging, or publishing.
 
 - [Document index](.github/docs/spec_index.md)
 - [Specification](.github/docs/spec.md) — API contracts, scope, lessons learned
-- [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, `openpty`, EOF staging
+- [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, `forkpty`, EOF staging
 
 ### Build
 

@@ -19,7 +19,7 @@ MiniPty selects one OS-specific backend at runtime:
 | OS | API | Entry point |
 |---|---|---|
 | Windows | ConPTY (`CreatePseudoConsole`) | `WindowsPtyBackend.Start` |
-| Linux / macOS / FreeBSD | `openpty` + `fork` + `execvp` | `UnixPtyBackend.Start` |
+| Linux / macOS / FreeBSD | `forkpty` + `execvp` | `UnixPtyBackend.Start` |
 
 Layers:
 
@@ -102,21 +102,20 @@ Without this, command output can appear on the parent's console instead of the c
 
 ConPTY requires Windows 10 1809+ / Windows 11. MiniPty does not use winpty.
 
-## Unix: openpty + fork
+## Unix: forkpty + execvp
 
-MiniPty uses `openpty` + `fork` rather than `forkpty` to keep explicit control over `setsid`, `TIOCSCTTY`, `chdir`, and `execvp`.
+MiniPty uses a small `libminipty_unix` native shim that calls the platform `forkpty`, then runs `execvp` in the child process.
 
 ### Child setup
 
 ```text
-close(master)
-setsid()
-ioctl(slave, TIOCSCTTY, 0)
-dup2(slave, 0..2)
-execvp via UTF-8 argv built with NativeMemory (byte**)
+forkpty(master, NULL, NULL, winsize)
+child: optional chdir(cwd)
+child: execvp(file, argv)
+parent: keep master fd for PTY input/output
 ```
 
-**`fork()` safety:** Build executable path, `argv`, and optional `cwd` as unmanaged UTF-8 C strings in the **parent** before `fork()`. The child path calls only libc P/Invoke (`close`, `setsid`, `ioctl`, `dup2`, `chdir`, `execvp`, `_exit`)—no managed allocation, no `RuntimeInformation`, no string marshalling. The parent frees the payload after `fork()`; the child retains a copy-on-write mapping until `execvp` replaces the address space.
+**`forkpty()` safety:** Build executable path, `argv`, and optional `cwd` as unmanaged UTF-8 C strings in the **parent** before `forkpty()`. The child path stays inside the native shim for `chdir`, `execvp`, and `_exit` after the fork boundary—no managed allocation, no `RuntimeInformation`, no string marshalling. The parent frees the payload after `forkpty()`; the child retains a copy-on-write mapping until `execvp` replaces the address space.
 
 `execvp` uses `LibraryImport` with `byte* file` and `byte** argv`—not `string[]` marshalling—so NativeAOT does not depend on runtime array marshalling for the exec boundary.
 
@@ -124,7 +123,7 @@ execvp via UTF-8 argv built with NativeMemory (byte**)
 
 ### Parent I/O
 
-1. `close(slave)` after fork.
+1. `forkpty()` returns the PTY master fd and child pid to the parent.
 2. Consumer reads `Output` while the child runs.
 3. If one-shot stdin was provided, `SendEof()` before waiting—see [Unix stdin EOF](#unix-stdin-eof).
 4. If no stdin bytes, leave the master open for writes until the child exits (TUI programs).
@@ -157,15 +156,15 @@ Platform-specific staging avoids signaling EOF before the child has attached std
 
 ### Platform differences
 
-Shared session logic and per-OS constants / `openpty` imports live in `UnixPtyBackend`. Runtime dispatch selects the correct pair; do not reuse Linux-only values on BSD.
+Shared session logic lives in `UnixPtyBackend`; the `forkpty` boundary and resize ioctl live in `libminipty_unix`. Runtime dispatch selects the correct native library for the target OS.
 
-| OS | `TIOCSCTTY` | `openpty` library |
-|---|---|---|
-| Linux | `0x540E` | `libc` |
-| macOS | `0x20007461` (`_IO('t', 97)`) | `libutil` |
-| FreeBSD | `0x20007461` (`_IO('t', 97)`) | `libutil` |
+| OS | `forkpty` header/library |
+|---|---|
+| Linux | `<pty.h>` / `libutil` |
+| macOS | `<util.h>` / `libutil` |
+| FreeBSD | `<libutil.h>` / `libutil` |
 
-`fork`, `setsid`, `waitpid`, and other syscalls remain on `libc` in the shared partial class. `TIOCSWINSZ` resize uses `minipty_set_winsize` in `libminipty_unix`—not a direct `ioctl` P/Invoke—because `ioctl` is variadic and mis-marshals on macOS arm64.
+`waitpid`, `kill`, `read`, `write`, and other syscalls remain on `libc` in the shared partial class. `TIOCSWINSZ` resize uses `minipty_set_winsize` in `libminipty_unix`—not a direct `ioctl` P/Invoke—because `ioctl` is variadic and mis-marshals on macOS arm64.
 
 ## Shared Rules
 
@@ -228,7 +227,7 @@ See [spec.md](../spec.md) → Verification. `tests/MiniPty.Tests` exercises:
 
 | Check | Why |
 |---|---|
-| TTY detection (`redirected=False`) | Confirms ConPTY / `openpty` attach |
+| TTY detection (`redirected=False`) | Confirms ConPTY / `forkpty` attach |
 | Simple command output | Confirms spawn + decode |
 | Stdin + EOF | Confirms staged EOF on both OSes |
 | Short TUI (`matrix 3`) | Confirms chunked ANSI capture |
