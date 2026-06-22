@@ -12,7 +12,8 @@ namespace MiniPty.Benchmarks;
 /// <remarks>
 /// <para><b>Binary</b> — <see cref="MiniPty.PtyCompleteOptions.DecodeOutput"/> = false; only merged bytes are retained.</para>
 /// <para><b>Text</b> — default decode during pump (bytes + decoded chars) and display helpers.</para>
-/// Allocations include OS process spawn; compare <see cref="Session_Exit0_Bytes"/> vs <see cref="Session_Echo_Bytes"/> to isolate output payload.
+/// Allocations include OS process spawn. Capture cost scales with <b>PTY read count</b>, not only merged byte length.
+/// Compare <see cref="Session_32KiB_Bytes"/> vs <see cref="Capture_32KiB_Bytes"/> to isolate per-read chunk metadata.
 /// </remarks>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
@@ -69,6 +70,18 @@ public class PtyIntegrationBenchmarks
             return 0;
 
         var result = await PtyCapture.RunAsync(echo, BenchmarkOptions.CaptureBytesOnly).ConfigureAwait(false);
+        return result.Output.Length;
+    }
+
+    [BenchmarkCategory("Integration", "Binary")]
+    [Benchmark]
+    public async Task<int> Session_32KiB_Bytes()
+    {
+        if (!supported)
+            return 0;
+
+        await using var session = Pty.Start(smallStdout);
+        var result = await session.CompleteAsync(BenchmarkOptions.BytesOnly).ConfigureAwait(false);
         return result.Output.Length;
     }
 

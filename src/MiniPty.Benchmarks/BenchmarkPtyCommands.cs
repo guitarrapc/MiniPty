@@ -20,10 +20,17 @@ internal static class BenchmarkPtyCommands
             ? WindowsCommand("exit /b 0")
             : UnixShell("exit 0");
 
+    /// <summary>
+    /// Child writes exactly <paramref name="byteCount"/> bytes to stdout (no shell pipeline).
+    /// </summary>
+    /// <remarks>
+    /// Avoids <c>yes x | head</c> on Unix: line-buffered PTY reads create one capture chunk per
+    /// <c>"x\n"</c> pair (~16k chunks for 32 KiB) and inflate benchmark allocations.
+    /// </remarks>
     internal static PtyStartInfo SmallStdout(int byteCount) =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? WindowsPowerShell($"[Console]::Out.Write(('x' * {byteCount}))")
-            : UnixShell($"yes x | head -c {byteCount}");
+            ? WindowsPowerShell($"[Console]::Out.Write(([string]::new('x',{byteCount})))")
+            : Spawn("head", ["-c", byteCount.ToString(), "/dev/zero"]);
 
     private static PtyStartInfo Spawn(string fileName, IReadOnlyList<string> arguments) =>
         new() { FileName = fileName, Arguments = arguments, Size = new(80, 24) };
