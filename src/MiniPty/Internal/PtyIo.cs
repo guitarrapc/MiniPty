@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
@@ -87,7 +88,7 @@ internal static class PtyIo
         WriteAll(fd, Encoding.UTF8.GetBytes(input));
     }
 
-    internal static async Task WriteTextAsync(
+    internal static Task WriteTextAsync(
         Stream stream,
         string text,
         Encoding encoding,
@@ -95,34 +96,56 @@ internal static class PtyIo
     {
         var byteCount = encoding.GetByteCount(text);
         if (byteCount == 0)
-            return;
+            return Task.CompletedTask;
 
         if (byteCount <= Utf8StackThreshold)
         {
             Span<byte> buffer = stackalloc byte[byteCount];
             encoding.GetBytes(text, buffer);
-            await stream.WriteAsync(buffer.ToArray(), cancellationToken).ConfigureAwait(false);
-            return;
+            stream.Write(buffer);
+            return Task.CompletedTask;
         }
 
-        await stream.WriteAsync(encoding.GetBytes(text), cancellationToken).ConfigureAwait(false);
+        var rented = ArrayPool<byte>.Shared.Rent(byteCount);
+        try
+        {
+            var written = encoding.GetBytes(text, rented.AsSpan(0, byteCount));
+            stream.Write(rented.AsSpan(0, written));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+
+        return Task.CompletedTask;
     }
 
-    internal static async Task WriteUtf8Async(Stream stream, string input, CancellationToken cancellationToken)
+    internal static Task WriteUtf8Async(Stream stream, string input, CancellationToken cancellationToken)
     {
         var byteCount = Encoding.UTF8.GetByteCount(input);
         if (byteCount == 0)
-            return;
+            return Task.CompletedTask;
 
         if (byteCount <= Utf8StackThreshold)
         {
             Span<byte> buffer = stackalloc byte[byteCount];
             Encoding.UTF8.GetBytes(input, buffer);
-            await stream.WriteAsync(buffer.ToArray(), cancellationToken);
-            return;
+            stream.Write(buffer);
+            return Task.CompletedTask;
         }
 
-        await stream.WriteAsync(Encoding.UTF8.GetBytes(input), cancellationToken);
+        var rented = ArrayPool<byte>.Shared.Rent(byteCount);
+        try
+        {
+            var written = Encoding.UTF8.GetBytes(input, rented.AsSpan(0, byteCount));
+            stream.Write(rented.AsSpan(0, written));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+
+        return Task.CompletedTask;
     }
 
     internal static int ToWaitMilliseconds(TimeSpan timeout)

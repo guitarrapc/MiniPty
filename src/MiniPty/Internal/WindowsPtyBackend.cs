@@ -128,10 +128,15 @@ internal static class WindowsPtyBackend
             };
 
             var arguments = startInfo.Arguments;
-            var commandLineText = arguments.Count == 0
-                ? QuoteArg(startInfo.FileName)
-                : QuoteArg(startInfo.FileName) + " " + string.Join(" ", arguments.Select(QuoteArg));
-            var commandLine = (commandLineText + '\0').ToCharArray();
+            var commandLineBuilder = new StringBuilder();
+            commandLineBuilder.Append(QuoteArg(startInfo.FileName));
+            for (var i = 0; i < arguments.Count; i++)
+            {
+                commandLineBuilder.Append(' ');
+                commandLineBuilder.Append(QuoteArg(arguments[i]));
+            }
+
+            var commandLine = (commandLineBuilder.ToString() + '\0').ToCharArray();
             if (!WindowsInterop.CreateProcessW(
                     null,
                     commandLine,
@@ -494,7 +499,7 @@ internal static class WindowsPtyBackend
     {
         if (arg.Length == 0)
             return "\"\"";
-        if (!arg.Any(static c => char.IsWhiteSpace(c) || c is '"' or '\\'))
+        if (!NeedsQuoting(arg))
             return arg;
 
         var sb = new StringBuilder(arg.Length + 2);
@@ -524,6 +529,18 @@ internal static class WindowsPtyBackend
         sb.Append('\\', backslashes * 2);
         sb.Append('"');
         return sb.ToString();
+    }
+
+    private static bool NeedsQuoting(string arg)
+    {
+        for (var i = 0; i < arg.Length; i++)
+        {
+            var c = arg[i];
+            if (char.IsWhiteSpace(c) || c is '"' or '\\')
+                return true;
+        }
+
+        return false;
     }
 
     private sealed class SafePseudoConsoleHandle : SafeHandle

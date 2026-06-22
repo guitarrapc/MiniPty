@@ -1,5 +1,8 @@
-<a href="https://github.com/guitarrapc/MiniPty/releases/latest"><img src="https://img.shields.io/github/v/release/guitarrapc/MiniPty" alt="GitHub Release"></a>
 [![Build](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml/badge.svg)](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml)
+[![release](https://github.com/guitarrapc/MiniPty/actions/workflows/release.yaml/badge.svg)](https://github.com/guitarrapc/MiniPty/actions/workflows/release.yaml)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![NuGet](https://img.shields.io/nuget/v/MiniPty.svg?label=MiniPty%20nuget)](https://www.nuget.org/packages/MiniPty)
 
 # MiniPty
 
@@ -8,6 +11,10 @@ NativeAOT-friendly minimal cross-platform pseudo-terminal library for .NET.
 **Motivation**
 
 I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries don't reliably work with NativeAOT. MiniPty is a minimal PTY library with a simple API, no third-party dependencies, and in-process backends built for AOT publish.
+
+**Benchmarks**
+
+You can check various benchmark patterns at [GitHub Actions/Benchmark](https://github.com/guitarrapc/MiniPty/actions/runs/27328010495).
 
 ## Features
 
@@ -64,11 +71,14 @@ var result = await session.CompleteAsync(new PtyCompleteOptions
 {
     Input = "echo ok\n",
 });
-Console.WriteLine(result.Output);
+Console.WriteLine(result.GetTextString());
 Console.WriteLine(result.ExitCode);
 
 // For host-readable logs, transform control sequences first:
-Console.WriteLine(PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.PlainText));
+Console.WriteLine(PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText));
+
+// Raw bytes: result.Output, or skip pump decoding with DecodeOutput = false
+Console.WriteLine(result.Output.Length);
 ```
 
 **MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`.
@@ -86,7 +96,10 @@ var result = await PtyCapture.RunAsync(new PtyStartInfo
 
 // Chunk timestamps are measured from session start (immediately after `Pty.Start`).
 foreach (var chunk in result.Chunks)
-    Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Data}");
+    Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Data.Length} bytes");
+
+foreach (var textChunk in result.GetTextChunks())
+    Console.WriteLine($"{textChunk.Time.TotalSeconds:F3}: {textChunk.Text.Span}");
 
 // Or plain text for logging:
 Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));

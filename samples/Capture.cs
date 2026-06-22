@@ -26,7 +26,7 @@ try
         return 1;
     }
 
-    if (!result.Output.Contains("minipty-capture-sample", StringComparison.Ordinal))
+    if (!result.Contains("minipty-capture-sample"))
     {
         Console.Error.WriteLine("FAIL Capture sample: expected marker missing from output.");
         return 1;
@@ -38,7 +38,7 @@ try
         return 1;
     }
 
-    Console.Error.WriteLine($"ok Capture sample: exit={result.ExitCode} chunks={result.Chunks.Count} chars={result.Output.Length}");
+    Console.Error.WriteLine($"ok Capture sample: exit={result.ExitCode} chunks={result.Chunks.Count} bytes={result.Output.Length}");
     return 0;
 }
 catch (Exception ex)

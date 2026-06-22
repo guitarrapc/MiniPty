@@ -125,13 +125,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         WaitForExitInternalAsync(cancellationToken, killOnCancellation: false);
 
     /// <summary>
-    /// Pumps and drains <see cref="Output"/>, optionally writes stdin, waits for exit, and returns merged text.
+    /// Pumps and drains the PTY output stream, optionally writes stdin, waits for exit, and returns captured bytes.
     /// </summary>
     /// <param name="options">Completion behavior, or <see langword="null"/> for defaults.</param>
     /// <param name="cancellationToken">
     /// When canceled, behavior depends on <see cref="PtyCompleteOptions.KillOnCancellation"/> (default: kill child).
     /// </param>
-    /// <returns>A <see cref="PtyResult"/> with decoded output and exit code.</returns>
+    /// <returns>A <see cref="PtyResult"/> with merged <see cref="PtyResult.Output"/> bytes and exit code.</returns>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">
     /// <see cref="PtyCompleteOptions.ExitTimeout"/> or output drain timeout was exceeded.
@@ -145,10 +145,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         var (output, exitCode) = await PtyCompletion.RunAsync(
             this,
             options,
-            (stream, ct) => PtyTextPump.ReadAllAsync(stream, encoding, ct),
+            (stream, ct) => PtyBytePump.ReadAllAsync(stream, encoding, options.DecodeOutput, ct),
             cancellationToken).ConfigureAwait(false);
 
-        return new PtyResult(output, exitCode);
+        return new PtyResult(output.ToPayload(), exitCode);
     }
 
     /// <summary>

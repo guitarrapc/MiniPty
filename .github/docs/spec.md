@@ -1,7 +1,5 @@
 # MiniPty Specification
 
-Status: **Implemented** (MiniPty 0.3.x, MiniPty.Capture 0.3.x)
-
 User-facing API contracts for the **MiniPty** and **MiniPty.Capture** NuGet packages. OS-level implementation notes live in [references/pty_crossplatform.md](references/pty_crossplatform.md).
 
 ## Motivation
@@ -75,7 +73,7 @@ Spawns a child attached to a new pseudo-terminal. Does **not** wait for exit.
 | `SendEof()` | End stdin (platform-specific; see reference doc) |
 | `Resize(PtySize)` | Resize terminal after spawn |
 | `WaitForExitAsync` | Wait for child exit; **cancellation stops waiting only—the child keeps running** |
-| `CompleteAsync` | Pump output, optional stdin, wait, drain, return `PtyResult` (no timestamps) |
+| `CompleteAsync` | Pump output, optional stdin, wait, drain, return `PtyResult` (raw `Output` bytes + optional pump-decoded text via `GetText`) |
 | `Kill()` | `TerminateProcess` / `SIGKILL`; does not release handles |
 | `HasExited` / `ExitCode?` | Poll exit; `ExitCode` is null until exited |
 | `Dispose` / `DisposeAsync` | **Kill child if still running**, then release handles |
@@ -92,7 +90,22 @@ Used by `CompleteAsync`. `MiniPty.Capture` composes the same type via `PtyCaptur
 | `ExitTimeout` | null | Max wait for child exit; null = wait until exit or cancel |
 | `OutputDrainGrace` | 1s | Drain after exit before closing transport |
 | `OutputReaderCloseTimeout` | 5s | Wait for reader after transport close |
+| `DecodeOutput` | true | When true, pump decodes bytes so `GetText()` returns a zero-alloc slice; when false, only `Output` is stored and `GetText()` decodes on each call |
 | `KillOnCancellation` | true | **CompleteAsync only** — cancel kills child |
+
+### `PtyResult`
+
+| Member | Type | Description |
+|---|---|---|
+| `Output` | `ReadOnlyMemory<byte>` | Merged raw PTY output (canonical) |
+| `ExitCode` | `int` | Child exit code |
+| `GetText()` | `ReadOnlyMemory<char>` | Decoded text; zero-alloc when `DecodeOutput` was true |
+| `GetTextString()` | `string` | Materialized decoded text |
+| `Contains(string)` | `bool` | Search decoded text |
+| `Contains(ReadOnlySpan<byte>)` | `bool` | Search raw bytes without decoding |
+| `ContainsUtf8(string)` | `bool` | Search UTF-8 pattern in raw bytes |
+
+Use `GetText()`, `Contains`, or `Output.Span` for inspection. `PtyOutput.ToDisplayText` accepts `ReadOnlyMemory<byte>` or `ReadOnlyMemory<char>`.
 
 ### Backpressure
 
@@ -103,7 +116,7 @@ A PTY has backpressure. If the child writes output and nothing reads `PtySession
 PTY backends and capture APIs return a **raw** terminal byte stream. Writing that stream directly to the parent console can clear the screen or change terminal modes. For logging and other readable host output, transform decoded text with:
 
 ```csharp
-string plain = PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.PlainText);
+string plain = PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText);
 ```
 
 | Mode | Purpose |
@@ -114,7 +127,7 @@ string plain = PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.Plain
 
 **Why this lives in core:** it is an optional post-decode helper; session and capture pumps still emit raw text by default. [scenetake](https://github.com/guitarrapc/scenetake) and similar recorders should keep raw `Chunks`.
 
-**MiniPty.Capture** adds `PtyCaptureResult.ToDisplayText(mode)` and `PtyCaptureChunk` list overloads that merge chunk text then call `PtyOutput`.
+**MiniPty.Capture** adds `PtyCaptureResult.ToDisplayText(mode)`, `ToDisplayTextFromOutput(mode)`, and `PtyCaptureTextChunk` list overloads that merge chunk text then call `PtyOutput`.
 
 **Non-goals:** full VT emulation, TUI replay, terminal-injection hardening, or `\r` overwrite preservation. Processing is **best-effort**; unknown or malformed sequences may be left as-is. Callers that need `\r` progress lines should use `Raw`.
 
@@ -124,9 +137,11 @@ Observes PTY execution from outside the child: output is read while the process 
 
 ```csharp
 PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
-// result.Output   — merged text (concatenation of chunk data)
+// result.Output        — merged raw PTY bytes (canonical)
+// result.GetText()     — decoded text (ReadOnlyMemory<char>)
 // result.ExitCode
-// result.Chunks   — PtyCaptureChunk(TimeSpan Time, string Data)
+// result.Chunks        — PtyCaptureChunk(TimeSpan Time, ReadOnlyMemory<byte> Data)
+// result.GetTextChunks() — PtyCaptureTextChunk(TimeSpan Time, ReadOnlyMemory<char> Text)
 ```
 
 - `PtyCaptureOptions.Completion` wraps `PtyCompleteOptions`.

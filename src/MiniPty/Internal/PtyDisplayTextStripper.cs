@@ -1,3 +1,5 @@
+using System.Buffers;
+
 namespace MiniPty.Internal;
 
 internal static class PtyDisplayTextStripper
@@ -5,12 +7,27 @@ internal static class PtyDisplayTextStripper
     private const char Esc = '\x1b';
     private const char Bell = '\a';
 
-    internal static string Strip(string text, PtyOutputDisplayMode mode)
+    internal static string Strip(ReadOnlySpan<char> text, PtyOutputDisplayMode mode)
     {
-        if (text.Length == 0)
-            return text;
+        if (text.IsEmpty)
+            return string.Empty;
 
-        var builder = new System.Text.StringBuilder(text.Length);
+        var pool = ArrayPool<char>.Shared;
+        var buffer = pool.Rent(text.Length);
+        try
+        {
+            var written = StripTo(buffer, text, mode);
+            return new string(buffer, 0, written);
+        }
+        finally
+        {
+            pool.Return(buffer);
+        }
+    }
+
+    private static int StripTo(Span<char> destination, ReadOnlySpan<char> text, PtyOutputDisplayMode mode)
+    {
+        var written = 0;
         for (var i = 0; i < text.Length; i++)
         {
             var ch = text[i];
@@ -19,13 +36,24 @@ internal static class PtyDisplayTextStripper
 
             if (ch != Esc)
             {
-                builder.Append(ch);
+                if (ch == '\r')
+                {
+                    if (i + 1 < text.Length && text[i + 1] == '\n')
+                        i++;
+
+                    destination[written++] = '\n';
+                }
+                else
+                {
+                    destination[written++] = ch;
+                }
+
                 continue;
             }
 
             if (i + 1 >= text.Length)
             {
-                builder.Append(Esc);
+                written = AppendNormalized(destination, written, Esc);
                 break;
             }
 
@@ -35,12 +63,12 @@ internal static class PtyDisplayTextStripper
                 var end = FindCsiEnd(text, i + 2);
                 if (end < 0)
                 {
-                    builder.Append(text.AsSpan(i));
+                    written = AppendNormalized(destination, written, text[i..]);
                     break;
                 }
 
                 if (mode == PtyOutputDisplayMode.AnsiText && text[end] == 'm')
-                    builder.Append(text.AsSpan(i, end - i + 1));
+                    written = AppendNormalized(destination, written, text[i..(end + 1)]);
 
                 i = end;
                 continue;
@@ -51,7 +79,7 @@ internal static class PtyDisplayTextStripper
                 var end = FindOscEnd(text, i + 2);
                 if (end < 0)
                 {
-                    builder.Append(text.AsSpan(i));
+                    written = AppendNormalized(destination, written, text[i..]);
                     break;
                 }
 
@@ -59,13 +87,39 @@ internal static class PtyDisplayTextStripper
                 continue;
             }
 
-            builder.Append(ch);
+            written = AppendNormalized(destination, written, ch);
         }
 
-        return NormalizeNewlines(builder.ToString());
+        return written;
     }
 
-    private static int FindCsiEnd(string text, int start)
+    private static int AppendNormalized(Span<char> destination, int written, char ch)
+    {
+        destination[written++] = ch;
+        return written;
+    }
+
+    private static int AppendNormalized(Span<char> destination, int written, ReadOnlySpan<char> text)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            var ch = text[i];
+            if (ch != '\r')
+            {
+                destination[written++] = ch;
+                continue;
+            }
+
+            if (i + 1 < text.Length && text[i + 1] == '\n')
+                i++;
+
+            destination[written++] = '\n';
+        }
+
+        return written;
+    }
+
+    private static int FindCsiEnd(ReadOnlySpan<char> text, int start)
     {
         for (var i = start; i < text.Length; i++)
         {
@@ -77,7 +131,7 @@ internal static class PtyDisplayTextStripper
         return -1;
     }
 
-    private static int FindOscEnd(string text, int start)
+    private static int FindOscEnd(ReadOnlySpan<char> text, int start)
     {
         for (var i = start; i < text.Length; i++)
         {
@@ -89,29 +143,5 @@ internal static class PtyDisplayTextStripper
         }
 
         return -1;
-    }
-
-    private static string NormalizeNewlines(string text)
-    {
-        if (text.Length == 0)
-            return text;
-
-        var builder = new System.Text.StringBuilder(text.Length);
-        for (var i = 0; i < text.Length; i++)
-        {
-            var ch = text[i];
-            if (ch != '\r')
-            {
-                builder.Append(ch);
-                continue;
-            }
-
-            if (i + 1 < text.Length && text[i + 1] == '\n')
-                i++;
-
-            builder.Append('\n');
-        }
-
-        return builder.ToString();
     }
 }

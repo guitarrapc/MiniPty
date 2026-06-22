@@ -27,6 +27,16 @@ public sealed record PtyCompleteOptions
     public string? Input { get; init; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether <see cref="PtySession.CompleteAsync"/> decodes
+    /// <see cref="PtyResult.Output"/> from the captured byte stream.
+    /// </summary>
+    /// <value>
+    /// Default is <see langword="true"/>. When <see langword="false"/>, only
+    /// <see cref="PtyResult.Output"/> is populated; <see cref="PtyResult.GetText"/> decodes on demand.
+    /// </value>
+    public bool DecodeOutput { get; init; } = true;
+
+    /// <summary>
     /// Gets or sets a value indicating whether <see cref="PtySession.SendEof"/> is called after
     /// <see cref="Input"/> is written.
     /// </summary>

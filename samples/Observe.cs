@@ -44,13 +44,16 @@ static async Task ObserveStaggeredOutputAsync()
             },
         });
 
-    Console.WriteLine($"exit={result.ExitCode} chunks={result.Chunks.Count} chars={result.Output.Length}");
+    var text = result.GetText();
+    Console.WriteLine($"exit={result.ExitCode} chunks={result.Chunks.Count} bytes={result.Output.Length} chars={text.Length}");
     Console.WriteLine("timeline (elapsed since session start):");
 
-    foreach (var chunk in result.Chunks)
+    var textChunks = result.GetTextChunks();
+    for (var i = 0; i < textChunks.Count; i++)
     {
-        var preview = EscapeForDisplay(chunk.Data);
-        Console.WriteLine($"  +{chunk.Time.TotalSeconds,7:F3}s  {chunk.Data.Length,4} chars  {preview}");
+        var chunk = textChunks[i];
+        var preview = EscapeForDisplay(chunk.Text.Span);
+        Console.WriteLine($"  +{chunk.Time.TotalSeconds,7:F3}s  {chunk.Text.Length,4} chars  {preview}");
     }
 
     if (result.Chunks.Count > 0)
@@ -59,9 +62,18 @@ static async Task ObserveStaggeredOutputAsync()
         Console.WriteLine($"session span: {last.Time.TotalSeconds:F3}s");
     }
 
-    var merged = string.Concat(result.Chunks.Select(static chunk => chunk.Data));
-    if (!string.Equals(merged, result.Output, StringComparison.Ordinal))
-        throw new InvalidOperationException("merged chunks do not match result.Output");
+    var mergedOffset = 0;
+    foreach (var chunk in result.Chunks)
+    {
+        var slice = result.Output.Span.Slice(mergedOffset, chunk.Data.Length);
+        if (!chunk.Data.Span.SequenceEqual(slice))
+            throw new InvalidOperationException("merged byte chunks do not match result.Output");
+
+        mergedOffset += chunk.Data.Length;
+    }
+
+    if (mergedOffset != result.Output.Length)
+        throw new InvalidOperationException("merged byte chunks do not cover result.Output");
 
     if (result.ExitCode != 0)
         throw new InvalidOperationException($"child exited with {result.ExitCode}");
@@ -71,7 +83,7 @@ static async Task ObserveStaggeredOutputAsync()
 
     foreach (var label in new[] { "alpha", "beta", "gamma" })
     {
-        if (!result.Output.Contains(label, StringComparison.Ordinal))
+        if (!result.ContainsUtf8(label))
             throw new InvalidOperationException($"expected label '{label}' missing from output");
     }
 }
@@ -94,17 +106,17 @@ static async Task ObserveStdinPipelineAsync()
 
     Console.WriteLine($"exit={result.ExitCode}");
     Console.WriteLine("merged output:");
-    Console.WriteLine(result.Output.TrimEnd());
+    Console.WriteLine(result.GetTextString().TrimEnd());
 
     Console.WriteLine("chunk boundaries (useful when rebuilding a consumer timeline):");
     var cursor = TimeSpan.Zero;
     foreach (var chunk in result.Chunks)
     {
-        Console.WriteLine($"  [{cursor.TotalSeconds:F3}s -> {chunk.Time.TotalSeconds:F3}s)  {chunk.Data.Length} chars");
+        Console.WriteLine($"  [{cursor.TotalSeconds:F3}s -> {chunk.Time.TotalSeconds:F3}s)  {chunk.Data.Length} bytes");
         cursor = chunk.Time;
     }
 
-    ValidateStdinPipelineOutput(result.Output, result.ExitCode);
+    ValidateStdinPipelineOutput(result.GetTextString(), result.ExitCode);
 }
 
 static void ValidateStdinPipelineOutput(string output, int exitCode)
@@ -116,7 +128,7 @@ static void ValidateStdinPipelineOutput(string output, int exitCode)
         throw new InvalidOperationException("expected pipeline marker missing from output");
 }
 
-static string EscapeForDisplay(string text)
+static string EscapeForDisplay(ReadOnlySpan<char> text)
 {
     var builder = new StringBuilder(text.Length);
     foreach (var ch in text)
