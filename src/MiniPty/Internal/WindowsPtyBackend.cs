@@ -68,6 +68,8 @@ internal static class WindowsPtyBackend
     private static readonly IntPtr InvalidHandleValue = new(-1);
     private const uint WaitPollMs = 100;
     private const uint HandleFlagInherit = 0x00000001;
+    private const int EofDeferPollsAfterInput = 3;
+    private const int EofDeferPollsEmptyInput = 40;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
@@ -183,6 +185,9 @@ internal static class WindowsPtyBackend
         private bool _inputClosed;
         private bool _outputClosed;
         private bool _eofSignaled;
+        private bool _eofPending;
+        private bool _inputWritten;
+        private int _eofDeferPollsRemaining;
         private bool _hpcClosed;
         private bool _exited;
         private int _exitCode;
@@ -202,7 +207,7 @@ internal static class WindowsPtyBackend
             _attrList = attrList;
             _processInfo = processInfo;
             _size = size;
-            Input = new PtyHandleWriteStream(inputWriteHandle);
+            Input = new InputTrackingWriteStream(new PtyHandleWriteStream(inputWriteHandle), () => _inputWritten = true);
             Output = new PtyHandleReadStream(outputReadHandle);
         }
 
@@ -250,13 +255,18 @@ internal static class WindowsPtyBackend
         public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState() || _inputClosed)
+            if (TryRefreshExitState() || _inputClosed || _eofSignaled)
                 return;
 
-            // Windows: defer pipe close to WaitForExitAsync (or CloseOutputTransport).
-            // WriteFile success does not imply the child has attached stdin yet; closing too early
-            // yields STATUS_CONTROL_C_EXIT (0xC000013A).
-            _eofSignaled = true;
+            if (_inputWritten)
+            {
+                _eofSignaled = true;
+                _eofDeferPollsRemaining = EofDeferPollsAfterInput;
+                return;
+            }
+
+            // Empty stdin EOF: defer pipe close until the wait loop gives the child time to attach.
+            _eofPending = true;
         }
 
         public void Kill()
@@ -293,6 +303,7 @@ internal static class WindowsPtyBackend
                     cancellationToken.ThrowIfCancellationRequested();
 
                     var waitResult = WindowsInterop.WaitForSingleObject(_processInfo.hProcess, WaitPollMs);
+                    PromoteEofIfPending();
                     CloseInputPipeIfEofSignaled();
                     if (waitResult == WindowsInterop.WaitFailed)
                         throw new Win32Exception(Marshal.GetLastPInvokeError(), "WaitForSingleObject failed");
@@ -379,10 +390,28 @@ internal static class WindowsPtyBackend
             return true;
         }
 
+        private void PromoteEofIfPending()
+        {
+            if (!_eofPending)
+                return;
+
+            _eofPending = false;
+            _eofSignaled = true;
+            _eofDeferPollsRemaining = EofDeferPollsEmptyInput;
+        }
+
         private void CloseInputPipeIfEofSignaled()
         {
-            if (_eofSignaled)
-                CloseInputPipe();
+            if (!_eofSignaled)
+                return;
+
+            if (_eofDeferPollsRemaining > 0)
+            {
+                _eofDeferPollsRemaining--;
+                return;
+            }
+
+            CloseInputPipe();
         }
 
         private void CloseInputPipe()
@@ -414,6 +443,7 @@ internal static class WindowsPtyBackend
 
         private void CloseTransport()
         {
+            PromoteEofIfPending();
             CloseInputPipeIfEofSignaled();
             if (!_inputClosed)
             {

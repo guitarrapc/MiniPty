@@ -404,3 +404,5 @@ FodyWeavers.xsd
 
 # custom
 .references/
+*.so
+*.dylib

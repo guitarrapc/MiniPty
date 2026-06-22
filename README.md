@@ -57,7 +57,29 @@ foreach (var chunk in result.Chunks)
     Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Data}");
 ```
 
-Chunk timestamps are measured from session start (`SessionStart`).
+Chunk timestamps are measured from session start (immediately after `Pty.Start`).
+
+## Documentation
+
+- [Specification](.github/docs/spec.md) — API contracts, scope, lessons learned
+- [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, `openpty`, EOF staging
+- [Document index](.github/docs/spec_index.md)
+
+## Samples
+
+NativeAOT smoke (same as CI `run` job):
+
+```bash
+dotnet publish samples/Capture.cs -c Release -r <rid> --self-contained true \
+  -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o artifacts/capture-aot
+./artifacts/capture-aot/Capture   # Capture.exe on Windows
+```
+
+JIT run for local development:
+
+```bash
+dotnet samples/Capture.cs
+```
 
 ## Build
 

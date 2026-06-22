@@ -1,0 +1,72 @@
+name: Build
+
+concurrency:
+  group: nativeaot-build-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            rid: linux-x64
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+          - os: windows-2025
+            rid: win-x64
+          - os: windows-11-arm
+            rid: win-arm64
+          - os: macos-26
+            rid: osx-arm64
+          - os: macos-26-intel
+            rid: osx-x64
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Build (JIT)
+        shell: bash
+        run: dotnet build -c Release
+      - name: Test
+        shell: bash
+        run: dotnet test -c Release
+      - name: Publish and run Capture sample (NativeAOT)
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/minipty-capture-aot"
+          dotnet publish samples/Capture.cs -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
+          exe="$out/Capture"
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            exe="$out/Capture.exe"
+          fi
+          test -f "$exe"
+          "$exe"
+
+  build-complete:
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - run: echo "Build and run completed successfully on all platforms."

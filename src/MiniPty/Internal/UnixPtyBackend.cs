@@ -14,26 +14,18 @@ internal static partial class UnixPtyBackend
     {
         var size = startInfo.ClampedSize;
         var winsize = new Winsize { ws_col = (ushort)size.Columns, ws_row = (ushort)size.Rows };
-        if (OpenPty(out var master, out var slave, ref winsize) != 0)
-            throw new IOException($"openpty failed (errno {Marshal.GetLastPInvokeError()})");
-
-        var tiocSetCtty = TiocSetCtty();
         var arguments = startInfo.Arguments as string[] ?? startInfo.Arguments.ToArray();
         var exec = UnixExecPayload.Create(startInfo.FileName, arguments, startInfo.WorkingDirectory);
         try
         {
-            var pid = fork();
-            if (pid < 0)
+            var pid = 0;
+            var master = 0;
+            unsafe
             {
-                UnixInterop.close(master);
-                UnixInterop.close(slave);
-                throw new IOException($"fork failed (errno {Marshal.GetLastPInvokeError()})");
+                if (ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, &pid) != 0)
+                    throw new IOException($"PTY spawn failed (errno {Marshal.GetLastPInvokeError()})");
             }
 
-            if (pid == 0)
-                ChildMainAfterFork(master, slave, tiocSetCtty, exec.Executable, exec.Argv, exec.WorkingDirectory);
-
-            UnixInterop.close(slave);
             return new UnixPtyBackendInstance(master, pid, size);
         }
         finally
@@ -42,30 +34,20 @@ internal static partial class UnixPtyBackend
         }
     }
 
-    /// <summary>
-    /// Child path after <c>fork()</c>. Only async-signal-safe libc calls — no managed allocation or runtime APIs.
-    /// </summary>
-    private static unsafe void ChildMainAfterFork(
-        int master,
-        int slave,
-        ulong tiocSetCtty,
+    private static unsafe int ForkPtyExec(
+        int* master,
+        Winsize* winsize,
+        IntPtr workingDirectory,
         IntPtr executable,
         IntPtr argv,
-        IntPtr workingDirectory)
-    {
-        close(master);
-        setsid();
-        ioctl(slave, tiocSetCtty, 0);
-        dup2(slave, 0);
-        dup2(slave, 1);
-        dup2(slave, 2);
-        if (slave > 2)
-            close(slave);
-        if (workingDirectory != IntPtr.Zero)
-            chdir((byte*)workingDirectory);
-        execvp((byte*)executable, (byte**)argv);
-        _exit(127);
-    }
+        int* pid) =>
+        minipty_fork_pty_exec(
+            master,
+            winsize,
+            (byte*)workingDirectory,
+            (byte*)executable,
+            (byte**)argv,
+            pid);
 
     private sealed class UnixExecPayload : IDisposable
     {
@@ -124,7 +106,7 @@ internal static partial class UnixPtyBackend
             _master = master;
             _pid = pid;
             _size = size;
-            _inputStream = new InputTrackingWriteStream(master, () => _inputWritten = true);
+            _inputStream = new InputTrackingWriteStream(new PtyFdWriteStream(master), () => _inputWritten = true);
             Input = _inputStream;
             Output = new PtyFdReadStream(master);
         }
@@ -161,8 +143,7 @@ internal static partial class UnixPtyBackend
 
             columns = Math.Clamp(columns, 1, 512);
             rows = Math.Clamp(rows, 1, 512);
-            var winsize = new Winsize { ws_row = (ushort)rows, ws_col = (ushort)columns };
-            if (ioctl(_master, TiocSwinsz(), ref winsize) != 0)
+            if (minipty_set_winsize(_master, (ushort)rows, (ushort)columns) != 0)
                 throw new IOException($"TIOCSWINSZ failed (errno {Marshal.GetLastPInvokeError()})");
 
             _size = new PtySize(columns, rows);
@@ -315,46 +296,6 @@ internal static partial class UnixPtyBackend
         }
     }
 
-    private sealed class InputTrackingWriteStream : Stream
-    {
-        private readonly PtyFdWriteStream _inner;
-        private readonly Action _onWrite;
-
-        public InputTrackingWriteStream(int fd, Action onWrite)
-        {
-            _inner = new PtyFdWriteStream(fd);
-            _onWrite = onWrite;
-        }
-
-        public override bool CanRead => _inner.CanRead;
-        public override bool CanSeek => _inner.CanSeek;
-        public override bool CanWrite => _inner.CanWrite;
-        public override long Length => _inner.Length;
-        public override long Position { get => _inner.Position; set => _inner.Position = value; }
-
-        public override void Flush() => _inner.Flush();
-
-        public override int Read(byte[] buffer, int offset, int count) =>
-            _inner.Read(buffer, offset, count);
-
-        public override long Seek(long offset, SeekOrigin origin) =>
-            _inner.Seek(offset, origin);
-
-        public override void SetLength(long value) => _inner.SetLength(value);
-
-        public override void Write(byte[] buffer, int offset, int count) =>
-            Write(buffer.AsSpan(offset, count));
-
-        public override void Write(ReadOnlySpan<byte> buffer)
-        {
-            if (!buffer.IsEmpty)
-                _onWrite();
-            _inner.Write(buffer);
-        }
-
-        protected override void Dispose(bool disposing) { }
-    }
-
     private static unsafe byte** AllocUtf8Argv(string fileName, string[] arguments, List<IntPtr> owned)
     {
         var argc = arguments.Length + 1;
@@ -412,95 +353,17 @@ internal static partial class UnixPtyBackend
         }
     }
 
-    private static int OpenPty(out int master, out int slave, ref Winsize winsize)
-    {
-        if (OperatingSystem.IsLinux())
-            return LinuxOpenPty(out master, out slave, IntPtr.Zero, IntPtr.Zero, ref winsize);
-        if (OperatingSystem.IsMacOS())
-            return MacOSOpenPty(out master, out slave, IntPtr.Zero, IntPtr.Zero, ref winsize);
-        if (OperatingSystem.IsFreeBSD())
-            return FreeBSDOpenPty(out master, out slave, IntPtr.Zero, IntPtr.Zero, ref winsize);
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    private static unsafe partial int minipty_fork_pty_exec(
+        int* master,
+        Winsize* winp,
+        byte* working_directory,
+        byte* file,
+        byte** argv,
+        int* pid_out);
 
-        throw new PlatformNotSupportedException("PTY is not supported on this Unix operating system.");
-    }
-
-    private static ulong TiocSetCtty()
-    {
-        if (OperatingSystem.IsLinux())
-            return Linux.TIOCSCTTY;
-        if (OperatingSystem.IsMacOS())
-            return MacOS.TIOCSCTTY;
-        if (OperatingSystem.IsFreeBSD())
-            return FreeBSD.TIOCSCTTY;
-
-        throw new PlatformNotSupportedException("PTY is not supported on this Unix operating system.");
-    }
-
-    private static ulong TiocSwinsz()
-    {
-        if (OperatingSystem.IsLinux())
-            return Linux.TIOCSWINSZ;
-        if (OperatingSystem.IsMacOS())
-            return MacOS.TIOCSWINSZ;
-        if (OperatingSystem.IsFreeBSD())
-            return FreeBSD.TIOCSWINSZ;
-
-        throw new PlatformNotSupportedException("PTY is not supported on this Unix operating system.");
-    }
-
-    private static class Linux
-    {
-        internal const ulong TIOCSCTTY = 0x540E;
-        internal const ulong TIOCSWINSZ = 0x5414;
-    }
-
-    private static class MacOS
-    {
-        internal const ulong TIOCSCTTY = 0x20007461;
-        internal const ulong TIOCSWINSZ = 0x80087467;
-    }
-
-    private static class FreeBSD
-    {
-        internal const ulong TIOCSCTTY = 0x20007461;
-        internal const ulong TIOCSWINSZ = 0x80087467;
-    }
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int LinuxOpenPty(out int amaster, out int aslave, IntPtr name, IntPtr termp, ref Winsize winp);
-
-    [LibraryImport("libutil", SetLastError = true)]
-    private static partial int MacOSOpenPty(out int amaster, out int aslave, IntPtr name, IntPtr termp, ref Winsize winp);
-
-    [LibraryImport("libutil", SetLastError = true)]
-    private static partial int FreeBSDOpenPty(out int amaster, out int aslave, IntPtr name, IntPtr termp, ref Winsize winp);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int fork();
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int setsid();
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int ioctl(int fd, ulong request, int arg);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int ioctl(int fd, ulong request, ref Winsize winp);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int dup2(int oldfd, int newfd);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static unsafe partial int chdir(byte* path);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static unsafe partial int execvp(byte* file, byte** argv);
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int close(int fd);
-
-    [LibraryImport("libc")]
-    private static partial void _exit(int status);
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    private static partial int minipty_set_winsize(int master, ushort rows, ushort cols);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Winsize
