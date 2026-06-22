@@ -10,13 +10,68 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to release"
-        required: false
-        default: "0.0.0-dev"
+      tag:
+        description: "Tag to build and verify (e.g. v0.3.0). Must exist on remote."
+        required: true
 
 jobs:
+  verify:
+    name: Verify tag and version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve tag ref
+        id: ref
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW="${TAG}"
+            TAG="v${RAW#v}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Verify tag on remote (workflow_dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/git/ref/tags/${{ steps.ref.outputs.tag }}" --silent --fail \
+            || { echo "::error::Tag '${{ steps.ref.outputs.tag }}' does not exist on the remote. Push it first, then re-run."; exit 1; }
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ steps.ref.outputs.tag }}
+
+      - name: Verify version ↔ tag consistency
+        id: version
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ref.outputs.tag }}"
+          PROPS_VERSION=$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props)
+          TAG_VERSION="${TAG#v}"
+          if [ "$PROPS_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Version mismatch: Directory.Build.props has '$PROPS_VERSION' but tag is '$TAG' (expected '$TAG_VERSION')"
+            exit 1
+          fi
+          echo "version=${PROPS_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "### Version check passed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** \`${TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version:** \`${PROPS_VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+
   build-unix-native:
+    needs: [verify]
     name: Native (${{ matrix.rid }})
     strategy:
       fail-fast: false
@@ -39,6 +94,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ needs.verify.outputs.tag }}
       - name: Build libminipty_unix
         shell: bash
         run: bash scripts/build-native.sh "${{ matrix.rid }}"
@@ -52,7 +108,7 @@ jobs:
 
   pack:
     name: Pack NuGet
-    needs: [build-unix-native]
+    needs: [verify, build-unix-native]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -62,6 +118,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ needs.verify.outputs.tag }}
       - uses: guitarrapc/actions/.github/actions/setup-dotnet@main
         with:
           dotnet-version: |
@@ -74,12 +131,7 @@ jobs:
           merge-multiple: true
       - name: Pack with prebuilt native libraries
         shell: bash
-        run: |
-          version="${VERSION}"
-          version="${version#v}"
-          bash scripts/pack-with-native.sh "$version" ./publish
-        env:
-          VERSION: ${{ inputs.version || github.ref_name }}
+        run: bash scripts/pack-with-native.sh "${{ needs.verify.outputs.version }}" ./publish
       - name: Upload NuGet packages
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -90,7 +142,7 @@ jobs:
 
   nuget-smoke:
     name: NuGet smoke (${{ matrix.os }})
-    needs: [pack]
+    needs: [verify, pack]
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -124,12 +176,7 @@ jobs:
           path: ./publish
       - name: Run NuGet smoke sample
         shell: bash
-        run: |
-          version="${VERSION}"
-          version="${version#v}"
-          bash scripts/run-nuget-smoke.sh "$version" ./publish
-        env:
-          VERSION: ${{ inputs.version || github.ref_name }}
+        run: bash scripts/run-nuget-smoke.sh "${{ needs.verify.outputs.version }}" ./publish
 
   build-dotnet:
     name: Attest packages
@@ -156,7 +203,7 @@ jobs:
 
   create-release:
     if: ${{ github.event_name == 'push' }}
-    needs: [build-dotnet]
+    needs: [verify, build-dotnet]
     permissions:
       contents: write
       id-token: write # for NuGet Trusted Publish
@@ -178,8 +225,8 @@ jobs:
       - name: Create Release
         uses: guitarrapc/actions/.github/actions/create-release@main
         with:
-          tag: ${{ github.ref_name }}
-          title: ${{ github.ref_name }}
+          tag: ${{ needs.verify.outputs.tag }}
+          title: ${{ needs.verify.outputs.tag }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}
       - run: dotnet nuget push "./nuget/*.nupkg" --skip-duplicate -s https://api.nuget.org/v3/index.json -k "${NUGET_KEY}"
         env:
