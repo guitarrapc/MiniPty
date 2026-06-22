@@ -1,7 +1,5 @@
 # MiniPty Specification
 
-Status: **Implemented** (MiniPty 0.4.0, MiniPty.Capture 0.4.0)
-
 User-facing API contracts for the **MiniPty** and **MiniPty.Capture** NuGet packages. OS-level implementation notes live in [references/pty_crossplatform.md](references/pty_crossplatform.md).
 
 ## Motivation
