@@ -46,8 +46,10 @@ static async Task RunStdinPipelineWithManualPumpAsync()
     await pump;
 
     Console.Error.WriteLine($"pid={session.ProcessId} size={session.Size.Columns}x{session.Size.Rows} exit={exitCode}");
-    Console.Error.WriteLine("child output (escaped; raw PTY bytes include terminal control sequences):");
+    Console.Error.WriteLine("child output (raw, escaped):");
     Console.Error.WriteLine(EscapeForDisplay(output.ToString()));
+    Console.Error.WriteLine("child output (plain):");
+    Console.Error.WriteLine(PtyOutput.ToDisplayText(output.ToString(), PtyOutputDisplayMode.PlainText));
 
     ValidateStdinPipelineOutput(output.ToString(), exitCode);
 }
@@ -64,8 +66,10 @@ static async Task RunEchoWithCompleteAsync()
     });
 
     Console.Error.WriteLine($"exit={result.ExitCode}");
-    Console.Error.WriteLine("child output (escaped):");
+    Console.Error.WriteLine("child output (raw, escaped):");
     Console.Error.WriteLine(EscapeForDisplay(result.Output.TrimEnd()));
+    Console.Error.WriteLine("child output (plain):");
+    Console.Error.WriteLine(PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.PlainText).TrimEnd());
 
     if (result.ExitCode != 0)
         throw new InvalidOperationException($"echo exited with {result.ExitCode}");
@@ -94,8 +98,10 @@ static async Task RunResizeAsync()
     await pump;
 
     Console.Error.WriteLine($"exit={exitCode}");
-    Console.Error.WriteLine("child output (escaped):");
+    Console.Error.WriteLine("child output (raw, escaped):");
     Console.Error.WriteLine(EscapeForDisplay(output.ToString().Trim()));
+    Console.Error.WriteLine("child output (plain):");
+    Console.Error.WriteLine(PtyOutput.ToDisplayText(output.ToString(), PtyOutputDisplayMode.PlainText).Trim());
 
     if (exitCode != 0)
         throw new InvalidOperationException($"resize probe exited with {exitCode}");

@@ -55,6 +55,9 @@ var result = await session.CompleteAsync(new PtyCompleteOptions
 });
 Console.WriteLine(result.Output);
 Console.WriteLine(result.ExitCode);
+
+// For host-readable logs, transform control sequences first:
+Console.WriteLine(PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.PlainText));
 ```
 
 **MiniPty.Capture** provides a higher-level API for observing PTY output with timestamps. Observe PTY execution from outside, each read from the output stream is recorded with elapsed time since session start.
@@ -73,6 +76,9 @@ var result = await PtyCapture.RunAsync(new PtyStartInfo
 // Chunk timestamps are measured from session start (immediately after `Pty.Start`).
 foreach (var chunk in result.Chunks)
     Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Data}");
+
+// Or plain text for logging:
+Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));
 ```
 
 ## Samples

@@ -30,6 +30,7 @@ Timestamped chunks are **not** part of the core API. Consumers that need to obse
 | Optional one-shot stdin with EOF | `cat`, `sort`, pipelines through a shell |
 | Terminal resize after spawn | `PtySession.Resize` |
 | Cooperative vs forced shutdown | `WaitForExitAsync` (cancel = stop waiting) vs `CompleteAsync` (cancel may kill) |
+| Host-displayable text from decoded PTY output | `PtyOutput.ToDisplayText` (`Raw`, `PlainText`, `AnsiText`) |
 
 ### Out of scope (for now)
 
@@ -97,9 +98,29 @@ Used by `CompleteAsync`. `MiniPty.Capture` composes the same type via `PtyCaptur
 
 A PTY has backpressure. If the child writes output and nothing reads `PtySession.Output`, the child may block when the terminal buffer fills. Callers must use `CompleteAsync`, `PtyCapture.RunAsync`, or continuously read `Output`.
 
+### Display text (`PtyOutput`)
+
+PTY backends and capture APIs return a **raw** terminal byte stream. Writing that stream directly to the parent console can clear the screen or change terminal modes. For logging and other readable host output, transform decoded text with:
+
+```csharp
+string plain = PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.PlainText);
+```
+
+| Mode | Purpose |
+|---|---|
+| `Raw` | Return input unchanged (recording, replay, custom handling) |
+| `PlainText` | Remove CSI, OSC, and bell; normalize `\r\n` / lone `\r` to `\n` |
+| `AnsiText` | Same as `PlainText` but keep SGR sequences (`CSI … m`) for colored host output |
+
+**Why this lives in core:** it is an optional post-decode helper; session and capture pumps still emit raw text by default. [scenetake](https://github.com/guitarrapc/scenetake) and similar recorders should keep raw `Chunks`.
+
+**MiniPty.Capture** adds `PtyCaptureResult.ToDisplayText(mode)` and `PtyCaptureChunk` list overloads that merge chunk text then call `PtyOutput`.
+
+**Non-goals:** full VT emulation, TUI replay, terminal-injection hardening, or `\r` overwrite preservation. Processing is **best-effort**; unknown or malformed sequences may be left as-is. Callers that need `\r` progress lines should use `Raw`.
+
 ## Capture API (`MiniPty.Capture`)
 
-Observes PTY execution from outside the child: output is read while the process runs, and each read becomes a timestamped chunk. MiniPty does not define a recording format or parse ANSI; consumers build timelines or artifacts from `Chunks`.
+Observes PTY execution from outside the child: output is read while the process runs, and each read becomes a timestamped chunk. MiniPty does not define a recording format; consumers build timelines or artifacts from `Chunks`. Optional `ToDisplayText` helpers are for host-readable output, not recording.
 
 ```csharp
 PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
@@ -112,7 +133,7 @@ PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
 - Each chunk's `Time` is elapsed since **session start** (immediately after `Pty.Start`).
 - The session is disposed when `RunAsync` completes (child killed on dispose if still running).
 
-PTY output is a **raw byte stream**. MiniPty does not normalize newlines or parse ANSI; sequences may span chunk boundaries.
+PTY output is a **raw byte stream**. Session and capture APIs do not normalize newlines or strip control sequences by default; sequences may span chunk boundaries. Use `PtyOutput.ToDisplayText` when host-readable output is needed.
 
 ## Cancellation
 
@@ -188,6 +209,7 @@ These constraints shaped the API and backends; details are in the reference doc.
 - **Session vs capture split reduced API awkwardness.** A blocking `Run` that mixed streams, timestamps, and cancellation forced `GetAwaiter().GetResult()` in tests; `PtySession` + optional Capture package keeps async paths natural.
 - **Cancel semantics differ by use case.** Library callers needed `WaitForExitAsync` that does not kill on cancel; one-shot capture defaults to killing so hung children do not leak.
 - **PTY output includes terminal echo.** Tests that drive stdin manually (`WriteInputAsync` + `SendEof`) may capture echoed input and control characters (`^D`, backspace). Prefer `CompleteAsync` input options or commands that do not need interactive stdin when asserting on captured text.
+- **Raw PTY text can break the parent console.** ConPTY and other backends emit mode and screen-control sequences. Printing decoded output directly to the host console may clear the screen; use `PtyOutput.ToDisplayText` for logs or keep escaped/raw bytes for inspection.
 - **Child-visible resize tests must synchronize with the parent.** `PtySession.Resize` runs in the parent after `Pty.Start` returns; a child that probes size after a short `sleep` can win the race on fast hosts. Block the child on stdin (or another explicit handshake) until after `Resize`.
 - **macOS arm64 cannot P/Invoke `ioctl` for `TIOCSWINSZ`.** `ioctl` is variadic; .NET does not marshal the third argument correctly on Apple Silicon ([dotnet/runtime#48752](https://github.com/dotnet/runtime/issues/48752)), so direct `LibraryImport("libc", …)` resize left the kernel winsize stale and `stty size` reported nonsense. `minipty_set_winsize` in `libminipty_unix` calls `ioctl` from C instead.
 
