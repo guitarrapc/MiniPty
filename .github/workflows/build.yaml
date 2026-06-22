@@ -21,11 +21,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
+            rid: linux-x64
           - os: ubuntu-24.04-arm
+            rid: linux-arm64
           - os: windows-2025
+            rid: win-x64
           - os: windows-11-arm
+            rid: win-arm64
           - os: macos-26
+            rid: osx-arm64
           - os: macos-26-intel
+            rid: osx-x64
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
@@ -44,37 +50,6 @@ jobs:
       - name: Test
         shell: bash
         run: dotnet test -c Release
-
-  run:
-    needs: [build]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            rid: linux-x64
-          - os: ubuntu-24.04-arm
-            rid: linux-arm64
-          - os: windows-2025
-            rid: win-x64
-          - os: windows-11-arm
-            rid: win-arm64
-          - os: macos-26
-            rid: osx-arm64
-          - os: macos-26-intel
-            rid: osx-x64
-    permissions:
-      contents: read
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          persist-credentials: false
-      - uses: guitarrapc/actions/.github/actions/setup-dotnet@main
-        with:
-          dotnet-version: 10.0.x
-      # NativeAOT smoke: publish single-file sample and run the native binary
       - name: Publish and run Capture sample (NativeAOT)
         shell: bash
         run: |
@@ -86,12 +61,3 @@ jobs:
           fi
           test -f "$exe"
           "$exe"
-
-  build-complete:
-    needs: [run]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - run: echo "Build and run completed successfully on all platforms."
