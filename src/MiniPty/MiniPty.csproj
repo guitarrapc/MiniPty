@@ -6,7 +6,10 @@
     <IsPackable>true</IsPackable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Description>NativeAOT-friendly minimal cross-platform pseudo-terminal library.</Description>
-    <MiniPtyBuildUnixNative Condition="$([MSBuild]::IsOSPlatform('Linux')) Or $([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD'))">true</MiniPtyBuildUnixNative>
+    <MiniPtyPackUnixNative Condition="'$(MiniPtyPackUnixNative)' == ''">false</MiniPtyPackUnixNative>
+    <_MiniPtyRuntimesRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\runtimes'))</_MiniPtyRuntimesRoot>
+    <MiniPtyBuildUnixNative Condition="'$(MiniPtyPackUnixNative)' == 'true'">false</MiniPtyBuildUnixNative>
+    <MiniPtyBuildUnixNative Condition="'$(MiniPtyBuildUnixNative)' == '' and ($([MSBuild]::IsOSPlatform('Linux')) Or $([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD')))">true</MiniPtyBuildUnixNative>
     <MiniPtyUnixNativeLibraryName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libminipty_unix.dylib</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLibraryName Condition="'$(MiniPtyUnixNativeLibraryName)' == ''">libminipty_unix.so</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLinkFlags Condition="$([MSBuild]::IsOSPlatform('Linux')) Or $([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD'))">-lutil</MiniPtyUnixNativeLinkFlags>
@@ -18,6 +21,12 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>MiniPty.Capture</_Parameter1>
     </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(MiniPtyPackUnixNative)' == 'true'">
+    <None Include="$(_MiniPtyRuntimesRoot)\**\*.*"
+          Pack="true"
+          PackagePath="runtimes/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
   <Target Name="BuildMiniPtyUnixNative" BeforeTargets="AssignTargetPaths"
