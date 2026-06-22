@@ -64,7 +64,12 @@ public sealed class PtyOutputTests
             new(TimeSpan.FromMilliseconds(1), merged.AsMemory(4, 6)),
         };
 
-        var result = new PtyCaptureResult(merged, 0, chunks);
+        var result = new PtyCaptureResult(
+            System.Text.Encoding.UTF8.GetBytes(merged),
+            merged.AsMemory(),
+            0,
+            [],
+            chunks);
         var fromResult = result.ToDisplayText(PtyOutputDisplayMode.PlainText);
         var fromChunks = chunks.ToDisplayText(PtyOutputDisplayMode.PlainText);
 

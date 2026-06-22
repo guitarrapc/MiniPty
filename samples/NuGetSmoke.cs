@@ -33,7 +33,7 @@ try
         return 1;
     }
 
-    if (!result.Output.Contains(marker, StringComparison.Ordinal))
+    if (!PtyMemory.Contains(result.Output, marker))
     {
         Console.Error.WriteLine("FAIL NuGet smoke: expected marker missing from output.");
         return 1;

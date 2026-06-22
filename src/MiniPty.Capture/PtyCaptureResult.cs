@@ -3,14 +3,21 @@ namespace MiniPty.Capture;
 /// <summary>
 /// Result of a full <see cref="PtyCapture.RunAsync"/> run.
 /// </summary>
+/// <param name="OutputBytes">
+/// Merged stdout and stderr bytes, equivalent to concatenating all <see cref="ByteChunks"/> in order.
+/// </param>
 /// <param name="Output">
-/// Merged stdout and stderr text, equivalent to concatenating all <see cref="Chunks"/> data in order.
+/// Text decoded from <paramref name="OutputBytes"/>.
+/// Empty when <see cref="PtyCompleteOptions.DecodeOutput"/> is <see langword="false"/>.
 /// </param>
 /// <param name="ExitCode">Operating-system exit code of the child process.</param>
+/// <param name="ByteChunks">Timestamped raw byte slices observed during the session.</param>
 /// <param name="Chunks">
-/// Timestamped output slices observed during the session. Times are elapsed since spawn.
+/// Timestamped decoded text slices observed during the session. Empty when output decoding is disabled.
 /// </param>
 public sealed record PtyCaptureResult(
-    string Output,
+    ReadOnlyMemory<byte> OutputBytes,
+    ReadOnlyMemory<char> Output,
     int ExitCode,
+    IReadOnlyList<PtyCaptureByteChunk> ByteChunks,
     IReadOnlyList<PtyCaptureChunk> Chunks);

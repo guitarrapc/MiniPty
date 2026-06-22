@@ -26,7 +26,7 @@ try
         return 1;
     }
 
-    if (!result.Output.Contains("minipty-capture-sample", StringComparison.Ordinal))
+    if (!PtyMemory.Contains(result.Output, "minipty-capture-sample"))
     {
         Console.Error.WriteLine("FAIL Capture sample: expected marker missing from output.");
         return 1;

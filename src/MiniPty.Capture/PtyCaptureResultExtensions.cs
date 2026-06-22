@@ -1,5 +1,5 @@
 using System.Buffers;
-using System.Runtime.InteropServices;
+using System.Text;
 
 namespace MiniPty.Capture;
 
@@ -9,7 +9,7 @@ namespace MiniPty.Capture;
 public static class PtyCaptureResultExtensions
 {
     /// <summary>
-    /// Transforms merged capture output for host display using <see cref="PtyOutput.ToDisplayText"/>.
+    /// Transforms merged decoded capture output for host display.
     /// </summary>
     /// <param name="result">Capture result whose <see cref="PtyCaptureResult.Output"/> is transformed.</param>
     /// <param name="mode">Display transformation to apply.</param>
@@ -17,7 +17,23 @@ public static class PtyCaptureResultExtensions
     public static string ToDisplayText(this PtyCaptureResult result, PtyOutputDisplayMode mode)
     {
         ArgumentNullException.ThrowIfNull(result);
-        return PtyOutput.ToDisplayText(result.Output, mode);
+        return PtyOutput.ToDisplayText(result.Output.Span, mode);
+    }
+
+    /// <summary>
+    /// Decodes merged raw capture bytes and transforms them for host display.
+    /// </summary>
+    /// <param name="result">Capture result whose <see cref="PtyCaptureResult.OutputBytes"/> is transformed.</param>
+    /// <param name="mode">Display transformation to apply.</param>
+    /// <param name="encoding">Encoding used by the child process terminal stream. Default is UTF-8.</param>
+    /// <returns>Displayable text for the chosen mode.</returns>
+    public static string ToDisplayTextFromBytes(
+        this PtyCaptureResult result,
+        PtyOutputDisplayMode mode,
+        Encoding? encoding = null)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        return PtyOutput.ToDisplayText(result.OutputBytes.Span, encoding ?? Encoding.UTF8, mode);
     }
 
     /// <summary>
@@ -35,45 +51,13 @@ public static class PtyCaptureResultExtensions
         if (chunks.Count == 1)
             return PtyOutput.ToDisplayText(chunks[0].Text.Span, mode);
 
-        if (TryGetContiguousChunkText(chunks, out var contiguous))
+        var texts = new List<ReadOnlyMemory<char>>(chunks.Count);
+        for (var i = 0; i < chunks.Count; i++)
+            texts.Add(chunks[i].Text);
+
+        if (PtyMemory.TryGetContiguousText(texts, out var contiguous))
             return PtyOutput.ToDisplayText(contiguous, mode);
 
-        return PtyOutput.ToDisplayText(MergeChunkText(chunks), mode);
-    }
-
-    private static bool TryGetContiguousChunkText(IReadOnlyList<PtyCaptureChunk> chunks, out ReadOnlySpan<char> text)
-    {
-        if (!MemoryMarshal.TryGetString(chunks[0].Text, out var str, out var start, out var length))
-        {
-            text = default;
-            return false;
-        }
-
-        var end = start + length;
-        for (var i = 1; i < chunks.Count; i++)
-        {
-            if (!MemoryMarshal.TryGetString(chunks[i].Text, out var other, out var otherStart, out var otherLength)
-                || !ReferenceEquals(str, other))
-            {
-                text = default;
-                return false;
-            }
-
-            if (otherStart != end)
-            {
-                text = default;
-                return false;
-            }
-
-            end += otherLength;
-        }
-
-        text = str.AsSpan(start, end - start);
-        return true;
-    }
-
-    private static string MergeChunkText(IReadOnlyList<PtyCaptureChunk> chunks)
-    {
         var total = 0;
         for (var i = 0; i < chunks.Count; i++)
             total += chunks[i].Text.Length;
@@ -90,7 +74,7 @@ public static class PtyCaptureResultExtensions
                 offset += chunk.Length;
             }
 
-            return new string(buffer, 0, total);
+            return PtyOutput.ToDisplayText(buffer.AsSpan(0, total), mode);
         }
         finally
         {

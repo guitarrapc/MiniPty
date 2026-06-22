@@ -71,11 +71,14 @@ var result = await session.CompleteAsync(new PtyCompleteOptions
 {
     Input = "echo ok\n",
 });
-Console.WriteLine(result.Output);
+Console.WriteLine(PtyMemory.ToString(result.Output));
 Console.WriteLine(result.ExitCode);
 
 // For host-readable logs, transform control sequences first:
 Console.WriteLine(PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.PlainText));
+
+// Raw bytes: result.OutputBytes, or skip decoding with CompleteBytesAsync / PtyCapture.RunBytesAsync
+Console.WriteLine(result.OutputBytes.Length);
 ```
 
 **MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`.
@@ -92,6 +95,9 @@ var result = await PtyCapture.RunAsync(new PtyStartInfo
 });
 
 // Chunk timestamps are measured from session start (immediately after `Pty.Start`).
+foreach (var chunk in result.ByteChunks)
+    Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Data.Length} bytes");
+
 foreach (var chunk in result.Chunks)
     Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Text.Span}");
 

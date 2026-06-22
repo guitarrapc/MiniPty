@@ -28,7 +28,12 @@ public class PtyCaptureDisplayBenchmarks
         var merged = BenchmarkSamples.AnsiHeavy(512);
         fewChunks = BenchmarkSamples.ChunkedAnsi(16, 64);
         manyChunks = BenchmarkSamples.ChunkedAnsi(256, 64);
-        captureResult = new PtyCaptureResult(merged, 0, manyChunks);
+        captureResult = new PtyCaptureResult(
+            System.Text.Encoding.UTF8.GetBytes(merged),
+            merged.AsMemory(),
+            0,
+            [],
+            manyChunks);
     }
 
     [BenchmarkCategory("Micro", "Capture")]

@@ -81,7 +81,7 @@ static async Task ObserveStaggeredOutputAsync()
 
     foreach (var label in new[] { "alpha", "beta", "gamma" })
     {
-        if (!result.Output.Contains(label, StringComparison.Ordinal))
+        if (!PtyMemory.Contains(result.Output, label))
             throw new InvalidOperationException($"expected label '{label}' missing from output");
     }
 }
@@ -104,7 +104,7 @@ static async Task ObserveStdinPipelineAsync()
 
     Console.WriteLine($"exit={result.ExitCode}");
     Console.WriteLine("merged output:");
-    Console.WriteLine(result.Output.TrimEnd());
+    Console.WriteLine(PtyMemory.ToString(result.Output).TrimEnd());
 
     Console.WriteLine("chunk boundaries (useful when rebuilding a consumer timeline):");
     var cursor = TimeSpan.Zero;
@@ -114,7 +114,7 @@ static async Task ObserveStdinPipelineAsync()
         cursor = chunk.Time;
     }
 
-    ValidateStdinPipelineOutput(result.Output, result.ExitCode);
+    ValidateStdinPipelineOutput(PtyMemory.ToString(result.Output), result.ExitCode);
 }
 
 static void ValidateStdinPipelineOutput(string output, int exitCode)

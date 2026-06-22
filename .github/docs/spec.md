@@ -75,7 +75,8 @@ Spawns a child attached to a new pseudo-terminal. Does **not** wait for exit.
 | `SendEof()` | End stdin (platform-specific; see reference doc) |
 | `Resize(PtySize)` | Resize terminal after spawn |
 | `WaitForExitAsync` | Wait for child exit; **cancellation stops waiting only—the child keeps running** |
-| `CompleteAsync` | Pump output, optional stdin, wait, drain, return `PtyResult` (no timestamps) |
+| `CompleteAsync` | Pump output, optional stdin, wait, drain, return `PtyResult` (`OutputBytes` + decoded `Output`) |
+| `CompleteBytesAsync` | Same as `CompleteAsync` with `DecodeOutput = false` (bytes only) |
 | `Kill()` | `TerminateProcess` / `SIGKILL`; does not release handles |
 | `HasExited` / `ExitCode?` | Poll exit; `ExitCode` is null until exited |
 | `Dispose` / `DisposeAsync` | **Kill child if still running**, then release handles |
@@ -92,7 +93,18 @@ Used by `CompleteAsync`. `MiniPty.Capture` composes the same type via `PtyCaptur
 | `ExitTimeout` | null | Max wait for child exit; null = wait until exit or cancel |
 | `OutputDrainGrace` | 1s | Drain after exit before closing transport |
 | `OutputReaderCloseTimeout` | 5s | Wait for reader after transport close |
+| `DecodeOutput` | true | Populate `PtyResult.Output` / capture text chunks; false = bytes only |
 | `KillOnCancellation` | true | **CompleteAsync only** — cancel kills child |
+
+### `PtyResult`
+
+| Member | Type | Description |
+|---|---|---|
+| `OutputBytes` | `ReadOnlyMemory<byte>` | Merged raw PTY output |
+| `Output` | `ReadOnlyMemory<char>` | Decoded text; empty when `DecodeOutput` is false |
+| `ExitCode` | `int` | Child exit code |
+
+Use `PtyMemory.ToString`, `PtyMemory.Contains`, or `.Span` for inspection. `PtyOutput.ToDisplayText` accepts `ReadOnlyMemory<byte>` or `ReadOnlyMemory<char>`.
 
 ### Backpressure
 
@@ -124,9 +136,11 @@ Observes PTY execution from outside the child: output is read while the process 
 
 ```csharp
 PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
-// result.Output   — merged text (concatenation of chunk data)
+// result.OutputBytes — merged raw PTY bytes
+// result.Output     — decoded text (ReadOnlyMemory<char>)
 // result.ExitCode
-// result.Chunks   — PtyCaptureChunk(TimeSpan Time, ReadOnlyMemory<char> Text)
+// result.ByteChunks — PtyCaptureByteChunk(TimeSpan Time, ReadOnlyMemory<byte> Data)
+// result.Chunks     — PtyCaptureChunk(TimeSpan Time, ReadOnlyMemory<char> Text)
 ```
 
 - `PtyCaptureOptions.Completion` wraps `PtyCompleteOptions`.

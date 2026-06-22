@@ -67,14 +67,14 @@ static async Task RunEchoWithCompleteAsync()
 
     Console.Error.WriteLine($"exit={result.ExitCode}");
     Console.Error.WriteLine("child output (raw, escaped):");
-    Console.Error.WriteLine(EscapeForDisplay(result.Output.TrimEnd()));
+    Console.Error.WriteLine(EscapeForDisplay(PtyMemory.ToString(result.Output).TrimEnd()));
     Console.Error.WriteLine("child output (plain):");
     Console.Error.WriteLine(PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.PlainText).TrimEnd());
 
     if (result.ExitCode != 0)
         throw new InvalidOperationException($"echo exited with {result.ExitCode}");
 
-    if (!result.Output.Contains("minipty-session-sample", StringComparison.Ordinal))
+    if (!PtyMemory.Contains(result.Output, "minipty-session-sample"))
         throw new InvalidOperationException("expected marker missing from output");
 }
 
