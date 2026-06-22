@@ -10,7 +10,7 @@
     <IsAotCompatible>true</IsAotCompatible>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <IsPackable>false</IsPackable>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <Authors>guitarrapc</Authors>
     <Copyright>© guitarrapc</Copyright>
     <PackageTags>pty</PackageTags>

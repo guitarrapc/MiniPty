@@ -169,13 +169,13 @@ internal sealed class PtyFdWriteStream : Stream
     protected override void Dispose(bool disposing) { }
 }
 
-/// <summary>Notifies when the first non-empty write occurs (stdin EOF staging).</summary>
+/// <summary>Notifies on each non-empty stdin write (EOF staging and line-ending tracking).</summary>
 internal sealed class InputTrackingWriteStream : Stream
 {
     private readonly Stream _inner;
-    private readonly Action _onWrite;
+    private readonly Action<ReadOnlySpan<byte>> _onWrite;
 
-    public InputTrackingWriteStream(Stream inner, Action onWrite)
+    public InputTrackingWriteStream(Stream inner, Action<ReadOnlySpan<byte>> onWrite)
     {
         _inner = inner;
         _onWrite = onWrite;
@@ -203,7 +203,7 @@ internal sealed class InputTrackingWriteStream : Stream
     public override void Write(ReadOnlySpan<byte> buffer)
     {
         if (!buffer.IsEmpty)
-            _onWrite();
+            _onWrite(buffer);
         _inner.Write(buffer);
     }
 

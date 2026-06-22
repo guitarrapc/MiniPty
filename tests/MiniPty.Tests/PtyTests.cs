@@ -92,6 +92,21 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyStdinEof_withoutTrailingNewline()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        const string marker = "pty-stdin-eof-no-nl";
+        var unix = await PtyCapture.RunAsync(
+            Spawn("cat", []),
+            new PtyCaptureOptions { Completion = new() { Input = marker } });
+
+        await Assert.That(unix.ExitCode).IsEqualTo(0);
+        await Assert.That(unix.Contains(marker)).IsTrue();
+    }
+
+    [Test]
     public async Task PtyEmptyInputSignalsEof()
     {
         const string marker = "pty-empty-eof-complete";

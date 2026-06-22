@@ -212,7 +212,7 @@ internal static class WindowsPtyBackend
             _attrList = attrList;
             _processInfo = processInfo;
             _size = size;
-            Input = new InputTrackingWriteStream(new PtyHandleWriteStream(inputWriteHandle), () => _inputWritten = true);
+            Input = new InputTrackingWriteStream(new PtyHandleWriteStream(inputWriteHandle), OnInputWritten);
             Output = new PtyHandleReadStream(outputReadHandle);
         }
 
@@ -371,6 +371,12 @@ internal static class WindowsPtyBackend
                 _outputReadHandle.Dispose();
                 _outputClosed = true;
             }
+        }
+
+        private void OnInputWritten(ReadOnlySpan<byte> buffer)
+        {
+            if (!buffer.IsEmpty)
+                _inputWritten = true;
         }
 
         private bool TryRefreshExitState()
