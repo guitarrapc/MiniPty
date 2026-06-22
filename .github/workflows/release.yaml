@@ -178,7 +178,8 @@ jobs:
         shell: bash
         run: bash scripts/run-nuget-smoke.sh "${{ needs.verify.outputs.version }}" ./publish
 
-  build-dotnet:
+  attest:
+    name: Attest packages
     needs: [nuget-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -219,7 +220,7 @@ jobs:
 
   create-release:
     if: ${{ github.event_name == 'push' }}
-    needs: [verify, build-dotnet]
+    needs: [verify, attest]
     permissions:
       contents: write
       id-token: write # for NuGet Trusted Publish
