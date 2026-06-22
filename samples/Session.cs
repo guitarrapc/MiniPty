@@ -21,6 +21,7 @@ try
     await RunStdinPipelineWithManualPumpAsync();
     await RunEchoWithCompleteAsync();
     await RunResizeAsync();
+    Console.Error.WriteLine("ok Session sample: manual pump, CompleteAsync, Resize");
     return 0;
 }
 catch (Exception ex)
@@ -31,7 +32,7 @@ catch (Exception ex)
 
 static async Task RunStdinPipelineWithManualPumpAsync()
 {
-    Console.WriteLine("=== Manual stream control (stdin pipeline) ===");
+    Console.Error.WriteLine("=== Manual stream control (stdin pipeline) ===");
 
     await using var session = Pty.Start(CreateStdinPipelineStartInfo());
     var output = new StringBuilder();
@@ -44,18 +45,17 @@ static async Task RunStdinPipelineWithManualPumpAsync()
     var exitCode = await session.WaitForExitAsync(cts.Token);
     await pump;
 
-    Console.WriteLine($"pid={session.ProcessId} size={session.Size.Columns}x{session.Size.Rows} exit={exitCode}");
-    Console.WriteLine("output:");
-    foreach (var line in output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        Console.WriteLine($"  {line}");
+    Console.Error.WriteLine($"pid={session.ProcessId} size={session.Size.Columns}x{session.Size.Rows} exit={exitCode}");
+    Console.Error.WriteLine("child output (escaped; raw PTY bytes include terminal control sequences):");
+    Console.Error.WriteLine(EscapeForDisplay(output.ToString()));
 
     ValidateStdinPipelineOutput(output.ToString(), exitCode);
 }
 
 static async Task RunEchoWithCompleteAsync()
 {
-    Console.WriteLine();
-    Console.WriteLine("=== One-shot completion (CompleteAsync) ===");
+    Console.Error.WriteLine();
+    Console.Error.WriteLine("=== One-shot completion (CompleteAsync) ===");
 
     await using var session = Pty.Start(CreateEchoStartInfo());
     var result = await session.CompleteAsync(new PtyCompleteOptions
@@ -63,9 +63,9 @@ static async Task RunEchoWithCompleteAsync()
         ExitTimeout = TimeSpan.FromSeconds(15),
     });
 
-    Console.WriteLine($"exit={result.ExitCode}");
-    Console.WriteLine("output:");
-    Console.WriteLine(result.Output.TrimEnd());
+    Console.Error.WriteLine($"exit={result.ExitCode}");
+    Console.Error.WriteLine("child output (escaped):");
+    Console.Error.WriteLine(EscapeForDisplay(result.Output.TrimEnd()));
 
     if (result.ExitCode != 0)
         throw new InvalidOperationException($"echo exited with {result.ExitCode}");
@@ -76,8 +76,8 @@ static async Task RunEchoWithCompleteAsync()
 
 static async Task RunResizeAsync()
 {
-    Console.WriteLine();
-    Console.WriteLine("=== Terminal resize ===");
+    Console.Error.WriteLine();
+    Console.Error.WriteLine("=== Terminal resize ===");
 
     await using var session = Pty.Start(CreateResizeStartInfo());
     var output = new StringBuilder();
@@ -85,7 +85,7 @@ static async Task RunResizeAsync()
     var pump = PumpOutputAsync(session.Output, output, cts.Token);
 
     session.Resize(new PtySize(100, 28));
-    Console.WriteLine($"parent reports {session.Size.Columns}x{session.Size.Rows}");
+    Console.Error.WriteLine($"parent reports {session.Size.Columns}x{session.Size.Rows}");
 
     await session.WriteInputAsync(CreateResizeWakeInput());
     session.SendEof();
@@ -93,8 +93,9 @@ static async Task RunResizeAsync()
     var exitCode = await session.WaitForExitAsync(cts.Token);
     await pump;
 
-    Console.WriteLine($"exit={exitCode}");
-    Console.WriteLine($"child output: {output.ToString().Trim()}");
+    Console.Error.WriteLine($"exit={exitCode}");
+    Console.Error.WriteLine("child output (escaped):");
+    Console.Error.WriteLine(EscapeForDisplay(output.ToString().Trim()));
 
     if (exitCode != 0)
         throw new InvalidOperationException($"resize probe exited with {exitCode}");
@@ -118,6 +119,24 @@ static async Task PumpOutputAsync(Stream output, StringBuilder sink, Cancellatio
 
         sink.Append(Encoding.UTF8.GetString(buffer, 0, read));
     }
+}
+
+static string EscapeForDisplay(string text)
+{
+    var builder = new StringBuilder(text.Length);
+    foreach (var ch in text)
+    {
+        builder.Append(ch switch
+        {
+            '\r' => "\\r",
+            '\n' => "\\n",
+            '\t' => "\\t",
+            < ' ' or > '~' => $"\\u{(int)ch:X4}",
+            _ => ch.ToString(),
+        });
+    }
+
+    return builder.ToString();
 }
 
 static void ValidateStdinPipelineOutput(string output, int exitCode)
