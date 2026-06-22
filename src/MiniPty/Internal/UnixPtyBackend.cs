@@ -95,6 +95,7 @@ internal static partial class UnixPtyBackend
         private bool _eofSent;
         private bool _eofPending;
         private bool _inputWritten;
+        private bool _inputEndsWithNewline;
         private bool _masterClosed;
         private bool _exited;
         private int _exitCode;
@@ -106,7 +107,7 @@ internal static partial class UnixPtyBackend
             _master = master;
             _pid = pid;
             _size = size;
-            _inputStream = new InputTrackingWriteStream(new PtyFdWriteStream(master), () => _inputWritten = true);
+            _inputStream = new InputTrackingWriteStream(new PtyFdWriteStream(master), OnInputWritten);
             Input = _inputStream;
             Output = new PtyFdReadStream(master);
         }
@@ -288,12 +289,24 @@ internal static partial class UnixPtyBackend
                 WriteEotToMaster();
         }
 
+        private void OnInputWritten(ReadOnlySpan<byte> buffer)
+        {
+            _inputWritten = true;
+            var last = buffer[^1];
+            _inputEndsWithNewline = last is (byte)'\n' or (byte)'\r';
+        }
+
         private void WriteEotToMaster()
         {
             if (_eofSent || _exited || _masterClosed)
                 return;
 
             PtyIo.WriteAll(_master, stackalloc byte[1] { InputEot });
+            // Canonical line discipline: one EOT on a non-empty buffer submits the line but
+            // does not signal EOF; a second EOT on the empty buffer ends input for programs like cat.
+            if (_inputWritten && !_inputEndsWithNewline)
+                PtyIo.WriteAll(_master, stackalloc byte[1] { InputEot });
+
             _eofPending = false;
             _eofSent = true;
         }
