@@ -6,16 +6,26 @@ NativeAOT-friendly minimal cross-platform pseudo-terminal library for .NET.
 
 **Motivation**
 
-I need a PTY library for NativeAOT projects, but existing .NET PTY libraries are not guranteed to work in NativeAOT. MiniPty is a minimal PTY library designed for NativeAOT compatibility, with a simple API and no dependencies.
+I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries don't reliably work with NativeAOT. MiniPty is a minimal PTY library with a simple API, no third-party dependencies, and in-process backends built for AOT publish.
 
 ## Features
 
-MiniPty provides a minimal set of features for running a child process in a PTY and observing its output.
-
+- NativeAOT ready, in-process backends only, no winpty or bundled helpers
+- Multi-platform ready, Windows, Linux, macOS, and FreeBSD
+- Spawn a child in a pseudo-terminal (`Pty.Start`)
+- `Input` / `Output` byte streams; stdout and stderr merged on `Output`
+- One-shot run with optional stdin and drained output (`CompleteAsync`)
+- Resize the terminal after spawn (`PtySession.Resize`)
+- Per-read timestamps for observation or recording (**MiniPty.Capture**, `PtyCapture.RunAsync`)
+- Plain or colored host output from PTY bytes (`PtyOutput.ToDisplayText`)
 
 **Not supported**
 
-
+- Long-lived interactive sessions (vim, less, REPLs, a shell you type into for minutes)
+- Ongoing bidirectional input beyond an optional initial stdin blob
+- Remote shells (`ssh`) or tunneling a PTY over the network
+- Full terminal emulation, TUI replay, or faithfully preserving `\r` overwrite lines
+- Falling back to pipe redirect when PTY creation fails—if you need a PTY, MiniPty either gives you one or throws
 
 ## Quick start
 
@@ -29,7 +39,7 @@ dotnet add package MiniPty
 dotnet add package MiniPty.Capture
 ```
 
-**MiniPty** supports running a child process in a PTY and observing its output through `PtySession.Output` or `PtySession.CompleteAsync`. The child process is killed when the session is disposed. If the child writes output and nobody reads `PtySession.Output`, the child may block once the PTY buffer fills. Use `CompleteAsync`, `MiniPty.Capture`, or read `Output` yourself.
+**MiniPty** start a session with `Pty.Start`, then either pump `Output` yourself or call `CompleteAsync` for a one-shot run. Disposing the session kills the child if it is still running. If nobody reads `Output` while the child writes, the PTY buffer can fill and the child will block; `CompleteAsync` and continuous reads avoid that.
 
 ```csharp
 using MiniPty;
@@ -60,7 +70,7 @@ Console.WriteLine(result.ExitCode);
 Console.WriteLine(PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.PlainText));
 ```
 
-**MiniPty.Capture** provides a higher-level API for observing PTY output with timestamps. Observe PTY execution from outside, each read from the output stream is recorded with elapsed time since session start.
+**MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`.
 
 ```csharp
 using MiniPty;
@@ -118,4 +128,5 @@ Use `dotnet` for local development, debugging, or publishing.
 ```bash
 dotnet build
 dotnet test
+dotnet pack
 ```
