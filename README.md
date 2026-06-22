@@ -77,12 +77,24 @@ foreach (var chunk in result.Chunks)
 
 ## Samples
 
-- [Capture](samples/Capture.cs) — capture PTY output with timestamps using `MiniPty.Capture`
+| Sample | Shows |
+|--------|-------|
+| [Capture.cs](samples/Capture.cs) | Minimal `MiniPty.Capture` smoke |
+| [Session.cs](samples/Session.cs) | `Pty.Start`, background `Output` reads, `WriteInputAsync` / `SendEof`, `CompleteAsync`, `Resize` |
+| [Observe.cs](samples/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
 
-To run sample as NativeAOT, use the following command:
+Run a sample locally (JIT):
 
 ```bash
-dotnet samples/Capture.cs -c Release --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
+dotnet samples/Session.cs
+dotnet samples/Observe.cs
+dotnet samples/Capture.cs
+```
+
+NativeAOT publish (same flags as CI):
+
+```bash
+dotnet samples/Session.cs -c Release --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
 ```
 
 ## Development

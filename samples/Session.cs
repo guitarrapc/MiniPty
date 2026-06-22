@@ -1,0 +1,214 @@
+#:sdk Microsoft.NET.Sdk
+#:property TargetFramework=net10.0
+#:property Nullable=enable
+#:property ImplicitUsings=enable
+#:property AllowUnsafeBlocks=true
+#:property PublishAot=true
+#:project ../src/MiniPty/MiniPty.csproj
+
+using System.Runtime.InteropServices;
+using System.Text;
+using MiniPty;
+
+if (!Pty.IsSupported)
+{
+    Console.Error.WriteLine("PTY is not supported on this operating system.");
+    return 1;
+}
+
+try
+{
+    await RunStdinPipelineWithManualPumpAsync();
+    await RunEchoWithCompleteAsync();
+    await RunResizeAsync();
+    return 0;
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"{ex.GetType().Name}: {ex.Message}");
+    return 1;
+}
+
+static async Task RunStdinPipelineWithManualPumpAsync()
+{
+    Console.WriteLine("=== Manual stream control (stdin pipeline) ===");
+
+    await using var session = Pty.Start(CreateStdinPipelineStartInfo());
+    var output = new StringBuilder();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    var pump = PumpOutputAsync(session.Output, output, cts.Token);
+
+    await session.WriteInputAsync(CreateStdinPipelineInput());
+    session.SendEof();
+
+    var exitCode = await session.WaitForExitAsync(cts.Token);
+    await pump;
+
+    Console.WriteLine($"pid={session.ProcessId} size={session.Size.Columns}x{session.Size.Rows} exit={exitCode}");
+    Console.WriteLine("output:");
+    foreach (var line in output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        Console.WriteLine($"  {line}");
+
+    ValidateStdinPipelineOutput(output.ToString(), exitCode);
+}
+
+static async Task RunEchoWithCompleteAsync()
+{
+    Console.WriteLine();
+    Console.WriteLine("=== One-shot completion (CompleteAsync) ===");
+
+    await using var session = Pty.Start(CreateEchoStartInfo());
+    var result = await session.CompleteAsync(new PtyCompleteOptions
+    {
+        ExitTimeout = TimeSpan.FromSeconds(15),
+    });
+
+    Console.WriteLine($"exit={result.ExitCode}");
+    Console.WriteLine("output:");
+    Console.WriteLine(result.Output.TrimEnd());
+
+    if (result.ExitCode != 0)
+        throw new InvalidOperationException($"echo exited with {result.ExitCode}");
+
+    if (!result.Output.Contains("minipty-session-sample", StringComparison.Ordinal))
+        throw new InvalidOperationException("expected marker missing from output");
+}
+
+static async Task RunResizeAsync()
+{
+    Console.WriteLine();
+    Console.WriteLine("=== Terminal resize ===");
+
+    await using var session = Pty.Start(CreateResizeStartInfo());
+    var output = new StringBuilder();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    var pump = PumpOutputAsync(session.Output, output, cts.Token);
+
+    session.Resize(new PtySize(100, 28));
+    Console.WriteLine($"parent reports {session.Size.Columns}x{session.Size.Rows}");
+
+    await session.WriteInputAsync(CreateResizeWakeInput());
+    session.SendEof();
+
+    var exitCode = await session.WaitForExitAsync(cts.Token);
+    await pump;
+
+    Console.WriteLine($"exit={exitCode}");
+    Console.WriteLine($"child output: {output.ToString().Trim()}");
+
+    if (exitCode != 0)
+        throw new InvalidOperationException($"resize probe exited with {exitCode}");
+
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        return;
+
+    if (!output.ToString().Contains("100", StringComparison.Ordinal)
+        || !output.ToString().Contains("28", StringComparison.Ordinal))
+        throw new InvalidOperationException("child did not report resized dimensions");
+}
+
+static async Task PumpOutputAsync(Stream output, StringBuilder sink, CancellationToken cancellationToken)
+{
+    var buffer = new byte[4096];
+    while (true)
+    {
+        var read = await output.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+        if (read == 0)
+            break;
+
+        sink.Append(Encoding.UTF8.GetString(buffer, 0, read));
+    }
+}
+
+static void ValidateStdinPipelineOutput(string output, int exitCode)
+{
+    if (exitCode != 0)
+        throw new InvalidOperationException($"stdin pipeline exited with {exitCode}");
+
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        if (!output.Contains("minipty-stdin-pipeline", StringComparison.Ordinal))
+            throw new InvalidOperationException("expected pipeline marker missing from output");
+        return;
+    }
+
+    if (!output.Contains("1\n", StringComparison.Ordinal))
+        throw new InvalidOperationException("expected sorted digits missing from output");
+
+    if (output.IndexOf('2', StringComparison.Ordinal) < output.IndexOf('1', StringComparison.Ordinal)
+        || output.IndexOf('3', StringComparison.Ordinal) < output.IndexOf('2', StringComparison.Ordinal))
+        throw new InvalidOperationException("expected ascending sorted output");
+}
+
+static PtyStartInfo CreateStdinPipelineStartInfo()
+{
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+        return new PtyStartInfo
+        {
+            FileName = cmd,
+            Arguments = ["/c", "find /v \"\" >nul & echo minipty-stdin-pipeline"],
+            Size = new PtySize(80, 24),
+        };
+    }
+
+    return new PtyStartInfo
+    {
+        FileName = "sort",
+        Arguments = [],
+        Size = new PtySize(80, 24),
+    };
+}
+
+static string CreateStdinPipelineInput() =>
+    RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+        ? "line 3\r\nline 1\r\nline 2\r\n"
+        : "3\n1\n2\n";
+
+static PtyStartInfo CreateEchoStartInfo()
+{
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+        return new PtyStartInfo
+        {
+            FileName = cmd,
+            Arguments = ["/c", "echo minipty-session-sample"],
+            WorkingDirectory = Environment.CurrentDirectory,
+            Size = new PtySize(100, 30),
+        };
+    }
+
+    return new PtyStartInfo
+    {
+        FileName = "/bin/sh",
+        Arguments = ["-c", "printf 'minipty-session-sample\\n'"],
+        WorkingDirectory = Environment.CurrentDirectory,
+        Size = new PtySize(100, 30),
+    };
+}
+
+static PtyStartInfo CreateResizeStartInfo()
+{
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+        return new PtyStartInfo
+        {
+            FileName = cmd,
+            Arguments = ["/c", "echo resized"],
+            Size = new PtySize(80, 24),
+        };
+    }
+
+    return new PtyStartInfo
+    {
+        FileName = "/bin/sh",
+        Arguments = ["-c", "read _; set -- $(stty size); echo $2 $1"],
+        Size = new PtySize(80, 24),
+    };
+}
+
+static string CreateResizeWakeInput() =>
+    RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "\r\n" : "\n";
