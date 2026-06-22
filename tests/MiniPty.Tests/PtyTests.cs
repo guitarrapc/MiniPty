@@ -328,7 +328,7 @@ public sealed class PtyTests
         }
 
         await using var unixSession = Pty.Start(
-            UnixShell("sleep 0.1; printf 'SIZE:%s:%s\\n' \"$(stty rows)\" \"$(stty columns)\""));
+            UnixShell("sleep 0.1; set -- $(stty size); printf 'SIZE:%s:%s\\n' \"$1\" \"$2\""));
         unixSession.Resize(new(100, 30));
         var unixResult = await unixSession.CompleteAsync();
 

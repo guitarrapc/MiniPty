@@ -159,6 +159,7 @@ These are **verification choices**, not API requirements—but they document pit
 |---|---|---|
 | **Linux** | `bash -lc` on a PTY often stays interactive after `-c` completes; login shells wait for more input | Prefer `sh -c`, or spawn utilities directly (`cat`, `sleep`, `true`) |
 | **Linux** | A single EOT with no trailing newline does not signal EOF in canonical mode—the buffered line is delivered first | One-shot stdin tests that use EOT must end input with `\n` before `SendEof()` (e.g. `cat`) |
+| **Linux** | GNU `stty rows` / `stty columns` without arguments set size—they do not print it (BSD prints). Query via `stty size` | Child resize checks use `set -- $(stty size)` not `$(stty rows)` |
 | **macOS** | Spawning via `posix_openpt` + `posix_spawn` without `forkpty` does not attach a controlling terminal; `stty` and resize probes return nonsense | Native spawn uses `forkpty` + `execvp` on all Unix targets, including macOS (`-lutil`) |
 | **Windows** | Closing ConPTY stdin while a child is still attaching stdin yields `STATUS_CONTROL_C_EXIT` (0xC000013A); PowerShell `ReadToEnd` / `ReadLine` + `SendEof()` is especially prone to this | Stdin-drain checks use `cmd /c find /v ""` (built-in); resize checks use `$Host.UI.RawUI.WindowSize`, not `[Console]::WindowWidth` |
 | **Windows** | `pwsh` (PowerShell 7) is optional on runners | Prefer built-in `powershell.exe` under `System32\WindowsPowerShell\v1.0` unless a test needs pwsh-only features |
