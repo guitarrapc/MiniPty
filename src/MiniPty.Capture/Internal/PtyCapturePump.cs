@@ -17,11 +17,12 @@ internal static class PtyCapturePump
         bool decodeOutput,
         CancellationToken cancellationToken)
     {
-        var byteChunkMeta = new List<ByteChunkMeta>();
+        // Typical PTY reads are few; avoid repeated List growth during capture.
+        var byteChunkMeta = new List<ByteChunkMeta>(capacity: 8);
         using var byteBuffer = new PtyGrowingBuffer<byte>();
         using var bytes = PtyReadBuffer.RentBytes();
 
-        List<TextChunkMeta>? textChunkMeta = decodeOutput ? [] : null;
+        List<TextChunkMeta>? textChunkMeta = decodeOutput ? new List<TextChunkMeta>(capacity: 8) : null;
         PtyGrowingBuffer<char>? charBuffer = decodeOutput ? new PtyGrowingBuffer<char>() : null;
         using var chars = decodeOutput ? PtyReadBuffer.RentChars(encoding) : default;
         var decoder = decodeOutput ? encoding.GetDecoder() : null;
@@ -45,12 +46,12 @@ internal static class PtyCapturePump
             if (decodeOutput)
                 AppendTextChunk(origin, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
 
-            var outputBytes = byteBuffer.ToArray();
+            var outputBytes = byteBuffer.Detach();
             var chunks = BuildByteChunks(outputBytes, byteChunkMeta);
             if (!decodeOutput)
                 return new PtyCapturePumpResult(outputBytes, null, encoding, chunks, null);
 
-            var outputChars = charBuffer!.ToArray();
+            var outputChars = charBuffer!.Detach();
             var textChunks = BuildTextChunks(outputChars, textChunkMeta!);
             return new PtyCapturePumpResult(outputBytes, outputChars, encoding, chunks, textChunks);
         }

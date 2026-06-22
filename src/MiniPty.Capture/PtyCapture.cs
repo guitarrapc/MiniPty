@@ -13,6 +13,8 @@ namespace MiniPty.Capture;
 /// </remarks>
 public static class PtyCapture
 {
+    private static readonly PtyCaptureOptions DefaultOptions = new();
+
     /// <summary>
     /// Spawns a child in a pseudo-terminal, observes timestamped byte output, waits for exit, and disposes the session.
     /// </summary>
@@ -35,7 +37,7 @@ public static class PtyCapture
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
-        options ??= new PtyCaptureOptions();
+        options ??= DefaultOptions;
         var completion = options.Completion;
         await using var session = Pty.Start(startInfo);
         var origin = Stopwatch.StartNew();

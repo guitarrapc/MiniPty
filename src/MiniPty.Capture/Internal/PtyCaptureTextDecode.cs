@@ -46,7 +46,7 @@ internal static class PtyCaptureTextDecode
             textBuffer.Append(chars.Span[..trailing]);
         }
 
-        var outputChars = textBuffer.ToArray();
+        var outputChars = textBuffer.Detach();
         var chunks = new PtyCaptureTextChunk[meta.Count];
         for (var i = 0; i < meta.Count; i++)
         {

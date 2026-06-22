@@ -29,6 +29,24 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyCaptureBytesOnlySkipsPumpDecode()
+    {
+        const string marker = "pty-bytes-only";
+
+        var result = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? await PtyCapture.RunAsync(
+                WindowsCommand($"echo {marker}"),
+                new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = false } })
+            : await PtyCapture.RunAsync(
+                UnixShell($"printf {marker}"),
+                new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = false } });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.ContainsUtf8(marker)).IsTrue();
+        await Assert.That(result.Chunks.Count).IsGreaterThan(0);
+    }
+
+    [Test]
     public async Task PtyTtyCheck()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))

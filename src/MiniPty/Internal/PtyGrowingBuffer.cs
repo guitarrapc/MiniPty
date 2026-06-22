@@ -2,6 +2,14 @@ using System.Buffers;
 
 namespace MiniPty.Internal;
 
+/// <summary>
+/// Growable write buffer backed by <see cref="ArrayPool{T}"/> during I/O.
+/// </summary>
+/// <remarks>
+/// Call <see cref="Detach"/> once to take ownership of the final array. When the rented capacity
+/// exactly matches the written length, the pool array is returned without an extra copy.
+/// Otherwise a right-sized array is allocated and the pool buffer is returned.
+/// </remarks>
 internal sealed class PtyGrowingBuffer<T> : IDisposable where T : struct
 {
     private T[] buffer = [];
@@ -21,17 +29,35 @@ internal sealed class PtyGrowingBuffer<T> : IDisposable where T : struct
         length += data.Length;
     }
 
-    internal T[] ToArray()
+    /// <summary>
+    /// Transfers written content to a caller-owned array and releases any pooled storage.
+    /// </summary>
+    internal T[] Detach()
     {
         if (length == 0)
+        {
+            ReleaseBuffer();
             return [];
+        }
 
-        var result = new T[length];
-        buffer.AsSpan(0, length).CopyTo(result);
-        return result;
+        if (buffer.Length == length)
+        {
+            var exact = buffer;
+            buffer = [];
+            length = 0;
+            return exact;
+        }
+
+        var trimmed = GC.AllocateUninitializedArray<T>(length);
+        buffer.AsSpan(0, length).CopyTo(trimmed);
+        ReleaseBuffer();
+        length = 0;
+        return trimmed;
     }
 
-    public void Dispose()
+    public void Dispose() => ReleaseBuffer();
+
+    private void ReleaseBuffer()
     {
         if (buffer.Length > 0)
         {

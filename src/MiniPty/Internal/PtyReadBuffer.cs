@@ -22,7 +22,11 @@ internal static class PtyReadBuffer
 
         internal Span<byte> Span => buffer.AsSpan(0, length);
 
-        public void Dispose() => ArrayPool<byte>.Shared.Return(buffer);
+        public void Dispose()
+        {
+            if (buffer is not null)
+                ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     internal readonly struct RentedCharBuffer(char[] buffer, int length) : IDisposable
@@ -31,6 +35,10 @@ internal static class PtyReadBuffer
 
         internal Span<char> Span => buffer.AsSpan(0, length);
 
-        public void Dispose() => ArrayPool<char>.Shared.Return(buffer);
+        public void Dispose()
+        {
+            if (buffer is not null)
+                ArrayPool<char>.Shared.Return(buffer);
+        }
     }
 }
