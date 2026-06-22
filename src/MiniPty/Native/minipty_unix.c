@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #if defined(__linux__)
@@ -60,5 +61,20 @@ int minipty_fork_pty_exec(
         return -1;
 
     *pid_out = (int)pid;
+    return 0;
+}
+
+int minipty_set_winsize(int master, unsigned short rows, unsigned short cols)
+{
+    struct winsize ws = {
+        .ws_row = rows,
+        .ws_col = cols,
+        .ws_xpixel = 0,
+        .ws_ypixel = 0,
+    };
+
+    if (ioctl(master, TIOCSWINSZ, &ws) != 0)
+        return -1;
+
     return 0;
 }

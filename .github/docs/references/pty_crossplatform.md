@@ -165,7 +165,7 @@ Shared session logic and per-OS constants / `openpty` imports live in `UnixPtyBa
 | macOS | `0x20007461` (`_IO('t', 97)`) | `libutil` |
 | FreeBSD | `0x20007461` (`_IO('t', 97)`) | `libutil` |
 
-`fork`, `setsid`, `ioctl`, `waitpid`, and other syscalls remain on `libc` in the shared partial class.
+`fork`, `setsid`, `waitpid`, and other syscalls remain on `libc` in the shared partial class. `TIOCSWINSZ` resize uses `minipty_set_winsize` in `libminipty_unix`—not a direct `ioctl` P/Invoke—because `ioctl` is variadic and mis-marshals on macOS arm64.
 
 ## Shared Rules
 
@@ -181,7 +181,7 @@ PTY output is a **byte stream**, not lines or Unicode strings:
 
 ### Terminal size
 
-Initial size comes from `PtyStartInfo.Size` (character cells, not pixels). Windows: `COORD` for `CreatePseudoConsole` and `ResizePseudoConsole`. Unix: `winsize` in `openpty` and `TIOCSWINSZ` via `PtySession.Resize`.
+Initial size comes from `PtyStartInfo.Size` (character cells, not pixels). Windows: `COORD` for `CreatePseudoConsole` and `ResizePseudoConsole`. Unix: `winsize` in `forkpty` and `TIOCSWINSZ` via `minipty_set_winsize` (`PtySession.Resize`).
 
 ### Environment variables
 

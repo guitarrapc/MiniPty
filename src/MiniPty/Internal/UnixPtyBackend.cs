@@ -143,8 +143,7 @@ internal static partial class UnixPtyBackend
 
             columns = Math.Clamp(columns, 1, 512);
             rows = Math.Clamp(rows, 1, 512);
-            var winsize = new Winsize { ws_row = (ushort)rows, ws_col = (ushort)columns };
-            if (ioctl(_master, TiocSwinsz(), ref winsize) != 0)
+            if (minipty_set_winsize(_master, (ushort)rows, (ushort)columns) != 0)
                 throw new IOException($"TIOCSWINSZ failed (errno {Marshal.GetLastPInvokeError()})");
 
             _size = new PtySize(columns, rows);
@@ -354,33 +353,6 @@ internal static partial class UnixPtyBackend
         }
     }
 
-    private static ulong TiocSwinsz()
-    {
-        if (OperatingSystem.IsLinux())
-            return Linux.TIOCSWINSZ;
-        if (OperatingSystem.IsMacOS())
-            return MacOS.TIOCSWINSZ;
-        if (OperatingSystem.IsFreeBSD())
-            return FreeBSD.TIOCSWINSZ;
-
-        throw new PlatformNotSupportedException("PTY is not supported on this Unix operating system.");
-    }
-
-    private static class Linux
-    {
-        internal const ulong TIOCSWINSZ = 0x5414;
-    }
-
-    private static class MacOS
-    {
-        internal const ulong TIOCSWINSZ = 0x80087467;
-    }
-
-    private static class FreeBSD
-    {
-        internal const ulong TIOCSWINSZ = 0x80087467;
-    }
-
     [LibraryImport("minipty_unix", SetLastError = true)]
     private static unsafe partial int minipty_fork_pty_exec(
         int* master,
@@ -390,8 +362,8 @@ internal static partial class UnixPtyBackend
         byte** argv,
         int* pid_out);
 
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int ioctl(int fd, ulong request, ref Winsize winp);
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    private static partial int minipty_set_winsize(int master, ushort rows, ushort cols);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Winsize
