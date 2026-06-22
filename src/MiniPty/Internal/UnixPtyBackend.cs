@@ -197,7 +197,10 @@ internal static partial class UnixPtyBackend
 
                     SendEotIfPending();
 
-                    await Task.Delay(WaitPollMs, cancellationToken);
+                    if (PollForChildExit(WaitPollMs, cancellationToken))
+                        break;
+
+                    await Task.Yield();
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
@@ -293,6 +296,25 @@ internal static partial class UnixPtyBackend
             PtyIo.WriteAll(_master, stackalloc byte[1] { InputEot });
             _eofPending = false;
             _eofSent = true;
+        }
+
+        /// Polls for child exit for up to <paramref name="timeoutMs"/> without allocating a delay task.
+        /// Mirrors the Windows backend's timed <c>WaitForSingleObject</c> loop.
+        private bool PollForChildExit(int timeoutMs, CancellationToken cancellationToken)
+        {
+            var deadline = Environment.TickCount64 + timeoutMs;
+            while (Environment.TickCount64 < deadline)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (TryRefreshExitState())
+                    return true;
+
+                var remaining = (int)Math.Min(10, deadline - Environment.TickCount64);
+                if (remaining > 0)
+                    Thread.Sleep(remaining);
+            }
+
+            return TryRefreshExitState();
         }
     }
 

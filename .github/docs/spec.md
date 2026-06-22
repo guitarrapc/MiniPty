@@ -36,7 +36,7 @@ Timestamped chunks are **not** part of the core API. Consumers that need to obse
 - Bidirectional input beyond optional initial stdin text
 - Remote shells (`ssh`)
 - Spilling capture to disk when memory is exhausted
-- Capture tuning (`TimeProvider`, max chunk size, chunk timestamp modes)
+- Capture tuning (max chunk size, chunk timestamp modes)
 
 ## Platform Support
 
@@ -145,6 +145,7 @@ PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
 ```
 
 - `PtyCaptureOptions.Completion` wraps `PtyCompleteOptions`.
+- `PtyCaptureOptions.TimeProvider` supplies the clock for chunk timestamps (default `TimeProvider.System`).
 - Each chunk's `Time` is elapsed since **session start** (immediately after `Pty.Start`).
 - The session is disposed when `RunAsync` completes (child killed on dispose if still running).
 

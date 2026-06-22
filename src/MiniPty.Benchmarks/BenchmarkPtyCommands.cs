@@ -14,6 +14,12 @@ internal static class BenchmarkPtyCommands
             ? WindowsCommand("echo minipty-bench-echo")
             : UnixShell("printf minipty-bench-echo");
 
+    /// <summary>Child exits immediately with code 0 and no PTY output (spawn baseline).</summary>
+    internal static PtyStartInfo Exit0() =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("exit /b 0")
+            : UnixShell("exit 0");
+
     internal static PtyStartInfo SmallStdout(int byteCount) =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? WindowsPowerShell($"[Console]::Out.Write(('x' * {byteCount}))")

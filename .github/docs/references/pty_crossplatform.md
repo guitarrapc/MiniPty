@@ -177,7 +177,7 @@ PTY output is a **byte stream**, not lines or Unicode strings:
 - Do not use line-based APIs (`ReadLine`) as the primary read path.
 - Decode PTY bytes with `PtyCompleteOptions.OutputEncoding` (default **UTF-8**). Do not use `Console.OutputEncoding`—in NativeAOT, containers, and CI it may not match the child terminal.
 
-`PtyCapturePump` timestamps each read while a `Stopwatch` runs from session start.
+`PtyCapturePump` timestamps each read from a `TimeProvider` origin captured at session start (`PtyCaptureOptions.TimeProvider`, default `TimeProvider.System`).
 
 ### Terminal size
 
@@ -240,7 +240,7 @@ See [spec.md](../spec.md) → Verification. `tests/MiniPty.Tests` exercises:
 
 | Area | Features |
 |---|---|
-| **Near term** | Ctrl-C (`\x03` write), `execve` env control, capture tuning (`TimeProvider`, chunk size) |
+| **Near term** | Ctrl-C (`\x03` write), `execve` env control, capture tuning (chunk size) |
 | **Later** | Long-lived interactive sessions, disk spill for huge captures |
 
 ## NativeAOT Interop
