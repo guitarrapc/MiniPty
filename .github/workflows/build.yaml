@@ -61,3 +61,12 @@ jobs:
           fi
           test -f "$exe"
           "$exe"
+
+  build-complete:
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - run: echo "Build and run completed successfully on all platforms."
