@@ -18,7 +18,8 @@ You can check various benchmark patterns at [GitHub Actions/Benchmark](https://g
 
 Ubuntu 24.04, .NET 10
 
-![](./images/benchmark.png)
+
+![](https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/images/benchmark.png)
 
 ## Features
 
