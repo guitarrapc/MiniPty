@@ -10,7 +10,7 @@ Source layout:
 | Completion / drain | `src/MiniPty/Internal/PtyCompletion.cs`, `PtyOutputDrain.cs`, `PtyTextPump.cs` |
 | Windows backend | `src/MiniPty/Internal/WindowsPtyBackend.cs` |
 | Unix backend | `src/MiniPty/Internal/UnixPtyBackend.cs` |
-| Timestamped capture | `src/MiniPty.Capture/PtyCapture.cs`, `Internal/PtyCapturePump.cs` |
+| Timestamped observation | `src/MiniPty.Capture/PtyCapture.cs`, `Internal/PtyCapturePump.cs` |
 
 ## Architecture
 
@@ -27,7 +27,7 @@ Layers:
 |---|---|
 | **PTY backend** | Spawn child, attach PTY, read/write bytes, wait, exit code |
 | **Completion** | Stdin pump, exit wait, output drain (`PtyCompletion`) |
-| **Capture** (optional package) | Timestamp each read (`PtyCapturePump`) |
+| **Capture** (optional package) | Observe output: timestamp each read (`PtyCapturePump`) |
 
 Do not parse escape sequences inside the PTY backend. Terminal rendering (ANSI → screen buffer) belongs in consumers such as scenetake.
 

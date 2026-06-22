@@ -53,17 +53,19 @@ jobs:
       - name: Test
         shell: bash
         run: dotnet test -c Release
-      - name: Publish and run Capture sample (NativeAOT)
+      - name: Publish and run samples (NativeAOT)
         shell: bash
         run: |
-          out="$RUNNER_TEMP/minipty-capture-aot"
-          dotnet publish samples/Capture.cs -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
-          exe="$out/Capture"
-          if [[ "${{ matrix.rid }}" == win-* ]]; then
-            exe="$out/Capture.exe"
-          fi
-          test -f "$exe"
-          "$exe"
+          for sample in Capture Session Observe; do
+            out="$RUNNER_TEMP/minipty-${sample}-aot"
+            dotnet publish "samples/${sample}.cs" -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
+            exe="$out/${sample}"
+            if [[ "${{ matrix.rid }}" == win-* ]]; then
+              exe="$out/${sample}.exe"
+            fi
+            test -f "$exe"
+            "$exe"
+          done
 
   build-unix-native:
     name: Native (${{ matrix.rid }})

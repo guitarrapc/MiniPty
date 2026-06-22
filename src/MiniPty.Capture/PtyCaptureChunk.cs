@@ -5,7 +5,7 @@ namespace MiniPty.Capture;
 /// </summary>
 /// <param name="Time">
 /// Elapsed time since the capture session started (immediately after <see cref="Pty.Start"/>).
-/// Suitable for asciicast-style timelines when combined with an external session origin.
+/// Consumers combine chunk times with an external session origin to build timelines.
 /// </param>
 /// <param name="Data">Text decoded from the bytes read in this slice.</param>
 public readonly record struct PtyCaptureChunk(TimeSpan Time, string Data);

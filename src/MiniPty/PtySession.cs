@@ -10,7 +10,7 @@ namespace MiniPty;
 /// <para>
 /// PTY output is a byte stream with terminal semantics. If the child writes output and nothing reads
 /// <see cref="Output"/>, the child may block when the terminal buffer fills. Use <see cref="CompleteAsync"/>,
-/// continuously read <see cref="Output"/>, or the <c>MiniPty.Capture</c> package for recording.
+/// continuously read <see cref="Output"/>, or the <c>MiniPty.Capture</c> package for timestamped observation.
 /// </para>
 /// <para>
 /// Disposing or awaiting <see cref="DisposeAsync"/> kills the child if it is still running, then releases handles.

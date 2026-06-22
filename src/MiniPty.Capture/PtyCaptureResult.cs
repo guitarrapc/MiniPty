@@ -8,7 +8,7 @@ namespace MiniPty.Capture;
 /// </param>
 /// <param name="ExitCode">Operating-system exit code of the child process.</param>
 /// <param name="Chunks">
-/// Timestamped output slices recorded during the session. Times are elapsed since spawn.
+/// Timestamped output slices observed during the session. Times are elapsed since spawn.
 /// </param>
 public sealed record PtyCaptureResult(
     string Output,

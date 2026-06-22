@@ -1,19 +1,40 @@
+[![Build](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml/badge.svg)](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml)
+
 # MiniPty
 
 NativeAOT-friendly minimal cross-platform pseudo-terminal library for .NET.
 
-## Packages
+**Motivation**
 
-| Package | Role |
-|---------|------|
-| **MiniPty** | PTY session: streams, lifecycle, `CompleteAsync` |
-| **MiniPty.Capture** | Timestamped output capture for asciicast-style tools |
+I need a PTY library for NativeAOT projects, but existing .NET PTY libraries are not guranteed to work in NativeAOT. MiniPty is a minimal PTY library designed for NativeAOT compatibility, with a simple API and no dependencies.
 
-## MiniPty (core)
+## Features
+
+MiniPty provides a minimal set of features for running a child process in a PTY and observing its output.
+
+
+**Not supported**
+
+
+
+## Quick start
+
+Install NuGet packages by running the following commands.
+
+```bash
+# PTY session management and lifecycle
+dotnet add package MiniPty
+
+# Timestamped PTY output observation (per-read chunks)
+dotnet add package MiniPty.Capture
+```
+
+**MiniPty** supports running a child process in a PTY and observing its output through `PtySession.Output` or `PtySession.CompleteAsync`. The child process is killed when the session is disposed. If the child writes output and nobody reads `PtySession.Output`, the child may block once the PTY buffer fills. Use `CompleteAsync`, `MiniPty.Capture`, or read `Output` yourself.
 
 ```csharp
 using MiniPty;
 
+// Disposing a pty session kills the child process if it is still running. Use `WaitForExitAsync` to wait for the child to exit without killing it.
 await using var session = Pty.Start(new PtyStartInfo
 {
     FileName = "/bin/bash",
@@ -24,23 +45,22 @@ await using var session = Pty.Start(new PtyStartInfo
 await session.WriteInputAsync("echo ok\n");
 session.SendEof();
 var exitCode = await session.WaitForExitAsync();
-```
+Console.WriteLine(session.Output);
+Console.WriteLine($"Exit code: {exitCode}");
 
-Or use `CompleteAsync` to drain output without timestamps:
-
-```csharp
+// Use `CompleteAsync` to drain output without timestamps:
 var result = await session.CompleteAsync(new PtyCompleteOptions
 {
     Input = "echo ok\n",
 });
-// result.Output, result.ExitCode
+Console.WriteLine(result.Output);
+Console.WriteLine(result.ExitCode);
+
+// For host-readable logs, transform control sequences first:
+Console.WriteLine(PtyOutput.ToDisplayText(result.Output, PtyOutputDisplayMode.PlainText));
 ```
 
-**Backpressure:** If the child writes output and nobody reads `PtySession.Output`, the child may block once the PTY buffer fills. Use `CompleteAsync`, `MiniPty.Capture`, or read `Output` yourself.
-
-**Dispose:** Disposing a `PtySession` kills the child if it is still running.
-
-## MiniPty.Capture
+**MiniPty.Capture** provides a higher-level API for observing PTY output with timestamps. Observe PTY execution from outside, each read from the output stream is recorded with elapsed time since session start.
 
 ```csharp
 using MiniPty;
@@ -53,37 +73,49 @@ var result = await PtyCapture.RunAsync(new PtyStartInfo
     Size = new PtySize(120, 30),
 });
 
+// Chunk timestamps are measured from session start (immediately after `Pty.Start`).
 foreach (var chunk in result.Chunks)
     Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Data}");
+
+// Or plain text for logging:
+Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));
 ```
-
-Chunk timestamps are measured from session start (immediately after `Pty.Start`).
-
-## Documentation
-
-- [Specification](.github/docs/spec.md) — API contracts, scope, lessons learned
-- [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, `openpty`, EOF staging
-- [Document index](.github/docs/spec_index.md)
 
 ## Samples
 
-NativeAOT smoke (same as CI `run` job):
+| Sample | Shows |
+|--------|-------|
+| [Capture.cs](samples/Capture.cs) | Minimal `MiniPty.Capture` smoke |
+| [Session.cs](samples/Session.cs) | `Pty.Start`, background `Output` reads, `WriteInputAsync` / `SendEof`, `CompleteAsync`, `Resize` |
+| [Observe.cs](samples/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
+
+Run a sample locally (JIT):
 
 ```bash
-dotnet samples/Capture.cs -c Release --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
-```
-
-JIT run for local development:
-
-```bash
+dotnet samples/Session.cs
+dotnet samples/Observe.cs
 dotnet samples/Capture.cs
 ```
 
-## Build
+NativeAOT publish (same flags as CI):
 
 ```bash
-dotnet build src/MiniPty/MiniPty.csproj
-dotnet build src/MiniPty.Capture/MiniPty.Capture.csproj
-dotnet pack src/MiniPty/MiniPty.csproj -o artifacts -c Release
-dotnet pack src/MiniPty.Capture/MiniPty.Capture.csproj -o artifacts -c Release
+dotnet samples/Session.cs -c Release --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
+```
+
+## Development
+
+Use `dotnet` for local development, debugging, or publishing.
+
+### Documentation
+
+- [Document index](.github/docs/spec_index.md)
+- [Specification](.github/docs/spec.md) — API contracts, scope, lessons learned
+- [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, `openpty`, EOF staging
+
+### Build
+
+```bash
+dotnet build
+dotnet test
 ```
