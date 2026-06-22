@@ -1,0 +1,73 @@
+using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Diagnosers;
+using BenchmarkDotNet.Engines;
+using BenchmarkDotNet.Jobs;
+
+namespace MiniPty.Benchmarks;
+
+/// <summary>
+/// CPU and allocation benchmarks for <see cref="PtyOutput.ToDisplayText"/>.
+/// </summary>
+[MemoryDiagnoser]
+[GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
+[CategoriesColumn]
+[SimpleJob(RuntimeMoniker.Net10_0, warmupCount: 3, iterationCount: 10)]
+public class PtyOutputBenchmarks
+{
+    private Consumer consumer = null!;
+    private string ansiLine = "";
+    private string ansiMedium = "";
+    private string ansiLarge = "";
+    private string plainLarge = "";
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        consumer = new Consumer();
+        ansiLine = BenchmarkSamples.AnsiLine;
+        ansiMedium = BenchmarkSamples.AnsiHeavy(256);
+        ansiLarge = BenchmarkSamples.AnsiHeavy(4_096);
+        plainLarge = BenchmarkSamples.PlainHeavy(65_536);
+    }
+
+    [BenchmarkCategory("Micro", "Raw")]
+    [Benchmark]
+    public void Raw_Small() =>
+        consumer.Consume(PtyOutput.ToDisplayText(ansiLine, PtyOutputDisplayMode.Raw));
+
+    [BenchmarkCategory("Micro", "PlainText")]
+    [Benchmark]
+    public void PlainText_Small() =>
+        consumer.Consume(PtyOutput.ToDisplayText(ansiLine, PtyOutputDisplayMode.PlainText));
+
+    [BenchmarkCategory("Micro", "AnsiText")]
+    [Benchmark]
+    public void AnsiText_Small() =>
+        consumer.Consume(PtyOutput.ToDisplayText(ansiLine, PtyOutputDisplayMode.AnsiText));
+
+    [BenchmarkCategory("Micro", "PlainText")]
+    [Benchmark]
+    public void PlainText_MediumAnsi() =>
+        consumer.Consume(PtyOutput.ToDisplayText(ansiMedium, PtyOutputDisplayMode.PlainText));
+
+    [BenchmarkCategory("Micro", "AnsiText")]
+    [Benchmark]
+    public void AnsiText_MediumAnsi() =>
+        consumer.Consume(PtyOutput.ToDisplayText(ansiMedium, PtyOutputDisplayMode.AnsiText));
+
+    [BenchmarkCategory("Micro", "PlainText")]
+    [Benchmark]
+    public void PlainText_LargeAnsi() =>
+        consumer.Consume(PtyOutput.ToDisplayText(ansiLarge, PtyOutputDisplayMode.PlainText));
+
+    [BenchmarkCategory("Micro", "PlainText")]
+    [Benchmark]
+    public void PlainText_LargePlain() =>
+        consumer.Consume(PtyOutput.ToDisplayText(plainLarge, PtyOutputDisplayMode.PlainText));
+
+    [BenchmarkCategory("Micro", "Raw")]
+    [Benchmark]
+    public void Raw_LargePlain() =>
+        consumer.Consume(PtyOutput.ToDisplayText(plainLarge, PtyOutputDisplayMode.Raw));
+}
