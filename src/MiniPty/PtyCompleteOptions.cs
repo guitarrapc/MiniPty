@@ -32,7 +32,7 @@ public sealed record PtyCompleteOptions
     /// </summary>
     /// <value>
     /// Default is <see langword="true"/>. When <see langword="false"/>, only
-    /// <see cref="PtyResult.OutputBytes"/> is populated.
+    /// <see cref="PtyResult.Output"/> is populated; <see cref="PtyResult.GetText"/> decodes on demand.
     /// </value>
     public bool DecodeOutput { get; init; } = true;
 

@@ -1,12 +1,14 @@
+using System.Text;
+
 namespace MiniPty.Internal;
 
-internal readonly struct PtyPumpOutput(byte[] outputBytes, char[] outputChars)
+internal readonly struct PtyPumpOutput(byte[] outputBytes, char[]? outputChars, Encoding encoding)
 {
     internal byte[] OutputBytes { get; } = outputBytes;
 
-    internal char[] OutputChars { get; } = outputChars;
+    internal char[]? OutputChars { get; } = outputChars;
 
-    internal ReadOnlyMemory<byte> Bytes => OutputBytes;
+    internal Encoding Encoding { get; } = encoding;
 
-    internal ReadOnlyMemory<char> Chars => OutputChars;
+    internal PtyPumpPayload ToPayload() => new(OutputBytes, OutputChars, Encoding);
 }

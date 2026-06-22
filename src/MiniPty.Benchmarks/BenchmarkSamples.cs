@@ -1,3 +1,4 @@
+using System.Text;
 using MiniPty.Capture;
 
 namespace MiniPty.Benchmarks;
@@ -43,7 +44,9 @@ internal static class BenchmarkSamples
         });
     }
 
-    internal static IReadOnlyList<PtyCaptureChunk> ChunkedAnsi(int chunkCount, int charsPerChunk)
+    internal static (PtyCaptureChunk[] ByteChunks, PtyCaptureTextChunk[] TextChunks) ChunkedAnsi(
+        int chunkCount,
+        int charsPerChunk)
     {
         var merged = new System.Text.StringBuilder(chunkCount * charsPerChunk);
         for (var i = 0; i < chunkCount; i++)
@@ -52,15 +55,20 @@ internal static class BenchmarkSamples
             merged.Append(piece);
         }
 
-        var output = merged.ToString();
-        var chunks = new PtyCaptureChunk[chunkCount];
-        var offset = 0;
+        var text = merged.ToString();
+        var bytes = Encoding.UTF8.GetBytes(text);
+        var chars = text.ToCharArray();
+        var byteChunks = new PtyCaptureChunk[chunkCount];
+        var textChunks = new PtyCaptureTextChunk[chunkCount];
+        var charOffset = 0;
         for (var i = 0; i < chunkCount; i++)
         {
-            chunks[i] = new PtyCaptureChunk(TimeSpan.FromMilliseconds(i), output.AsMemory(offset, charsPerChunk));
-            offset += charsPerChunk;
+            // Benchmark samples are ASCII + ANSI escapes (1 UTF-8 byte per char); char and byte offsets align.
+            byteChunks[i] = new PtyCaptureChunk(TimeSpan.FromMilliseconds(i), bytes.AsMemory(charOffset, charsPerChunk));
+            textChunks[i] = new PtyCaptureTextChunk(TimeSpan.FromMilliseconds(i), chars.AsMemory(charOffset, charsPerChunk));
+            charOffset += charsPerChunk;
         }
 
-        return chunks;
+        return (byteChunks, textChunks);
     }
 }

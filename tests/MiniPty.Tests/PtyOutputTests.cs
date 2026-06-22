@@ -1,5 +1,7 @@
+using System.Text;
 using MiniPty;
 using MiniPty.Capture;
+using MiniPty.Internal;
 using TUnit.Assertions;
 using TUnit.Core;
 
@@ -58,20 +60,26 @@ public sealed class PtyOutputTests
     public async Task CaptureResultToDisplayTextMatchesMergedOutput()
     {
         const string merged = "\u001b[2Jhello\n";
-        var chunks = new PtyCaptureChunk[]
+        var mergedBytes = Encoding.UTF8.GetBytes(merged);
+        var mergedChars = merged.ToCharArray();
+        var byteChunks = new PtyCaptureChunk[]
         {
-            new(TimeSpan.Zero, merged.AsMemory(0, 4)),
-            new(TimeSpan.FromMilliseconds(1), merged.AsMemory(4, 6)),
+            new(TimeSpan.Zero, mergedBytes.AsMemory(0, 4)),
+            new(TimeSpan.FromMilliseconds(1), mergedBytes.AsMemory(4, mergedBytes.Length - 4)),
+        };
+        var textChunks = new PtyCaptureTextChunk[]
+        {
+            new(TimeSpan.Zero, mergedChars.AsMemory(0, 4)),
+            new(TimeSpan.FromMilliseconds(1), mergedChars.AsMemory(4, mergedChars.Length - 4)),
         };
 
         var result = new PtyCaptureResult(
-            System.Text.Encoding.UTF8.GetBytes(merged),
-            merged.AsMemory(),
+            new PtyPumpPayload(mergedBytes, mergedChars, Encoding.UTF8),
             0,
-            [],
-            chunks);
+            byteChunks,
+            textChunks);
         var fromResult = result.ToDisplayText(PtyOutputDisplayMode.PlainText);
-        var fromChunks = chunks.ToDisplayText(PtyOutputDisplayMode.PlainText);
+        var fromChunks = textChunks.ToDisplayText(PtyOutputDisplayMode.PlainText);
 
         await Assert.That(fromResult).IsEqualTo("hello\n");
         await Assert.That(fromChunks).IsEqualTo("hello\n");

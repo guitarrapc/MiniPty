@@ -18,14 +18,14 @@ public sealed class PtyTests
             var result = await PtyCapture.RunAsync(Spawn(cmd, ["/c", "echo pty-layer-echo"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(PtyMemory.Contains(result.Output, "pty-layer-echo")).IsTrue();
+            await Assert.That(result.Contains("pty-layer-echo")).IsTrue();
             return;
         }
 
         var unix = await PtyCapture.RunAsync(UnixShell("printf pty-layer-echo"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
-        await Assert.That(PtyMemory.Contains(unix.Output, "pty-layer-echo")).IsTrue();
+        await Assert.That(unix.Contains("pty-layer-echo")).IsTrue();
     }
 
     [Test]
@@ -40,14 +40,14 @@ public sealed class PtyTests
                 Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "Write-Output (\"redirected=$([Console]::IsOutputRedirected)\")"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(PtyMemory.Contains(result.Output, "redirected=False", StringComparison.OrdinalIgnoreCase)).IsTrue();
+            await Assert.That(result.Contains("redirected=False", StringComparison.OrdinalIgnoreCase)).IsTrue();
             return;
         }
 
         var unix = await PtyCapture.RunAsync(UnixShell("test -t 1 && printf redirected=False || printf redirected=True"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
-        await Assert.That(PtyMemory.Contains(unix.Output, "redirected=False", StringComparison.OrdinalIgnoreCase)).IsTrue();
+        await Assert.That(unix.Contains("redirected=False", StringComparison.OrdinalIgnoreCase)).IsTrue();
     }
 
     [Test]
@@ -62,8 +62,8 @@ public sealed class PtyTests
                 Spawn(sort, []),
                 new PtyCaptureOptions { Completion = new() { Input = $"zzz\r\n{marker}\r\naaa\r\n" } });
 
-            await Assert.That(PtyMemory.Contains(result.Output, marker)).IsTrue();
-            await Assert.That(PtyMemory.Contains(result.Output, "aaa")).IsTrue();
+            await Assert.That(result.Contains(marker)).IsTrue();
+            await Assert.That(result.Contains("aaa")).IsTrue();
             return;
         }
 
@@ -73,7 +73,7 @@ public sealed class PtyTests
             new PtyCaptureOptions { Completion = new() { Input = $"{marker}\n" } });
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
-        await Assert.That(PtyMemory.Contains(unix.Output, marker)).IsTrue();
+        await Assert.That(unix.Contains(marker)).IsTrue();
     }
 
     [Test]
@@ -88,7 +88,7 @@ public sealed class PtyTests
                 new PtyCaptureOptions { Completion = new() { Input = string.Empty } });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(PtyMemory.Contains(result.Output, marker)).IsTrue();
+            await Assert.That(result.Contains(marker)).IsTrue();
             return;
         }
 
@@ -97,7 +97,7 @@ public sealed class PtyTests
             new PtyCaptureOptions { Completion = new() { Input = string.Empty } });
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
-        await Assert.That(PtyMemory.Contains(unix.Output, marker)).IsTrue();
+        await Assert.That(unix.Contains(marker)).IsTrue();
     }
 
     [Test]
@@ -112,7 +112,7 @@ public sealed class PtyTests
                 new PtyCaptureOptions { Completion = new() { Input = "line 1\r\nline 2\r\n" } });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(PtyMemory.Contains(result.Output, marker)).IsTrue();
+            await Assert.That(result.Contains(marker)).IsTrue();
             return;
         }
 
@@ -121,7 +121,7 @@ public sealed class PtyTests
             new PtyCaptureOptions { Completion = new() { Input = "line 1\nline 2\n" } });
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
-        await Assert.That(PtyMemory.Contains(unix.Output, marker)).IsTrue();
+        await Assert.That(unix.Contains(marker)).IsTrue();
     }
 
     [Test]
@@ -185,14 +185,14 @@ public sealed class PtyTests
                 Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "[Console]::WriteLine([Console]::IsOutputRedirected)"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(PtyMemory.Contains(result.Output, "False", StringComparison.OrdinalIgnoreCase)).IsTrue();
+            await Assert.That(result.Contains("False", StringComparison.OrdinalIgnoreCase)).IsTrue();
             return;
         }
 
         var unix = await PtyCapture.RunAsync(UnixShell("test -t 1 && printf true || printf false"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
-        await Assert.That(PtyMemory.Contains(unix.Output, "true")).IsTrue();
+        await Assert.That(unix.Contains("true")).IsTrue();
     }
 
     [Test]
@@ -209,14 +209,14 @@ public sealed class PtyTests
                 Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Write([char]27 + '[31mred' + [char]27 + '[0m')"]));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(PtyMemory.Contains(result.Output, ansiRed) || PtyMemory.Contains(result.Output, "red")).IsTrue();
+            await Assert.That(result.Contains(ansiRed) || result.Contains("red")).IsTrue();
             return;
         }
 
         var unix = await PtyCapture.RunAsync(UnixShell("printf '\\033[31mred\\033[0m'"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
-        await Assert.That(PtyMemory.Contains(unix.Output, ansiRed)).IsTrue();
+        await Assert.That(unix.Contains(ansiRed)).IsTrue();
     }
 
     [Test]
@@ -323,7 +323,7 @@ public sealed class PtyTests
             var result = await session.CompleteAsync();
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(PtyMemory.Contains(result.Output, "100 30")).IsTrue();
+            await Assert.That(result.Contains("100 30")).IsTrue();
             return;
         }
 
@@ -334,7 +334,7 @@ public sealed class PtyTests
         var unixResult = await unixSession.CompleteAsync(new PtyCompleteOptions { Input = "go\n" });
 
         await Assert.That(unixResult.ExitCode).IsEqualTo(0);
-        await Assert.That(PtyMemory.Contains(unixResult.Output, "SIZE:30:100")).IsTrue();
+        await Assert.That(unixResult.Contains("SIZE:30:100")).IsTrue();
     }
 
     [Test]

@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Text;
 
 namespace MiniPty.Internal;
@@ -25,7 +24,7 @@ internal static class PtyBytePump
                 byteBuffer.Append(bytes.Span[..read]);
             }
 
-            return new PtyPumpOutput(byteBuffer.ToArray(), []);
+            return new PtyPumpOutput(byteBuffer.ToArray(), null, encoding);
         }
 
         using var charBuffer = new PtyGrowingBuffer<char>();
@@ -43,7 +42,7 @@ internal static class PtyBytePump
         }
 
         AppendDecoded(decoder, ReadOnlySpan<byte>.Empty, chars.Span, charBuffer, flush: true);
-        return new PtyPumpOutput(byteBuffer.ToArray(), charBuffer.ToArray());
+        return new PtyPumpOutput(byteBuffer.ToArray(), charBuffer.ToArray(), encoding);
     }
 
     private static void AppendDecoded(

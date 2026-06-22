@@ -14,7 +14,7 @@ namespace MiniPty.Capture;
 public static class PtyCapture
 {
     /// <summary>
-    /// Spawns a child in a pseudo-terminal, observes timestamped output, waits for exit, and disposes the session.
+    /// Spawns a child in a pseudo-terminal, observes timestamped byte output, waits for exit, and disposes the session.
     /// </summary>
     /// <param name="startInfo">Executable, arguments, working directory, and initial terminal size.</param>
     /// <param name="options">Capture and completion options, or <see langword="null"/> for defaults.</param>
@@ -23,7 +23,7 @@ public static class PtyCapture
     /// <see langword="true"/> (default).
     /// </param>
     /// <returns>
-    /// A <see cref="PtyCaptureResult"/> containing merged output, exit code, and per-read chunks with timestamps.
+    /// A <see cref="PtyCaptureResult"/> containing merged bytes, per-read byte chunks, exit code, and optional pump-decoded text.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="startInfo"/> is <see langword="null"/>.</exception>
     /// <exception cref="PlatformNotSupportedException">The current operating system is not supported.</exception>
@@ -36,40 +36,6 @@ public static class PtyCapture
     {
         ArgumentNullException.ThrowIfNull(startInfo);
         options ??= new PtyCaptureOptions();
-        return await RunInternalAsync(startInfo, options, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Spawns a child, captures raw byte output with per-read timestamps, waits for exit, and disposes the session.
-    /// </summary>
-    /// <param name="startInfo">Executable, arguments, working directory, and initial terminal size.</param>
-    /// <param name="options">Capture and completion options, or <see langword="null"/> for defaults.</param>
-    /// <param name="cancellationToken">
-    /// When canceled, the child is killed when <see cref="PtyCompleteOptions.KillOnCancellation"/> is
-    /// <see langword="true"/> (default).
-    /// </param>
-    /// <returns>
-    /// A <see cref="PtyCaptureResult"/> with <see cref="PtyCaptureResult.OutputBytes"/> and
-    /// <see cref="PtyCaptureResult.ByteChunks"/> populated.
-    /// </returns>
-    public static Task<PtyCaptureResult> RunBytesAsync(
-        PtyStartInfo startInfo,
-        PtyCaptureOptions? options = null,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(startInfo);
-        options ??= new PtyCaptureOptions();
-        if (options.Completion.DecodeOutput)
-            options = options with { Completion = options.Completion with { DecodeOutput = false } };
-
-        return RunInternalAsync(startInfo, options, cancellationToken);
-    }
-
-    private static async Task<PtyCaptureResult> RunInternalAsync(
-        PtyStartInfo startInfo,
-        PtyCaptureOptions options,
-        CancellationToken cancellationToken)
-    {
         var completion = options.Completion;
         await using var session = Pty.Start(startInfo);
         var origin = Stopwatch.StartNew();
@@ -84,11 +50,6 @@ public static class PtyCapture
                 ct),
             cancellationToken).ConfigureAwait(false);
 
-        return new PtyCaptureResult(
-            capture.OutputBytes,
-            capture.Output,
-            exitCode,
-            capture.ByteChunks,
-            capture.Chunks);
+        return new PtyCaptureResult(capture.ToPayload(), exitCode, capture.Chunks, capture.TextChunks);
     }
 }

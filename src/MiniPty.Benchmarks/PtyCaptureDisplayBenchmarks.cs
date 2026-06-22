@@ -1,9 +1,11 @@
+using System.Text;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Diagnosers;
 using BenchmarkDotNet.Engines;
 using BenchmarkDotNet.Jobs;
 using MiniPty.Capture;
+using MiniPty.Internal;
 
 namespace MiniPty.Benchmarks;
 
@@ -18,22 +20,25 @@ public class PtyCaptureDisplayBenchmarks
 {
     private Consumer consumer = null!;
     private PtyCaptureResult captureResult = null!;
-    private IReadOnlyList<PtyCaptureChunk> fewChunks = [];
-    private IReadOnlyList<PtyCaptureChunk> manyChunks = [];
+    private IReadOnlyList<PtyCaptureTextChunk> fewTextChunks = [];
+    private IReadOnlyList<PtyCaptureTextChunk> manyTextChunks = [];
 
     [GlobalSetup]
     public void Setup()
     {
         consumer = new Consumer();
         var merged = BenchmarkSamples.AnsiHeavy(512);
-        fewChunks = BenchmarkSamples.ChunkedAnsi(16, 64);
-        manyChunks = BenchmarkSamples.ChunkedAnsi(256, 64);
+        var mergedBytes = Encoding.UTF8.GetBytes(merged);
+        var mergedChars = merged.ToCharArray();
+        (PtyCaptureChunk[] fewByteChunks, PtyCaptureTextChunk[] fewTextChunkArr) = BenchmarkSamples.ChunkedAnsi(16, 64);
+        (PtyCaptureChunk[] manyByteChunks, PtyCaptureTextChunk[] manyTextChunkArr) = BenchmarkSamples.ChunkedAnsi(256, 64);
+        fewTextChunks = fewTextChunkArr;
+        manyTextChunks = manyTextChunkArr;
         captureResult = new PtyCaptureResult(
-            System.Text.Encoding.UTF8.GetBytes(merged),
-            merged.AsMemory(),
+            new PtyPumpPayload(mergedBytes, mergedChars, Encoding.UTF8),
             0,
-            [],
-            manyChunks);
+            manyByteChunks,
+            manyTextChunkArr);
     }
 
     [BenchmarkCategory("Micro", "Capture")]
@@ -49,10 +54,10 @@ public class PtyCaptureDisplayBenchmarks
     [BenchmarkCategory("Micro", "Capture")]
     [Benchmark]
     public void FewChunks_PlainText() =>
-        consumer.Consume(fewChunks.ToDisplayText(PtyOutputDisplayMode.PlainText));
+        consumer.Consume(fewTextChunks.ToDisplayText(PtyOutputDisplayMode.PlainText));
 
     [BenchmarkCategory("Micro", "Capture")]
     [Benchmark]
     public void ManyChunks_PlainText() =>
-        consumer.Consume(manyChunks.ToDisplayText(PtyOutputDisplayMode.PlainText));
+        consumer.Consume(manyTextChunks.ToDisplayText(PtyOutputDisplayMode.PlainText));
 }

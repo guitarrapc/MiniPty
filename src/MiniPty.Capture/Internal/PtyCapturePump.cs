@@ -46,13 +46,13 @@ internal static class PtyCapturePump
                 AppendTextChunk(origin, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
 
             var outputBytes = byteBuffer.ToArray();
-            var byteChunks = BuildByteChunks(outputBytes, byteChunkMeta);
+            var chunks = BuildByteChunks(outputBytes, byteChunkMeta);
             if (!decodeOutput)
-                return new PtyCapturePumpResult(outputBytes, [], byteChunks, []);
+                return new PtyCapturePumpResult(outputBytes, null, encoding, chunks, null);
 
             var outputChars = charBuffer!.ToArray();
             var textChunks = BuildTextChunks(outputChars, textChunkMeta!);
-            return new PtyCapturePumpResult(outputBytes, outputChars, byteChunks, textChunks);
+            return new PtyCapturePumpResult(outputBytes, outputChars, encoding, chunks, textChunks);
         }
         finally
         {
@@ -77,25 +77,25 @@ internal static class PtyCapturePump
         charBuffer.Append(chars[..charCount]);
     }
 
-    private static PtyCaptureByteChunk[] BuildByteChunks(byte[] outputBytes, List<ByteChunkMeta> meta)
-    {
-        var chunks = new PtyCaptureByteChunk[meta.Count];
-        for (var i = 0; i < meta.Count; i++)
-        {
-            var item = meta[i];
-            chunks[i] = new PtyCaptureByteChunk(item.Time, outputBytes.AsMemory(item.Start, item.Length));
-        }
-
-        return chunks;
-    }
-
-    private static PtyCaptureChunk[] BuildTextChunks(char[] outputChars, List<TextChunkMeta> meta)
+    private static PtyCaptureChunk[] BuildByteChunks(byte[] outputBytes, List<ByteChunkMeta> meta)
     {
         var chunks = new PtyCaptureChunk[meta.Count];
         for (var i = 0; i < meta.Count; i++)
         {
             var item = meta[i];
-            chunks[i] = new PtyCaptureChunk(item.Time, outputChars.AsMemory(item.Start, item.Length));
+            chunks[i] = new PtyCaptureChunk(item.Time, outputBytes.AsMemory(item.Start, item.Length));
+        }
+
+        return chunks;
+    }
+
+    private static PtyCaptureTextChunk[] BuildTextChunks(char[] outputChars, List<TextChunkMeta> meta)
+    {
+        var chunks = new PtyCaptureTextChunk[meta.Count];
+        for (var i = 0; i < meta.Count; i++)
+        {
+            var item = meta[i];
+            chunks[i] = new PtyCaptureTextChunk(item.Time, outputChars.AsMemory(item.Start, item.Length));
         }
 
         return chunks;

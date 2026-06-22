@@ -1,16 +1,18 @@
+using System.Text;
+using MiniPty.Internal;
+
 namespace MiniPty.Capture;
 
 internal sealed class PtyCapturePumpResult(
     byte[] outputBytes,
-    char[] outputChars,
-    PtyCaptureByteChunk[] byteChunks,
-    PtyCaptureChunk[] textChunks)
+    char[]? outputChars,
+    Encoding encoding,
+    PtyCaptureChunk[] chunks,
+    PtyCaptureTextChunk[]? textChunks)
 {
-    internal ReadOnlyMemory<byte> OutputBytes => outputBytes;
+    internal PtyPumpPayload ToPayload() => new(outputBytes, outputChars, encoding);
 
-    internal ReadOnlyMemory<char> Output => outputChars;
+    internal PtyCaptureChunk[] Chunks { get; } = chunks;
 
-    internal IReadOnlyList<PtyCaptureByteChunk> ByteChunks => byteChunks;
-
-    internal IReadOnlyList<PtyCaptureChunk> Chunks => textChunks;
+    internal PtyCaptureTextChunk[]? TextChunks { get; } = textChunks;
 }

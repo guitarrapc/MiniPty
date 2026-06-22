@@ -33,13 +33,13 @@ try
         return 1;
     }
 
-    if (!PtyMemory.Contains(result.Output, marker))
+    if (!result.Contains(marker))
     {
         Console.Error.WriteLine("FAIL NuGet smoke: expected marker missing from output.");
         return 1;
     }
 
-    Console.Error.WriteLine($"ok NuGet smoke: exit={result.ExitCode} chars={result.Output.Length}");
+    Console.Error.WriteLine($"ok NuGet smoke: exit={result.ExitCode} bytes={result.Output.Length}");
     return 0;
 }
 catch (Exception ex)

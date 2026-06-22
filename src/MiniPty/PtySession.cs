@@ -125,13 +125,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         WaitForExitInternalAsync(cancellationToken, killOnCancellation: false);
 
     /// <summary>
-    /// Pumps and drains <see cref="Output"/>, optionally writes stdin, waits for exit, and returns merged text.
+    /// Pumps and drains the PTY output stream, optionally writes stdin, waits for exit, and returns captured bytes.
     /// </summary>
     /// <param name="options">Completion behavior, or <see langword="null"/> for defaults.</param>
     /// <param name="cancellationToken">
     /// When canceled, behavior depends on <see cref="PtyCompleteOptions.KillOnCancellation"/> (default: kill child).
     /// </param>
-    /// <returns>A <see cref="PtyResult"/> with decoded output and exit code.</returns>
+    /// <returns>A <see cref="PtyResult"/> with merged <see cref="PtyResult.Output"/> bytes and exit code.</returns>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">
     /// <see cref="PtyCompleteOptions.ExitTimeout"/> or output drain timeout was exceeded.
@@ -148,26 +148,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             (stream, ct) => PtyBytePump.ReadAllAsync(stream, encoding, options.DecodeOutput, ct),
             cancellationToken).ConfigureAwait(false);
 
-        return new PtyResult(output.Bytes, output.Chars, exitCode);
-    }
-
-    /// <summary>
-    /// Pumps and drains <see cref="Output"/>, optionally writes stdin, waits for exit, and returns raw bytes only.
-    /// </summary>
-    /// <param name="options">Completion behavior, or <see langword="null"/> for defaults.</param>
-    /// <param name="cancellationToken">
-    /// When canceled, behavior depends on <see cref="PtyCompleteOptions.KillOnCancellation"/> (default: kill child).
-    /// </param>
-    /// <returns>A <see cref="PtyResult"/> with <see cref="PtyResult.OutputBytes"/> populated and empty <see cref="PtyResult.Output"/>.</returns>
-    public Task<PtyResult> CompleteBytesAsync(
-        PtyCompleteOptions? options = null,
-        CancellationToken cancellationToken = default)
-    {
-        options ??= new PtyCompleteOptions();
-        if (options.DecodeOutput)
-            options = options with { DecodeOutput = false };
-
-        return CompleteAsync(options, cancellationToken);
+        return new PtyResult(output.ToPayload(), exitCode);
     }
 
     /// <summary>
