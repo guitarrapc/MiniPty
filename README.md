@@ -1,3 +1,4 @@
+<a href="https://github.com/guitarrapc/MiniPty/releases/latest"><img src="https://img.shields.io/github/v/release/guitarrapc/MiniPty" alt="GitHub Release"></a>
 [![Build](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml/badge.svg)](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml)
 
 # MiniPty
