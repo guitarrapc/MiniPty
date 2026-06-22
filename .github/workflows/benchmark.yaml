@@ -75,14 +75,17 @@ jobs:
       - name: Update README.md benchmark report link
         if: ${{ inputs.benchmark == '*' }}
         run: |
-          sed -E -i 's|(https://github\.com/[^/]+/[^/]+/actions/runs/)[0-9]+|\1${{ github.run_id }}|g' README.md
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://github-actions:${GITHUB_TOKEN}@github.com/${{ github.repository }}"
+          git fetch origin "${GITHUB_REF_NAME}"
+          git rebase FETCH_HEAD
+
+          sed -E -i 's|(https://github\.com/[^/]+/[^/]+/actions/runs/)[0-9]+|\1${{ github.run_id }}|g' README.md
 
           git add README.md
           git commit -m 'docs: update benchmark report link' -m "updated in run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${{ job.check_run_id }}"
-          git push
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
