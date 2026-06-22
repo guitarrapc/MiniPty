@@ -13,6 +13,9 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  MINIPTY_CI_PACKAGE_VERSION: 99.0.0-ci
+
 jobs:
   build:
     timeout-minutes: 5
@@ -62,11 +65,116 @@ jobs:
           test -f "$exe"
           "$exe"
 
+  build-unix-native:
+    name: Native (${{ matrix.rid }})
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            rid: linux-x64
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+          - os: macos-26
+            rid: osx-arm64
+          - os: macos-26-intel
+            rid: osx-x64
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build libminipty_unix
+        shell: bash
+        run: bash scripts/build-native.sh "${{ matrix.rid }}"
+      - name: Upload native artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: native-${{ matrix.rid }}
+          path: runtimes/
+          retention-days: 1
+          if-no-files-found: error
+
+  pack:
+    name: Pack NuGet
+    needs: [build-unix-native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Download native artifacts
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: native-*
+          path: runtimes
+          merge-multiple: true
+      - name: Pack with prebuilt native libraries
+        shell: bash
+        run: bash scripts/pack-with-native.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish
+      - name: Upload NuGet packages
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: nuget
+          path: ./publish/
+          retention-days: 1
+          if-no-files-found: error
+
+  nuget-smoke:
+    name: NuGet smoke (${{ matrix.os }})
+    needs: [pack]
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: ubuntu-24.04-arm
+          - os: windows-2025
+          - os: windows-11-arm
+          - os: macos-26
+          - os: macos-26-intel
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            samples
+            scripts
+      - name: Set up .NET
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Download NuGet packages
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: nuget
+          path: ./publish
+      - name: Run NuGet smoke sample
+        shell: bash
+        run: bash scripts/run-nuget-smoke.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish
+
   build-complete:
-    needs: [build]
+    needs: [build, nuget-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
     steps:
-      - run: echo "Build and run completed successfully on all platforms."
+      - run: echo "Build, test, pack, and NuGet smoke completed successfully on all platforms."
