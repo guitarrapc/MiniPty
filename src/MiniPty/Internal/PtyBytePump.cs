@@ -24,7 +24,7 @@ internal static class PtyBytePump
                 byteBuffer.Append(bytes.Span[..read]);
             }
 
-            return new PtyPumpOutput(byteBuffer.ToArray(), null, encoding);
+            return new PtyPumpOutput(byteBuffer.Detach(), null, encoding);
         }
 
         using var charBuffer = new PtyGrowingBuffer<char>();
@@ -42,7 +42,7 @@ internal static class PtyBytePump
         }
 
         AppendDecoded(decoder, ReadOnlySpan<byte>.Empty, chars.Span, charBuffer, flush: true);
-        return new PtyPumpOutput(byteBuffer.ToArray(), charBuffer.ToArray(), encoding);
+        return new PtyPumpOutput(byteBuffer.Detach(), charBuffer.Detach(), encoding);
     }
 
     private static void AppendDecoded(

@@ -18,6 +18,8 @@ namespace MiniPty;
 /// </remarks>
 public sealed class PtySession : IAsyncDisposable, IDisposable
 {
+    private static readonly PtyCompleteOptions DefaultCompleteOptions = new();
+
     private readonly IPtyBackend _backend;
     private bool _disposed;
 
@@ -140,7 +142,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         PtyCompleteOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        options ??= new PtyCompleteOptions();
+        options ??= DefaultCompleteOptions;
         var encoding = options.OutputEncoding;
         var (output, exitCode) = await PtyCompletion.RunAsync(
             this,

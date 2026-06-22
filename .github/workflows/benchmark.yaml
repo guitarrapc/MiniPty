@@ -10,11 +10,11 @@ on:
         type: choice
         options:
           - "*"
-          - "*BenchmarkPtyCommands*"
-          - "*BenchmarkSamples*"
-          - "*PtyCaptureDisplayBenchmarks*"
+          - "*categories*Binary*"
+          - "*categories*Text*"
           - "*PtyIntegrationBenchmarks*"
           - "*PtyOutputBenchmarks*"
+          - "*PtyCaptureDisplayBenchmarks*"
 
 jobs:
   benchmark:
