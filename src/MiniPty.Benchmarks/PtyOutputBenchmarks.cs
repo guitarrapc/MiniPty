@@ -7,7 +7,7 @@ using BenchmarkDotNet.Jobs;
 namespace MiniPty.Benchmarks;
 
 /// <summary>
-/// Microbenchmarks for <see cref="PtyOutput.ToDisplayText"/> (text/display path only).
+/// Microbenchmarks for <see cref="PtyOutput.ToDisplayText(string, PtyOutputDisplayMode)"/> (text/display path only).
 /// </summary>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]

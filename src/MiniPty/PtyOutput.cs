@@ -11,7 +11,7 @@ namespace MiniPty;
 /// <para>
 /// PTY backends and capture APIs return a <strong>raw</strong> terminal byte stream.
 /// Writing that stream directly to the parent console can trigger screen clears and other
-/// control effects. Use <see cref="ToDisplayText"/> when the goal is logging or readable output.
+/// control effects. Use <see cref="ToDisplayText(string, PtyOutputDisplayMode)"/> when the goal is logging or readable output.
 /// </para>
 /// <para>
 /// Processing is best-effort and not a full terminal emulator. Recording and replay tools
