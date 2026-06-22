@@ -17,7 +17,7 @@ Status: **Implemented** (MiniPty 0.3.x, MiniPty.Capture 0.3.x).
 |---|---|
 | Understand what MiniPty provides vs MiniPty.Capture | [spec.md](spec.md) → Scope |
 | Use streams, wait, or one-shot completion | [spec.md](spec.md) → Core API |
-| Record timestamped PTY output (asciicast-style) | [spec.md](spec.md) → Capture API |
+| Observe PTY output with per-read timestamps | [spec.md](spec.md) → Capture API |
 | Know cancel vs kill semantics | [spec.md](spec.md) → Cancellation |
 | Debug ConPTY hangs, EOF, or fork safety | [references/pty_crossplatform.md](references/pty_crossplatform.md) |
 | See how scenetake uses these packages | [scenetake spec_pty](https://github.com/guitarrapc/scenetake/blob/main/.github/docs/spec_pty.md) |

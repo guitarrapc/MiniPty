@@ -6,16 +6,16 @@ using MiniPty.Internal;
 namespace MiniPty.Capture;
 
 /// <summary>
-/// High-level API for spawning a PTY child and capturing timestamped output in one call.
+/// High-level API for spawning a PTY child and observing timestamped output in one call.
 /// </summary>
 /// <remarks>
 /// Built on <see cref="Pty.Start"/> and <see cref="PtySession.CompleteAsync"/>.
-/// Each <see cref="PtyCaptureChunk"/> records elapsed time from session start (immediately after spawn).
+/// Each <see cref="PtyCaptureChunk"/> records one read from the PTY output stream with elapsed time since session start (immediately after spawn).
 /// </remarks>
 public static class PtyCapture
 {
     /// <summary>
-    /// Spawns a child in a pseudo-terminal, captures timestamped output, waits for exit, and disposes the session.
+    /// Spawns a child in a pseudo-terminal, observes timestamped output, waits for exit, and disposes the session.
     /// </summary>
     /// <param name="startInfo">Executable, arguments, working directory, and initial terminal size.</param>
     /// <param name="options">Capture and completion options, or <see langword="null"/> for defaults.</param>

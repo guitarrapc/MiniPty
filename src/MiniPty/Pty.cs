@@ -13,7 +13,7 @@ namespace MiniPty;
 /// <see cref="PtySession.CompleteAsync"/>.
 /// </para>
 /// <para>
-/// For timestamped output capture, use the <c>MiniPty.Capture</c> package and <c>PtyCapture.RunAsync</c>.
+/// For timestamped PTY output observation, use the <c>MiniPty.Capture</c> package and <c>PtyCapture.RunAsync</c>.
 /// </para>
 /// </remarks>
 public static class Pty

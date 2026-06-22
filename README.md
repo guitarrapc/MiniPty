@@ -1,13 +1,26 @@
+[![Build](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml/badge.svg)](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml)
+
 # MiniPty
 
 NativeAOT-friendly minimal cross-platform pseudo-terminal library for .NET.
+
+**Motivation**
+
+I need a PTY library for NativeAOT projects, but existing .NET PTY libraries are not guranteed to work in NativeAOT. MiniPty is a minimal PTY library designed for NativeAOT compatibility, with a simple API and no dependencies.
+
+## Features
+
+
+**Not supported**
+
+
 
 ## Packages
 
 | Package | Role |
 |---------|------|
 | **MiniPty** | PTY session: streams, lifecycle, `CompleteAsync` |
-| **MiniPty.Capture** | Timestamped output capture for asciicast-style tools |
+| **MiniPty.Capture** | Timestamped PTY output observation (per-read chunks) |
 
 ## MiniPty (core)
 
@@ -41,6 +54,8 @@ var result = await session.CompleteAsync(new PtyCompleteOptions
 **Dispose:** Disposing a `PtySession` kills the child if it is still running.
 
 ## MiniPty.Capture
+
+Observe PTY execution from outside: each read from the output stream is recorded with elapsed time since session start. MiniPty does not define a recording format; consumers build timelines from `Chunks`.
 
 ```csharp
 using MiniPty;

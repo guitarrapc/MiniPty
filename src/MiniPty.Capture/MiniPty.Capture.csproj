@@ -5,7 +5,7 @@
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Description>Timestamped PTY output capture for MiniPty.</Description>
+    <Description>Timestamped PTY output observation for MiniPty.</Description>
   </PropertyGroup>
 
   <ItemGroup>

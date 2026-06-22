@@ -8,7 +8,7 @@ User-facing API contracts for the **MiniPty** and **MiniPty.Capture** NuGet pack
 
 Many CLI tools and terminal UIs behave differently when stdout is not a TTY: they disable color, skip animations, or refuse to run. A pseudo-terminal gives the child real terminal semantics while the parent reads and writes a byte stream.
 
-MiniPty exists as a **standalone, NativeAOT-friendly** library so any .NET program—not only scenetake—can spawn PTY children without bundling winpty or external helpers. Recording semantics (per-read timestamps) are split into **MiniPty.Capture** so core callers that only need streams and exit codes are not forced to depend on capture types.
+MiniPty exists as a **standalone, NativeAOT-friendly** library so any .NET program—not only scenetake—can spawn PTY children without bundling winpty or external helpers. Observation semantics (per-read timestamps) are split into **MiniPty.Capture** so core callers that only need streams and exit codes are not forced to depend on capture types.
 
 ## Scope
 
@@ -17,9 +17,9 @@ MiniPty exists as a **standalone, NativeAOT-friendly** library so any .NET progr
 | Package | Responsibility |
 |---|---|
 | **MiniPty** | Spawn child in PTY; `Input` / `Output` streams; lifecycle (`WaitForExitAsync`, `CompleteAsync`, `Dispose`) |
-| **MiniPty.Capture** | One-shot `PtyCapture.RunAsync` → merged output, exit code, and timestamped `Chunks` |
+| **MiniPty.Capture** | One-shot `PtyCapture.RunAsync` → observe PTY output with per-read timestamps (`Chunks`), plus merged text and exit code |
 
-Timestamped chunks are **not** part of the core API. Consumers that need cast timelines (e.g. [scenetake](https://github.com/guitarrapc/scenetake)) take a dependency on both packages.
+Timestamped chunks are **not** part of the core API. Consumers that need to observe PTY output over time (e.g. [scenetake](https://github.com/guitarrapc/scenetake) for terminal recordings) take a dependency on both packages.
 
 ### In scope (current)
 
@@ -98,6 +98,8 @@ Used by `CompleteAsync`. `MiniPty.Capture` composes the same type via `PtyCaptur
 A PTY has backpressure. If the child writes output and nothing reads `PtySession.Output`, the child may block when the terminal buffer fills. Callers must use `CompleteAsync`, `PtyCapture.RunAsync`, or continuously read `Output`.
 
 ## Capture API (`MiniPty.Capture`)
+
+Observes PTY execution from outside the child: output is read while the process runs, and each read becomes a timestamped chunk. MiniPty does not define a recording format or parse ANSI; consumers build timelines or artifacts from `Chunks`.
 
 ```csharp
 PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
