@@ -16,13 +16,13 @@ internal static class PtyOutputDrain
 
         if (!transportAlreadyClosed)
         {
-            if (await WaitAsync(pump, outputDrainGrace, cancellationToken).ConfigureAwait(false))
+            if (await WaitForCompletionAsync(pump, outputDrainGrace, cancellationToken).ConfigureAwait(false))
                 return await pump.ConfigureAwait(false);
 
             closeOutputTransport();
         }
 
-        if (await WaitAsync(pump, outputReaderCloseTimeout, cancellationToken).ConfigureAwait(false))
+        if (await WaitForCompletionAsync(pump, outputReaderCloseTimeout, cancellationToken).ConfigureAwait(false))
             return await pump.ConfigureAwait(false);
 
         if (throwOnTimeout)
@@ -33,13 +33,22 @@ internal static class PtyOutputDrain
             : throw new InvalidOperationException("PTY output pump did not complete.");
     }
 
-    private static async Task<bool> WaitAsync(Task task, TimeSpan timeout, CancellationToken cancellationToken)
+    /// <summary>
+    /// Waits for <paramref name="task"/> to complete within <paramref name="timeout"/> without allocating a separate delay task.
+    /// </summary>
+    private static async Task<bool> WaitForCompletionAsync(Task task, TimeSpan timeout, CancellationToken cancellationToken)
     {
         if (task.IsCompleted)
             return true;
 
-        var delay = Task.Delay(timeout, cancellationToken);
-        var completed = await Task.WhenAny(task, delay).ConfigureAwait(false);
-        return completed == task;
+        try
+        {
+            await task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
     }
 }

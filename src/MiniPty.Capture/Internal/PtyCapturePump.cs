@@ -1,5 +1,4 @@
-﻿using System.Diagnostics;
-using System.Text;
+﻿using System.Text;
 using MiniPty.Internal;
 
 namespace MiniPty.Capture;
@@ -10,7 +9,13 @@ internal static class PtyCapturePump
 
     private readonly record struct TextChunkMeta(TimeSpan Time, int Start, int Length);
 
-    internal static async Task<PtyCapturePumpResult> ReadAsync(Stream stream, Stopwatch origin, Encoding encoding, bool decodeOutput, CancellationToken cancellationToken)
+    internal static async Task<PtyCapturePumpResult> ReadAsync(
+        Stream stream,
+        long originTimestamp,
+        TimeProvider timeProvider,
+        Encoding encoding,
+        bool decodeOutput,
+        CancellationToken cancellationToken)
     {
         // Typical PTY reads are few; avoid repeated List growth during capture.
         var byteChunkMeta = new List<ByteChunkMeta>(capacity: 8);
@@ -31,15 +36,15 @@ internal static class PtyCapturePump
                     break;
 
                 var slice = bytes.Span[..read];
-                byteChunkMeta.Add(new ByteChunkMeta(origin.Elapsed, byteBuffer.Length, read));
+                byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteBuffer.Length, read));
                 byteBuffer.Append(slice);
 
                 if (decodeOutput)
-                    AppendTextChunk(origin, textChunkMeta!, charBuffer!, decoder!, slice, chars.Span, flush: false);
+                    AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, slice, chars.Span, flush: false);
             }
 
             if (decodeOutput)
-                AppendTextChunk(origin, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
+                AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
 
             var outputBytes = byteBuffer.Detach();
             var chunks = BuildByteChunks(outputBytes, byteChunkMeta);
@@ -56,8 +61,12 @@ internal static class PtyCapturePump
         }
     }
 
+    private static TimeSpan ElapsedSinceStart(long originTimestamp, TimeProvider timeProvider) =>
+        timeProvider.GetElapsedTime(originTimestamp);
+
     private static void AppendTextChunk(
-        Stopwatch origin,
+        long originTimestamp,
+        TimeProvider timeProvider,
         List<TextChunkMeta> textChunkMeta,
         PtyGrowingBuffer<char> charBuffer,
         Decoder decoder,
@@ -69,7 +78,7 @@ internal static class PtyCapturePump
         if (charCount <= 0)
             return;
 
-        textChunkMeta.Add(new TextChunkMeta(origin.Elapsed, charBuffer.Length, charCount));
+        textChunkMeta.Add(new TextChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), charBuffer.Length, charCount));
         charBuffer.Append(chars[..charCount]);
     }
 

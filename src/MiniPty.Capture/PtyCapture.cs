@@ -1,5 +1,4 @@
-﻿using System.Diagnostics;
-using MiniPty.Internal;
+﻿using MiniPty.Internal;
 
 namespace MiniPty.Capture;
 
@@ -38,14 +37,16 @@ public static class PtyCapture
         ArgumentNullException.ThrowIfNull(startInfo);
         options ??= DefaultOptions;
         var completion = options.Completion;
+        var timeProvider = options.TimeProvider;
         await using var session = Pty.Start(startInfo);
-        var origin = Stopwatch.StartNew();
+        var originTimestamp = timeProvider.GetTimestamp();
         var (capture, exitCode) = await PtyCompletion.RunAsync(
             session,
             completion,
             (stream, ct) => PtyCapturePump.ReadAsync(
                 stream,
-                origin,
+                originTimestamp,
+                timeProvider,
                 completion.OutputEncoding,
                 completion.DecodeOutput,
                 ct),

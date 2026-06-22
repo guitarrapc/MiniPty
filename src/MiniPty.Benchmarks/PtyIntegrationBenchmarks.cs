@@ -12,7 +12,7 @@ namespace MiniPty.Benchmarks;
 /// <remarks>
 /// <para><b>Binary</b> — <see cref="MiniPty.PtyCompleteOptions.DecodeOutput"/> = false; only merged bytes are retained.</para>
 /// <para><b>Text</b> — default decode during pump (bytes + decoded chars) and display helpers.</para>
-/// Allocations include OS process spawn; compare Binary vs Text to isolate decode and chunk overhead.
+/// Allocations include OS process spawn; compare <see cref="Session_Exit0_Bytes"/> vs <see cref="Session_Echo_Bytes"/> to isolate output payload.
 /// </remarks>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
@@ -21,6 +21,7 @@ namespace MiniPty.Benchmarks;
 public class PtyIntegrationBenchmarks
 {
     private PtyStartInfo echo = null!;
+    private PtyStartInfo exit0 = null!;
     private PtyStartInfo smallStdout = null!;
     private bool supported;
 
@@ -32,7 +33,20 @@ public class PtyIntegrationBenchmarks
             return;
 
         echo = BenchmarkPtyCommands.Echo();
+        exit0 = BenchmarkPtyCommands.Exit0();
         smallStdout = BenchmarkPtyCommands.SmallStdout(32_768);
+    }
+
+    [BenchmarkCategory("Integration", "Binary")]
+    [Benchmark]
+    public async Task<int> Session_Exit0_Bytes()
+    {
+        if (!supported)
+            return 0;
+
+        await using var session = Pty.Start(exit0);
+        var result = await session.CompleteAsync(BenchmarkOptions.BytesOnly).ConfigureAwait(false);
+        return result.ExitCode;
     }
 
     [BenchmarkCategory("Integration", "Binary")]

@@ -51,11 +51,13 @@ internal static class PtyCompletion
         if (!options.ExitTimeout.HasValue)
             return await waitTask.ConfigureAwait(false);
 
-        var timeoutTask = Task.Delay(options.ExitTimeout.Value, cancellationToken);
-        var completed = await Task.WhenAny(waitTask, timeoutTask).ConfigureAwait(false);
-        if (completed != waitTask)
+        try
+        {
+            return await waitTask.WaitAsync(options.ExitTimeout.Value, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
             throw new TimeoutException("PTY child did not exit within the configured exit timeout.");
-
-        return await waitTask.ConfigureAwait(false);
+        }
     }
 }
