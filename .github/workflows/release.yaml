@@ -179,12 +179,13 @@ jobs:
         run: bash scripts/run-nuget-smoke.sh "${{ needs.verify.outputs.version }}" ./publish
 
   build-dotnet:
-    name: Attest packages
     needs: [nuget-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
@@ -194,6 +195,21 @@ jobs:
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: "./publish/*.nupkg"
+      - name: Prepare SLSA attestation bundles for release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for nupkg in ./publish/*.nupkg; do
+            gh attestation download "$nupkg" --repo "${GITHUB_REPOSITORY}"
+            bundle=(sha256:*.jsonl)
+            if [ "${#bundle[@]}" -ne 1 ]; then
+              echo "::error::Expected one attestation bundle for $nupkg, found ${#bundle[@]}"
+              exit 1
+            fi
+            mv "${bundle[0]}" "./publish/$(basename "$nupkg").sigstore.jsonl"
+          done
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nuget
@@ -219,15 +235,30 @@ jobs:
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: nuget
-          path: ./nuget
+          path: ./artifacts/nuget
       - name: List Nuget
-        run: ls -al ./nuget
-      - name: Create Release
-        uses: guitarrapc/actions/.github/actions/create-release@main
-        with:
-          tag: ${{ needs.verify.outputs.tag }}
-          title: ${{ needs.verify.outputs.tag }}
-          gh-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: dotnet nuget push "./nuget/*.nupkg" --skip-duplicate -s https://api.nuget.org/v3/index.json -k "${NUGET_KEY}"
+        run: ls -al ./artifacts/nuget
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts/ -type f \( -name '*.nupkg' -o -name '*.sigstore.jsonl' \) -exec cp {} release/ \;
+          if [ -z "$(find release/ -maxdepth 1 -type f -print -quit)" ]; then
+            echo "::error::No release assets found"
+            exit 1
+          fi
+          echo "### Release assets" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          find release/ -maxdepth 1 -type f | sort | xargs -n 1 basename >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Create GitHub Release
+        shell: bash
+        run: |
+          gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag --draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+      - run: dotnet nuget push "./release/*.nupkg" --skip-duplicate -s https://api.nuget.org/v3/index.json -k "${NUGET_KEY}"
         env:
           NUGET_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
