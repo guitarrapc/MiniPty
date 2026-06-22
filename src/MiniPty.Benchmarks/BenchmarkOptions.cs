@@ -1,5 +1,4 @@
-using MiniPty;
-using MiniPty.Capture;
+﻿using MiniPty.Capture;
 
 namespace MiniPty.Benchmarks;
 

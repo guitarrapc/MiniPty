@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text;
 using MiniPty.Internal;
 
@@ -10,12 +10,7 @@ internal static class PtyCapturePump
 
     private readonly record struct TextChunkMeta(TimeSpan Time, int Start, int Length);
 
-    internal static async Task<PtyCapturePumpResult> ReadAsync(
-        Stream stream,
-        Stopwatch origin,
-        Encoding encoding,
-        bool decodeOutput,
-        CancellationToken cancellationToken)
+    internal static async Task<PtyCapturePumpResult> ReadAsync(Stream stream, Stopwatch origin, Encoding encoding, bool decodeOutput, CancellationToken cancellationToken)
     {
         // Typical PTY reads are few; avoid repeated List growth during capture.
         var byteChunkMeta = new List<ByteChunkMeta>(capacity: 8);

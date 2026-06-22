@@ -1,9 +1,6 @@
-using System.Text;
-using MiniPty;
+﻿using System.Text;
 using MiniPty.Capture;
 using MiniPty.Internal;
-using TUnit.Assertions;
-using TUnit.Core;
 
 namespace MiniPty.Tests;
 

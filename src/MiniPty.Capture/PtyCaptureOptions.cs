@@ -1,6 +1,4 @@
-using MiniPty;
-
-namespace MiniPty.Capture;
+﻿namespace MiniPty.Capture;
 
 /// <summary>
 /// Options for <see cref="PtyCapture.RunAsync"/>.

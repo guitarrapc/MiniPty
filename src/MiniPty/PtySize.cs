@@ -1,4 +1,4 @@
-namespace MiniPty;
+﻿namespace MiniPty;
 
 /// <summary>
 /// Terminal dimensions measured in character cells (not pixels).

@@ -1,4 +1,4 @@
-namespace MiniPty.Capture;
+﻿namespace MiniPty.Capture;
 
 /// <summary>
 /// A single timestamped slice of raw PTY output bytes produced by one read from the master output stream.

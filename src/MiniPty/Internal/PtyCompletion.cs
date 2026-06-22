@@ -1,4 +1,4 @@
-namespace MiniPty.Internal;
+﻿namespace MiniPty.Internal;
 
 internal static class PtyCompletion
 {

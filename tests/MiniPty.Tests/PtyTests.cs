@@ -1,8 +1,5 @@
 ﻿using System.Runtime.InteropServices;
-using MiniPty;
 using MiniPty.Capture;
-using TUnit.Assertions;
-using TUnit.Core;
 
 namespace MiniPty.Tests;
 

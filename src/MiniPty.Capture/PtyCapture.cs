@@ -1,5 +1,4 @@
-using System.Diagnostics;
-using MiniPty;
+﻿using System.Diagnostics;
 using MiniPty.Internal;
 
 namespace MiniPty.Capture;

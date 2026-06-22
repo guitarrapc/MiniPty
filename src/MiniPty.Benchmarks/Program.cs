@@ -1,4 +1,4 @@
-using BenchmarkDotNet.Running;
+﻿using BenchmarkDotNet.Running;
 
 // Release configuration is required for meaningful timings and allocation stats.
 // Examples:

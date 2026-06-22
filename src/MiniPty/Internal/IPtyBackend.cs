@@ -1,16 +1,16 @@
-namespace MiniPty.Internal;
+﻿namespace MiniPty.Internal;
 
 internal interface IPtyBackend : IDisposable
 {
-    Stream Input { get; }
-    Stream Output { get; }
-    int ProcessId { get; }
-    bool HasExited { get; }
-    int ExitCode { get; }
-    PtySize Size { get; }
-    void Resize(int columns, int rows);
-    void SendEof();
-    void Kill();
-    Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation);
-    void CloseOutputTransport();
+    public Stream Input { get; }
+    public Stream Output { get; }
+    public int ProcessId { get; }
+    public bool HasExited { get; }
+    public int ExitCode { get; }
+    public PtySize Size { get; }
+    public void Resize(int columns, int rows);
+    public void SendEof();
+    public void Kill();
+    public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation);
+    public void CloseOutputTransport();
 }

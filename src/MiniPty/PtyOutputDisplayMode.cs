@@ -1,4 +1,4 @@
-namespace MiniPty;
+﻿namespace MiniPty;
 
 /// <summary>
 /// Controls how decoded PTY text is transformed for display on the host.

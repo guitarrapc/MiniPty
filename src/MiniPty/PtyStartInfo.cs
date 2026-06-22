@@ -1,4 +1,4 @@
-namespace MiniPty;
+﻿namespace MiniPty;
 
 /// <summary>
 /// Process and terminal options passed to <see cref="Pty.Start"/>.

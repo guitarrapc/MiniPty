@@ -1,4 +1,4 @@
-namespace MiniPty.Capture;
+﻿namespace MiniPty.Capture;
 
 /// <summary>
 /// A single timestamped slice of decoded PTY text aligned to one read from the master output stream.

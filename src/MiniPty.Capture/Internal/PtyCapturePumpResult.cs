@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using MiniPty.Internal;
 
 namespace MiniPty.Capture;
