@@ -17,12 +17,12 @@ internal static class PtyCapturePump
         bool decodeOutput,
         CancellationToken cancellationToken)
     {
-        // Typical PTY reads are few; avoid repeated List growth during capture.
-        var byteChunkMeta = new List<ByteChunkMeta>(capacity: 8);
+        // Typical PTY reads are few; large outputs may still produce many small reads (e.g. line-buffered children).
+        var byteChunkMeta = new List<ByteChunkMeta>(capacity: 64);
         using var byteBuffer = new PtyGrowingBuffer<byte>();
         using var bytes = PtyReadBuffer.RentBytes();
 
-        List<TextChunkMeta>? textChunkMeta = decodeOutput ? new List<TextChunkMeta>(capacity: 8) : null;
+        List<TextChunkMeta>? textChunkMeta = decodeOutput ? new List<TextChunkMeta>(capacity: 64) : null;
         PtyGrowingBuffer<char>? charBuffer = decodeOutput ? new PtyGrowingBuffer<char>() : null;
         using var chars = decodeOutput ? PtyReadBuffer.RentChars(encoding) : default;
         var decoder = decodeOutput ? encoding.GetDecoder() : null;
