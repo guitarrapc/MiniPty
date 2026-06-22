@@ -327,10 +327,11 @@ public sealed class PtyTests
             return;
         }
 
+        // Block on read until after Resize so a fast ARM runner cannot query size before SIGWINCH.
         await using var unixSession = Pty.Start(
-            UnixShell("sleep 0.1; set -- $(stty size); printf 'SIZE:%s:%s\\n' \"$1\" \"$2\""));
+            UnixShell("read _; set -- $(stty size); printf 'SIZE:%s:%s\\n' \"$1\" \"$2\""));
         unixSession.Resize(new(100, 30));
-        var unixResult = await unixSession.CompleteAsync();
+        var unixResult = await unixSession.CompleteAsync(new PtyCompleteOptions { Input = "go\n" });
 
         await Assert.That(unixResult.ExitCode).IsEqualTo(0);
         await Assert.That(unixResult.Output).Contains("SIZE:30:100");
