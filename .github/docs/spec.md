@@ -126,7 +126,7 @@ Observes PTY execution from outside the child: output is read while the process 
 PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
 // result.Output   — merged text (concatenation of chunk data)
 // result.ExitCode
-// result.Chunks   — PtyCaptureChunk(TimeSpan Time, string Data)
+// result.Chunks   — PtyCaptureChunk(TimeSpan Time, ReadOnlyMemory<char> Text)
 ```
 
 - `PtyCaptureOptions.Completion` wraps `PtyCompleteOptions`.

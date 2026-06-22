@@ -57,13 +57,14 @@ public sealed class PtyOutputTests
     [Test]
     public async Task CaptureResultToDisplayTextMatchesMergedOutput()
     {
+        const string merged = "\u001b[2Jhello\n";
         var chunks = new PtyCaptureChunk[]
         {
-            new(TimeSpan.Zero, "\u001b[2J"),
-            new(TimeSpan.FromMilliseconds(1), "hello\n"),
+            new(TimeSpan.Zero, merged.AsMemory(0, 4)),
+            new(TimeSpan.FromMilliseconds(1), merged.AsMemory(4, 6)),
         };
 
-        var result = new PtyCaptureResult("\u001b[2Jhello\n", 0, chunks);
+        var result = new PtyCaptureResult(merged, 0, chunks);
         var fromResult = result.ToDisplayText(PtyOutputDisplayMode.PlainText);
         var fromChunks = chunks.ToDisplayText(PtyOutputDisplayMode.PlainText);
 

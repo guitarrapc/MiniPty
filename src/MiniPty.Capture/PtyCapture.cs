@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text;
 using MiniPty;
 using MiniPty.Internal;
 
@@ -40,13 +39,12 @@ public static class PtyCapture
         var completion = options.Completion;
         await using var session = Pty.Start(startInfo);
         var origin = Stopwatch.StartNew();
-        var (chunks, exitCode) = await PtyCompletion.RunAsync(
+        var (capture, exitCode) = await PtyCompletion.RunAsync(
             session,
             completion,
             (stream, ct) => PtyCapturePump.ReadAsync(stream, origin, completion.OutputEncoding, ct),
             cancellationToken).ConfigureAwait(false);
 
-        var output = string.Concat(chunks.Select(static chunk => chunk.Data));
-        return new PtyCaptureResult(output, exitCode, chunks);
+        return new PtyCaptureResult(capture.Output, exitCode, capture.Chunks);
     }
 }

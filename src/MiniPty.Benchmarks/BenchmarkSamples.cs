@@ -45,11 +45,20 @@ internal static class BenchmarkSamples
 
     internal static IReadOnlyList<PtyCaptureChunk> ChunkedAnsi(int chunkCount, int charsPerChunk)
     {
-        var chunks = new PtyCaptureChunk[chunkCount];
+        var merged = new System.Text.StringBuilder(chunkCount * charsPerChunk);
         for (var i = 0; i < chunkCount; i++)
         {
             var piece = $"{Red}chunk-{i,4}{Reset}".PadRight(charsPerChunk, 'x');
-            chunks[i] = new PtyCaptureChunk(TimeSpan.FromMilliseconds(i), piece);
+            merged.Append(piece);
+        }
+
+        var output = merged.ToString();
+        var chunks = new PtyCaptureChunk[chunkCount];
+        var offset = 0;
+        for (var i = 0; i < chunkCount; i++)
+        {
+            chunks[i] = new PtyCaptureChunk(TimeSpan.FromMilliseconds(i), output.AsMemory(offset, charsPerChunk));
+            offset += charsPerChunk;
         }
 
         return chunks;

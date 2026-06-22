@@ -30,6 +30,24 @@ public static class PtyOutput
         ArgumentNullException.ThrowIfNull(text);
         return mode == PtyOutputDisplayMode.Raw
             ? text
+            : text.Length == 0
+                ? text
+                : PtyDisplayTextStripper.Strip(text, mode);
+    }
+
+    /// <summary>
+    /// Transforms decoded PTY text for display on the host using the given mode.
+    /// </summary>
+    /// <param name="text">Decoded PTY output text.</param>
+    /// <param name="mode">Display transformation to apply.</param>
+    /// <returns>Displayable text for the chosen mode.</returns>
+    public static string ToDisplayText(ReadOnlySpan<char> text, PtyOutputDisplayMode mode)
+    {
+        if (text.IsEmpty)
+            return string.Empty;
+
+        return mode == PtyOutputDisplayMode.Raw
+            ? text.ToString()
             : PtyDisplayTextStripper.Strip(text, mode);
     }
 }

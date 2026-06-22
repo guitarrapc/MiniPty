@@ -6,34 +6,33 @@ internal static class PtyTextPump
 {
     internal static async Task<string> ReadAllAsync(Stream stream, Encoding encoding, CancellationToken cancellationToken)
     {
-        var bytes = new byte[4096];
-        var chars = new char[encoding.GetMaxCharCount(bytes.Length)];
+        using var bytes = PtyReadBuffer.RentBytes();
+        using var chars = PtyReadBuffer.RentChars(encoding);
         var decoder = encoding.GetDecoder();
         var builder = new StringBuilder();
 
         while (true)
         {
-            var read = await stream.ReadAsync(bytes.AsMemory(0, bytes.Length), cancellationToken).ConfigureAwait(false);
+            var read = await stream.ReadAsync(bytes.Memory, cancellationToken).ConfigureAwait(false);
             if (read <= 0)
                 break;
 
-            AppendDecoded(decoder, bytes, read, chars, builder, flush: false);
+            AppendDecoded(decoder, bytes.Span[..read], chars.Span, builder, flush: false);
         }
 
-        AppendDecoded(decoder, [], 0, chars, builder, flush: true);
+        AppendDecoded(decoder, ReadOnlySpan<byte>.Empty, chars.Span, builder, flush: true);
         return builder.ToString();
     }
 
     private static void AppendDecoded(
         Decoder decoder,
-        byte[] bytes,
-        int count,
-        char[] chars,
+        ReadOnlySpan<byte> bytes,
+        Span<char> chars,
         StringBuilder builder,
         bool flush)
     {
-        var charCount = decoder.GetChars(bytes, 0, count, chars, 0, flush);
+        var charCount = decoder.GetChars(bytes, chars, flush);
         if (charCount > 0)
-            builder.Append(chars, 0, charCount);
+            builder.Append(chars[..charCount]);
     }
 }

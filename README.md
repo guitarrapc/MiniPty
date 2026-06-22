@@ -1,5 +1,8 @@
-<a href="https://github.com/guitarrapc/MiniPty/releases/latest"><img src="https://img.shields.io/github/v/release/guitarrapc/MiniPty" alt="GitHub Release"></a>
 [![Build](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml/badge.svg)](https://github.com/guitarrapc/MiniPty/actions/workflows/build.yaml)
+[![release](https://github.com/guitarrapc/MiniPty/actions/workflows/release.yaml/badge.svg)](https://github.com/guitarrapc/MiniPty/actions/workflows/release.yaml)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![NuGet](https://img.shields.io/nuget/v/MiniPty.svg?label=MiniPty%20nuget)](https://www.nuget.org/packages/MiniPty)
 
 # MiniPty
 
@@ -90,7 +93,7 @@ var result = await PtyCapture.RunAsync(new PtyStartInfo
 
 // Chunk timestamps are measured from session start (immediately after `Pty.Start`).
 foreach (var chunk in result.Chunks)
-    Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Data}");
+    Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Text.Span}");
 
 // Or plain text for logging:
 Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));

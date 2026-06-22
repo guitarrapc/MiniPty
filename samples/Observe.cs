@@ -49,8 +49,9 @@ static async Task ObserveStaggeredOutputAsync()
 
     foreach (var chunk in result.Chunks)
     {
-        var preview = EscapeForDisplay(chunk.Data);
-        Console.WriteLine($"  +{chunk.Time.TotalSeconds,7:F3}s  {chunk.Data.Length,4} chars  {preview}");
+        var text = chunk.Text.Span;
+        var preview = EscapeForDisplay(text);
+        Console.WriteLine($"  +{chunk.Time.TotalSeconds,7:F3}s  {text.Length,4} chars  {preview}");
     }
 
     if (result.Chunks.Count > 0)
@@ -59,8 +60,17 @@ static async Task ObserveStaggeredOutputAsync()
         Console.WriteLine($"session span: {last.Time.TotalSeconds:F3}s");
     }
 
-    var merged = string.Concat(result.Chunks.Select(static chunk => chunk.Data));
-    if (!string.Equals(merged, result.Output, StringComparison.Ordinal))
+    var mergedOffset = 0;
+    foreach (var chunk in result.Chunks)
+    {
+        var slice = result.Output.AsSpan(mergedOffset, chunk.Text.Length);
+        if (!chunk.Text.Span.SequenceEqual(slice))
+            throw new InvalidOperationException("merged chunks do not match result.Output");
+
+        mergedOffset += chunk.Text.Length;
+    }
+
+    if (mergedOffset != result.Output.Length)
         throw new InvalidOperationException("merged chunks do not match result.Output");
 
     if (result.ExitCode != 0)
@@ -100,7 +110,7 @@ static async Task ObserveStdinPipelineAsync()
     var cursor = TimeSpan.Zero;
     foreach (var chunk in result.Chunks)
     {
-        Console.WriteLine($"  [{cursor.TotalSeconds:F3}s -> {chunk.Time.TotalSeconds:F3}s)  {chunk.Data.Length} chars");
+        Console.WriteLine($"  [{cursor.TotalSeconds:F3}s -> {chunk.Time.TotalSeconds:F3}s)  {chunk.Text.Length} chars");
         cursor = chunk.Time;
     }
 
@@ -116,7 +126,7 @@ static void ValidateStdinPipelineOutput(string output, int exitCode)
         throw new InvalidOperationException("expected pipeline marker missing from output");
 }
 
-static string EscapeForDisplay(string text)
+static string EscapeForDisplay(ReadOnlySpan<char> text)
 {
     var builder = new StringBuilder(text.Length);
     foreach (var ch in text)
