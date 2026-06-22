@@ -5,14 +5,30 @@ version="${1:?Usage: run-nuget-smoke.sh <package-version> <nupkg-directory>}"
 feed_dir="${2:?Usage: run-nuget-smoke.sh <package-version> <nupkg-directory>}"
 version="${version#v}"
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
-feed_dir="$(cd "$feed_dir" && pwd)"
+to_dotnet_path() {
+  local dir="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$dir"
+    return
+  fi
+  # Git Bash pwd (/c/foo) is misread by NuGet as C:\c\foo on Windows.
+  if [[ "$dir" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+    printf '%s:/%s' "$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')" "${BASH_REMATCH[2]}"
+    return
+  fi
+  printf '%s' "$dir"
+}
+
+root_unix="$(cd "$(dirname "$0")/.." && pwd)"
+feed_dir_unix="$(cd "$feed_dir" && pwd)"
+root="$(to_dotnet_path "$root_unix")"
+feed_dir="$(to_dotnet_path "$feed_dir_unix")"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-if [[ ! -f "$feed_dir/MiniPty.${version}.nupkg" ]]; then
-  echo "MiniPty.${version}.nupkg not found in $feed_dir" >&2
-  ls -la "$feed_dir" >&2 || true
+if [[ ! -f "$feed_dir_unix/MiniPty.${version}.nupkg" ]]; then
+  echo "MiniPty.${version}.nupkg not found in $feed_dir_unix" >&2
+  ls -la "$feed_dir_unix" >&2 || true
   exit 1
 fi
 
