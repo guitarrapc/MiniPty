@@ -1,11 +1,15 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <signal.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 #if defined(__linux__)
 #include <pty.h>
@@ -30,14 +34,35 @@ static const char *minipty_get_env_value(char *const *envp, const char *name)
     return NULL;
 }
 
+static void minipty_execve_compat(const char *path, char *const *argv, char *const *envp)
+{
+    size_t argc = 0;
+
+    execve(path, argv, envp);
+    if (errno != ENOEXEC)
+        return;
+
+    while (argv[argc] != NULL)
+        argc++;
+
+    char *shell_argv[argc + 2];
+    shell_argv[0] = (char *)"sh";
+    shell_argv[1] = (char *)path;
+    for (size_t i = 1; i < argc; i++)
+        shell_argv[i + 1] = argv[i];
+    shell_argv[argc + 1] = NULL;
+
+    execve("/bin/sh", shell_argv, envp);
+}
+
 static void minipty_execve_path(const char *dir, size_t dir_len, const char *file, char *const *argv, char *const *envp)
 {
     size_t file_len = strlen(file);
     size_t needs_slash = dir_len > 0 ? 1 : 0;
-    char *path = (char *)malloc(dir_len + needs_slash + file_len + 1);
+    char path[PATH_MAX];
 
-    if (path == NULL) {
-        errno = ENOMEM;
+    if (dir_len + needs_slash + file_len + 1 > sizeof(path)) {
+        errno = ENAMETOOLONG;
         return;
     }
 
@@ -48,8 +73,7 @@ static void minipty_execve_path(const char *dir, size_t dir_len, const char *fil
     memcpy(path + dir_len + needs_slash, file, file_len);
     path[dir_len + needs_slash + file_len] = '\0';
 
-    execve(path, argv, envp);
-    free(path);
+    minipty_execve_compat(path, argv, envp);
 }
 
 static void minipty_execvpe(const char *file, char *const *argv, char *const *envp)
@@ -66,7 +90,7 @@ static void minipty_execvpe(const char *file, char *const *argv, char *const *en
     }
 
     if (strchr(file, '/') != NULL) {
-        execve(file, argv, envp);
+        minipty_execve_compat(file, argv, envp);
         return;
     }
 

@@ -395,6 +395,34 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyUnixPathLookupUsesOverlayAndFallsBackToShellForPlainScripts()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        var tempRoot = Path.Combine(Path.GetTempPath(), "minipty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var script = Path.Combine(tempRoot, "minipty-plain-script");
+            await File.WriteAllTextAsync(script, "printf path-overlay-shell-fallback");
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var result = await PtyCapture.RunAsync(Spawn("minipty-plain-script", []) with
+            {
+                Environment = new Dictionary<string, string?> { ["PATH"] = tempRoot }
+            });
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Contains("path-overlay-shell-fallback")).IsTrue();
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task PtyWindowsTerminalNameDoesNotSetTerm()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !TryResolveWindowsPowerShell(out var powershell))
