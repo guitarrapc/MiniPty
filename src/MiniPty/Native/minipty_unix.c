@@ -20,6 +20,32 @@
 #include <libutil.h>
 #endif
 
+extern char **environ;
+
+static const char minipty_default_term[] = "TERM=xterm-256color";
+
+static int minipty_is_sanitized_key(const char *entry)
+{
+    static const char *keys[] = {
+        "TMUX=",
+        "TMUX_PANE=",
+        "STY=",
+        "WINDOW=",
+        "WINDOWID=",
+        "TERMCAP=",
+        "COLUMNS=",
+        "LINES=",
+    };
+
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        size_t key_len = strlen(keys[i]);
+        if (strncmp(entry, keys[i], key_len) == 0)
+            return 1;
+    }
+
+    return 0;
+}
+
 static const char *minipty_get_env_value(char *const *envp, const char *name)
 {
     size_t name_len = strlen(name);
@@ -37,7 +63,7 @@ static const char *minipty_get_env_value(char *const *envp, const char *name)
 
 static const char *minipty_get_path(char *const *envp)
 {
-    const char *path = envp == NULL ? getenv("PATH") : minipty_get_env_value(envp, "PATH");
+    const char *path = minipty_get_env_value(envp, "PATH");
 
     if (path != NULL)
         return path;
@@ -45,29 +71,52 @@ static const char *minipty_get_path(char *const *envp)
     return NULL;
 }
 
-static void minipty_prepare_inherited_environment(void)
+static char **minipty_build_inherited_envp(void)
 {
-    unsetenv("TMUX");
-    unsetenv("TMUX_PANE");
-    unsetenv("STY");
-    unsetenv("WINDOW");
-    unsetenv("WINDOWID");
-    unsetenv("TERMCAP");
-    unsetenv("COLUMNS");
-    unsetenv("LINES");
+    size_t count = 0;
+    size_t kept = 0;
+    int has_term = 0;
 
-    if (getenv("TERM") == NULL)
-        setenv("TERM", "xterm-256color", 0);
+    if (environ == NULL) {
+        char **envp = malloc(2 * sizeof(char *));
+        if (envp == NULL)
+            return NULL;
+
+        envp[0] = (char *)minipty_default_term;
+        envp[1] = NULL;
+        return envp;
+    }
+
+    while (environ[count] != NULL) {
+        if (!minipty_is_sanitized_key(environ[count]))
+            kept++;
+        if (strncmp(environ[count], "TERM=", 5) == 0)
+            has_term = 1;
+        count++;
+    }
+
+    char **envp = malloc((kept + (has_term ? 0 : 1) + 1) * sizeof(char *));
+    if (envp == NULL)
+        return NULL;
+
+    size_t index = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!minipty_is_sanitized_key(environ[i]))
+            envp[index++] = environ[i];
+    }
+
+    if (!has_term)
+        envp[index++] = (char *)minipty_default_term;
+
+    envp[index] = NULL;
+    return envp;
 }
 
 static void minipty_execve_compat(const char *path, char *const *argv, char *const *envp)
 {
     size_t argc = 0;
 
-    if (envp == NULL)
-        execv(path, argv);
-    else
-        execve(path, argv, envp);
+    execve(path, argv, envp);
 
     if (errno != ENOEXEC)
         return;
@@ -82,10 +131,7 @@ static void minipty_execve_compat(const char *path, char *const *argv, char *con
         shell_argv[i + 1] = argv[i];
     shell_argv[argc + 1] = NULL;
 
-    if (envp == NULL)
-        execv("/bin/sh", shell_argv);
-    else
-        execve("/bin/sh", shell_argv, envp);
+    execve("/bin/sh", shell_argv, envp);
 }
 
 static void minipty_execve_path(const char *dir, size_t dir_len, const char *file, char *const *argv, char *const *envp)
@@ -169,6 +215,9 @@ static int spawn_pty_child(
     pid_t pid;
     sigset_t newmask;
     sigset_t oldmask;
+    char **child_envp = envp == NULL ? minipty_build_inherited_envp() : (char **)envp;
+    if (child_envp == NULL)
+        return -1;
 
     sigfillset(&newmask);
     pthread_sigmask(SIG_BLOCK, &newmask, &oldmask);
@@ -177,17 +226,21 @@ static int spawn_pty_child(
 
     pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 
-    if (pid < 0)
+    if (pid < 0) {
+        if (envp == NULL)
+            free(child_envp);
         return -1;
+    }
 
     if (pid == 0) {
         if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
             _exit(126);
-        if (envp == NULL)
-            minipty_prepare_inherited_environment();
-        minipty_execvpe(file, argv, envp);
+        minipty_execvpe(file, argv, child_envp);
         _exit(127);
     }
+
+    if (envp == NULL)
+        free(child_envp);
 
     *pid_out = pid;
     return 0;
