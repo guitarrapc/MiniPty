@@ -46,6 +46,7 @@ tests/MiniPty.Tests/      Focused behavior and integration tests.
 
 ## Documentation
 
+- Write generous class and method comments that explain intent and context when code alone cannot make the reasoning clear.
 - Keep docs concise and implementation-neutral; record lessons learned in related specs under `.github/docs` so regressions are easier to avoid and future designs do not restart from zero.
 - Update README or samples when public API behavior changes.
 - Document allocation or compatibility trade-offs only when they matter to users or future maintainers.
