@@ -299,11 +299,39 @@ Lessons learned while specifying this milestone:
 
 Goal: make persistent sessions reliable under cancellation, exit, and disposal.
 
-- Specify and test cancellation of read, wait, and completion separately.
-- Test child exit while output reader is active.
-- Test dispose while read/write/wait operations are pending.
-- Test output drain after process exit.
-- Review Windows ConPTY startup readiness and whether write/resize deferral is needed.
+**Scope:** Specify contracts in `lifecycle.md`, add focused tests, and fix behavior only where tests prove gaps. **No new public readiness APIs** (ConPTY deferral stays internal).
+
+**Delivery:** One PR containing spec updates, tests, implementation, baseline snapshot, and allocation comparison script.
+
+#### Resolved contracts
+
+| Area | Decision |
+|---|---|
+| `Dispose` / `DisposeAsync` | In-flight `ReadOutputAsync`, `WaitForExitAsync`, and `WriteInputAsync` fail immediately with `ObjectDisposedException`. No cooperative wait. Child is killed if still running; handles are released. |
+| `ReadOutputAsync` ∥ `WaitForExitAsync` | **Allowed and guaranteed** without deadlock, data loss, or premature transport close. Duplicate `WaitForExitAsync` calls are allowed. |
+| Output consumer exclusivity | **Single consumer, bidirectional.** While `ReadOutputAsync` **or** a raw `Output` read is active: a second `ReadOutputAsync`, `CompleteAsync`, or the other output path throws `InvalidOperationException`. No queuing of `CompleteAsync`. |
+| Allowed during `ReadOutputAsync` | `WriteInputAsync`, `SendEof`, `WaitForExitAsync`, `Resize`, `Kill`, `Dispose`. |
+| `Kill()` during active read | Same as normal child exit: drain remaining output, then `ReadOutputAsync` completes normally (EOF). |
+| Cancellation (concurrent ops) | Scoped per operation. Canceling read does not cancel wait (and vice versa). Child is not killed. After cancel, the same session may start a new `ReadOutputAsync` or `WaitForExitAsync`. |
+| Timeouts | `ExitTimeout`, `OutputDrainGrace`, and `OutputReaderCloseTimeout` apply to **one-shot** `CompleteAsync` / `PtyCapture.RunAsync` only. Persistent `ReadOutputAsync` and `PtySession.WaitForExitAsync` use caller `CancellationToken` only. |
+| ConPTY spawn readiness | Document current internal EOF/write deferral. Add Windows smoke tests for immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof`. Fix only if tests fail. |
+
+#### Definition of done
+
+- [ ] `lifecycle.md` updated with operation matrix (dispose, cancel, kill, concurrency, exclusivity, timeouts).
+- [ ] Tests cover every row in the matrix above (including dispose during wait/write, kill during read, concurrent wait+read, bidirectional output exclusivity).
+- [ ] Windows ConPTY spawn smoke tests (immediate write / resize / empty `SendEof`).
+- [ ] Full test suite green.
+- [ ] **Benchmark gate:** `PtyIntegrationBenchmarks` on Release; compare against baseline snapshot taken at Milestone 3 start (record baseline commit SHA in this section when work begins).
+- [ ] **Allocation rule:** `Allocated` must not increase on any Integration benchmark vs baseline. BenchmarkDotNet allocation counts are treated as deterministic; **any increase is an implementation defect**, not measurement noise. Improve allocations on hot paths touched by this milestone where possible (`Session_32KiB_StreamBytes`, `Session_32KiB_OutputStreamBytes`, `Capture_32KiB_*`).
+- [ ] Latency (`Mean`) within +10% vs baseline (lower priority than allocation).
+- [ ] Baseline JSON committed under `BenchmarkDotNet.Artifacts/baselines/` and a comparison script fails CI/PR checks on allocation regression.
+- [ ] Milestone 3.5 prerequisite “M3 complete” satisfied (checklist above).
+
+#### Lessons learned (specification)
+
+- Do not queue or block `CompleteAsync` behind an active output consumer; fail fast with `InvalidOperationException` instead. Queuing hides deadlocks between read, wait, and one-shot completion.
+- Persistent and one-shot APIs have different timeout models; do not silently apply `PtyCompleteOptions` drain timeouts to `ReadOutputAsync`.
 
 ### Milestone 3.5: Capture Alignment (deferred; was Milestone 2.5)
 
