@@ -45,6 +45,6 @@ tests/MiniPty.Tests/      Focused behavior and integration tests.
 
 ## Documentation
 
-- Keep docs concise and implementation-neutral.
+- Keep docs concise and implementation-neutral; record lessons learned in related specs under `.github/docs` so regressions are easier to avoid and future designs do not restart from zero.
 - Update README or samples when public API behavior changes.
 - Document allocation or compatibility trade-offs only when they matter to users or future maintainers.
