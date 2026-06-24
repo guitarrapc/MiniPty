@@ -360,13 +360,13 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
 
-        var result = await PtyCapture.RunAsync(UnixShell("if [ \"${TERM+x}\" = x ]; then printf 'TERM:%s' \"$TERM\"; else printf 'TERM:MISSING'; fi") with
+        var result = await PtyCapture.RunAsync(Spawn("env", []) with
         {
             Environment = new Dictionary<string, string?> { ["TERM"] = null }
         });
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
-        await Assert.That(result.Contains("TERM:MISSING")).IsTrue();
+        await Assert.That(ContainsEnvironmentLine(result.GetTextString(), "TERM")).IsFalse();
     }
 
     [Test]
@@ -669,6 +669,19 @@ public sealed class PtyTests
     {
         var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
         return Spawn(cmd, ["/c", command]);
+    }
+
+    private static bool ContainsEnvironmentLine(string text, string key)
+    {
+        using var reader = new StringReader(text);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (line.StartsWith(key + "=", StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
     }
 
     private static PtyStartInfo SpawnForValidation() => RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
