@@ -340,6 +340,34 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyOutputChunkDataCanSplitUtf8Sequences()
+    {
+        const string marker = "utf8-boundary";
+        const string expected = "\u20AC" + marker;
+
+        var bytes = Encoding.UTF8.GetBytes(expected);
+        var chunks = new[]
+        {
+            new PtyOutputChunk(bytes.AsMemory(0, 1)),
+            new PtyOutputChunk(bytes.AsMemory(1))
+        };
+
+        using var output = new MemoryStream();
+        var chunkDecode = new StringBuilder();
+
+        foreach (var chunk in chunks)
+        {
+            await output.WriteAsync(chunk.Data);
+            chunkDecode.Append(Encoding.UTF8.GetString(chunk.Data.Span));
+        }
+
+        var decoded = Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
+
+        await Assert.That(decoded).Contains(expected);
+        await Assert.That(chunkDecode.ToString()).DoesNotContain(expected);
+    }
+
+    [Test]
     public async Task PtyReadOutputAsyncDrainsOutputAcrossBoundedBufferCapacity()
     {
         const int minimumLength = 2 * 1024 * 1024;

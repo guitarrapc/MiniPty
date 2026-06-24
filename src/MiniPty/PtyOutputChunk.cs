@@ -5,7 +5,8 @@
 /// </summary>
 /// <remarks>
 /// The memory referenced by <see cref="Data"/> is valid only until the next successful
-/// <c>MoveNextAsync</c> call on the same output enumeration. Copy the data if it must be retained.
+/// <c>MoveNextAsync</c> call on the same output enumeration, or until the owning
+/// <see cref="PtySession"/> is disposed. Copy the data if it must be retained.
 /// </remarks>
 public readonly struct PtyOutputChunk
 {

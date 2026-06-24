@@ -67,7 +67,6 @@ dotnet add package MiniPty.Capture
 **MiniPty** start a session with `Pty.Start`, then either call `ReadOutputAsync` for persistent bytes-only output streaming or call `CompleteAsync` for a one-shot run. Disposing the session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that.
 
 ```csharp
-using System.Text;
 using MiniPty;
 
 // Disposing a pty session kills the child process if it is still running. Use `WaitForExitAsync` to wait for the child to exit without killing it.
@@ -86,8 +85,9 @@ await using var session = Pty.Start(new PtyStartInfo
 
 var outputTask = Task.Run(async () =>
 {
+    var stdout = Console.OpenStandardOutput();
     await foreach (var chunk in session.ReadOutputAsync())
-        Console.Write(Encoding.UTF8.GetString(chunk.Data.Span));
+        await stdout.WriteAsync(chunk.Data);
 });
 
 await session.WriteInputAsync("echo ok\n");
