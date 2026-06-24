@@ -149,8 +149,7 @@ Use `dotnet` for local development, debugging, or publishing.
 
 ### Documentation
 
-- [Document index](.github/docs/spec_index.md)
-- [Specification](.github/docs/spec.md) — API contracts, scope, lessons learned
+- [Specification](.github/docs/spec.md) — API contracts, scope, document map, lessons learned
 - [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, `forkpty`, EOF staging
 
 ### Build

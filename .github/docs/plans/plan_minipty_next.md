@@ -2,7 +2,7 @@
 
 Planning notes for evolving MiniPty from a one-shot-oriented PTY runner into a persistent PTY transport while keeping the core package small, NativeAOT-friendly, and dependency-light.
 
-This document is a working plan, not an implemented API contract. Update [spec.md](../spec.md) after each implemented milestone.
+This document is a working plan, not an implemented API contract. After each implemented milestone, update the relevant implemented specs and keep [spec.md](../spec.md) as the entry-point document map.
 
 ## Summary
 
@@ -308,11 +308,11 @@ TUI programs such as Vim, htop, less, and top should be later smoke tests. They 
 
 As milestones land, update:
 
-- [spec.md](../spec.md): move long-lived sessions from out of scope into core scope when implemented.
-- [spec.md](../spec.md): document `PtyStartInfo.Environment`, `TerminalName`, output streaming, and persistent lifecycle semantics.
-- [spec_index.md](../spec_index.md): add any new implemented spec documents.
+- [spec.md](../spec.md): move long-lived sessions from out of scope into implemented scope and add any new spec documents to the document map.
+- [core_session.md](../specs/core_session.md): document `PtyStartInfo.Environment`, `TerminalName`, output streaming, and persistent session contracts.
+- [lifecycle.md](../specs/lifecycle.md): document persistent cancellation, read, drain, EOF, and disposal semantics.
 - [references/pty_crossplatform.md](../references/pty_crossplatform.md): document environment passing, ConPTY readiness decisions, and Unix `execve` details if implemented.
-- [../../README.md](../../README.md): update features and not-supported sections after the core persistent API is tested.
+- [README.md](../../../README.md): update features and not-supported sections after the core persistent API is tested.
 
 ## Open Questions
 
