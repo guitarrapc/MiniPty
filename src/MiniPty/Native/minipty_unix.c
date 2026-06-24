@@ -23,23 +23,29 @@
 extern char **environ;
 
 static const char minipty_default_term[] = "TERM=xterm-256color";
+static const char minipty_default_path[] = "/bin:/usr/bin";
+
+static int minipty_has_env_name(const char *entry, const char *name)
+{
+    size_t name_len = strlen(name);
+    return strncmp(entry, name, name_len) == 0 && entry[name_len] == '=';
+}
 
 static int minipty_is_sanitized_key(const char *entry)
 {
     static const char *keys[] = {
-        "TMUX=",
-        "TMUX_PANE=",
-        "STY=",
-        "WINDOW=",
-        "WINDOWID=",
-        "TERMCAP=",
-        "COLUMNS=",
-        "LINES=",
+        "TMUX",
+        "TMUX_PANE",
+        "STY",
+        "WINDOW",
+        "WINDOWID",
+        "TERMCAP",
+        "COLUMNS",
+        "LINES",
     };
 
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-        size_t key_len = strlen(keys[i]);
-        if (strncmp(entry, keys[i], key_len) == 0)
+        if (minipty_has_env_name(entry, keys[i]))
             return 1;
     }
 
@@ -54,7 +60,7 @@ static const char *minipty_get_env_value(char *const *envp, const char *name)
         return NULL;
 
     for (char *const *entry = envp; *entry != NULL; entry++) {
-        if (strncmp(*entry, name, name_len) == 0 && (*entry)[name_len] == '=')
+        if (minipty_has_env_name(*entry, name))
             return *entry + name_len + 1;
     }
 
@@ -90,7 +96,7 @@ static char **minipty_build_inherited_envp(void)
     while (environ[count] != NULL) {
         if (!minipty_is_sanitized_key(environ[count]))
             kept++;
-        if (strncmp(environ[count], "TERM=", 5) == 0)
+        if (minipty_has_env_name(environ[count], "TERM"))
             has_term = 1;
         count++;
     }
@@ -140,6 +146,11 @@ static void minipty_execve_path(const char *dir, size_t dir_len, const char *fil
     size_t needs_slash = dir_len > 0 ? 1 : 0;
     char path[PATH_MAX];
 
+    if (dir_len == 0) {
+        minipty_execve_compat(file, argv, envp);
+        return;
+    }
+
     if (dir_len + needs_slash + file_len + 1 > sizeof(path)) {
         errno = ENAMETOOLONG;
         return;
@@ -161,7 +172,6 @@ static void minipty_execvpe(const char *file, char *const *argv, char *const *en
     const char *cursor;
     int saved_errno = ENOENT;
     int saw_eacces = 0;
-    char fallback[256];
 
     if (file == NULL || file[0] == '\0') {
         errno = ENOENT;
@@ -174,15 +184,8 @@ static void minipty_execvpe(const char *file, char *const *argv, char *const *en
     }
 
     path = minipty_get_path(envp);
-    if (path == NULL) {
-#if defined(_CS_PATH)
-        size_t length = confstr(_CS_PATH, fallback, sizeof(fallback));
-        if (length > 0 && length <= sizeof(fallback))
-            path = fallback;
-        else
-#endif
-            path = "/bin:/usr/bin";
-    }
+    if (path == NULL)
+        path = minipty_default_path;
 
     cursor = path;
     while (1) {

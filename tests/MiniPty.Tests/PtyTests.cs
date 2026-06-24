@@ -644,6 +644,50 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyUnixPathLookupUsesFixedFallbackWhenPathIsAbsent()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        var result = await PtyCapture.RunAsync(Spawn("sh", ["-c", "printf path-absent-fallback"]) with
+        {
+            Environment = new Dictionary<string, string?> { ["PATH"] = null }
+        });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.Contains("path-absent-fallback")).IsTrue();
+    }
+
+    [Test]
+    public async Task PtyUnixPathLookupTreatsEmptyPathEntriesAsCurrentDirectory()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        var tempRoot = Path.Combine(Path.GetTempPath(), "minipty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var script = Path.Combine(tempRoot, "minipty-current-path-script");
+            await File.WriteAllTextAsync(script, "printf current-path-entry");
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var result = await PtyCapture.RunAsync(Spawn("minipty-current-path-script", []) with
+            {
+                WorkingDirectory = tempRoot,
+                Environment = new Dictionary<string, string?> { ["PATH"] = ":" }
+            });
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Contains("current-path-entry")).IsTrue();
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task PtyWindowsTerminalNameDoesNotSetTerm()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !TryResolveWindowsPowerShell(out var powershell))
