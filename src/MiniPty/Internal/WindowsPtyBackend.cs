@@ -204,7 +204,15 @@ internal static class WindowsPtyBackend
 
         var charCount = 1;
         for (var i = 0; i < environment.Length; i++)
+        {
+            if (environment[i].Value.Length == 0)
+                continue;
+
             charCount += environment[i].Key.Length + 1 + environment[i].Value.Length + 1;
+        }
+
+        if (charCount == 1)
+            charCount = 2;
 
         var block = Marshal.AllocHGlobal(charCount * sizeof(char));
         var span = new Span<char>((void*)block, charCount);
@@ -212,6 +220,9 @@ internal static class WindowsPtyBackend
         for (var i = 0; i < environment.Length; i++)
         {
             var pair = environment[i];
+            if (pair.Value.Length == 0)
+                continue;
+
             pair.Key.AsSpan().CopyTo(span[offset..]);
             offset += pair.Key.Length;
             span[offset++] = '=';
@@ -221,6 +232,8 @@ internal static class WindowsPtyBackend
         }
 
         span[offset] = '\0';
+        if (offset == 0)
+            span[1] = '\0';
         return block;
     }
 
