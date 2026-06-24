@@ -41,6 +41,7 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 | Member | Behavior |
 |---|---|
 | `Input` / `Output` | Raw byte streams. No line-ending translation. stdout and stderr are merged on `Output`. |
+| `ReadOutputAsync` | Persistent bytes-only output streaming. Returns `IAsyncEnumerable<PtyOutputChunk>`. |
 | `WriteInputAsync` | Writes UTF-8 text by default, or raw bytes. Does not close stdin. |
 | `SendEof()` | Signals end of stdin using platform-specific behavior. See [Lifecycle](lifecycle.md). |
 | `Resize(PtySize)` | Resizes the terminal after spawn. |
@@ -52,9 +53,15 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 
 ## Backpressure
 
-A PTY has backpressure. If the child writes output and nothing reads `PtySession.Output`, the child may block when the terminal buffer fills. Callers must use `CompleteAsync`, `PtyCapture.RunAsync`, or continuously read `Output` themselves.
+A PTY has backpressure. If the child writes output and nothing reads PTY output, the child may block when the terminal buffer fills. Callers must use `ReadOutputAsync`, `CompleteAsync`, `PtyCapture.RunAsync`, or continuously read `Output` themselves.
 
-Continuous manual reading is possible through `Output`, but long-lived interactive sessions are not yet a supported high-level scenario in the current implementation.
+`ReadOutputAsync` is the supported high-level persistent output API. It is bytes-only and performs no text decoding.
+
+`PtyOutputChunk.Data` is ephemeral: it is valid only until the next successful `MoveNextAsync` call on the same enumeration. Callers that need to retain bytes must copy them before advancing the reader.
+
+Only one active `ReadOutputAsync` reader is allowed per session. A concurrent reader attempt throws `InvalidOperationException`. The existing `Output` stream remains available as the low-level stream API, but callers should not read `Output` concurrently with `ReadOutputAsync`.
+
+`ReadOutputAsync` uses bounded, no-drop backpressure. The initial implementation reads chunks up to 16 KiB and does not introduce an unbounded managed output queue.
 
 ## Lessons Learned
 

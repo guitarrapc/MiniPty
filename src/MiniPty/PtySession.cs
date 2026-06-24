@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Runtime.CompilerServices;
+using System.Text;
 using MiniPty.Internal;
 
 namespace MiniPty;
@@ -19,8 +20,10 @@ namespace MiniPty;
 public sealed class PtySession : IAsyncDisposable, IDisposable
 {
     private static readonly PtyCompleteOptions DefaultCompleteOptions = new();
+    private const int OutputStreamChunkSize = 16 * 1024;
 
     private readonly IPtyBackend _backend;
+    private int _outputReaderActive;
     private bool _disposed;
 
     internal PtySession(IPtyBackend backend) => _backend = backend;
@@ -46,6 +49,55 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// </summary>
     /// <remarks>Reads are raw bytes; decode with <see cref="PtyCompleteOptions.OutputEncoding"/> or your own decoder.</remarks>
     public Stream Output => _backend.Output;
+
+    /// <summary>
+    /// Reads persistent PTY output as raw byte chunks.
+    /// </summary>
+    /// <param name="cancellationToken">
+    /// Token used to stop this output reader. Canceling the reader does not kill the child process.
+    /// </param>
+    /// <returns>An async sequence of raw output chunks.</returns>
+    /// <remarks>
+    /// <para>Only one active output reader is allowed. Concurrent readers throw <see cref="InvalidOperationException"/>.</para>
+    /// <para>
+    /// Each chunk's memory is valid only until the next successful <c>MoveNextAsync</c> call on the same enumeration.
+    /// Copy the bytes if they must be retained.
+    /// </para>
+    /// <para>Normal PTY EOF completes the sequence after all available output is drained.</para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">Another output reader is already active.</exception>
+    /// <exception cref="ObjectDisposedException">The session was disposed while reading.</exception>
+    /// <exception cref="IOException">The PTY output transport failed unexpectedly.</exception>
+    /// <exception cref="OperationCanceledException">The reader was canceled.</exception>
+    public async IAsyncEnumerable<PtyOutputChunk> ReadOutputAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        if (Interlocked.Exchange(ref _outputReaderActive, 1) != 0)
+            throw new InvalidOperationException("Only one PTY output reader can be active at a time.");
+
+        try
+        {
+            _ = WaitForExitInternalAsync(CancellationToken.None, killOnCancellation: false);
+            using var bytes = PtyReadBuffer.RentBytes(OutputStreamChunkSize);
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ThrowIfDisposed();
+
+                var read = await Output.ReadAsync(bytes.Memory, cancellationToken).ConfigureAwait(false);
+                if (read <= 0)
+                    yield break;
+
+                ThrowIfDisposed();
+                yield return new PtyOutputChunk(bytes.Memory[..read]);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref _outputReaderActive, 0);
+        }
+    }
 
     /// <summary>
     /// Gets a value indicating whether the child process has exited.
@@ -179,4 +231,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         _backend.WaitForExitAsync(cancellationToken, killOnCancellation);
 
     internal void CloseOutputTransport() => _backend.CloseOutputTransport();
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(PtySession));
+    }
 }

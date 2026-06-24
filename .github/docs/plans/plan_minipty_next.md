@@ -274,7 +274,7 @@ Lessons learned while specifying this milestone:
 - Windows ConPTY currently has no `TerminalName` equivalent. Treating `TerminalName` as Unix-only avoids inventing misleading cross-platform behavior while keeping common `PtyStartInfo` construction portable.
 - Passing explicit Unix `envp` changes executable lookup requirements. A portable `execvpe`-equivalent shim keeps Linux, macOS, and FreeBSD behavior aligned without depending on non-portable libc extensions.
 
-### Milestone 2: Persistent Output Streaming
+### Milestone 2: Persistent Output Streaming (implemented)
 
 Goal: make continuous output consumption a supported core API.
 

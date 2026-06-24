@@ -12,7 +12,7 @@ MiniPty exists as a **standalone, NativeAOT-friendly** library so any .NET progr
 
 | Package | Responsibility |
 |---|---|
-| **MiniPty** | Spawn a child in a PTY; expose `Input` / `Output` streams; provide lifecycle operations and one-shot completion |
+| **MiniPty** | Spawn a child in a PTY; expose `Input` / `Output` streams; provide persistent bytes-only output streaming, lifecycle operations, and one-shot completion |
 | **MiniPty.Capture** | One-shot `PtyCapture.RunAsync` observation with per-read timestamps, merged output, decoded text, and exit code |
 
 Timestamped chunks are **not** part of the core API. Consumers that need to observe PTY output over time take a dependency on both packages.
@@ -22,6 +22,7 @@ Timestamped chunks are **not** part of the core API. Consumers that need to obse
 | Goal | Specification |
 |---|---|
 | Spawn and control a PTY-backed child process | [Core session](specs/core_session.md) |
+| Consume persistent bytes-only PTY output | [Core session](specs/core_session.md), [Lifecycle](specs/lifecycle.md) |
 | Run a one-shot command with optional stdin and drained output | [Completion](specs/completion.md) |
 | Observe one-shot output with per-read timestamps | [Capture](specs/capture.md) |
 | Convert PTY text into host-readable output | [Display text](specs/display_text.md) |
@@ -30,14 +31,13 @@ Timestamped chunks are **not** part of the core API. Consumers that need to obse
 
 ## Out of Scope For The Current Implementation
 
-- Long-lived interactive sessions (vim, less, REPLs)
-- Bidirectional input beyond optional initial stdin text as a supported high-level scenario
+- Full local-console attachment for programs such as vim, less, and htop
 - Remote shells (`ssh`)
 - Spilling capture to disk when memory is exhausted
 - Capture tuning such as max chunk size or chunk timestamp modes
 - Full terminal emulation, TUI replay, or faithful screen-buffer rendering
 
-Future work for persistent PTY sessions is tracked separately in [plans/plan_minipty_next.md](plans/plan_minipty_next.md). Planning documents are not implemented API contracts.
+Future work for capture alignment, local console attachment, and optional node-pty parity features is tracked separately in [plans/plan_minipty_next.md](plans/plan_minipty_next.md). Planning documents are not implemented API contracts.
 
 ## Related Documents
 

@@ -11,6 +11,8 @@ internal static class PtyReadBuffer
 
     internal static RentedByteBuffer RentBytes() => new(ArrayPool<byte>.Shared.Rent(Size), Size);
 
+    internal static RentedByteBuffer RentBytes(int length) => new(ArrayPool<byte>.Shared.Rent(length), length);
+
     internal static RentedCharBuffer RentChars(Encoding encoding) =>
         new(ArrayPool<char>.Shared.Rent(GetCharBufferLength(encoding)), GetCharBufferLength(encoding));
 

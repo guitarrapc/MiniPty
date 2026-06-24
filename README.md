@@ -28,6 +28,7 @@ Ubuntu 24.04, .NET 10
 - Spawn a child in a pseudo-terminal (`Pty.Start`)
 - Overlay child environment variables and set Unix `TERM`
 - `Input` / `Output` byte streams; stdout and stderr merged on `Output`
+- Persistent bytes-only output streaming (`ReadOutputAsync`)
 - One-shot run with optional stdin and drained output (`CompleteAsync`)
 - Resize the terminal after spawn (`PtySession.Resize`)
 - Per-read timestamps for observation or recording (**MiniPty.Capture**, `PtyCapture.RunAsync`)
@@ -35,8 +36,7 @@ Ubuntu 24.04, .NET 10
 
 **Not supported**
 
-- Long-lived interactive sessions (vim, less, REPLs, a shell you type into for minutes)
-- Ongoing bidirectional input beyond an optional initial stdin blob
+- Full local-console attachment for programs such as vim, less, and htop
 - Remote shells (`ssh`) or tunneling a PTY over the network
 - Full terminal emulation, TUI replay, or faithfully preserving `\r` overwrite lines
 - Falling back to pipe redirect when PTY creation fails—if you need a PTY, MiniPty either gives you one or throws
@@ -64,9 +64,10 @@ dotnet add package MiniPty
 dotnet add package MiniPty.Capture
 ```
 
-**MiniPty** start a session with `Pty.Start`, then either pump `Output` yourself or call `CompleteAsync` for a one-shot run. Disposing the session kills the child if it is still running. If nobody reads `Output` while the child writes, the PTY buffer can fill and the child will block; `CompleteAsync` and continuous reads avoid that.
+**MiniPty** start a session with `Pty.Start`, then either call `ReadOutputAsync` for persistent bytes-only output streaming or call `CompleteAsync` for a one-shot run. Disposing the session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that.
 
 ```csharp
+using System.Text;
 using MiniPty;
 
 // Disposing a pty session kills the child process if it is still running. Use `WaitForExitAsync` to wait for the child to exit without killing it.
@@ -83,10 +84,16 @@ await using var session = Pty.Start(new PtyStartInfo
     },
 });
 
+var outputTask = Task.Run(async () =>
+{
+    await foreach (var chunk in session.ReadOutputAsync())
+        Console.Write(Encoding.UTF8.GetString(chunk.Data.Span));
+});
+
 await session.WriteInputAsync("echo ok\n");
 session.SendEof();
 var exitCode = await session.WaitForExitAsync();
-Console.WriteLine(session.Output);
+await outputTask;
 Console.WriteLine($"Exit code: {exitCode}");
 
 // Use `CompleteAsync` to drain output without timestamps:
