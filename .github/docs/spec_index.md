@@ -7,9 +7,10 @@ MiniPty behavior is documented under `.github/docs/`. Specs cover **what** and *
 | Document | Covers |
 |---|---|
 | [spec.md](spec.md) | Library scope, packages, public API contracts, cancellation, failure behavior, verification |
+| [plans/plan_minipty_next.md](plans/plan_minipty_next.md) | Planning notes for persistent PTY sessions, package boundaries, node-pty comparison, and staged API direction |
 | [references/pty_crossplatform.md](references/pty_crossplatform.md) | ConPTY / `openpty` design, EOF staging, interop constraints (implementers) |
 
-Status: **Implemented** (MiniPty 0.3.x, MiniPty.Capture 0.3.x).
+Status: **Implemented** specs cover MiniPty 0.3.x / MiniPty.Capture 0.3.x. Planning documents describe proposed future work and are not API contracts.
 
 ## Where to Look
 
