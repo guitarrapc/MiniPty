@@ -18,9 +18,12 @@ internal static class PtyEnvironment
         "LINES",
     ];
 
-    public static KeyValuePair<string, string>[] BuildUnix(PtyStartInfo startInfo)
+    public static KeyValuePair<string, string>[]? BuildUnix(PtyStartInfo startInfo)
     {
         ValidateTerminalName(startInfo.TerminalName);
+
+        if (startInfo.Environment is null && string.IsNullOrEmpty(startInfo.TerminalName))
+            return null;
 
         var entries = CreateParentMap(StringComparer.Ordinal);
         for (var i = 0; i < UnixSanitizedKeys.Length; i++)

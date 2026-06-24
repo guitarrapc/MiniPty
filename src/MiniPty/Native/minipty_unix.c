@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -19,6 +20,38 @@
 #include <libutil.h>
 #endif
 
+extern char **environ;
+
+static const char minipty_default_term[] = "TERM=xterm-256color";
+static const char minipty_default_path[] = "/bin:/usr/bin";
+
+static int minipty_has_env_name(const char *entry, const char *name)
+{
+    size_t name_len = strlen(name);
+    return strncmp(entry, name, name_len) == 0 && entry[name_len] == '=';
+}
+
+static int minipty_is_sanitized_key(const char *entry)
+{
+    static const char *keys[] = {
+        "TMUX",
+        "TMUX_PANE",
+        "STY",
+        "WINDOW",
+        "WINDOWID",
+        "TERMCAP",
+        "COLUMNS",
+        "LINES",
+    };
+
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (minipty_has_env_name(entry, keys[i]))
+            return 1;
+    }
+
+    return 0;
+}
+
 static const char *minipty_get_env_value(char *const *envp, const char *name)
 {
     size_t name_len = strlen(name);
@@ -27,11 +60,62 @@ static const char *minipty_get_env_value(char *const *envp, const char *name)
         return NULL;
 
     for (char *const *entry = envp; *entry != NULL; entry++) {
-        if (strncmp(*entry, name, name_len) == 0 && (*entry)[name_len] == '=')
+        if (minipty_has_env_name(*entry, name))
             return *entry + name_len + 1;
     }
 
     return NULL;
+}
+
+static const char *minipty_get_path(char *const *envp)
+{
+    const char *path = minipty_get_env_value(envp, "PATH");
+
+    if (path != NULL)
+        return path;
+
+    return NULL;
+}
+
+static char **minipty_build_inherited_envp(void)
+{
+    size_t count = 0;
+    size_t kept = 0;
+    int has_term = 0;
+
+    if (environ == NULL) {
+        char **envp = malloc(2 * sizeof(char *));
+        if (envp == NULL)
+            return NULL;
+
+        envp[0] = (char *)minipty_default_term;
+        envp[1] = NULL;
+        return envp;
+    }
+
+    while (environ[count] != NULL) {
+        if (!minipty_is_sanitized_key(environ[count]))
+            kept++;
+        if (minipty_has_env_name(environ[count], "TERM"))
+            has_term = 1;
+        count++;
+    }
+
+    char **envp = malloc((kept + (has_term ? 0 : 1) + 1) * sizeof(char *));
+    if (envp == NULL)
+        return NULL;
+
+    size_t index = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!minipty_is_sanitized_key(environ[i]))
+            envp[index++] = environ[i];
+    }
+
+    if (!has_term)
+        envp[index++] = (char *)minipty_default_term;
+
+    envp[index] = NULL;
+    return envp;
 }
 
 static void minipty_execve_compat(const char *path, char *const *argv, char *const *envp)
@@ -39,6 +123,7 @@ static void minipty_execve_compat(const char *path, char *const *argv, char *con
     size_t argc = 0;
 
     execve(path, argv, envp);
+
     if (errno != ENOEXEC)
         return;
 
@@ -61,6 +146,11 @@ static void minipty_execve_path(const char *dir, size_t dir_len, const char *fil
     size_t needs_slash = dir_len > 0 ? 1 : 0;
     char path[PATH_MAX];
 
+    if (dir_len == 0) {
+        minipty_execve_compat(file, argv, envp);
+        return;
+    }
+
     if (dir_len + needs_slash + file_len + 1 > sizeof(path)) {
         errno = ENAMETOOLONG;
         return;
@@ -82,7 +172,6 @@ static void minipty_execvpe(const char *file, char *const *argv, char *const *en
     const char *cursor;
     int saved_errno = ENOENT;
     int saw_eacces = 0;
-    char fallback[256];
 
     if (file == NULL || file[0] == '\0') {
         errno = ENOENT;
@@ -94,16 +183,9 @@ static void minipty_execvpe(const char *file, char *const *argv, char *const *en
         return;
     }
 
-    path = minipty_get_env_value(envp, "PATH");
-    if (path == NULL) {
-#if defined(_CS_PATH)
-        size_t length = confstr(_CS_PATH, fallback, sizeof(fallback));
-        if (length > 0 && length <= sizeof(fallback))
-            path = fallback;
-        else
-#endif
-            path = "/bin:/usr/bin";
-    }
+    path = minipty_get_path(envp);
+    if (path == NULL)
+        path = minipty_default_path;
 
     cursor = path;
     while (1) {
@@ -136,6 +218,11 @@ static int spawn_pty_child(
     pid_t pid;
     sigset_t newmask;
     sigset_t oldmask;
+    char **child_envp = envp == NULL ? minipty_build_inherited_envp() : (char **)envp;
+    if (child_envp == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
 
     sigfillset(&newmask);
     pthread_sigmask(SIG_BLOCK, &newmask, &oldmask);
@@ -144,15 +231,21 @@ static int spawn_pty_child(
 
     pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 
-    if (pid < 0)
+    if (pid < 0) {
+        if (envp == NULL)
+            free(child_envp);
         return -1;
+    }
 
     if (pid == 0) {
         if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
             _exit(126);
-        minipty_execvpe(file, argv, envp);
+        minipty_execvpe(file, argv, child_envp);
         _exit(127);
     }
+
+    if (envp == NULL)
+        free(child_envp);
 
     *pid_out = pid;
     return 0;

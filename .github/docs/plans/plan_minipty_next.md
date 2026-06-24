@@ -156,7 +156,7 @@ Unix terminal sanitize removes inherited terminal-container and size variables t
 Executable lookup decisions:
 
 - Unix native spawn moved from `execvp` to a portable `execvpe`-equivalent path so explicit `envp` can be passed.
-- Unix executable lookup uses the final child `PATH` after overlay. If `PATH` is absent, use `_CS_PATH` or `/bin:/usr/bin`; if `PATH` is empty, treat it as an empty path entry, matching current-directory lookup semantics.
+- Unix executable lookup uses the final child `PATH` after overlay. If `PATH` is absent, use `/bin:/usr/bin`; if `PATH` is empty, treat it as an empty path entry, matching current-directory lookup semantics. The fixed fallback avoids libc environment/path discovery calls in the post-`forkpty()` child path.
 - Windows executable lookup remains delegated to `CreateProcessW`; MiniPty does not reimplement `PATHEXT`, system-directory, or application search rules.
 - Windows explicit environment blocks are UTF-16 and require `CREATE_UNICODE_ENVIRONMENT`.
 - Windows important variables such as `SystemRoot` are normally preserved by overlay semantics, but if a caller explicitly removes them MiniPty does not restore them.
