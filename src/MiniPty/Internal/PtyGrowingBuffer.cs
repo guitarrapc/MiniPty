@@ -19,12 +19,20 @@ internal sealed class PtyGrowingBuffer<T> : IDisposable where T : struct
 
     internal ReadOnlySpan<T> WrittenSpan => buffer.AsSpan(0, length);
 
+    internal void EnsureCapacity(int required)
+    {
+        if (required <= buffer.Length)
+            return;
+
+        Grow(required);
+    }
+
     internal void Append(ReadOnlySpan<T> data)
     {
         if (data.IsEmpty)
             return;
 
-        EnsureCapacity(length + data.Length);
+        GrowIfNeeded(length + data.Length);
         data.CopyTo(buffer.AsSpan(length));
         length += data.Length;
     }
@@ -68,11 +76,16 @@ internal sealed class PtyGrowingBuffer<T> : IDisposable where T : struct
         length = 0;
     }
 
-    private void EnsureCapacity(int required)
+    private void GrowIfNeeded(int required)
     {
         if (required <= buffer.Length)
             return;
 
+        Grow(required);
+    }
+
+    private void Grow(int required)
+    {
         var next = buffer.Length == 0 ? PtyReadBuffer.Size : buffer.Length * 2;
         while (next < required)
             next *= 2;

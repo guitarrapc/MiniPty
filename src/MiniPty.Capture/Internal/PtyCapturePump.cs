@@ -5,6 +5,8 @@ namespace MiniPty.Capture;
 
 internal static class PtyCapturePump
 {
+    private const int SustainedOutputInitialCapacity = 32 * 1024;
+
     private readonly record struct ByteChunkMeta(TimeSpan Time, int Start, int Length);
 
     private readonly record struct TextChunkMeta(TimeSpan Time, int Start, int Length);
@@ -37,6 +39,7 @@ internal static class PtyCapturePump
 
                 var slice = bytes.Span[..read];
                 byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteBuffer.Length, read));
+                ReserveForSustainedOutput(byteBuffer, read, bytes.Memory.Length);
                 byteBuffer.Append(slice);
 
                 if (decodeOutput)
@@ -104,5 +107,11 @@ internal static class PtyCapturePump
         }
 
         return chunks;
+    }
+
+    private static void ReserveForSustainedOutput(PtyGrowingBuffer<byte> output, int read, int readBufferLength)
+    {
+        if (output.Length == 0 && read == readBufferLength)
+            output.EnsureCapacity(SustainedOutputInitialCapacity);
     }
 }
