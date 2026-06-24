@@ -26,6 +26,7 @@ Ubuntu 24.04, .NET 10
 - NativeAOT ready, in-process backends only, no winpty or bundled helpers
 - Multi-platform ready, Windows, Linux, macOS, and FreeBSD
 - Spawn a child in a pseudo-terminal (`Pty.Start`)
+- Overlay child environment variables and set Unix `TERM`
 - `Input` / `Output` byte streams; stdout and stderr merged on `Output`
 - One-shot run with optional stdin and drained output (`CompleteAsync`)
 - Resize the terminal after spawn (`PtySession.Resize`)
@@ -47,7 +48,7 @@ MiniPty creates a real PTY on each supported OS; it does not fall back to redire
 | OS | Backend | Notes |
 |----|---------|-------|
 | Windows | ConPTY (`CreatePseudoConsole`) | Uses Win32 ConPTY directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. Requires Windows 10 1809+ / Windows 11. No winpty or helper process is used. |
-| Ubuntu / Linux | `forkpty` | Uses the small `libminipty_unix` native shim to call the platform PTY API, then `execvp` the child inside the PTY. Resize uses `TIOCSWINSZ`. |
+| Ubuntu / Linux | `forkpty` | Uses the small `libminipty_unix` native shim to call the platform PTY API, then `execve` the child inside the PTY. Resize uses `TIOCSWINSZ`. |
 | macOS | `forkpty` | Uses the same Unix backend shape through `libminipty_unix.dylib`, backed by macOS `forkpty` / libutil. Resize uses `TIOCSWINSZ`. |
 | FreeBSD | `forkpty` | Uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle. |
 
@@ -74,6 +75,12 @@ await using var session = Pty.Start(new PtyStartInfo
     FileName = "/bin/bash",
     Arguments = ["-lc", "stty size && echo hello"],
     Size = new PtySize(120, 30),
+    TerminalName = "xterm-256color",
+    Environment = new Dictionary<string, string?>
+    {
+        ["NO_COLOR"] = null,
+        ["MINIPTY_SAMPLE"] = "true",
+    },
 });
 
 await session.WriteInputAsync("echo ok\n");
@@ -96,6 +103,10 @@ Console.WriteLine(PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode
 // Raw bytes: result.Output, or skip pump decoding with DecodeOutput = false
 Console.WriteLine(result.Output.Length);
 ```
+
+`PtyStartInfo.Environment` overlays the parent environment. A null value removes a variable; an empty string sets an empty variable on platforms that preserve empty environment values. On Unix, `TerminalName` sets `TERM`; if no `TERM` remains, MiniPty defaults it to `xterm-256color`. On Windows, `TerminalName` is currently ignored and `TERM` is only passed when explicitly set in `Environment`.
+
+MiniPty is not a sandbox. Processes run with the parent process permissions unless the host application isolates them with OS users, containers, or another security boundary.
 
 **MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`.
 

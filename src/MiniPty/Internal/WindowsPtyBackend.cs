@@ -70,6 +70,7 @@ internal static class WindowsPtyBackend
     private const uint HandleFlagInherit = 0x00000001;
     private const int EofDeferPollsAfterInput = 3;
     private const int EofDeferPollsEmptyInput = 40;
+    private const uint CreateUnicodeEnvironment = 0x00000400;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
@@ -90,6 +91,7 @@ internal static class WindowsPtyBackend
         outputWrite.Dispose();
 
         var attrList = IntPtr.Zero;
+        var environmentBlock = IntPtr.Zero;
         var processInfo = new WindowsProcessInformation();
         try
         {
@@ -137,19 +139,33 @@ internal static class WindowsPtyBackend
             }
 
             var commandLine = (commandLineBuilder.ToString() + '\0').ToCharArray();
+            var environment = PtyEnvironment.BuildWindows(startInfo);
+            var creationFlags = ExtendedStartupInfoPresent;
+            if (environment is not null)
+            {
+                environmentBlock = AllocEnvironmentBlock(environment);
+                creationFlags |= CreateUnicodeEnvironment;
+            }
+
             if (!WindowsInterop.CreateProcessW(
                     null,
                     commandLine,
                     IntPtr.Zero,
                     IntPtr.Zero,
                     false,
-                    ExtendedStartupInfoPresent,
-                    IntPtr.Zero,
+                    creationFlags,
+                    environmentBlock,
                     string.IsNullOrWhiteSpace(startInfo.WorkingDirectory) ? null : startInfo.WorkingDirectory,
                     ref startupInfo,
                     out processInfo))
             {
                 throw new Win32Exception(Marshal.GetLastPInvokeError(), "CreateProcess failed");
+            }
+
+            if (environmentBlock != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(environmentBlock);
+                environmentBlock = IntPtr.Zero;
             }
 
             return new WindowsPtyBackendInstance(
@@ -172,11 +188,40 @@ internal static class WindowsPtyBackend
                 Marshal.FreeHGlobal(attrList);
             }
 
+            if (environmentBlock != IntPtr.Zero)
+                Marshal.FreeHGlobal(environmentBlock);
+
             hpc.Dispose();
             inputWriteHandle.Dispose();
             outputReadHandle.Dispose();
             throw;
         }
+    }
+
+    private static unsafe IntPtr AllocEnvironmentBlock(KeyValuePair<string, string>[] environment)
+    {
+        Array.Sort(environment, static (left, right) => string.Compare(left.Key, right.Key, StringComparison.OrdinalIgnoreCase));
+
+        var charCount = 1;
+        for (var i = 0; i < environment.Length; i++)
+            charCount += environment[i].Key.Length + 1 + environment[i].Value.Length + 1;
+
+        var block = Marshal.AllocHGlobal(charCount * sizeof(char));
+        var span = new Span<char>((void*)block, charCount);
+        var offset = 0;
+        for (var i = 0; i < environment.Length; i++)
+        {
+            var pair = environment[i];
+            pair.Key.AsSpan().CopyTo(span[offset..]);
+            offset += pair.Key.Length;
+            span[offset++] = '=';
+            pair.Value.AsSpan().CopyTo(span[offset..]);
+            offset += pair.Value.Length;
+            span[offset++] = '\0';
+        }
+
+        span[offset] = '\0';
+        return block;
     }
 
     private sealed class WindowsPtyBackendInstance : IPtyBackend

@@ -136,7 +136,7 @@ Resolved Milestone 1 decisions:
 
 - `Environment = null` inherits the parent environment.
 - A non-null `Environment` is an overlay on top of the parent environment, not a replacement block. This intentionally differs from node-pty, where callers commonly pass `process.env` or build their own overlay before spawn.
-- Environment values use `null` to remove a variable and `""` to set an empty variable.
+- Environment values use `null` to remove a variable and `""` to set an empty variable where the platform preserves empty environment variables. On Windows, empty environment entries are observed by children as missing, matching the OS environment model.
 - Environment keys are case-insensitive on Windows and case-sensitive on Unix.
 - Invalid environment keys or values are rejected at spawn time: empty keys, keys containing `=`, and keys or values containing NUL are invalid.
 - Duplicate-equivalent overlay keys are resolved by enumeration order; the last value wins.
@@ -155,7 +155,7 @@ Unix terminal sanitize removes inherited terminal-container and size variables t
 
 Executable lookup decisions:
 
-- Unix native spawn should move from `execvp` to a portable `execvpe`-equivalent path so explicit `envp` can be passed.
+- Unix native spawn moved from `execvp` to a portable `execvpe`-equivalent path so explicit `envp` can be passed.
 - Unix executable lookup uses the final child `PATH` after overlay. If `PATH` is absent, use `_CS_PATH` or `/bin:/usr/bin`; if `PATH` is empty, treat it as an empty path entry, matching current-directory lookup semantics.
 - Windows executable lookup remains delegated to `CreateProcessW`; MiniPty does not reimplement `PATHEXT`, system-directory, or application search rules.
 - Windows explicit environment blocks are UTF-16 and require `CREATE_UNICODE_ENVIRONMENT`.
@@ -249,7 +249,7 @@ Initial recommendation:
 
 ## Implementation Milestones
 
-### Milestone 1: Spawn Option Parity
+### Milestone 1: Spawn Option Parity (implemented)
 
 Goal: make child process environment suitable for terminal applications.
 
@@ -266,6 +266,7 @@ Lessons learned while specifying this milestone:
 - Parent environment inheritance is normal PTY behavior, not a sandbox. Removing inherited secrets must be an explicit caller policy, while untrusted PTY hosting requires process isolation beyond environment filtering.
 - Terminal correctness needs a small Unix sanitize step. Inheriting `COLUMNS`, `LINES`, tmux, screen, or termcap variables from the parent can make a new PTY behave as if it still lived inside the parent terminal context.
 - `TERM` defaults are useful on Unix but should not override explicit caller intent. `Environment["TERM"] = null` means no `TERM`; `Environment["TERM"] = ""` means an empty `TERM`; `TerminalName` is the only dedicated option that overrides the overlay.
+- Windows does not preserve an empty environment variable as a child-visible empty value. Treat `""` as distinct in the API so Unix can express it, but document that Windows children observe it like removal.
 - Windows ConPTY currently has no `TerminalName` equivalent. Treating `TerminalName` as Unix-only avoids inventing misleading cross-platform behavior while keeping common `PtyStartInfo` construction portable.
 - Passing explicit Unix `envp` changes executable lookup requirements. A portable `execvpe`-equivalent shim keeps Linux, macOS, and FreeBSD behavior aligned without depending on non-portable libc extensions.
 
