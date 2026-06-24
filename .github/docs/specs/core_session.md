@@ -61,7 +61,7 @@ A PTY has backpressure. If the child writes output and nothing reads PTY output,
 
 Only one active `ReadOutputAsync` reader is allowed per session. A concurrent reader attempt throws `InvalidOperationException`. The existing `Output` stream remains available as the low-level stream API, but callers should not read `Output` concurrently with `ReadOutputAsync`.
 
-`ReadOutputAsync` uses bounded, no-drop backpressure. The initial implementation reads chunks up to 16 KiB and does not introduce an unbounded managed output queue.
+`ReadOutputAsync` uses a bounded 1 MiB managed output buffer and does not drop data. The producer waits when the buffer is full, and chunks are returned with a maximum size of 16 KiB.
 
 ## Lessons Learned
 
