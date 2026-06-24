@@ -3,6 +3,7 @@ using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Diagnosers;
 using BenchmarkDotNet.Jobs;
 using MiniPty.Capture;
+using MiniPty.Internal;
 
 namespace MiniPty.Benchmarks;
 
@@ -96,6 +97,42 @@ public class PtyIntegrationBenchmarks
         var length = 0;
         await foreach (var chunk in session.ReadOutputAsync())
             length += chunk.Data.Length;
+
+        return length;
+    }
+
+    [BenchmarkCategory("Integration", "Streaming", "Binary")]
+    [Benchmark]
+    public async Task<int> Session_32KiB_OutputStreamBytes()
+    {
+        if (!supported)
+            return 0;
+
+        await using var session = Pty.Start(smallStdout);
+        var readTask = ReadOutputStreamAsync(session.Output);
+        await session.WaitForExitInternalAsync(CancellationToken.None, killOnCancellation: false).ConfigureAwait(false);
+        return await PtyOutputDrain.AwaitPumpAsync(
+            readTask,
+            session.CloseOutputTransport,
+            BenchmarkOptions.BytesOnly.OutputDrainGrace,
+            BenchmarkOptions.BytesOnly.OutputReaderCloseTimeout,
+            throwOnTimeout: true,
+            transportAlreadyClosed: false,
+            CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private static async Task<int> ReadOutputStreamAsync(Stream output)
+    {
+        using var bytes = PtyReadBuffer.RentBytes();
+        var length = 0;
+        while (true)
+        {
+            var read = await output.ReadAsync(bytes.Memory).ConfigureAwait(false);
+            if (read <= 0)
+                break;
+
+            length += read;
+        }
 
         return length;
     }
