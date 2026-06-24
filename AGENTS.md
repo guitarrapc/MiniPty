@@ -14,6 +14,18 @@ Keep every change small, measurable, and friendly to zero-allocation implementat
 - Keep public APIs minimal, predictable, and hard to misuse.
 - Design APIs so that their usage is immediately intuitive. Simplicity is the ideal; complexity is the enemy.
 
+## Project Structure
+
+```
+.github/docs/             Design notes, plans, and project documentation.
+samples/                  User-facing examples.
+scripts/                  Packaging and native helper scripts.
+src/MiniPty/              Core public API, PTY sessions, platform backends, and shared internals.
+src/MiniPty.Capture/      Timestamped capture API layered on top of MiniPty.
+src/MiniPty.Benchmarks/   Performance benchmarks and benchmark samples.
+tests/MiniPty.Tests/      Focused behavior and integration tests.
+```
+
 ## Implementation Guidance
 
 - Preserve existing cross-platform behavior for Windows ConPTY and Unix PTY backends.
