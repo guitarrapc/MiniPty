@@ -7,6 +7,7 @@ Implemented lifecycle, cancellation, EOF, drain, and failure behavior for MiniPt
 | API | On cancellation |
 |---|---|
 | `WaitForExitAsync` | Waiting stops with `OperationCanceledException`; the child continues running. |
+| `ReadOutputAsync` | Output enumeration stops with `OperationCanceledException`; the child continues running. |
 | `CompleteAsync` | When `KillOnCancellation` is true, the child is killed and `OperationCanceledException` is thrown. |
 | `PtyCapture.RunAsync` | Same as `CompleteAsync`; it uses completion options. |
 
@@ -27,6 +28,7 @@ Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-
 
 | Behavior | Contract |
 |---|---|
+| `ReadOutputAsync` after child exit | Drains remaining output and then completes normally. |
 | `CompleteAsync` after child exit | Drains output for `OutputDrainGrace`, then closes transport if needed. |
 | Output reader close | Waits up to `OutputReaderCloseTimeout`. |
 | `Dispose` while child running | Kills the child, then releases handles. |
@@ -39,6 +41,8 @@ Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-
 | Unsupported OS | `PlatformNotSupportedException` from `Pty.Start`. |
 | Spawn, ConPTY, `openpty`, or `forkpty` failure | OS exception with error code; run aborts. |
 | Child non-zero exit | Returned as `ExitCode`; MiniPty does not throw for non-zero child exits. |
+| Concurrent `ReadOutputAsync` readers | `InvalidOperationException`. |
+| Session disposed while output streaming | `ObjectDisposedException`. |
 | `ExitTimeout` exceeded | `TimeoutException`. |
 | Output drain or reader close timeout | `TimeoutException`. |
 

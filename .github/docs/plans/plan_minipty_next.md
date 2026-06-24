@@ -168,29 +168,37 @@ Security contract:
 
 ### Output Streaming
 
-Add a first-class persistent output API. Prefer an async stream or channel over events as the primary primitive so backpressure and cancellation remain explicit.
+Milestone 2 decisions:
 
-Possible shape:
+- Keep core bytes-first. No text decode in core streaming API.
+- Add a first-class persistent output API on `PtySession`:
 
 ```csharp
-public readonly record struct PtyOutputChunk(
-    ReadOnlyMemory<byte> Data,
-    TimeSpan? Time = null);
+public readonly struct PtyOutputChunk
+{
+    public ReadOnlyMemory<byte> Data { get; }
+}
 
 public IAsyncEnumerable<PtyOutputChunk> ReadOutputAsync(
-    PtyReadOptions? options = null,
     CancellationToken cancellationToken = default);
 ```
 
-Alternative shape:
+- Use `IAsyncEnumerable<PtyOutputChunk>` as the primary public shape.
+- Enforce single active reader. A second concurrent reader attempt throws `InvalidOperationException`.
+- Chunk lifetime is ephemeral: `Data` is valid until the next `MoveNextAsync` on that same enumeration.
+- Child exit handling: after child exit, drain remaining output and then complete enumeration normally (EOF-style completion).
+- Cancellation handling: canceling `ReadOutputAsync` stops the reader only; it does not kill the child.
+- Error handling: unexpected transport/read failures complete enumeration with exceptions (`IOException` family; cancellation as `OperationCanceledException`).
+- Dispose handling: disposing an active session while streaming causes reader termination with `ObjectDisposedException`.
+- Backpressure contract: do not drop data. Use bounded buffering with producer wait.
+- Initial implementation constants: buffer upper bound 1 MiB, max chunk size 16 KiB.
+- Keep existing `Output` stream and one-shot APIs during Milestone 2 (no deprecation in this milestone).
 
-```csharp
-public ChannelReader<PtyOutputChunk> StartOutputReader(
-    PtyReadOptions? options = null,
-    CancellationToken cancellationToken = default);
-```
+Deferred ideas (not in Milestone 2):
 
-Preference: start with `IAsyncEnumerable<PtyOutputChunk>` because it matches .NET streaming APIs and avoids owning a background task until enumeration starts. Add a channel wrapper later only if frontend integration needs it.
+- Public advanced reader API (`WaitToReadAsync` + `TryRead`).
+- Public channel-based wrapper API.
+- Timestamped output in core.
 
 ### Exit Status
 
@@ -226,25 +234,21 @@ Events can be added as convenience later, but the primary API should not depend 
 
 Persistent sessions need sharper lifecycle contracts than one-shot completion:
 
-| Area | Decision needed |
+| Area | Milestone 2 decision |
 |---|---|
-| Concurrent reads | Whether only one active `ReadOutputAsync` enumeration is allowed |
-| Concurrent writes | Whether multiple `WriteInputAsync` calls are serialized or caller-managed |
-| Cancellation | Canceling output enumeration should stop reading only, not kill the child |
-| Child exit | Whether output streaming naturally drains until EOF after exit |
-| Dispose | Existing behavior kills the child if running; keep this for core consistency |
+| Concurrent reads | Exactly one active `ReadOutputAsync` reader is allowed |
+| Concurrent writes | Keep existing `WriteInputAsync` behavior; caller-ordered by awaiting writes |
+| Cancellation | Canceling output enumeration stops reading only; child remains alive |
+| Child exit | Stream drains remaining output then completes normally |
+| Dispose | Existing dispose behavior remains; active readers terminate with `ObjectDisposedException` |
 | EOF | Preserve platform-specific `SendEof`; document limitations for raw/canonical modes |
-| Read errors | Distinguish expected PTY EOF/EIO-on-exit from unexpected transport failures |
-| Backpressure | State whether slow consumers block the output pump or whether data can be dropped |
-| Buffer ownership | Chunks must have stable memory after each read; no rented buffer leakage |
+| Read errors | Unexpected transport failures surface as exceptions from enumeration |
+| Backpressure | Bounded buffer, producer wait, and no data drop |
+| Buffer ownership | Chunk memory is valid until next `MoveNextAsync` on the same enumeration |
 
-Initial recommendation:
+Resolved implementation notes:
 
-- Allow one output reader at a time.
-- Keep writes caller-ordered by awaiting `WriteInputAsync`; add internal serialization only if tests expose interleaving issues.
-- Canceling `ReadOutputAsync` stops the enumeration and leaves the child alive.
 - `WaitForExitAsync` cancellation continues to mean stop waiting only.
-- `Dispose` continues to kill if the child is still running.
 - `CompleteAsync` remains the API that may kill on cancellation through `PtyCompleteOptions.KillOnCancellation`.
 
 ## Implementation Milestones
@@ -270,16 +274,29 @@ Lessons learned while specifying this milestone:
 - Windows ConPTY currently has no `TerminalName` equivalent. Treating `TerminalName` as Unix-only avoids inventing misleading cross-platform behavior while keeping common `PtyStartInfo` construction portable.
 - Passing explicit Unix `envp` changes executable lookup requirements. A portable `execvpe`-equivalent shim keeps Linux, macOS, and FreeBSD behavior aligned without depending on non-portable libc extensions.
 
-### Milestone 2: Persistent Output Streaming
+### Milestone 2: Persistent Output Streaming (implemented)
 
 Goal: make continuous output consumption a supported core API.
 
-- Add `PtyOutputChunk`.
-- Add `PtySession.ReadOutputAsync`.
-- Define single-reader behavior.
-- Treat expected PTY EOF conditions as normal completion.
-- Ensure chunks own stable memory.
-- Add shell/REPL tests that read prompt/output while writing multiple commands.
+- Add `PtyOutputChunk` (bytes-only).
+- Add `PtySession.ReadOutputAsync(CancellationToken)` returning `IAsyncEnumerable<PtyOutputChunk>`.
+- Enforce single-reader behavior (`InvalidOperationException` on concurrent reader attempt).
+- Treat expected PTY EOF conditions as normal completion after exit+drain.
+- Use bounded buffering (1 MiB), no-drop policy, producer wait on pressure.
+- Use 16 KiB max chunk size in the initial implementation.
+- Define ephemeral chunk lifetime contract (valid until next `MoveNextAsync`).
+- Keep existing `Output` stream API as-is in this milestone.
+- Add tests for shell/REPL command loops, single-reader violations, cancellation semantics, drain-on-exit, and backpressure behavior.
+
+### Milestone 2.5: Capture Alignment (separate PR series)
+
+Goal: migrate safely without expanding Milestone 2 risk.
+
+- Keep `MiniPty.Capture` public API unchanged.
+- Incrementally move Capture internals to consume the Milestone 2 core streaming primitive.
+- Keep timestamp/decode concerns in Capture, not in core.
+- Validate parity with existing one-shot capture behavior via focused tests/benchmarks.
+- Keep PRs small and separable from Milestone 2 core transport changes.
 
 ### Milestone 3: Lifecycle Hardening
 
@@ -356,10 +373,8 @@ As milestones land, update:
 
 ## Open Questions
 
-- Should persistent output streaming return only raw bytes, or should it optionally decode text chunks with a `Decoder` like capture does?
-- Should `ReadOutputAsync` include timestamps, or should timestamps remain exclusive to `MiniPty.Capture`?
-- Should environment dictionaries replace the full environment or overlay the parent environment?
-- Should `TerminalName` be a first-class property, or should callers set `TERM` through `Environment`?
+- Should we later expose an advanced low-allocation reader API (`WaitToReadAsync` + `TryRead`) in addition to `IAsyncEnumerable`?
+- Should backpressure limits (buffer upper bound, chunk size) become configurable start/read options?
 - Is Unix `uid` / `gid` worth supporting in a minimal AOT-friendly library?
 - Does Windows ConPTY require a public ready state or only internal write/resize deferral?
 - Should flow control be explicit (`Pause` / `Resume`) or expressed through bounded async streams/channels?

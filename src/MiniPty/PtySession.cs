@@ -1,4 +1,6 @@
-﻿using System.Text;
+﻿using System.Runtime.CompilerServices;
+using System.Buffers;
+using System.Text;
 using MiniPty.Internal;
 
 namespace MiniPty;
@@ -19,8 +21,13 @@ namespace MiniPty;
 public sealed class PtySession : IAsyncDisposable, IDisposable
 {
     private static readonly PtyCompleteOptions DefaultCompleteOptions = new();
+    private const int OutputBufferCapacity = 1024 * 1024;
+    private const int OutputStreamChunkSize = 16 * 1024;
 
     private readonly IPtyBackend _backend;
+    private readonly Lock _outputReaderLock = new();
+    private BoundedOutputBuffer? _outputBuffer;
+    private int _outputReaderActive;
     private bool _disposed;
 
     internal PtySession(IPtyBackend backend) => _backend = backend;
@@ -46,6 +53,66 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// </summary>
     /// <remarks>Reads are raw bytes; decode with <see cref="PtyCompleteOptions.OutputEncoding"/> or your own decoder.</remarks>
     public Stream Output => _backend.Output;
+
+    /// <summary>
+    /// Reads persistent PTY output as raw byte chunks.
+    /// </summary>
+    /// <param name="cancellationToken">
+    /// Token used to stop this output reader. Canceling the reader does not kill the child process.
+    /// </param>
+    /// <returns>An async sequence of raw output chunks.</returns>
+    /// <remarks>
+    /// <para>Only one active output reader is allowed. Concurrent readers throw <see cref="InvalidOperationException"/>.</para>
+    /// <para>
+    /// Each chunk's memory is valid only until the next successful <c>MoveNextAsync</c> call on the same enumeration.
+    /// Copy the bytes if they must be retained.
+    /// </para>
+    /// <para>Normal PTY EOF completes the sequence after all available output is drained.</para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">Another output reader is already active.</exception>
+    /// <exception cref="ObjectDisposedException">The session was disposed while reading.</exception>
+    /// <exception cref="IOException">The PTY output transport failed unexpectedly.</exception>
+    /// <exception cref="OperationCanceledException">The reader was canceled.</exception>
+    public async IAsyncEnumerable<PtyOutputChunk> ReadOutputAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        if (Interlocked.Exchange(ref _outputReaderActive, 1) != 0)
+            throw new InvalidOperationException("Only one PTY output reader can be active at a time.");
+
+        BoundedOutputBuffer? outputBuffer = null;
+        var pendingAdvance = 0;
+        try
+        {
+            outputBuffer = GetOrCreateOutputBuffer();
+            while (true)
+            {
+                if (pendingAdvance > 0)
+                {
+                    outputBuffer.Advance(pendingAdvance);
+                    pendingAdvance = 0;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                ThrowIfDisposed();
+
+                var chunk = await outputBuffer.ReadAsync(cancellationToken).ConfigureAwait(false);
+                if (chunk.IsEmpty)
+                    yield break;
+
+                ThrowIfDisposed();
+                pendingAdvance = chunk.Length;
+                yield return new PtyOutputChunk(chunk);
+            }
+        }
+        finally
+        {
+            if (pendingAdvance > 0)
+                outputBuffer?.Advance(pendingAdvance);
+
+            Volatile.Write(ref _outputReaderActive, 0);
+        }
+    }
 
     /// <summary>
     /// Gets a value indicating whether the child process has exited.
@@ -162,6 +229,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             return;
 
         _disposed = true;
+        _outputBuffer?.Dispose();
         _backend.Dispose();
     }
 
@@ -179,4 +247,244 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         _backend.WaitForExitAsync(cancellationToken, killOnCancellation);
 
     internal void CloseOutputTransport() => _backend.CloseOutputTransport();
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(PtySession));
+    }
+
+    private BoundedOutputBuffer GetOrCreateOutputBuffer()
+    {
+        lock (_outputReaderLock)
+            return _outputBuffer ??= new BoundedOutputBuffer(this);
+    }
+
+    private sealed class BoundedOutputBuffer : IDisposable
+    {
+        private readonly PtySession _session;
+        private readonly Lock _gate = new();
+        private readonly byte[] _buffer;
+        private readonly CancellationTokenSource _producerCancellation = new();
+        private readonly Task _producer;
+        private bool _bufferReturned;
+        private int _readOffset;
+        private int _writeOffset;
+        private int _count;
+        private bool _completed;
+        private bool _disposed;
+        private Exception? _error;
+        private TaskCompletionSource? _dataAvailable;
+        private TaskCompletionSource? _spaceAvailable;
+
+        internal BoundedOutputBuffer(PtySession session)
+        {
+            _session = session;
+            _buffer = ArrayPool<byte>.Shared.Rent(OutputBufferCapacity);
+            _producer = ProduceAsync();
+        }
+
+        internal async ValueTask<ReadOnlyMemory<byte>> ReadAsync(CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                Task? wait;
+                lock (_gate)
+                {
+                    if (_disposed)
+                        throw new ObjectDisposedException(nameof(PtySession));
+
+                    if (_count > 0)
+                    {
+                        var length = Math.Min(_count, OutputBufferCapacity - _readOffset);
+                        length = Math.Min(length, OutputStreamChunkSize);
+                        return _buffer.AsMemory(_readOffset, length);
+                    }
+
+                    if (_error is not null)
+                        throw _error;
+
+                    if (_completed)
+                        return ReadOnlyMemory<byte>.Empty;
+
+                    wait = (_dataAvailable ??= CreateSignal()).Task;
+                }
+
+                await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        internal void Advance(int length)
+        {
+            if (length <= 0)
+                return;
+
+            TaskCompletionSource? signal = null;
+            lock (_gate)
+            {
+                _readOffset = (_readOffset + length) % OutputBufferCapacity;
+                _count -= length;
+                signal = _spaceAvailable;
+                _spaceAvailable = null;
+            }
+
+            signal?.TrySetResult();
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                    return;
+
+                _disposed = true;
+            }
+
+            _producerCancellation.Cancel();
+            SignalAll();
+            if (_producer.IsCompleted)
+            {
+                ReturnBuffer();
+                return;
+            }
+
+            _ = _producer.ContinueWith(
+                static (task, state) => ((BoundedOutputBuffer)state!).ReturnBuffer(),
+                this,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        private async Task ProduceAsync()
+        {
+            Task<int>? exitTask = null;
+            try
+            {
+                exitTask = _session.WaitForExitInternalAsync(CancellationToken.None, killOnCancellation: false);
+                using var bytes = PtyReadBuffer.RentBytes(OutputStreamChunkSize);
+                while (true)
+                {
+                    var read = await _session.Output.ReadAsync(bytes.Memory, _producerCancellation.Token).ConfigureAwait(false);
+                    if (read <= 0)
+                        break;
+
+                    var consumed = 0;
+                    while (consumed < read)
+                    {
+                        var written = await WriteAsync(bytes.Memory.Slice(consumed, read - consumed), _producerCancellation.Token).ConfigureAwait(false);
+                        consumed += written;
+                    }
+                }
+
+                Complete(null);
+            }
+            catch (OperationCanceledException) when (_producerCancellation.IsCancellationRequested)
+            {
+                Complete(null);
+            }
+            catch (Exception ex) when (_session._disposed && ex is IOException or ObjectDisposedException or System.ComponentModel.Win32Exception)
+            {
+                Complete(new ObjectDisposedException(nameof(PtySession), ex));
+            }
+            catch (Exception ex)
+            {
+                Complete(ex);
+            }
+            finally
+            {
+                _ = ObserveExitAsync(exitTask);
+            }
+        }
+
+        private async ValueTask<int> WriteAsync(ReadOnlyMemory<byte> source, CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                Task? wait;
+                lock (_gate)
+                {
+                    if (_disposed)
+                        throw new ObjectDisposedException(nameof(PtySession));
+
+                    var free = OutputBufferCapacity - _count;
+                    if (free > 0)
+                    {
+                        var length = Math.Min(source.Length, free);
+                        length = Math.Min(length, OutputBufferCapacity - _writeOffset);
+                        source[..length].CopyTo(_buffer.AsMemory(_writeOffset, length));
+                        _writeOffset = (_writeOffset + length) % OutputBufferCapacity;
+                        _count += length;
+                        var signal = _dataAvailable;
+                        _dataAvailable = null;
+                        signal?.TrySetResult();
+                        return length;
+                    }
+
+                    wait = (_spaceAvailable ??= CreateSignal()).Task;
+                }
+
+                await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        private void Complete(Exception? error)
+        {
+            lock (_gate)
+            {
+                _error = error;
+                _completed = true;
+            }
+
+            SignalAll();
+        }
+
+        private void SignalAll()
+        {
+            TaskCompletionSource? data;
+            TaskCompletionSource? space;
+            lock (_gate)
+            {
+                data = _dataAvailable;
+                space = _spaceAvailable;
+                _dataAvailable = null;
+                _spaceAvailable = null;
+            }
+
+            data?.TrySetResult();
+            space?.TrySetResult();
+        }
+
+        private static TaskCompletionSource CreateSignal() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private void ReturnBuffer()
+        {
+            _producerCancellation.Dispose();
+            lock (_gate)
+            {
+                if (_bufferReturned)
+                    return;
+
+                _bufferReturned = true;
+            }
+
+            ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
+        }
+
+        private static async Task ObserveExitAsync(Task<int>? exitTask)
+        {
+            if (exitTask is null)
+                return;
+
+            try
+            {
+                await exitTask.ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+        }
+    }
 }

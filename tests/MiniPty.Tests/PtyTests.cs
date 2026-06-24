@@ -1,4 +1,5 @@
 ﻿using System.Runtime.InteropServices;
+using System.Text;
 using MiniPty.Capture;
 
 namespace MiniPty.Tests;
@@ -174,6 +175,226 @@ public sealed class PtyTests
 
         await Assert.That(unix.ExitCode).IsEqualTo(0);
         await Assert.That(unix.Output.Length).IsGreaterThan(999_999);
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncReadsBytesUntilExit()
+    {
+        const string marker = "minipty-streaming-output";
+
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand($"echo {marker}")
+            : UnixShell($"printf {marker}"));
+
+        var text = await ReadOutputTextAsync(session, marker);
+        var exitCode = await session.WaitForExitAsync();
+
+        await Assert.That(exitCode).IsEqualTo(0);
+        await Assert.That(text).Contains(marker);
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncSupportsPersistentCommandLoop()
+    {
+        var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        PtyStartInfo startInfo;
+        if (isWindows)
+        {
+            if (!TryResolveWindowsPowerShell(out var powershell))
+                return;
+
+            startInfo = Spawn(powershell,
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                "[Console]::Out.WriteLine('ready'); $a=[Console]::In.ReadLine(); [Console]::Out.WriteLine('first:' + $a); $b=[Console]::In.ReadLine(); [Console]::Out.WriteLine('second:' + $b)"
+            ]);
+        }
+        else
+        {
+            startInfo = Spawn("sh", ["-c", "printf 'ready\\n'; IFS= read -r a; printf 'first:%s\\n' \"$a\"; IFS= read -r b; printf 'second:%s\\n' \"$b\""]);
+        }
+
+        var newline = isWindows ? "\r\n" : "\n";
+
+        await using var session = Pty.Start(startInfo);
+        var outputTask = ReadOutputTextAsync(session, "second:beta");
+
+        await session.WriteInputAsync("alpha" + newline);
+        await session.WriteInputAsync("beta" + newline);
+
+        var text = await outputTask;
+        var exitCode = await session.WaitForExitAsync();
+
+        await Assert.That(exitCode).IsEqualTo(0);
+        await Assert.That(text).Contains("first:alpha");
+        await Assert.That(text).Contains("second:beta");
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncRejectsConcurrentReaders()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("echo ready & ping -n 3 127.0.0.1 >nul")
+            : UnixShell("printf ready; sleep 2"));
+
+        await using var first = session.ReadOutputAsync().GetAsyncEnumerator();
+        await Assert.That(await first.MoveNextAsync()).IsTrue();
+
+        await using var second = session.ReadOutputAsync().GetAsyncEnumerator();
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await second.MoveNextAsync());
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncCancellationDoesNotKillChild()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("echo ready & ping -n 3 127.0.0.1 >nul")
+            : UnixShell("printf ready; sleep 2"));
+
+        using var cts = new CancellationTokenSource();
+        await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
+        await Assert.That(await reader.MoveNextAsync()).IsTrue();
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await reader.MoveNextAsync());
+        await Assert.That(session.HasExited).IsFalse();
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncCanRestartAfterCancellation()
+    {
+        var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        PtyStartInfo startInfo;
+        if (isWindows)
+        {
+            if (!TryResolveWindowsPowerShell(out var powershell))
+                return;
+
+            startInfo = Spawn(powershell,
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                "[Console]::Out.WriteLine('ready'); $line=[Console]::In.ReadLine(); [Console]::Out.WriteLine('after:' + $line)"
+            ]);
+        }
+        else
+        {
+            startInfo = Spawn("sh", ["-c", "printf 'ready\\n'; IFS= read -r line; printf 'after:%s\\n' \"$line\""]);
+        }
+
+        await using var session = Pty.Start(startInfo);
+
+        using (var cts = new CancellationTokenSource())
+        {
+            await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
+            await Assert.That(await reader.MoveNextAsync()).IsTrue();
+            await cts.CancelAsync();
+            await Assert.ThrowsAsync<OperationCanceledException>(async () => await reader.MoveNextAsync());
+        }
+
+        var newline = isWindows ? "\r\n" : "\n";
+        var outputTask = ReadOutputTextAsync(session, "after:restart");
+        await session.WriteInputAsync("restart" + newline);
+        var text = await outputTask;
+        var exitCode = await session.WaitForExitAsync();
+
+        await Assert.That(exitCode).IsEqualTo(0);
+        await Assert.That(text).Contains("after:restart");
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncThrowsObjectDisposedWhenDisposedWhileReading()
+    {
+        var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("echo ready & ping -n 8 127.0.0.1 >nul")
+            : UnixShell("printf ready; sleep 8"));
+
+        await using var reader = session.ReadOutputAsync().GetAsyncEnumerator();
+        await Assert.That(await reader.MoveNextAsync()).IsTrue();
+
+        session.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await reader.MoveNextAsync());
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncDrainsLargeOutputAfterExit()
+    {
+        const int minimumLength = 128 * 1024;
+
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? Spawn(Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe", ["/c", "for /l %i in (1,1,4096) do @echo 0123456789abcdef0123456789abcdef"])
+            : UnixShell("yes 0123456789abcdef0123456789abcdef | head -c 131072"));
+
+        var length = 0;
+        await foreach (var chunk in session.ReadOutputAsync())
+            length += chunk.Data.Length;
+
+        var exitCode = await session.WaitForExitAsync();
+
+        await Assert.That(exitCode).IsEqualTo(0);
+        await Assert.That(length).IsGreaterThanOrEqualTo(minimumLength);
+    }
+
+    [Test]
+    public async Task PtyOutputChunkDataCanSplitUtf8Sequences()
+    {
+        const string marker = "utf8-boundary";
+        const string expected = "\u20AC" + marker;
+
+        var bytes = Encoding.UTF8.GetBytes(expected);
+        var chunks = new[]
+        {
+            new PtyOutputChunk(bytes.AsMemory(0, 1)),
+            new PtyOutputChunk(bytes.AsMemory(1))
+        };
+
+        using var output = new MemoryStream();
+        var chunkDecode = new StringBuilder();
+
+        foreach (var chunk in chunks)
+        {
+            await output.WriteAsync(chunk.Data);
+            chunkDecode.Append(Encoding.UTF8.GetString(chunk.Data.Span));
+        }
+
+        var decoded = Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
+
+        await Assert.That(decoded).Contains(expected);
+        await Assert.That(chunkDecode.ToString()).DoesNotContain(expected);
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncDrainsOutputAcrossBoundedBufferCapacity()
+    {
+        const int minimumLength = 2 * 1024 * 1024;
+
+        PtyStartInfo startInfo;
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            if (!TryResolveWindowsPowerShell(out var powershell))
+                return;
+
+            startInfo = Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "[Console]::Out.Write(('x' * 2097152))"]);
+        }
+        else
+        {
+            startInfo = UnixShell("yes x | head -c 2097152");
+        }
+
+        await using var session = Pty.Start(startInfo);
+
+        var length = 0;
+        await foreach (var chunk in session.ReadOutputAsync())
+            length += chunk.Data.Length;
+
+        var exitCode = await session.WaitForExitAsync();
+
+        await Assert.That(exitCode).IsEqualTo(0);
+        await Assert.That(length).IsGreaterThanOrEqualTo(minimumLength);
     }
 
     [Test]
@@ -687,6 +908,20 @@ public sealed class PtyTests
     private static PtyStartInfo SpawnForValidation() => RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
         ? WindowsCommand("exit /b 0")
         : Spawn("true", []);
+
+    private static async Task<string> ReadOutputTextAsync(PtySession session, string marker)
+    {
+        using var output = new MemoryStream();
+        await foreach (var chunk in session.ReadOutputAsync())
+        {
+            await output.WriteAsync(chunk.Data);
+            var text = Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
+            if (text.Contains(marker, StringComparison.Ordinal))
+                return text;
+        }
+
+        return Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
+    }
 
     private static async Task WaitUntilExited(PtySession session)
     {

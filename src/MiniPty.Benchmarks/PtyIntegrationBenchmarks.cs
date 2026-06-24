@@ -85,6 +85,21 @@ public class PtyIntegrationBenchmarks
         return result.Output.Length;
     }
 
+    [BenchmarkCategory("Integration", "Streaming", "Binary")]
+    [Benchmark]
+    public async Task<int> Session_32KiB_StreamBytes()
+    {
+        if (!supported)
+            return 0;
+
+        await using var session = Pty.Start(smallStdout);
+        var length = 0;
+        await foreach (var chunk in session.ReadOutputAsync())
+            length += chunk.Data.Length;
+
+        return length;
+    }
+
     [BenchmarkCategory("Integration", "Binary")]
     [Benchmark]
     public async Task<int> Capture_32KiB_Bytes()
