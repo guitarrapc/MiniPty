@@ -33,6 +33,7 @@ tests/MiniPty.Tests/      Focused behavior and integration tests.
 - Prefer async APIs that avoid hidden buffering and unnecessary task/allocation churn.
 - Avoid LINQ, closures, iterator blocks, boxing, string formatting, and exception-driven control flow in hot paths.
 - Use UTF-8/byte-oriented processing where possible; decode text only at API boundaries that require text.
+- Throw BCL exceptions for programmer errors; define custom exceptions only for MiniPty domain errors, and wrap dependency exceptions only when abstraction requires it.
 - Use cancellation and disposal paths carefully; process/session cleanup must be deterministic.
 - Do not broaden scope with unrelated refactors.
 
