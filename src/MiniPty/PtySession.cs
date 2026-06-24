@@ -281,7 +281,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         {
             _session = session;
             _buffer = ArrayPool<byte>.Shared.Rent(OutputBufferCapacity);
-            _producer = Task.Run(ProduceAsync);
+            _producer = ProduceAsync();
         }
 
         internal async ValueTask<ReadOnlyMemory<byte>> ReadAsync(CancellationToken cancellationToken)
@@ -343,6 +343,12 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
             _producerCancellation.Cancel();
             SignalAll();
+            if (_producer.IsCompleted)
+            {
+                ReturnBuffer();
+                return;
+            }
+
             _ = _producer.ContinueWith(
                 static (task, state) => ((BoundedOutputBuffer)state!).ReturnBuffer(),
                 this,
