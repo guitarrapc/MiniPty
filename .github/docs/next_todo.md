@@ -1,0 +1,1 @@
+The next planned core API expansion is spawn option parity: environment overlay and terminal-name support for `PtyStartInfo`. The intended contract is documented in the Milestone 1 section of [plans/plan_minipty_next.md](plans/plan_minipty_next.md) until implemented, then should move into [specs/core_session.md](specs/core_session.md) and related platform notes.

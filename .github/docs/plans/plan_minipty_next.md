@@ -132,9 +132,39 @@ public sealed record PtyStartInfo
 
 Open questions:
 
-- Whether `TerminalName` should simply set/override `TERM` on Unix and be ignored on Windows, or whether it should be exposed as a cross-platform metadata option.
-- Whether `Environment = null` means inherit the parent environment exactly, and a non-null dictionary means replace or overlay.
-- Whether environment keys with null values remove variables or set empty values.
+Resolved Milestone 1 decisions:
+
+- `Environment = null` inherits the parent environment.
+- A non-null `Environment` is an overlay on top of the parent environment, not a replacement block. This intentionally differs from node-pty, where callers commonly pass `process.env` or build their own overlay before spawn.
+- Environment values use `null` to remove a variable and `""` to set an empty variable.
+- Environment keys are case-insensitive on Windows and case-sensitive on Unix.
+- Invalid environment keys or values are rejected at spawn time: empty keys, keys containing `=`, and keys or values containing NUL are invalid.
+- Duplicate-equivalent overlay keys are resolved by enumeration order; the last value wins.
+- `TerminalName` is a `string?` convenience for terminal identity. Empty string is treated as unspecified; NUL is invalid.
+- On Unix, `TerminalName` sets `TERM` after the environment overlay. If no `TERM` remains and it was not explicitly removed, MiniPty sets `TERM=xterm-256color`.
+- On Windows, `TerminalName` has no effect for now. It does not set `TERM`; callers may still set `Environment["TERM"]` explicitly.
+
+Environment construction order:
+
+| Platform | Order |
+|---|---|
+| Unix | Parent environment -> node-pty-style terminal sanitize -> `Environment` overlay -> `TerminalName` / default `TERM` |
+| Windows | Parent environment -> `Environment` overlay |
+
+Unix terminal sanitize removes inherited terminal-container and size variables that can make a fresh PTY report or use stale terminal state: `TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `WINDOWID`, `TERMCAP`, `COLUMNS`, and `LINES`. The sanitize step happens before the explicit overlay so advanced callers can still opt back into any of those variables.
+
+Executable lookup decisions:
+
+- Unix native spawn should move from `execvp` to a portable `execvpe`-equivalent path so explicit `envp` can be passed.
+- Unix executable lookup uses the final child `PATH` after overlay. If `PATH` is absent, use `_CS_PATH` or `/bin:/usr/bin`; if `PATH` is empty, treat it as an empty path entry, matching current-directory lookup semantics.
+- Windows executable lookup remains delegated to `CreateProcessW`; MiniPty does not reimplement `PATHEXT`, system-directory, or application search rules.
+- Windows explicit environment blocks are UTF-16 and require `CREATE_UNICODE_ENVIRONMENT`.
+- Windows important variables such as `SystemRoot` are normally preserved by overlay semantics, but if a caller explicitly removes them MiniPty does not restore them.
+
+Security contract:
+
+- Environment inheritance follows normal PTY/process-spawn expectations and is not a security boundary.
+- MiniPty does not attempt to detect or scrub secrets automatically. Callers that expose PTYs to untrusted users must isolate the process with OS users, containers, sandboxes, or explicit environment removal.
 
 ### Output Streaming
 
@@ -229,6 +259,15 @@ Goal: make child process environment suitable for terminal applications.
 - Update Unix native shim path to support `execve` or equivalent explicit environment passing.
 - Document inheritance and override rules.
 - Add tests for environment inheritance, override, and `TERM`.
+
+Lessons learned while specifying this milestone:
+
+- node-pty passes an explicit environment supplied by the caller; examples commonly pass `process.env` or create an overlay manually. MiniPty should expose overlay semantics directly because .NET callers need a small, hard-to-misuse spawn surface and Windows child startup is fragile when critical inherited variables are accidentally omitted.
+- Parent environment inheritance is normal PTY behavior, not a sandbox. Removing inherited secrets must be an explicit caller policy, while untrusted PTY hosting requires process isolation beyond environment filtering.
+- Terminal correctness needs a small Unix sanitize step. Inheriting `COLUMNS`, `LINES`, tmux, screen, or termcap variables from the parent can make a new PTY behave as if it still lived inside the parent terminal context.
+- `TERM` defaults are useful on Unix but should not override explicit caller intent. `Environment["TERM"] = null` means no `TERM`; `Environment["TERM"] = ""` means an empty `TERM`; `TerminalName` is the only dedicated option that overrides the overlay.
+- Windows ConPTY currently has no `TerminalName` equivalent. Treating `TerminalName` as Unix-only avoids inventing misleading cross-platform behavior while keeping common `PtyStartInfo` construction portable.
+- Passing explicit Unix `envp` changes executable lookup requirements. A portable `execvpe`-equivalent shim keeps Linux, macOS, and FreeBSD behavior aligned without depending on non-portable libc extensions.
 
 ### Milestone 2: Persistent Output Streaming
 
