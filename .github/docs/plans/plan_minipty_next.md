@@ -191,7 +191,7 @@ public IAsyncEnumerable<PtyOutputChunk> ReadOutputAsync(
 - Error handling: unexpected transport/read failures complete enumeration with exceptions (`IOException` family; cancellation as `OperationCanceledException`).
 - Dispose handling: disposing an active session while streaming causes reader termination with `ObjectDisposedException`.
 - Backpressure contract: do not drop data. Use bounded buffering with producer wait.
-- Initial implementation constants: buffer upper bound 1 MiB, max chunk size 16 KiB.
+- Initial implementation constants: internal bounded buffer capacity, max chunk size 16 KiB.
 - Keep existing `Output` stream and one-shot APIs during Milestone 2 (no deprecation in this milestone).
 
 Deferred ideas (not in Milestone 2):
@@ -282,7 +282,7 @@ Goal: make continuous output consumption a supported core API.
 - Add `PtySession.ReadOutputAsync(CancellationToken)` returning `IAsyncEnumerable<PtyOutputChunk>`.
 - Enforce single-reader behavior (`InvalidOperationException` on concurrent reader attempt).
 - Treat expected PTY EOF conditions as normal completion after exit+drain.
-- Use bounded buffering (1 MiB), no-drop policy, producer wait on pressure.
+- Use bounded buffering, no-drop policy, producer wait on pressure.
 - Use 16 KiB max chunk size in the initial implementation.
 - Define ephemeral chunk lifetime contract (valid until next `MoveNextAsync`).
 - Keep existing `Output` stream API as-is in this milestone.

@@ -61,10 +61,11 @@ A PTY has backpressure. If the child writes output and nothing reads PTY output,
 
 Only one active `ReadOutputAsync` reader is allowed per session. A concurrent reader attempt throws `InvalidOperationException`. The existing `Output` stream remains available as the low-level stream API, but callers should not read `Output` concurrently with `ReadOutputAsync`.
 
-`ReadOutputAsync` uses a bounded 1 MiB managed output buffer and does not drop data. The producer waits when the buffer is full, and chunks are returned with a maximum size of 16 KiB.
+`ReadOutputAsync` uses bounded managed buffering and does not drop data. The producer waits when the buffer is full, and chunks are returned with a maximum size of 16 KiB. The exact buffer capacity is an implementation detail and may change as allocation and backpressure trade-offs are measured.
 
 ## Lessons Learned
 
 - Environment overlay is safer for MiniPty than node-pty-style replacement because Windows child startup is fragile when inherited variables such as `SystemRoot` are accidentally omitted.
 - Unix terminal-size variables such as `COLUMNS` and `LINES` can make a fresh PTY behave like the parent terminal. Sanitizing them before overlay avoids stale child-visible terminal state.
 - Windows does not preserve empty environment variables as child-visible empty values. MiniPty keeps the API distinction so Unix can express empty values, but Windows children observe them like missing variables.
+- A fixed public buffer capacity is a poor contract for `ReadOutputAsync`: it turns an allocation/backpressure tuning knob into observable API surface. The stable contract is bounded no-drop streaming with producer wait; capacity should remain internal unless a future options API exposes it deliberately.
