@@ -253,6 +253,8 @@ Resolved implementation notes:
 
 ## Implementation Milestones
 
+Milestones are ordered by dependency. **Milestone 3.5 (Capture Alignment)** is deferred and must not start until Milestone 3 and the prerequisites listed there are satisfied. Downstream milestones (4–6) do not depend on 3.5.
+
 ### Milestone 1: Spawn Option Parity (implemented)
 
 Goal: make child process environment suitable for terminal applications.
@@ -288,15 +290,10 @@ Goal: make continuous output consumption a supported core API.
 - Keep existing `Output` stream API as-is in this milestone.
 - Add tests for shell/REPL command loops, single-reader violations, cancellation semantics, drain-on-exit, and backpressure behavior.
 
-### Milestone 2.5: Capture Alignment (separate PR series)
+Lessons learned while specifying this milestone:
 
-Goal: migrate safely without expanding Milestone 2 risk.
-
-- Keep `MiniPty.Capture` public API unchanged.
-- Incrementally move Capture internals to consume the Milestone 2 core streaming primitive.
-- Keep timestamp/decode concerns in Capture, not in core.
-- Validate parity with existing one-shot capture behavior via focused tests/benchmarks.
-- Keep PRs small and separable from Milestone 2 core transport changes.
+- `ReadOutputAsync` is structurally heavier than reading `Output` directly: a bounded managed buffer, background producer, and exit observation are part of the contract, not optional overhead to remove for downstream convenience.
+- Benchmarks must compare paths separately (`CompleteAsync`, `ReadOutputAsync`, raw `Output` stream). Collapsing `ReadOutputAsync` into a thin `Output` wrapper changes Milestone 2 semantics and invalidates backpressure tests.
 
 ### Milestone 3: Lifecycle Hardening
 
@@ -307,6 +304,46 @@ Goal: make persistent sessions reliable under cancellation, exit, and disposal.
 - Test dispose while read/write/wait operations are pending.
 - Test output drain after process exit.
 - Review Windows ConPTY startup readiness and whether write/resize deferral is needed.
+
+### Milestone 3.5: Capture Alignment (deferred; was Milestone 2.5)
+
+**Status: deferred.** Do not start until the prerequisites below are met and recorded in this plan or an ADR.
+
+**Placement rationale:** Originally scheduled immediately after Milestone 2. An integration attempt showed that Capture-on-`ReadOutputAsync` conflicts with Milestone 2 transport semantics and benchmark baselines unless core backpressure is weakened. Lifecycle ordering (stdin, read, exit, drain) also needs Milestone 3 hardening before Capture can migrate safely. Resume after Milestone 3, not in parallel with core transport work.
+
+Goal: migrate safely without expanding Milestone 2 risk.
+
+- Keep `MiniPty.Capture` public API unchanged.
+- Incrementally move Capture internals to consume the Milestone 2 core streaming primitive (`ReadOutputAsync`).
+- Keep timestamp/decode concerns in Capture, not in core.
+- Validate parity with existing one-shot capture behavior via focused tests/benchmarks.
+- Keep PRs small and separable from Milestone 2 core transport changes.
+
+**Prerequisites before resuming:**
+
+| Prerequisite | Why |
+|---|---|
+| Milestone 3 complete (or equivalent lifecycle tests landed) | Capture migration needs stable stdin/read/exit/drain ordering; parallel completion pumps deadlocked against `ReadOutputAsync`. |
+| Measured gap documented | Benchmark `Capture` (stream path) vs `Capture` (`ReadOutputAsync` path) vs `Session_32KiB_StreamBytes` on the same machine and commit. |
+| Design choice recorded | One of: (a) accept Capture allocation/latency overhead on `ReadOutputAsync`, (b) Milestone 2.x core optimization without weakening backpressure, or (c) Capture-only internal fast path — reviewed before coding. |
+| No open Milestone 2 contract changes | `ReadOutputAsync` bounded buffering and producer-wait semantics remain as implemented in Milestone 2 unless a separate core milestone says otherwise. |
+
+**Non-negotiable constraints (do not violate for Capture convenience):**
+
+| Constraint | Detail |
+|---|---|
+| Do not weaken Milestone 2 `ReadOutputAsync` | Keep bounded managed buffering, producer wait on pressure, no data drop, and up-to-16 KiB chunk delivery. Do not replace with a pull-through `Output` wrapper to fix Capture benchmarks. |
+| Do not change core in a Capture-only PR | Changes to `PtySession.ReadOutputAsync` belong in an explicit Milestone 2.x / core PR with separate review — not under a Capture Alignment PR title. |
+| Benchmark gate | Capture integration must not regress Capture benchmark allocations vs the pre-migration baseline. If `ReadOutputAsync` is heavier, document the delta and get an explicit plan decision; do not hide it by altering core. |
+| Parity contract | Merged `Output` bytes, decoded text, and `ExitCode` must remain equivalent. Per-chunk count and split points are **not** a stability contract. |
+| Layering | Timestamping and decode stay in `MiniPty.Capture`. Core stays bytes-first. |
+| Orchestration in Capture | Stdin-before-read or caller-thread drain belongs in Capture/completion orchestration, not in shortcuts that bypass Milestone 2 backpressure. |
+
+Lessons learned from the deferred attempt:
+
+- Satisfying Capture allocation targets by removing `BoundedOutputBuffer` traded Milestone 2 backpressure for OS-level PTY blocking and changed chunk sizing — unacceptable without a core milestone revision.
+- `ReadOutputAsync` integration cost is real and pre-existing; Milestone 2.5 cannot assume it is free compared to `Output` + `PtyCompletion`.
+- A failed integration should stop the milestone and escalate a design choice, not proceed by editing core transport under Capture scope.
 
 ### Milestone 4: Interactive Sample
 
@@ -373,6 +410,7 @@ As milestones land, update:
 
 ## Open Questions
 
+- When resuming Milestone 3.5 (Capture Alignment), which design path applies: accept `ReadOutputAsync` overhead, optimize core first (Milestone 2.x), or add a Capture-only internal path?
 - Should we later expose an advanced low-allocation reader API (`WaitToReadAsync` + `TryRead`) in addition to `IAsyncEnumerable`?
 - Should backpressure limits (buffer upper bound, chunk size) become configurable start/read options?
 - Is Unix `uid` / `gid` worth supporting in a minimal AOT-friendly library?
