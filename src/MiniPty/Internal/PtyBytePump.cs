@@ -4,6 +4,8 @@ namespace MiniPty.Internal;
 
 internal static class PtyBytePump
 {
+    private const int SustainedOutputInitialCapacity = 32 * 1024;
+
     internal static async Task<PtyPumpOutput> ReadAllAsync(
         Stream stream,
         Encoding encoding,
@@ -21,6 +23,7 @@ internal static class PtyBytePump
                 if (read <= 0)
                     break;
 
+                ReserveForSustainedOutput(byteBuffer, read, bytes.Memory.Length);
                 byteBuffer.Append(bytes.Span[..read]);
             }
 
@@ -37,6 +40,7 @@ internal static class PtyBytePump
             if (read <= 0)
                 break;
 
+            ReserveForSustainedOutput(byteBuffer, read, bytes.Memory.Length);
             byteBuffer.Append(bytes.Span[..read]);
             AppendDecoded(decoder, bytes.Span[..read], chars.Span, charBuffer);
         }
@@ -55,5 +59,11 @@ internal static class PtyBytePump
         var charCount = decoder.GetChars(bytes, chars, flush);
         if (charCount > 0)
             output.Append(chars[..charCount]);
+    }
+
+    private static void ReserveForSustainedOutput(PtyGrowingBuffer<byte> output, int read, int readBufferLength)
+    {
+        if (output.Length == readBufferLength && read == readBufferLength)
+            output.EnsureCapacity(SustainedOutputInitialCapacity);
     }
 }

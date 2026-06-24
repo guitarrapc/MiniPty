@@ -21,7 +21,7 @@ namespace MiniPty;
 public sealed class PtySession : IAsyncDisposable, IDisposable
 {
     private static readonly PtyCompleteOptions DefaultCompleteOptions = new();
-    private const int OutputBufferCapacity = 1024 * 1024;
+    private const int OutputBufferCapacity = 32 * 1024;
     private const int OutputStreamChunkSize = 16 * 1024;
 
     private readonly IPtyBackend _backend;
