@@ -74,14 +74,14 @@ internal static partial class UnixPtyBackend
             string fileName,
             string[] arguments,
             string? cwd,
-            KeyValuePair<string, string>[] environment)
+            KeyValuePair<string, string>[]? environment)
         {
             var owned = new List<IntPtr>();
             try
             {
                 var executable = AllocUtf8CString(fileName, owned);
                 var argv = AllocUtf8Argv(fileName, arguments, owned);
-                var envp = AllocUtf8Envp(environment, owned);
+                var envp = environment is null ? null : AllocUtf8Envp(environment, owned);
                 IntPtr workingDirectory = IntPtr.Zero;
                 if (!string.IsNullOrWhiteSpace(cwd))
                     workingDirectory = (IntPtr)AllocUtf8CString(cwd, owned);

@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -34,11 +35,40 @@ static const char *minipty_get_env_value(char *const *envp, const char *name)
     return NULL;
 }
 
+static const char *minipty_get_path(char *const *envp)
+{
+    const char *path = envp == NULL ? getenv("PATH") : minipty_get_env_value(envp, "PATH");
+
+    if (path != NULL)
+        return path;
+
+    return NULL;
+}
+
+static void minipty_prepare_inherited_environment(void)
+{
+    unsetenv("TMUX");
+    unsetenv("TMUX_PANE");
+    unsetenv("STY");
+    unsetenv("WINDOW");
+    unsetenv("WINDOWID");
+    unsetenv("TERMCAP");
+    unsetenv("COLUMNS");
+    unsetenv("LINES");
+
+    if (getenv("TERM") == NULL)
+        setenv("TERM", "xterm-256color", 0);
+}
+
 static void minipty_execve_compat(const char *path, char *const *argv, char *const *envp)
 {
     size_t argc = 0;
 
-    execve(path, argv, envp);
+    if (envp == NULL)
+        execv(path, argv);
+    else
+        execve(path, argv, envp);
+
     if (errno != ENOEXEC)
         return;
 
@@ -52,7 +82,10 @@ static void minipty_execve_compat(const char *path, char *const *argv, char *con
         shell_argv[i + 1] = argv[i];
     shell_argv[argc + 1] = NULL;
 
-    execve("/bin/sh", shell_argv, envp);
+    if (envp == NULL)
+        execv("/bin/sh", shell_argv);
+    else
+        execve("/bin/sh", shell_argv, envp);
 }
 
 static void minipty_execve_path(const char *dir, size_t dir_len, const char *file, char *const *argv, char *const *envp)
@@ -94,7 +127,7 @@ static void minipty_execvpe(const char *file, char *const *argv, char *const *en
         return;
     }
 
-    path = minipty_get_env_value(envp, "PATH");
+    path = minipty_get_path(envp);
     if (path == NULL) {
 #if defined(_CS_PATH)
         size_t length = confstr(_CS_PATH, fallback, sizeof(fallback));
@@ -150,6 +183,8 @@ static int spawn_pty_child(
     if (pid == 0) {
         if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
             _exit(126);
+        if (envp == NULL)
+            minipty_prepare_inherited_environment();
         minipty_execvpe(file, argv, envp);
         _exit(127);
     }
