@@ -219,8 +219,10 @@ static int spawn_pty_child(
     sigset_t newmask;
     sigset_t oldmask;
     char **child_envp = envp == NULL ? minipty_build_inherited_envp() : (char **)envp;
-    if (child_envp == NULL)
+    if (child_envp == NULL) {
+        errno = ENOMEM;
         return -1;
+    }
 
     sigfillset(&newmask);
     pthread_sigmask(SIG_BLOCK, &newmask, &oldmask);
