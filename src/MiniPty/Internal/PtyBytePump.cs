@@ -63,7 +63,7 @@ internal static class PtyBytePump
 
     private static void ReserveForSustainedOutput(PtyGrowingBuffer<byte> output, int read, int readBufferLength)
     {
-        if (output.Length == 0 && read == readBufferLength)
+        if (output.Length == readBufferLength && read == readBufferLength)
             output.EnsureCapacity(SustainedOutputInitialCapacity);
     }
 }
