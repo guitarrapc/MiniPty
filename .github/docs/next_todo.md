@@ -1,0 +1,1 @@
+Spawn option parity has been implemented and moved into [specs/core_session.md](specs/core_session.md). The next planned core API expansion is persistent output streaming; see [plans/plan_minipty_next.md](plans/plan_minipty_next.md).

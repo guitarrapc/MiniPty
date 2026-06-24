@@ -15,14 +15,15 @@ internal static partial class UnixPtyBackend
         var size = startInfo.ClampedSize;
         var winsize = new Winsize { ws_col = (ushort)size.Columns, ws_row = (ushort)size.Rows };
         var arguments = startInfo.Arguments as string[] ?? startInfo.Arguments.ToArray();
-        var exec = UnixExecPayload.Create(startInfo.FileName, arguments, startInfo.WorkingDirectory);
+        var environment = PtyEnvironment.BuildUnix(startInfo);
+        var exec = UnixExecPayload.Create(startInfo.FileName, arguments, startInfo.WorkingDirectory, environment);
         try
         {
             var pid = 0;
             var master = 0;
             unsafe
             {
-                if (ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, &pid) != 0)
+                if (ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid) != 0)
                     throw new IOException($"PTY spawn failed (errno {Marshal.GetLastPInvokeError()})");
             }
 
@@ -40,6 +41,7 @@ internal static partial class UnixPtyBackend
         IntPtr workingDirectory,
         IntPtr executable,
         IntPtr argv,
+        IntPtr envp,
         int* pid) =>
         minipty_fork_pty_exec(
             master,
@@ -47,35 +49,43 @@ internal static partial class UnixPtyBackend
             (byte*)workingDirectory,
             (byte*)executable,
             (byte**)argv,
+            (byte**)envp,
             pid);
 
     private sealed class UnixExecPayload : IDisposable
     {
         private readonly List<IntPtr> _owned;
 
-        private UnixExecPayload(List<IntPtr> owned, IntPtr executable, IntPtr argv, IntPtr workingDirectory)
+        private UnixExecPayload(List<IntPtr> owned, IntPtr executable, IntPtr argv, IntPtr envp, IntPtr workingDirectory)
         {
             _owned = owned;
             Executable = executable;
             Argv = argv;
+            Envp = envp;
             WorkingDirectory = workingDirectory;
         }
 
         public IntPtr Executable { get; }
         public IntPtr Argv { get; }
+        public IntPtr Envp { get; }
         public IntPtr WorkingDirectory { get; }
 
-        public static unsafe UnixExecPayload Create(string fileName, string[] arguments, string? cwd)
+        public static unsafe UnixExecPayload Create(
+            string fileName,
+            string[] arguments,
+            string? cwd,
+            KeyValuePair<string, string>[] environment)
         {
             var owned = new List<IntPtr>();
             try
             {
                 var executable = AllocUtf8CString(fileName, owned);
                 var argv = AllocUtf8Argv(fileName, arguments, owned);
+                var envp = AllocUtf8Envp(environment, owned);
                 IntPtr workingDirectory = IntPtr.Zero;
                 if (!string.IsNullOrWhiteSpace(cwd))
                     workingDirectory = (IntPtr)AllocUtf8CString(cwd, owned);
-                return new UnixExecPayload(owned, (IntPtr)executable, (IntPtr)argv, workingDirectory);
+                return new UnixExecPayload(owned, (IntPtr)executable, (IntPtr)argv, (IntPtr)envp, workingDirectory);
             }
             catch
             {
@@ -344,6 +354,17 @@ internal static partial class UnixPtyBackend
         return argv;
     }
 
+    private static unsafe byte** AllocUtf8Envp(KeyValuePair<string, string>[] environment, List<IntPtr> owned)
+    {
+        var envp = (byte**)NativeMemory.Alloc((nuint)(environment.Length + 1) * (nuint)IntPtr.Size);
+        owned.Add((IntPtr)envp);
+
+        for (var i = 0; i < environment.Length; i++)
+            envp[i] = AllocUtf8CString(environment[i].Key + "=" + environment[i].Value, owned);
+        envp[environment.Length] = null;
+        return envp;
+    }
+
     private static unsafe byte* AllocUtf8CString(string value, List<IntPtr> owned)
     {
         var bytes = Encoding.UTF8.GetBytes(value);
@@ -395,6 +416,7 @@ internal static partial class UnixPtyBackend
         byte* working_directory,
         byte* file,
         byte** argv,
+        byte** envp,
         int* pid_out);
 
     [LibraryImport("minipty_unix", SetLastError = true)]

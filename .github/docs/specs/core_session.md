@@ -14,6 +14,27 @@ Implemented user-facing contract for the **MiniPty** core session API.
 | `Arguments` | Arguments after the executable. Default is empty. |
 | `WorkingDirectory` | Optional child working directory. Null inherits the parent working directory. |
 | `Size` | Initial terminal columns x rows. Default is 80x24; values are clamped to 1-512 per dimension at spawn. |
+| `Environment` | Optional child environment overlay. Null inherits the parent environment. Non-null entries override or remove inherited variables. |
+| `TerminalName` | Optional Unix terminal name for `TERM`. Null or empty uses default behavior. Currently ignored on Windows. |
+
+## Spawn Environment
+
+`PtyStartInfo.Environment` is an overlay on top of the parent process environment, not a replacement block.
+
+| Value | Behavior |
+|---|---|
+| `Environment = null` | Inherit the parent environment. |
+| `Environment["KEY"] = "value"` | Set or override `KEY` for the child. |
+| `Environment["KEY"] = null` | Remove `KEY` from the child environment. Removing a missing key succeeds. |
+| `Environment["KEY"] = ""` | Set an empty value on platforms that preserve empty environment variables. Windows children observe empty entries as missing. |
+
+Environment keys are case-insensitive on Windows and case-sensitive on Unix. Invalid names are rejected at spawn time: empty names, names containing `=`, and names or values containing NUL are invalid. Duplicate-equivalent overlay keys are resolved by enumeration order; the last value wins.
+
+On Unix, MiniPty removes inherited terminal-container and size variables before applying the explicit overlay: `TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `WINDOWID`, `TERMCAP`, `COLUMNS`, and `LINES`. This prevents a fresh PTY from inheriting stale parent terminal state. Because sanitize runs before the overlay, callers can still explicitly pass any of these variables.
+
+On Unix, `TerminalName` sets `TERM` after the environment overlay. If `TerminalName` is null or empty and no `TERM` remains, MiniPty sets `TERM=xterm-256color` unless `TERM` was explicitly removed by the overlay. `Environment["TERM"] = ""` is respected as an explicit empty value on Unix. On Windows, `TerminalName` does not set `TERM`; use `Environment["TERM"]` to pass it explicitly.
+
+MiniPty environment inheritance follows normal process-spawn behavior and is not a sandbox. Callers exposing PTYs to untrusted users must isolate the child process outside MiniPty, for example with OS users, containers, sandboxing, or explicit environment removal.
 
 ## Session Contract
 
@@ -34,3 +55,9 @@ Implemented user-facing contract for the **MiniPty** core session API.
 A PTY has backpressure. If the child writes output and nothing reads `PtySession.Output`, the child may block when the terminal buffer fills. Callers must use `CompleteAsync`, `PtyCapture.RunAsync`, or continuously read `Output` themselves.
 
 Continuous manual reading is possible through `Output`, but long-lived interactive sessions are not yet a supported high-level scenario in the current implementation.
+
+## Lessons Learned
+
+- Environment overlay is safer for MiniPty than node-pty-style replacement because Windows child startup is fragile when inherited variables such as `SystemRoot` are accidentally omitted.
+- Unix terminal-size variables such as `COLUMNS` and `LINES` can make a fresh PTY behave like the parent terminal. Sanitizing them before overlay avoids stale child-visible terminal state.
+- Windows does not preserve empty environment variables as child-visible empty values. MiniPty keeps the API distinction so Unix can express empty values, but Windows children observe them like missing variables.

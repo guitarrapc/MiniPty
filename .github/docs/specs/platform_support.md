@@ -7,9 +7,9 @@ Implemented public platform support, verification constraints, and platform-leve
 | OS | Backend | Minimum |
 |---|---|---|
 | Windows | ConPTY (`CreatePseudoConsole`) | Windows 10 1809+, Windows 11 |
-| Linux | `forkpty` + `execvp` through native shim | Common glibc/musl targets |
-| macOS | `forkpty` + `execvp` through native shim | Supported runners with `libutil` |
-| FreeBSD | `forkpty` + `execvp` through native shim | `libutil` |
+| Linux | `forkpty` + `execve` through native shim | Common glibc/musl targets |
+| macOS | `forkpty` + `execve` through native shim | Supported runners with `libutil` |
+| FreeBSD | `forkpty` + `execve` through native shim | `libutil` |
 
 Pipe redirect without ConPTY is not a PTY. On Windows, TUI tools require ConPTY-backed spawn.
 
@@ -40,7 +40,7 @@ These are verification choices, not API requirements, but they document pitfalls
 | Linux | `bash -lc` on a PTY often stays interactive after `-c` completes. | Prefer `sh -c`, or spawn utilities directly. |
 | Linux | A single EOT with no trailing newline does not signal EOF in canonical mode. | One-shot stdin tests using EOT end input with `\n` before `SendEof()`. |
 | Linux | GNU `stty rows` / `stty columns` without arguments set size instead of printing it. | Query via `stty size`. |
-| macOS | Spawn paths that do not attach a controlling terminal make `stty` and resize probes unreliable. | Unix targets use `forkpty` + `execvp`. |
+| macOS | Spawn paths that do not attach a controlling terminal make `stty` and resize probes unreliable. | Unix targets use `forkpty` + native `execve`. |
 | macOS ARM | Variadic `ioctl` for `TIOCSWINSZ` is unsafe to P/Invoke directly. | Resize runs in `libminipty_unix`. |
 | Windows | Closing ConPTY stdin while a child is still attaching can yield `STATUS_CONTROL_C_EXIT`. | Stdin-drain checks use stable built-in commands and staged EOF. |
 | Windows | `pwsh` is optional on runners. | Prefer built-in Windows PowerShell unless pwsh-only behavior is needed. |
@@ -49,8 +49,8 @@ These are verification choices, not API requirements, but they document pitfalls
 
 - **Pipe redirect is not a PTY.** Redirected stdin/stdout captures bytes but children report not-a-TTY.
 - **winpty is a poor fit for NativeAOT single-binary goals.** Bundled helpers add environment dependency; in-process ConPTY avoids that.
-- **macOS spawn must establish a controlling terminal.** A `posix_openpt` + `posix_spawn` path left the slave without a controlling tty; Unix targets use `forkpty` + `execvp`.
-- **Fork before exec must stay async-signal-safe.** Build arguments and working-directory data in the parent; the child only calls libc before `execvp`.
+- **macOS spawn must establish a controlling terminal.** A `posix_openpt` + `posix_spawn` path left the slave without a controlling tty; Unix targets use `forkpty` + native `execve`.
+- **Explicit Unix environments require `execve`.** Passing `envp` means MiniPty cannot rely on plain `execvp`; the native shim provides portable path lookup before `execve`.
 - **Capture timing requires concurrent reads.** Reading only after exit loses TUI animation timing.
 - **PTY output includes terminal echo.** Tests that drive stdin manually may capture echoed input and control characters.
 - **Raw PTY text can break the parent console.** Use [Display text](display_text.md) helpers for logs or keep escaped/raw bytes for inspection.

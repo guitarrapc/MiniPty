@@ -19,7 +19,7 @@ MiniPty selects one OS-specific backend at runtime:
 | OS | API | Entry point |
 |---|---|---|
 | Windows | ConPTY (`CreatePseudoConsole`) | `WindowsPtyBackend.Start` |
-| Linux / macOS / FreeBSD | `forkpty` + `execvp` | `UnixPtyBackend.Start` |
+| Linux / macOS / FreeBSD | `forkpty` + native path lookup + `execve` | `UnixPtyBackend.Start` |
 
 Layers:
 
@@ -102,24 +102,25 @@ Without this, command output can appear on the parent's console instead of the c
 
 ConPTY requires Windows 10 1809+ / Windows 11. MiniPty does not use winpty.
 
-## Unix: forkpty + execvp
+## Unix: forkpty + execve
 
-MiniPty uses a small `libminipty_unix` native shim that calls the platform `forkpty`, then runs `execvp` in the child process.
+MiniPty uses a small `libminipty_unix` native shim that calls the platform `forkpty`, resolves executable names against the child environment `PATH`, then runs `execve` with an explicit environment block in the child process.
 
 ### Child setup
 
 ```text
 forkpty(master, NULL, NULL, winsize)
 child: optional chdir(cwd)
-child: execvp(file, argv)
+child: resolve file against child PATH when needed
+child: execve(file, argv, envp)
 parent: keep master fd for PTY input/output
 ```
 
-**`forkpty()` safety:** Build executable path, `argv`, and optional `cwd` as unmanaged UTF-8 C strings in the **parent** before `forkpty()`. The child path stays inside the native shim for `chdir`, `execvp`, and `_exit` after the fork boundary—no managed allocation, no `RuntimeInformation`, no string marshalling. The parent frees the payload after `forkpty()`; the child retains a copy-on-write mapping until `execvp` replaces the address space.
+**`forkpty()` safety:** Build executable path, `argv`, `envp`, and optional `cwd` as unmanaged UTF-8 C strings in the **parent** before `forkpty()`. The child path stays inside the native shim for `chdir`, path lookup, `execve`, and `_exit` after the fork boundary—no managed allocation, no `RuntimeInformation`, no string marshalling. The parent frees the payload after `forkpty()`; the child retains a copy-on-write mapping until `execve` replaces the address space.
 
-`execvp` uses `LibraryImport` with `byte* file` and `byte** argv`—not `string[]` marshalling—so NativeAOT does not depend on runtime array marshalling for the exec boundary.
+The native boundary uses `LibraryImport` with `byte* file`, `byte** argv`, and `byte** envp`—not `string[]` marshalling—so NativeAOT does not depend on runtime array marshalling for the exec boundary.
 
-`execve` (explicit environment block) is a future option if callers need to override `TERM` or other variables independently of the parent process.
+If `file` contains `/`, the shim calls `execve` directly. Otherwise it searches the final child `PATH`; absent `PATH` falls back to `_CS_PATH` or `/bin:/usr/bin`, while an empty `PATH` is treated as an empty path entry for current-directory lookup.
 
 ### Parent I/O
 
@@ -239,15 +240,14 @@ See [spec.md](../spec.md) → Verification. `tests/MiniPty.Tests` exercises:
 
 | Area | Features |
 |---|---|
-| **Near term** | Ctrl-C (`\x03` write), `execve` env control, capture tuning (chunk size) |
+| **Near term** | Ctrl-C (`\x03` write), capture tuning (chunk size) |
 | **Later** | Long-lived interactive sessions, disk spill for huge captures |
 
 ## NativeAOT Interop
 
 - Use `[LibraryImport]` (source-generated P/Invoke), not `[DllImport]`. `AllowUnsafeBlocks` is required in the MiniPty project.
 - Windows `CreateProcessW` takes a writable `char[]` command line; `InitializeProcThreadAttributeList` size query uses `ref nuint` (not `out`).
-- Unix `execvp` is declared as `execvp(byte* file, byte** argv)`. The child builds a UTF-8 `argv` with `NativeMemory.Alloc`—do not marshal `string[]` across the exec boundary.
-- `execve` remains an option when callers need an explicit environment block instead of inheriting the parent env.
+- Unix spawn passes `byte* file`, `byte** argv`, and `byte** envp` to the native shim. The managed side builds UTF-8 payloads with `NativeMemory.Alloc`—do not marshal `string[]` across the exec boundary.
 
 ## External References
 
