@@ -413,7 +413,7 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 - [x] `lifecycle.md` and `platform_support.md` updated: Windows write-then-EOF contract, limitations for raw/TUI.
 - [x] Representative Windows tests (`sort`, existing stdin+EOF paths) assert **ExitCode 0** on x64 (arm64 CI pending).
 - [x] Full test suite green (61/61 local).
-- [x] **Benchmark gate:** `PtyIntegrationBenchmarks` allocation ≤ baseline at M3.1 start (11/11 pass; all improved vs `7bd4eff`).
+- [x] **Benchmark gate:** `PtyIntegrationBenchmarks` allocation ≤ baseline at M3.1 start (`fd589fe`, ShortRun; 11/11 pass).
 
 **Lessons learned:** ConPTY input pipe close after a write is delivered as `STATUS_CONTROL_C_EXIT`, not EOF. Legacy console EOF for pipe-style readers (`sort`) is Ctrl+Z submitted with CR (`0x1A`, `0x0D`); the input pipe must stay open until the child exits naturally.
 

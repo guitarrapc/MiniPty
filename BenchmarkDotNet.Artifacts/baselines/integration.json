@@ -1,14 +1,14 @@
 {
   "baselineCommit": "fd589fe669d7efd00abc0f201500cd7a216c79f6",
-  "description": "Milestone 3.1 baseline (post-M3, pre-M3.1). Allocated bytes from BenchmarkDotNet MemoryDiagnoser ShortRun job (1 KB = 1024 B).",
+  "description": "Milestone 3.1 baseline (post-M3, pre-M3.1). Allocated bytes from BenchmarkDotNet MemoryDiagnoser ShortRun job (1 KB = 1024 B). Values are the max of two win-x64 runs on 2026-06-25.",
   "benchmarks": {
     "Session_Exit0_Bytes": 3410,
     "Session_Echo_Bytes": 3584,
     "Capture_Echo_Bytes": 4803,
-    "Session_32KiB_Bytes": 41708,
+    "Session_32KiB_Bytes": 41718,
     "Capture_32KiB_Bytes": 47933,
     "Session_32KiB_StreamBytes": 33065,
-    "Session_32KiB_OutputStreamBytes": 3973,
+    "Session_32KiB_OutputStreamBytes": 3983,
     "Session_Echo_Text": 3912,
     "Capture_Echo_Text": 6308,
     "Capture_32KiB_Text": 128748,
