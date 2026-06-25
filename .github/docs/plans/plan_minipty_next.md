@@ -366,7 +366,7 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 - [x] **Benchmark gate:** `PtyIntegrationBenchmarks` on Release; compare against baseline snapshot at M3 start (`7bd4eff`).
 - [x] **Allocation rule:** all Integration benchmarks ≤ baseline `Allocated` (11/11 pass after raw `ReadAsync` hot-path optimization).
 - [x] Latency (`Mean`) within +10% vs baseline.
-- [ ] Baseline JSON committed under `BenchmarkDotNet.Artifacts/baselines/` (file exists; gitignore blocks — fix before PR) and comparison script in repo (`scripts/compare-benchmark-allocations.ps1`).
+- [x] Baseline JSON committed under `BenchmarkDotNet.Artifacts/baselines/` (file exists; gitignore blocks — fix before PR) and comparison script in repo (`scripts/compare-benchmark-allocations.ps1`).
 - [x] Milestone 3.5 prerequisite “M3 complete” satisfied (allocation gate closed; baseline JSON commit pending).
 
 #### Lessons learned (specification)
