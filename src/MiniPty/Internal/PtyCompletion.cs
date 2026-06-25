@@ -62,13 +62,11 @@ internal static class PtyCompletion
         // Match transport-pump ordering (exit then drain). Defer CloseTransport on Windows until after
         // ReadOutputAsync finishes so BoundedOutputBuffer's producer is not mid-read on a disposed handle.
         var exitCode = await WaitForExitAsync(session, options, cancellationToken, closeTransportOnExit: false).ConfigureAwait(false);
-        var output = await PtyOutputDrain.AwaitPumpAsync(
+        var output = await PtyOutputDrain.AwaitSessionPumpAsync(
             pumpTask,
             session.CloseOutputTransport,
             options.OutputDrainGrace,
             options.OutputReaderCloseTimeout,
-            throwOnTimeout: true,
-            transportAlreadyClosed: false,
             cancellationToken).ConfigureAwait(false);
 
         return (output, exitCode);

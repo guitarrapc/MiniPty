@@ -19,9 +19,7 @@ internal static class PtyCapturePump
         Encoding encoding,
         bool decodeOutput,
         CancellationToken cancellationToken) =>
-        Task.Run(
-            () => ReadSessionCoreAsync(session, originTimestamp, timeProvider, encoding, decodeOutput, cancellationToken),
-            cancellationToken);
+        ReadSessionCoreAsync(session, originTimestamp, timeProvider, encoding, decodeOutput, cancellationToken);
 
     private static async Task<PtyCapturePumpResult> ReadSessionCoreAsync(
         PtySession session,
