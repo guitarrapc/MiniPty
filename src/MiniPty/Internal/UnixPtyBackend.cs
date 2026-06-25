@@ -189,7 +189,10 @@ internal static partial class UnixPtyBackend
             UnixInterop.kill(_pid, UnixInterop.SigKill);
         }
 
-        public async Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation)
+        public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true) =>
+            WaitForExitCoreAsync(cancellationToken, killOnCancellation);
+
+        private async Task<int> WaitForExitCoreAsync(CancellationToken cancellationToken, bool killOnCancellation)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (TryRefreshExitState())

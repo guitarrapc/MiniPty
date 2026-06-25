@@ -520,7 +520,7 @@ Lessons learned from the deferred attempt:
 - `ReadOutputAsync` integration cost is real and pre-existing; Milestone 3.5 cannot assume it is free compared to `Output` + `PtyCompletion`.
 - The ~28 KB Stream-vs-transport gap is primarily the 32 KB ring buffer, not `IAsyncEnumerable`. PR2 dedupe fixed the merge duplicate; the remaining **~30 KB Capture regression** maps to the ring pool rent on fast-consumer paths and is **PR3** scope.
 - A failed integration should stop the milestone and escalate a design choice, not proceed by editing core transport under Capture scope.
-- `ReadOutputAsync` delivers up-to-16 KiB chunks; Capture decode must slice input to the rented char scratch buffer. Session-pump orchestration must run exit wait concurrently with drain (not exit-before-drain) to avoid pipe backpressure deadlock on large output.
+- `ReadOutputAsync` delivers up-to-16 KiB chunks; Capture decode must slice input to the rented char scratch buffer. Session-pump orchestration must **start the pump before waiting for exit** so the child can drain while writing (pipe backpressure). The **await order** matches the transport pump and `completion.md`: exit, then post-exit drain via `AwaitPumpAsync` — not `await pump` before `await exit` (that deadlocks on large output).
 
 #### PR2 implementation record (2026-06-25)
 
@@ -528,8 +528,37 @@ Lessons learned from the deferred attempt:
 |---|---|---|
 | 1 | `PtyCompletion` `SessionOutputPump` delegate only | 61/61 |
 | 2 | `PtyCapture` wires session overload (still transport read) | 61/61 |
-| 3 | `ReadSessionAsync` + `ReadOutputAsync`; concurrent exit+drain for session pump; decode slicing | 61/61 |
-| 4 | `CaptureByteAccumulator` dedupe (session path; pre-size 32 KiB on sustained output; direct chunk copy) | 61/61 |
+| 3 | `ReadSessionAsync` + `ReadOutputAsync`; session pump starts drain concurrently with exit wait; decode slicing | 61/61 (local Windows) |
+| 4 | `CaptureByteAccumulator` dedupe (session path; pre-size 32 KiB on sustained output; direct chunk copy) | 61/61 (local Windows) |
+| 5 | **CI orchestration fix** — see [Session-pump orchestration (final)](#session-pump-orchestration-final) below | 61/61 (Windows Release, WSL2 Ubuntu 24.04) |
+
+##### Session-pump orchestration (final)
+
+Aligns with `lifecycle.md` / `completion.md`: child exit → `OutputDrainGrace` post-exit drain → transport close if needed. Same observable contract as the transport pump; implementation differs only because `ReadOutputAsync` owns a `BoundedOutputBuffer` producer.
+
+| Phase | Session pump (`PtyCapture`) | Transport pump (`CompleteAsync`) |
+|---|---|---|
+| Start | `pumpTask` on thread pool (`ReadOutputAsync`) | `pumpTask` on transport stream |
+| Stdin | `ApplyInputAsync` | same |
+| Exit wait | `WaitForExitAsync` with `closeTransportOnExit: false` (pump still running) | `WaitForExitAsync` (Windows closes transport on exit) |
+| Drain | `AwaitPumpAsync` (`OutputDrainGrace`, then `CloseOutputTransport` if needed) | same |
+
+**`BoundedOutputBuffer` producer (core, PR2 hardening):**
+
+- Do **not** call `WaitForExitInternalAsync` from `ProduceAsync` — a second concurrent exit waiter closes the transport while the pump is still reading (`ObjectDisposedException` on Windows CI; truncated capture / SIGHUP on Unix CI).
+- **`EnterCompletionOrchestration()`** — while `PtyCompletion` drives Capture / `CompleteAsync`, disable the producer exit observer so post-exit close is owned by `AwaitPumpAsync` only.
+- **Exit observer** (persistent `ReadOutputAsync` only) — after child exit, close the transport only when the producer has stalled (~100 ms) so Windows ConPTY unblocks a stuck `ReadFile` without racing short-lived commands.
+- **`EnterExitWait()`** — public `WaitForExitAsync` suppresses the observer; that path already closes the transport on exit on Windows.
+
+**Rejected orchestration attempts (PR2):**
+
+| Attempt | Failure |
+|---|---|
+| `await pump` then `await exit` (pure drain-before-exit) | Large-output deadlock: child blocks on full pipe while pump waits for EOF before exit is polled |
+| Concurrent `await` of exit + `AwaitPumpAsync` with `ProduceAsync` also waiting for exit | Premature `CloseTransport` races the producer (Windows `ObjectDisposedException`; Unix/macOS truncated output / exit 129) |
+| `AwaitPumpAsync` grace close **before** child exit (mis-ordered session path) | Same CI failures as above |
+| `transportIoLock` held across blocking `ReadOutputTransport` | Deadlock: `CloseOutputTransport` waits on lock while producer is blocked inside `ReadFile` |
+| Core `BoundedOutputBuffer` direct handoff (PR3 spike in PR2) | Large-output hang before orchestration fixes landed |
 
 **Benchmark (ShortRun vs `integration.json`, after step 4):**
 
@@ -541,7 +570,9 @@ Lessons learned from the deferred attempt:
 
 Capture dedupe removes the merge duplicate but does **not** close gate **C**: `BoundedOutputBuffer` (~32 KiB pool) is still eagerly rented. **PR3** lazy-ring / pass-through is expected to recover the ~30 KiB on fast-consumer benchmarks (`Capture_*`, and likely `Session_32KiB_StreamBytes`).
 
-**Rejected in PR2 scope:** core `BoundedOutputBuffer` direct handoff (large-output deadlock / timeout before orchestration + decode fixes landed); reverting session orchestration to exit-before-drain (`PtyCancellationKill` regression).
+**Rejected in PR2 scope (core transport):** `BoundedOutputBuffer` direct handoff / lazy-ring (deferred to PR3; large-output hang before step-5 orchestration landed).
+
+**CI lessons (step 5):** `OutputDrainGrace` is defined as **post-exit** drain (`completion.md`). Applying transport close during grace while the child is still running violates the lifecycle contract and broke macOS (`exit 129`), Ubuntu (missing markers), and Windows CI (`ObjectDisposedException`). Session pump must defer `CloseTransport` on exit wait and let `AwaitPumpAsync` own post-exit close — same as transport pump semantics with a deferred Windows `CloseTransport`.
 
 #### PR3: Core `BoundedOutputBuffer` lazy-ring / pass-through
 
@@ -563,7 +594,7 @@ Capture dedupe removes the merge duplicate but does **not** close gate **C**: `B
 
 **Correctness gate:** 61/61 tests; especially `PtyLargeOutputDoesNotBlock`, `PtyReadOutputAsyncDrainsOutputAcrossBoundedBufferCapacity` (slow / backlog consumer must still use the ring).
 
-**Risk (known from PR2 spike):** Naïve direct handoff deadlocked or timed out before PR2 orchestration (concurrent exit+drain) and decode slicing landed. PR3 must re-validate on top of PR2; do not land pass-through without large-output and bounded-capacity tests green.
+**Risk (known from PR2 spike):** Naïve direct handoff deadlocked or timed out before step-5 session orchestration and decode slicing landed. PR3 must re-validate on top of PR2; do not land pass-through without large-output and bounded-capacity tests green.
 
 **Not acceptable:** Satisfying allocation by removing the ring entirely — that trades M2 backpressure for OS-level PTY blocking (see lessons learned).
 

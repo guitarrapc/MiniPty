@@ -11,6 +11,6 @@ internal interface IPtyBackend : IDisposable
     public void Resize(int columns, int rows);
     public void SendEof();
     public void Kill();
-    public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation);
+    public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true);
     public void CloseOutputTransport();
 }

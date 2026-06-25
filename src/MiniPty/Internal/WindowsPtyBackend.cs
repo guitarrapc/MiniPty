@@ -350,12 +350,14 @@ internal static class WindowsPtyBackend
             WindowsInterop.TerminateProcess(_processInfo.hProcess, 1);
         }
 
-        public async Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation)
+        public async Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (TryRefreshExitState())
             {
-                CloseTransport();
+                if (closeTransportOnExit)
+                    CloseTransport();
+
                 return _exitCode;
             }
 
@@ -389,7 +391,9 @@ internal static class WindowsPtyBackend
                         await Task.Yield();
                 }
 
-                CloseTransport();
+                if (closeTransportOnExit)
+                    CloseTransport();
+
                 cancellationToken.ThrowIfCancellationRequested();
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 return _exitCode;

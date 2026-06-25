@@ -30,6 +30,7 @@ internal static class PtyCompletion
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(pump);
 
+        using var orchestration = session.EnterCompletionOrchestration();
         var pumpTask = pump(session.OutputTransport, cancellationToken);
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
         var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
@@ -55,9 +56,12 @@ internal static class PtyCompletion
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(pump);
 
+        using var orchestration = session.EnterCompletionOrchestration();
         var pumpTask = pump(session, cancellationToken);
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
-        var exitCodeTask = WaitForExitAsync(session, options, cancellationToken);
+        // Match transport-pump ordering (exit then drain). Defer CloseTransport on Windows until after
+        // ReadOutputAsync finishes so BoundedOutputBuffer's producer is not mid-read on a disposed handle.
+        var exitCode = await WaitForExitAsync(session, options, cancellationToken, closeTransportOnExit: false).ConfigureAwait(false);
         var output = await PtyOutputDrain.AwaitPumpAsync(
             pumpTask,
             session.CloseOutputTransport,
@@ -66,7 +70,6 @@ internal static class PtyCompletion
             throwOnTimeout: true,
             transportAlreadyClosed: false,
             cancellationToken).ConfigureAwait(false);
-        var exitCode = await exitCodeTask.ConfigureAwait(false);
 
         return (output, exitCode);
     }
@@ -86,9 +89,10 @@ internal static class PtyCompletion
     private static async Task<int> WaitForExitAsync(
         PtySession session,
         PtyCompleteOptions options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool closeTransportOnExit = true)
     {
-        var waitTask = session.WaitForExitInternalAsync(cancellationToken, options.KillOnCancellation);
+        var waitTask = session.WaitForExitInternalAsync(cancellationToken, options.KillOnCancellation, closeTransportOnExit);
 
         if (!options.ExitTimeout.HasValue)
             return await waitTask.ConfigureAwait(false);
