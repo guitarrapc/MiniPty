@@ -337,6 +337,11 @@ internal static class WindowsPtyBackend
             if (_disposed || TryRefreshExitState() || _processInfo.hProcess == IntPtr.Zero)
                 return;
 
+            KillCore();
+        }
+
+        private void KillCore()
+        {
             WindowsInterop.TerminateProcess(_processInfo.hProcess, 1);
         }
 
@@ -381,6 +386,7 @@ internal static class WindowsPtyBackend
 
                 CloseTransport();
                 cancellationToken.ThrowIfCancellationRequested();
+                ObjectDisposedException.ThrowIf(_disposed, this);
                 return _exitCode;
             }
             finally
@@ -404,7 +410,7 @@ internal static class WindowsPtyBackend
 
             _disposed = true;
             if (!TryRefreshExitState())
-                Kill();
+                KillCore();
 
             CloseTransport();
             CloseOutputPipe();

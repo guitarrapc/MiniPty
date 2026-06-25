@@ -250,7 +250,7 @@ public sealed class PtyTests
     {
         await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? WindowsCommand("echo ready & set /p DUMMY=")
-            : UnixShell("printf ready; IFS= read -r _"));
+            : UnixShell("printf 'ready\\n'; IFS= read -r _"));
 
         using var cts = new CancellationTokenSource();
         await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
