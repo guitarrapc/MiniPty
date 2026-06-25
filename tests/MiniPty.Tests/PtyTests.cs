@@ -446,99 +446,6 @@ public sealed class PtyTests
     }
 
     [Test]
-    public async Task PtyEnvironmentOverlayOverridesAndInherits()
-    {
-        const string parentKey = "MINIPTY_TEST_PARENT_ENV";
-        const string overlayKey = "MINIPTY_TEST_OVERLAY_ENV";
-        var previous = Environment.GetEnvironmentVariable(parentKey);
-        Environment.SetEnvironmentVariable(parentKey, "parent-value");
-        try
-        {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                if (!TryResolveWindowsPowerShell(out var powershell))
-                    return;
-
-                var result = await PtyCapture.RunAsync(Spawn(powershell,
-                    [
-                        "-NoLogo",
-                        "-NoProfile",
-                        "-Command",
-                        $"Write-Output ([Environment]::GetEnvironmentVariable('{parentKey}','Process')); Write-Output ([Environment]::GetEnvironmentVariable('{overlayKey}','Process'))"
-                    ]) with
-                    {
-                        Environment = new Dictionary<string, string?> { [overlayKey] = "overlay-value" }
-                    });
-
-                await Assert.That(result.ExitCode).IsEqualTo(0);
-                await Assert.That(result.Contains("parent-value")).IsTrue();
-                await Assert.That(result.Contains("overlay-value")).IsTrue();
-                return;
-            }
-
-            var unix = await PtyCapture.RunAsync(UnixShell($"printf '%s:%s' \"${parentKey}\" \"${overlayKey}\"") with
-            {
-                Environment = new Dictionary<string, string?> { [overlayKey] = "overlay-value" }
-            });
-
-            await Assert.That(unix.ExitCode).IsEqualTo(0);
-            await Assert.That(unix.Contains("parent-value:overlay-value")).IsTrue();
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(parentKey, previous);
-        }
-    }
-
-    [Test]
-    public async Task PtyEnvironmentNullRemovesAndEmptySetsEmpty()
-    {
-        const string emptyKey = "MINIPTY_TEST_EMPTY_ENV";
-        const string removeKey = "MINIPTY_TEST_REMOVE_ENV";
-        var previousRemove = Environment.GetEnvironmentVariable(removeKey);
-        Environment.SetEnvironmentVariable(removeKey, "remove-me");
-        try
-        {
-            var environment = new Dictionary<string, string?> { [emptyKey] = string.Empty, [removeKey] = null };
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                if (!TryResolveWindowsPowerShell(out var powershell))
-                    return;
-
-                var result = await PtyCapture.RunAsync(Spawn(powershell,
-                    [
-                        "-NoLogo",
-                        "-NoProfile",
-                        "-Command",
-                        $"$e=[Environment]::GetEnvironmentVariable('{emptyKey}','Process'); if ($null -eq $e) {{ 'EMPTY:MISSING' }} else {{ 'EMPTY:' + $e }}; $r=[Environment]::GetEnvironmentVariable('{removeKey}','Process'); if ($null -eq $r) {{ 'REMOVE:MISSING' }} else {{ 'REMOVE:' + $r }}"
-                    ]) with
-                    {
-                        Environment = environment
-                    });
-
-                await Assert.That(result.ExitCode).IsEqualTo(0);
-                await Assert.That(result.Contains("EMPTY:MISSING")).IsTrue();
-                await Assert.That(result.Contains("REMOVE:MISSING")).IsTrue();
-                return;
-            }
-
-            var unix = await PtyCapture.RunAsync(UnixShell(
-                $"if [ \"${{{emptyKey}+x}}\" = x ]; then printf 'EMPTY:%s;' \"${emptyKey}\"; else printf 'EMPTY:MISSING;'; fi; if [ \"${{{removeKey}+x}}\" = x ]; then printf 'REMOVE:%s' \"${removeKey}\"; else printf 'REMOVE:MISSING'; fi") with
-            {
-                Environment = environment
-            });
-
-            await Assert.That(unix.ExitCode).IsEqualTo(0);
-            await Assert.That(unix.Contains("EMPTY:;")).IsTrue();
-            await Assert.That(unix.Contains("REMOVE:MISSING")).IsTrue();
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(removeKey, previousRemove);
-        }
-    }
-
-    [Test]
     public async Task PtyUnixTerminalNameSetsTerm()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -551,27 +458,6 @@ public sealed class PtyTests
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
         await Assert.That(result.Contains("xterm-test")).IsTrue();
-    }
-
-    [Test]
-    public async Task PtyUnixDefaultTermIsAppliedWhenAbsent()
-    {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return;
-
-        var previous = Environment.GetEnvironmentVariable("TERM");
-        Environment.SetEnvironmentVariable("TERM", null);
-        try
-        {
-            var result = await PtyCapture.RunAsync(UnixShell("printf '%s' \"$TERM\""));
-
-            await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(result.Contains("xterm-256color")).IsTrue();
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("TERM", previous);
-        }
     }
 
     [Test]
@@ -589,8 +475,13 @@ public sealed class PtyTests
         await Assert.That(ContainsEnvironmentLine(result.GetTextString(), "TERM")).IsFalse();
     }
 
+    /// <summary>
+    /// Exercises the native <c>envp == null</c> path (<c>minipty_build_inherited_envp</c>), which is not covered by
+    /// <see cref="PtyEnvironmentTests"/>. Mutates process environment, so it must not run in parallel with itself.
+    /// </summary>
     [Test]
-    public async Task PtyUnixSanitizesInheritedTerminalSizeVariables()
+    [NotInParallel("native-unix-environ")]
+    public async Task PtyUnixNativePathSanitizesInheritedTerminalSizeVariables()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
@@ -601,7 +492,8 @@ public sealed class PtyTests
         Environment.SetEnvironmentVariable("LINES", "888");
         try
         {
-            var result = await PtyCapture.RunAsync(UnixShell("if [ \"${COLUMNS+x}\" = x ]; then printf 'COLUMNS:%s;' \"$COLUMNS\"; else printf 'COLUMNS:MISSING;'; fi; if [ \"${LINES+x}\" = x ]; then printf 'LINES:%s' \"$LINES\"; else printf 'LINES:MISSING'; fi"));
+            var result = await PtyCapture.RunAsync(
+                UnixShell("test -z \"${COLUMNS+x}\" && test -z \"${LINES+x}\" && printf 'COLUMNS:MISSING;LINES:MISSING'"));
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Contains("COLUMNS:MISSING")).IsTrue();
@@ -706,65 +598,6 @@ public sealed class PtyTests
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
         await Assert.That(result.Contains("TERM:MISSING")).IsTrue();
-    }
-
-    [Test]
-    public async Task PtyWindowsEnvironmentOverlayIsCaseInsensitive()
-    {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !TryResolveWindowsPowerShell(out var powershell))
-            return;
-
-        const string key = "MINIPTY_TEST_CASE_ENV";
-        var previous = Environment.GetEnvironmentVariable(key);
-        Environment.SetEnvironmentVariable(key, "parent-value");
-        try
-        {
-            var result = await PtyCapture.RunAsync(Spawn(powershell,
-                [
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-Command",
-                    $"Write-Output ([Environment]::GetEnvironmentVariable('{key}','Process'))"
-                ]) with
-                {
-                    Environment = new Dictionary<string, string?> { [key.ToLowerInvariant()] = "child-value" }
-                });
-
-            await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(result.Contains("child-value")).IsTrue();
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(key, previous);
-        }
-    }
-
-    [Test]
-    public async Task PtyEnvironmentRejectsInvalidKeysAndValues()
-    {
-        await Assert.ThrowsAsync<ArgumentException>(async () =>
-        {
-            await using var session = Pty.Start(SpawnForValidation() with
-            {
-                Environment = new Dictionary<string, string?> { ["BAD=KEY"] = "value" }
-            });
-        });
-
-        await Assert.ThrowsAsync<ArgumentException>(async () =>
-        {
-            await using var session = Pty.Start(SpawnForValidation() with
-            {
-                Environment = new Dictionary<string, string?> { ["BAD"] = "bad\0value" }
-            });
-        });
-
-        await Assert.ThrowsAsync<ArgumentException>(async () =>
-        {
-            await using var session = Pty.Start(SpawnForValidation() with
-            {
-                TerminalName = "bad\0term"
-            });
-        });
     }
 
     [Test]
@@ -1024,7 +857,7 @@ public sealed class PtyTests
         using var waitCts = new CancellationTokenSource();
 
         await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? WindowsCommand("echo ready & ping -n 8 127.0.0.1 >nul")
+            ? WindowsCommand("echo ready & set /p DUMMY=")
             : UnixShell("printf ready; sleep 8"));
 
         var waitTask = session.WaitForExitAsync(waitCts.Token);
@@ -1134,10 +967,6 @@ public sealed class PtyTests
 
         return false;
     }
-
-    private static PtyStartInfo SpawnForValidation() => RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-        ? WindowsCommand("exit /b 0")
-        : Spawn("true", []);
 
     private static async Task<string> ReadOutputTextAsync(PtySession session, string marker)
     {

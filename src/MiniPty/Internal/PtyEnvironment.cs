@@ -18,14 +18,21 @@ internal static class PtyEnvironment
         "LINES",
     ];
 
-    public static KeyValuePair<string, string>[]? BuildUnix(PtyStartInfo startInfo)
+    /// <summary>Builds the Unix child environment from <paramref name="startInfo"/> and an optional parent snapshot.</summary>
+    /// <param name="startInfo">Spawn options containing overlay and terminal name.</param>
+    /// <param name="parentEnvironment">
+    /// Optional parent-environment snapshot for tests. When <see langword="null"/>, the current process environment is used.
+    /// </param>
+    public static KeyValuePair<string, string>[]? BuildUnix(
+        PtyStartInfo startInfo,
+        IReadOnlyDictionary<string, string>? parentEnvironment = null)
     {
         ValidateTerminalName(startInfo.TerminalName);
 
         if (startInfo.Environment is null && string.IsNullOrEmpty(startInfo.TerminalName))
             return null;
 
-        var entries = CreateParentMap(StringComparer.Ordinal);
+        var entries = CreateParentMap(StringComparer.Ordinal, parentEnvironment);
         for (var i = 0; i < UnixSanitizedKeys.Length; i++)
             entries.Remove(UnixSanitizedKeys[i]);
 
@@ -42,28 +49,40 @@ internal static class PtyEnvironment
         return ToArray(entries);
     }
 
-    public static KeyValuePair<string, string>[]? BuildWindows(PtyStartInfo startInfo)
+    public static KeyValuePair<string, string>[]? BuildWindows(
+        PtyStartInfo startInfo,
+        IReadOnlyDictionary<string, string>? parentEnvironment = null)
     {
         ValidateTerminalName(startInfo.TerminalName);
         if (startInfo.Environment is null)
             return null;
 
-        var entries = CreateParentMap(StringComparer.OrdinalIgnoreCase);
+        var entries = CreateParentMap(StringComparer.OrdinalIgnoreCase, parentEnvironment);
         ApplyOverlay(entries, startInfo.Environment, StringComparer.OrdinalIgnoreCase, termKey: null);
         return ToArray(entries);
     }
 
-    private static Dictionary<string, EnvironmentEntry> CreateParentMap(StringComparer comparer)
+    private static Dictionary<string, EnvironmentEntry> CreateParentMap(
+        StringComparer comparer,
+        IReadOnlyDictionary<string, string>? parentEnvironment = null)
     {
         var entries = new Dictionary<string, EnvironmentEntry>(comparer);
-        var parent = System.Environment.GetEnvironmentVariables();
-        foreach (DictionaryEntry entry in parent)
+        if (parentEnvironment is null)
         {
-            if (entry.Key is not string key || entry.Value is not string value)
-                continue;
+            var parent = System.Environment.GetEnvironmentVariables();
+            foreach (DictionaryEntry entry in parent)
+            {
+                if (entry.Key is not string key || entry.Value is not string value)
+                    continue;
 
-            entries[key] = new EnvironmentEntry(key, value);
+                entries[key] = new EnvironmentEntry(key, value);
+            }
+
+            return entries;
         }
+
+        foreach (var pair in parentEnvironment)
+            entries[pair.Key] = new EnvironmentEntry(pair.Key, pair.Value);
 
         return entries;
     }
