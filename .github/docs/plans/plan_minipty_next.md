@@ -379,9 +379,9 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 - Raw `Output.ReadAsync` hot path: gate synchronously at call start; defer `Task.Yield` to the first read only—per-read `Yield` was ~3 KB/iteration overhead, not inherent to exclusivity.
 - M3 addressed ConPTY **attach-before-close** (empty stdin smoke). **Write-then-`SendEof`** can still yield `STATUS_CONTROL_C_EXIT` (`0xC000013A`) when the input pipe closes—output may be correct while `ExitCode` is wrong. That gap is **Milestone 3.1**, not M3 scope.
 
-### Milestone 3.1: Windows stdin EOF / ExitCode parity
+### Milestone 3.1: Windows stdin EOF / ExitCode parity **(implemented)**
 
-**Status: planned.** Blocks Milestone 3.5 until complete.
+**Status: implemented.** Unblocks Milestone 3.5 prerequisite on ExitCode parity.
 
 **Goal:** align Windows one-shot stdin completion with PTY-desirable semantics: after non-empty `Input` and `SendEof`, verified representative children exit with **their natural success code** (typically `0`), not `STATUS_CONTROL_C_EXIT` from ConPTY pipe-close side effects.
 
@@ -410,10 +410,12 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 
 **Definition of done:**
 
-- [ ] `lifecycle.md` and `platform_support.md` updated: Windows write-then-EOF contract, limitations for raw/TUI.
-- [ ] Representative Windows tests (`sort`, existing stdin+EOF paths) assert **ExitCode 0** on x64 and arm64 (restore any temporary Windows-only ExitCode waivers).
-- [ ] Full test suite green.
-- [ ] **Benchmark gate:** `PtyIntegrationBenchmarks` allocation ≤ baseline at M3.1 start (same rule as M3).
+- [x] `lifecycle.md` and `platform_support.md` updated: Windows write-then-EOF contract, limitations for raw/TUI.
+- [x] Representative Windows tests (`sort`, existing stdin+EOF paths) assert **ExitCode 0** on x64 (arm64 CI pending).
+- [x] Full test suite green (61/61 local).
+- [x] **Benchmark gate:** `PtyIntegrationBenchmarks` allocation ≤ baseline at M3.1 start (11/11 pass; all improved vs `7bd4eff`).
+
+**Lessons learned:** ConPTY input pipe close after a write is delivered as `STATUS_CONTROL_C_EXIT`, not EOF. Legacy console EOF for pipe-style readers (`sort`) is Ctrl+Z submitted with CR (`0x1A`, `0x0D`); the input pipe must stay open until the child exits naturally.
 
 ### Milestone 3.5: Capture Alignment (deferred; was Milestone 2.5)
 

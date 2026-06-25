@@ -40,7 +40,7 @@ Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps th
 | `Pty.Start(PtyStartInfo)` | Spawns the child. Does not wait. |
 | `HasExited` | Polls the child (`WaitForSingleObject(0)` / `waitpid(WNOHANG)`). On Unix, a successful poll reaps the zombie and records the exit code. |
 | `WriteInputAsync` | Writes UTF-8 (default) or raw bytes to PTY stdin. Does not close stdin. |
-| `SendEof()` | **Windows:** closes the ConPTY input pipe on the first wait poll (or transport close)—always deferred; `WriteFile` success is not a safe attach signal. **Unix:** writes EOT (`0x04`, Ctrl-D); immediate after successful write, deferred when there were no bytes—see [Staged stdin EOF](#staged-stdin-eof). |
+| `SendEof()` | **Windows:** after bytes were written, writes Ctrl+Z + CR (`0x1A`, `0x0D`) and keeps the input pipe open until exit (pipe close during wait yields `0xC000013A`); with no bytes, defers input pipe close to the first wait poll—see [Staged stdin EOF](#staged-stdin-eof). **Unix:** writes EOT (`0x04`, Ctrl-D); immediate after successful write, deferred when there were no bytes. |
 | `WaitForExitAsync(CancellationToken)` | Polls the child. Cancellation stops waiting only; the child keeps running (`OperationCanceledException`). |
 | `CompleteAsync(PtyCompleteOptions, CancellationToken)` | Optional stdin, wait for exit, drain output, return `PtyResult`. Cancellation kills the child when `KillOnCancellation` is true (default). |
 | `Kill()` | `TerminateProcess` (Windows) or `kill(SIGKILL)` (Unix). Does not release handles; call `Dispose` afterward. |
@@ -144,7 +144,7 @@ EOT is a **terminal convention**, not a kernel EOF like closing a pipe. It is re
 
 **Does not work reliably for:** raw-mode readers, full-screen TUIs (`vim`, `less`), REPLs, or apps that bind Ctrl-D to another action.
 
-**Windows vs Unix asymmetry:** `SendEof()` signals EOF differently—Windows closes the ConPTY input pipe; Unix writes Ctrl-D only (does **not** close the PTY master fd). Both use the same **staged** rule below.
+**Windows vs Unix asymmetry:** `SendEof()` signals EOF differently—Windows writes Ctrl+Z + CR when bytes were written (pipe close only for empty stdin); Unix writes Ctrl-D only (does **not** close the PTY master fd). Both use the same **staged** rule below for empty stdin.
 
 ### Staged stdin EOF (`SendEof`)
 
@@ -152,7 +152,7 @@ Platform-specific staging avoids signaling EOF before the child has attached std
 
 | Platform | After successful `WriteInputAsync` | EOF with no bytes (`Input: ""`) |
 |---|---|---|
-| **Windows** | Defer pipe close to first wait poll (or transport close)—`WriteFile` to ConPTY does **not** mean the child stdin is wired yet (`0xC000013A` if closed too early) | Same |
+| **Windows** | After bytes: Ctrl+Z + CR on first wait poll; pipe stays open until exit. Empty stdin: defer pipe close to first wait poll (or transport close)—`WriteFile` does **not** mean the child stdin is wired yet (`0xC000013A` if closed too early) | Same |
 | **Unix** | Write EOT (`0x04`) immediately | Defer EOT to wait loop / transport close |
 
 ### Platform differences
@@ -193,7 +193,7 @@ PTY shutdown is timing-sensitive. General pattern:
 
 ```text
 1. Start reading PTY output (pump task)
-2. One-shot stdin: WriteInputAsync → SendEof (Windows: pipe close; Unix: EOT) before wait
+2. One-shot stdin: WriteInputAsync → SendEof (Windows: Ctrl+Z + CR when bytes written, else pipe close; Unix: EOT) before wait
 3. Detect child exit (wait / WaitForSingleObject)
 4. Drain output (OutputDrainGrace), then close ConPTY (Windows) or master fd (Unix)
 5. Wait for reader (OutputReaderCloseTimeout), release process handles

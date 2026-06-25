@@ -68,7 +68,8 @@ internal static class WindowsPtyBackend
     private static readonly IntPtr InvalidHandleValue = new(-1);
     private const uint WaitPollMs = 100;
     private const uint HandleFlagInherit = 0x00000001;
-    private const int EofDeferPollsAfterInput = 40;
+    private const byte InputEofCtrlZ = 0x1A;
+    private const byte InputEofSubmit = 0x0D;
     private const int EofDeferPollsEmptyInput = 40;
     private const uint CreateUnicodeEnvironment = 0x00000400;
 
@@ -249,7 +250,9 @@ internal static class WindowsPtyBackend
         private bool _outputClosed;
         private bool _eofSignaled;
         private bool _eofPending;
+        private bool _streamEofSent;
         private bool _inputWritten;
+        private bool _inputEndsWithNewline;
         private int _eofDeferPollsRemaining;
         private bool _hpcClosed;
         private bool _exited;
@@ -318,10 +321,10 @@ internal static class WindowsPtyBackend
         public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState() || _inputClosed || _eofSignaled || _eofPending)
+            if (TryRefreshExitState() || _inputClosed || _eofSignaled || _eofPending || _streamEofSent)
                 return;
 
-            // Always stage EOF to the wait loop. WriteFile can succeed before ConPTY stdin is attached.
+            // Stage EOF to the wait loop. WriteFile can succeed before ConPTY stdin is attached.
             _eofPending = true;
         }
 
@@ -433,8 +436,12 @@ internal static class WindowsPtyBackend
 
         private void OnInputWritten(ReadOnlySpan<byte> buffer)
         {
-            if (!buffer.IsEmpty)
-                _inputWritten = true;
+            if (buffer.IsEmpty)
+                return;
+
+            _inputWritten = true;
+            var last = buffer[^1];
+            _inputEndsWithNewline = last is (byte)'\n' or (byte)'\r';
         }
 
         private bool TryRefreshExitState()
@@ -465,13 +472,22 @@ internal static class WindowsPtyBackend
                 return;
 
             _eofPending = false;
+            if (_inputWritten)
+            {
+                // ConPTY input pipe close is observed as STATUS_CONTROL_C_EXIT, not EOF.
+                // Legacy console EOF is Ctrl+Z submitted with CR; keep the pipe open until exit.
+                WriteStreamEofToInput();
+                _streamEofSent = true;
+                return;
+            }
+
             _eofSignaled = true;
-            _eofDeferPollsRemaining = _inputWritten ? EofDeferPollsAfterInput : EofDeferPollsEmptyInput;
+            _eofDeferPollsRemaining = EofDeferPollsEmptyInput;
         }
 
         private void CloseInputPipeIfEofSignaled()
         {
-            if (!_eofSignaled)
+            if (!_eofSignaled || _streamEofSent)
                 return;
 
             if (_eofDeferPollsRemaining > 0)
@@ -481,6 +497,18 @@ internal static class WindowsPtyBackend
             }
 
             CloseInputPipe();
+        }
+
+        private void WriteStreamEofToInput()
+        {
+            if (_streamEofSent || _inputClosed)
+                return;
+
+            if (_inputWritten && !_inputEndsWithNewline)
+                PtyIo.WriteAll(_inputWriteHandle, stackalloc byte[1] { InputEofSubmit });
+
+            PtyIo.WriteAll(_inputWriteHandle, stackalloc byte[2] { InputEofCtrlZ, InputEofSubmit });
+            _streamEofSent = true;
         }
 
         private void CloseInputPipe()

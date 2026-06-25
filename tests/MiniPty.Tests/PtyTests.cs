@@ -77,6 +77,7 @@ public sealed class PtyTests
                 Spawn(sort, []),
                 new PtyCaptureOptions { Completion = new() { Input = $"zzz\r\n{marker}\r\naaa\r\n" } });
 
+            await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Contains(marker)).IsTrue();
             await Assert.That(result.Contains("aaa")).IsTrue();
             return;
@@ -137,13 +138,14 @@ public sealed class PtyTests
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
+            var sort = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "sort.exe");
             var result = await PtyCapture.RunAsync(
-                WindowsCommand($"find /v \"\" >nul & echo {marker}"),
+                Spawn(sort, []),
                 new PtyCaptureOptions { Completion = new() { Input = "line 1\r\nline 2\r\n" } });
 
-            // ConPTY may report STATUS_CONTROL_C_EXIT (0xC000013A) when the input pipe closes
-            // after a write, even when the child produced the expected output.
-            await Assert.That(result.Contains(marker)).IsTrue();
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Contains("line 1")).IsTrue();
+            await Assert.That(result.Contains("line 2")).IsTrue();
             return;
         }
 
