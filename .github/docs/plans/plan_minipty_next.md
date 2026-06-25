@@ -253,7 +253,7 @@ Resolved implementation notes:
 
 ## Implementation Milestones
 
-Milestones are ordered by dependency. **Milestone 3.5 (Capture Alignment)** is deferred and must not start until Milestone 3 and the prerequisites listed there are satisfied. Downstream milestones (4–6) do not depend on 3.5.
+Milestones are ordered by dependency. **Milestone 3.5 (Capture Alignment)** is deferred and must not start until Milestone 3, **Milestone 3.1**, and the prerequisites listed there are satisfied. Downstream milestones (4–6) do not depend on 3.5.
 
 ### Milestone 1: Spawn Option Parity (implemented)
 
@@ -377,6 +377,43 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 - Output exclusivity for raw `Output.ReadAsync` must acquire the consumer **when `ReadAsync` is invoked**, not when the transport read runs; otherwise a racing `ReadOutputAsync` slips through.
 - Parallel lifecycle tests must not use short `sleep`/`ping` windows to assert “child still alive”; use stdin-blocking children instead.
 - Raw `Output.ReadAsync` hot path: gate synchronously at call start; defer `Task.Yield` to the first read only—per-read `Yield` was ~3 KB/iteration overhead, not inherent to exclusivity.
+- M3 addressed ConPTY **attach-before-close** (empty stdin smoke). **Write-then-`SendEof`** can still yield `STATUS_CONTROL_C_EXIT` (`0xC000013A`) when the input pipe closes—output may be correct while `ExitCode` is wrong. That gap is **Milestone 3.1**, not M3 scope.
+
+### Milestone 3.1: Windows stdin EOF / ExitCode parity
+
+**Status: planned.** Blocks Milestone 3.5 until complete.
+
+**Goal:** align Windows one-shot stdin completion with PTY-desirable semantics: after non-empty `Input` and `SendEof`, verified representative children exit with **their natural success code** (typically `0`), not `STATUS_CONTROL_C_EXIT` from ConPTY pipe-close side effects.
+
+**Problem (observed):** On Windows (including arm64 CI), `CompleteAsync` / `PtyCapture.RunAsync` with non-empty `Input` can produce expected output while the child reports `0xC000013A`. Deferring pipe close alone did not fix `sort.exe`; `Ctrl+Z` alone hung. Pipe close on ConPTY is not always equivalent to clean stdin EOF for blocking console readers.
+
+**Contract scope (what we guarantee):**
+
+| In scope | Out of scope |
+|---|---|
+| One-shot `CompleteAsync` / Capture with non-empty `Input` + `SendEofAfterInput` | Raw-mode / full-screen TUI stdin EOF |
+| Pipe-style stdin readers (`sort`, `cat`, existing platform_support checks) | Arbitrary child processes |
+| Windows x64 and arm64 CI targets | ExitCode normalization / masking (`0xC000013A` → `0`) |
+
+**Non-goals:**
+
+- No new public API (no `IsStdinReady`, no Windows-only `PtyCompleteOptions` escape hatches). Implementation stays in `WindowsPtyBackend` / completion orchestration.
+- Do not reopen Milestone 3 as unimplemented.
+
+**Implementation approach (order):**
+
+1. **Research** — document how ConPTY / reference implementations deliver post-write stdin EOF without spurious control events.
+2. **Stream EOF marker + natural exit** — prefer in-stream EOF signaling (e.g. legacy console markers) and waiting for child exit; treat pipe close as last resort or post-exit cleanup.
+3. **Attach / defer tuning** — extend staged EOF only if (1–2) still need timing margin.
+
+**Delivery:** One PR: research notes in plan/spec, backend fix, spec updates, tests, benchmark gate.
+
+**Definition of done:**
+
+- [ ] `lifecycle.md` and `platform_support.md` updated: Windows write-then-EOF contract, limitations for raw/TUI.
+- [ ] Representative Windows tests (`sort`, existing stdin+EOF paths) assert **ExitCode 0** on x64 and arm64 (restore any temporary Windows-only ExitCode waivers).
+- [ ] Full test suite green.
+- [ ] **Benchmark gate:** `PtyIntegrationBenchmarks` allocation ≤ baseline at M3.1 start (same rule as M3).
 
 ### Milestone 3.5: Capture Alignment (deferred; was Milestone 2.5)
 
@@ -397,6 +434,7 @@ Goal: migrate safely without expanding Milestone 2 risk.
 | Prerequisite | Why |
 |---|---|
 | Milestone 3 complete (or equivalent lifecycle tests landed) | Capture migration needs stable stdin/read/exit/drain ordering; parallel completion pumps deadlocked against `ReadOutputAsync`. |
+| **Milestone 3.1 complete** | Capture parity contract requires equivalent `ExitCode`; Windows write-then-`SendEof` currently yields `0xC000013A` for verified one-shot children. |
 | Measured gap documented | Benchmark `Capture` (stream path) vs `Capture` (`ReadOutputAsync` path) vs `Session_32KiB_StreamBytes` on the same machine and commit. |
 | Design choice recorded | One of: (a) accept Capture allocation/latency overhead on `ReadOutputAsync`, (b) Milestone 2.x core optimization without weakening backpressure, or (c) Capture-only internal fast path — reviewed before coding. |
 | No open Milestone 2 contract changes | `ReadOutputAsync` bounded buffering and producer-wait semantics remain as implemented in Milestone 2 unless a separate core milestone says otherwise. |
