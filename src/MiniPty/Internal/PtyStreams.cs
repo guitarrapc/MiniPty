@@ -288,7 +288,7 @@ internal sealed class PtyFdReadStream : Stream
                         var errno = Marshal.GetLastPInvokeError();
                         if (errno == UnixInterop.EINTR)
                             continue;
-                        if (errno is 0 or UnixInterop.EIO)
+                        if (errno is 0 or UnixInterop.EIO or UnixInterop.EBADF)
                             return 0;
 
                         throw new IOException($"read failed (errno {errno})");

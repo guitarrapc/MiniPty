@@ -517,7 +517,7 @@ public sealed class PtyTests
         try
         {
             var script = Path.Combine(tempRoot, "minipty-plain-script");
-            await File.WriteAllTextAsync(script, "printf path-overlay-shell-fallback");
+            await File.WriteAllTextAsync(script, "#!/bin/sh\nprintf path-overlay-shell-fallback\n");
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
             var result = await PtyCapture.RunAsync(Spawn("minipty-plain-script", []) with
@@ -678,14 +678,14 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-            using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 8 127.0.0.1 >nul"]));
+            using var session = Pty.Start(Spawn(cmd, ["/c", "set /p DUMMY="]));
 
             await Assert.ThrowsAsync<OperationCanceledException>(() => session.WaitForExitAsync(cts.Token));
             await Assert.That(session.HasExited).IsFalse();
             return;
         }
 
-        using var unixSession = Pty.Start(Spawn("sleep", ["8"]));
+        using var unixSession = Pty.Start(Spawn("sh", ["-c", "IFS= read -r _"]));
 
         await Assert.ThrowsAsync<OperationCanceledException>(() => unixSession.WaitForExitAsync(cts.Token));
         await Assert.That(unixSession.HasExited).IsFalse();
