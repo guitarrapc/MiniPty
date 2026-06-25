@@ -295,7 +295,7 @@ Lessons learned while specifying this milestone:
 - `ReadOutputAsync` is structurally heavier than reading `Output` directly: a bounded managed buffer, background producer, and exit observation are part of the contract, not optional overhead to remove for downstream convenience.
 - Benchmarks must compare paths separately (`CompleteAsync`, `ReadOutputAsync`, raw `Output` stream). Collapsing `ReadOutputAsync` into a thin `Output` wrapper changes Milestone 2 semantics and invalidates backpressure tests.
 
-### Milestone 3: Lifecycle Hardening **(implemented; allocation gate open item)**
+### Milestone 3: Lifecycle Hardening **(implemented)**
 
 Goal: make persistent sessions reliable under cancellation, exit, and disposal.
 
@@ -334,13 +334,13 @@ Compared to baseline `7bd4eff` via `scripts/compare-benchmark-allocations.ps1`:
 | `Session_32KiB_Bytes` | 55890 | 41718 | −14172 | pass |
 | `Capture_32KiB_Bytes` | 62095 | 47944 | −14151 | pass |
 | `Session_32KiB_StreamBytes` | 47155 | 32993 | −14162 | pass |
-| `Session_32KiB_OutputStreamBytes` | 18032 | 20982 | **+2950** | **fail** |
+| `Session_32KiB_OutputStreamBytes` | 18032 | 3983 | −14049 | pass |
 | `Session_Echo_Text` | 4423 | 3912 | −511 | pass |
 | `Capture_Echo_Text` | 6835 | 6308 | −527 | pass |
 | `Capture_32KiB_Text` | 142684 | 128492 | −14192 | pass |
 | `Capture_32KiB_DisplayPlain` | 212869 | 195594 | −17275 | pass |
 
-**Open item:** `Session_32KiB_OutputStreamBytes` regresses +2950 B because M3 requires `Output.ReadAsync` to hold the raw-output consumer from call start (exclusivity spec). Pre-M3 baseline used the BCL default `ReadAsync` without that gate. Fix options: zero-alloc gated `ReadAsync` (e.g. `IValueTaskSource` reuse, or fast-path when `IsCompletedSuccessfully`) before closing the gate; or revise baseline with documented justification if the cost is accepted as spec-mandated.
+**Hot-path fix:** `Output.ReadAsync` acquires the gate synchronously on every call; `Task.Yield` runs only on the **first** read of an exclusive raw-output session (`rawHoldActive == 0`). Continuing reads use `ValueTask.FromResult(ReadTransport(...))` with no async state machine.
 
 Latency (`Mean`) remained within +10% on all integration benchmarks in the same run.
 
@@ -364,10 +364,10 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 - [x] Windows ConPTY spawn smoke tests (immediate write / resize / empty `SendEof`).
 - [x] Full test suite green (55/55, parallel).
 - [x] **Benchmark gate:** `PtyIntegrationBenchmarks` on Release; compare against baseline snapshot at M3 start (`7bd4eff`).
-- [ ] **Allocation rule:** all Integration benchmarks ≤ baseline `Allocated`. **10/11 pass;** `Session_32KiB_OutputStreamBytes` +2950 B (see open item above).
+- [x] **Allocation rule:** all Integration benchmarks ≤ baseline `Allocated` (11/11 pass after raw `ReadAsync` hot-path optimization).
 - [x] Latency (`Mean`) within +10% vs baseline.
 - [ ] Baseline JSON committed under `BenchmarkDotNet.Artifacts/baselines/` (file exists; gitignore blocks — fix before PR) and comparison script in repo (`scripts/compare-benchmark-allocations.ps1`).
-- [ ] Milestone 3.5 prerequisite “M3 complete” satisfied (pending allocation gate close-out).
+- [x] Milestone 3.5 prerequisite “M3 complete” satisfied (allocation gate closed; baseline JSON commit pending).
 
 #### Lessons learned (specification)
 
@@ -376,6 +376,7 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 - `BoundedOutputBuffer` must `await Task.Yield()` before the first synchronous `ReadOutputTransport`; otherwise `ReadOutputAsync` blocks the caller and stdin cannot be written (persistent loop deadlock).
 - Output exclusivity for raw `Output.ReadAsync` must acquire the consumer **when `ReadAsync` is invoked**, not when the transport read runs; otherwise a racing `ReadOutputAsync` slips through.
 - Parallel lifecycle tests must not use short `sleep`/`ping` windows to assert “child still alive”; use stdin-blocking children instead.
+- Raw `Output.ReadAsync` hot path: gate synchronously at call start; defer `Task.Yield` to the first read only—per-read `Yield` was ~3 KB/iteration overhead, not inherent to exclusivity.
 
 ### Milestone 3.5: Capture Alignment (deferred; was Milestone 2.5)
 

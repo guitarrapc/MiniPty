@@ -46,13 +46,48 @@ internal sealed class PtyHandleReadStream : Stream
         }
     }
 
-    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    /// <inheritdoc cref="Stream.ReadAsync(Memory{byte}, CancellationToken)" />
+    /// <remarks>
+    /// <para>
+    /// Intentionally not <c>async</c>: when <see cref="rawHoldActive"/> is already set, this returns
+    /// <see cref="ValueTask.FromResult{TResult}(TResult)"/> so tight <c>Output.ReadAsync</c> loops do not pay
+    /// an async state machine per call (see <c>Session_32KiB_OutputStreamBytes</c>).
+    /// </para>
+    /// <para>
+    /// <see cref="PtySession.BeforeRawOutputRead"/> runs synchronously at call start so a second
+    /// <c>ReadOutputAsync</c> / <c>CompleteAsync</c> fails immediately even if transport I/O has not begun.
+    /// </para>
+    /// <para>
+    /// Only the first read of an exclusive session delegates to <see cref="ReadFirstAsync"/>, which
+    /// <see cref="Task.Yield"/>s before blocking transport I/O. That lets callers start concurrent pumps
+    /// without deadlocking on an empty pipe; later reads in the same session use the synchronous fast path above.
+    /// </para>
+    /// </remarks>
+    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
         if (buffer.IsEmpty)
-            return 0;
+            return ValueTask.FromResult(0);
 
         cancellationToken.ThrowIfCancellationRequested();
+        var continuing = Volatile.Read(ref rawHoldActive) != 0;
         session?.BeforeRawOutputRead(ref rawHoldActive);
+        try
+        {
+            if (continuing)
+                return ValueTask.FromResult(EndRawOutputRead(ReadTransport(buffer.Span)));
+
+            return ReadFirstAsync(buffer, cancellationToken);
+        }
+        catch
+        {
+            session?.AfterRawOutputRead(ref rawHoldActive);
+            throw;
+        }
+    }
+
+    /// <summary>First gated read of a raw-output session; yields before blocking transport I/O.</summary>
+    private async ValueTask<int> ReadFirstAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+    {
         try
         {
             await Task.Yield();
@@ -181,13 +216,48 @@ internal sealed class PtyFdReadStream : Stream
         }
     }
 
-    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    /// <inheritdoc cref="Stream.ReadAsync(Memory{byte}, CancellationToken)" />
+    /// <remarks>
+    /// <para>
+    /// Intentionally not <c>async</c>: when <see cref="rawHoldActive"/> is already set, this returns
+    /// <see cref="ValueTask.FromResult{TResult}(TResult)"/> so tight <c>Output.ReadAsync</c> loops do not pay
+    /// an async state machine per call (see <c>Session_32KiB_OutputStreamBytes</c>).
+    /// </para>
+    /// <para>
+    /// <see cref="PtySession.BeforeRawOutputRead"/> runs synchronously at call start so a second
+    /// <c>ReadOutputAsync</c> / <c>CompleteAsync</c> fails immediately even if transport I/O has not begun.
+    /// </para>
+    /// <para>
+    /// Only the first read of an exclusive session delegates to <see cref="ReadFirstAsync"/>, which
+    /// <see cref="Task.Yield"/>s before blocking transport I/O. That lets callers start concurrent pumps
+    /// without deadlocking on an empty pipe; later reads in the same session use the synchronous fast path above.
+    /// </para>
+    /// </remarks>
+    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
         if (buffer.IsEmpty)
-            return 0;
+            return ValueTask.FromResult(0);
 
         cancellationToken.ThrowIfCancellationRequested();
+        var continuing = Volatile.Read(ref rawHoldActive) != 0;
         session?.BeforeRawOutputRead(ref rawHoldActive);
+        try
+        {
+            if (continuing)
+                return ValueTask.FromResult(EndRawOutputRead(ReadTransport(buffer.Span)));
+
+            return ReadFirstAsync(buffer, cancellationToken);
+        }
+        catch
+        {
+            session?.AfterRawOutputRead(ref rawHoldActive);
+            throw;
+        }
+    }
+
+    /// <summary>First gated read of a raw-output session; yields before blocking transport I/O.</summary>
+    private async ValueTask<int> ReadFirstAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+    {
         try
         {
             await Task.Yield();
