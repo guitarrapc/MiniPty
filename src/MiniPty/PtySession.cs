@@ -20,17 +20,29 @@ namespace MiniPty;
 /// </remarks>
 public sealed class PtySession : IAsyncDisposable, IDisposable
 {
+    internal const int OutputConsumerNone = 0;
+    internal const int OutputConsumerReadOutputAsync = 1;
+    internal const int OutputConsumerRawOutput = 2;
+    internal const int OutputConsumerComplete = 3;
+    internal const string OutputConsumerConflictMessage = "Only one PTY output reader can be active at a time.";
+
     private static readonly PtyCompleteOptions DefaultCompleteOptions = new();
     private const int OutputBufferCapacity = 32 * 1024;
     private const int OutputStreamChunkSize = 16 * 1024;
 
     private readonly IPtyBackend _backend;
-    private readonly Lock _outputReaderLock = new();
+    private readonly Stream outputTransport;
+    private readonly Lock outputReaderLock = new();
     private BoundedOutputBuffer? _outputBuffer;
     private int _outputReaderActive;
     private bool _disposed;
 
-    internal PtySession(IPtyBackend backend) => _backend = backend;
+    internal PtySession(IPtyBackend backend)
+    {
+        _backend = backend;
+        outputTransport = backend.Output;
+        BindOutputGate(outputTransport);
+    }
 
     /// <summary>
     /// Gets the operating-system process identifier of the child.
@@ -52,7 +64,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// Gets the read-only stream of merged stdout and stderr from the child (PTY master output).
     /// </summary>
     /// <remarks>Reads are raw bytes; decode with <see cref="PtyCompleteOptions.OutputEncoding"/> or your own decoder.</remarks>
-    public Stream Output => _backend.Output;
+    public Stream Output => outputTransport;
+
+    internal Stream OutputTransport => outputTransport;
 
     /// <summary>
     /// Reads persistent PTY output as raw byte chunks.
@@ -77,8 +91,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        if (Interlocked.Exchange(ref _outputReaderActive, 1) != 0)
-            throw new InvalidOperationException("Only one PTY output reader can be active at a time.");
+        if (Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerReadOutputAsync, OutputConsumerNone) != OutputConsumerNone)
+            throw new InvalidOperationException(OutputConsumerConflictMessage);
 
         BoundedOutputBuffer? outputBuffer = null;
         var pendingAdvance = 0;
@@ -110,7 +124,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             if (pendingAdvance > 0)
                 outputBuffer?.Advance(pendingAdvance);
 
-            Volatile.Write(ref _outputReaderActive, 0);
+            Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
         }
     }
 
@@ -135,6 +149,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// <returns>A task that completes when the bytes are written.</returns>
     public async ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
         if (!bytes.IsEmpty)
             await Input.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
     }
@@ -151,8 +166,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     public ValueTask WriteInputAsync(
         string text,
         Encoding? encoding = null,
-        CancellationToken cancellationToken = default) =>
-        new(PtyIo.WriteTextAsync(Input, text, encoding ?? Encoding.UTF8, cancellationToken));
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return new(PtyIo.WriteTextAsync(Input, text, encoding ?? Encoding.UTF8, cancellationToken));
+    }
 
     /// <summary>
     /// Signals end of stdin to the child.
@@ -161,7 +179,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// <para>Windows: closes the ConPTY input pipe (deferred until the first wait poll when staged).</para>
     /// <para>Unix: writes EOT (<c>0x04</c>, Ctrl-D) to the PTY master; does not close the master fd.</para>
     /// </remarks>
-    public void SendEof() => _backend.SendEof();
+    public void SendEof()
+    {
+        ThrowIfDisposed();
+        _backend.SendEof();
+    }
 
     /// <summary>
     /// Resizes the pseudo-terminal to the given dimensions.
@@ -170,7 +192,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// <exception cref="InvalidOperationException">The PTY transport has already been closed.</exception>
     /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed.</exception>
     /// <exception cref="IOException">Unix: <c>TIOCSWINSZ</c> failed.</exception>
-    public void Resize(PtySize size) => _backend.Resize(size.Columns, size.Rows);
+    public void Resize(PtySize size)
+    {
+        ThrowIfDisposed();
+        _backend.Resize(size.Columns, size.Rows);
+    }
 
     /// <summary>
     /// Terminates the child process without releasing PTY handles.
@@ -179,7 +205,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// Uses <c>TerminateProcess</c> on Windows and <c>SIGKILL</c> on Unix.
     /// Call <see cref="Dispose"/> afterward to release resources.
     /// </remarks>
-    public void Kill() => _backend.Kill();
+    public void Kill()
+    {
+        ThrowIfDisposed();
+        _backend.Kill();
+    }
 
     /// <summary>
     /// Asynchronously waits until the child process exits.
@@ -190,8 +220,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// </param>
     /// <returns>A task that completes with the child exit code.</returns>
     /// <exception cref="OperationCanceledException">Waiting was canceled.</exception>
-    public Task<int> WaitForExitAsync(CancellationToken cancellationToken = default) =>
-        WaitForExitInternalAsync(cancellationToken, killOnCancellation: false);
+    public Task<int> WaitForExitAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return WaitForExitInternalAsync(cancellationToken, killOnCancellation: false);
+    }
 
     /// <summary>
     /// Pumps and drains the PTY output stream, optionally writes stdin, waits for exit, and returns captured bytes.
@@ -210,14 +243,25 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         CancellationToken cancellationToken = default)
     {
         options ??= DefaultCompleteOptions;
-        var encoding = options.OutputEncoding;
-        var (output, exitCode) = await PtyCompletion.RunAsync(
-            this,
-            options,
-            (stream, ct) => PtyBytePump.ReadAllAsync(stream, encoding, options.DecodeOutput, ct),
-            cancellationToken).ConfigureAwait(false);
+        ThrowIfDisposed();
+        if (Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerComplete, OutputConsumerNone) != OutputConsumerNone)
+            throw new InvalidOperationException(OutputConsumerConflictMessage);
 
-        return new PtyResult(output.ToPayload(), exitCode);
+        try
+        {
+            var encoding = options.OutputEncoding;
+            var (output, exitCode) = await PtyCompletion.RunAsync(
+                this,
+                options,
+                (stream, ct) => PtyBytePump.ReadAllAsync(stream, encoding, options.DecodeOutput, ct),
+                cancellationToken).ConfigureAwait(false);
+
+            return new PtyResult(output.ToPayload(), exitCode);
+        }
+        finally
+        {
+            Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
+        }
     }
 
     /// <summary>
@@ -229,6 +273,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             return;
 
         _disposed = true;
+        Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
         _outputBuffer?.Dispose();
         _backend.Dispose();
     }
@@ -254,9 +299,64 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             throw new ObjectDisposedException(nameof(PtySession));
     }
 
+    private void ThrowIfOutputConsumerActive()
+    {
+        if (Volatile.Read(ref _outputReaderActive) != OutputConsumerNone)
+            throw new InvalidOperationException(OutputConsumerConflictMessage);
+    }
+
+    internal void EnsureRawOutputReadAllowed() => ThrowIfDisposed();
+
+    internal void BeforeRawOutputRead(ref int rawHoldActive)
+    {
+        EnsureRawOutputReadAllowed();
+        if (Volatile.Read(ref rawHoldActive) != 0)
+            return;
+
+        AcquireRawOutputConsumer();
+        Volatile.Write(ref rawHoldActive, 1);
+    }
+
+    internal void AfterRawOutputRead(ref int rawHoldActive)
+    {
+        if (Interlocked.Exchange(ref rawHoldActive, 0) != 0)
+            ReleaseRawOutputConsumer();
+    }
+
+    internal void AcquireRawOutputConsumer()
+    {
+        ThrowIfDisposed();
+        if (Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerRawOutput, OutputConsumerNone) != OutputConsumerNone)
+            throw new InvalidOperationException(OutputConsumerConflictMessage);
+    }
+
+    internal void ReleaseRawOutputConsumer() =>
+        Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerNone, OutputConsumerRawOutput);
+
+    internal int ReadOutputTransport(Span<byte> buffer) =>
+        outputTransport switch
+        {
+            PtyHandleReadStream windowsOutput => windowsOutput.ReadTransport(buffer),
+            PtyFdReadStream unixOutput => unixOutput.ReadTransport(buffer),
+            _ => throw new InvalidOperationException("Unsupported PTY output transport.")
+        };
+
+    private void BindOutputGate(Stream output)
+    {
+        switch (output)
+        {
+            case PtyHandleReadStream windowsOutput:
+                windowsOutput.BindOutputGate(this);
+                break;
+            case PtyFdReadStream unixOutput:
+                unixOutput.BindOutputGate(this);
+                break;
+        }
+    }
+
     private BoundedOutputBuffer GetOrCreateOutputBuffer()
     {
-        lock (_outputReaderLock)
+        lock (outputReaderLock)
             return _outputBuffer ??= new BoundedOutputBuffer(this);
     }
 
@@ -366,7 +466,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 using var bytes = PtyReadBuffer.RentBytes(OutputStreamChunkSize);
                 while (true)
                 {
-                    var read = await _session.Output.ReadAsync(bytes.Memory, _producerCancellation.Token).ConfigureAwait(false);
+                    _producerCancellation.Token.ThrowIfCancellationRequested();
+                    var read = _session.ReadOutputTransport(bytes.Span);
                     if (read <= 0)
                         break;
 

@@ -204,6 +204,7 @@ internal static partial class UnixPtyBackend
             {
                 while (!TryRefreshExitState())
                 {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
                     cancellationToken.ThrowIfCancellationRequested();
 
                     SendEotIfPending();

@@ -363,6 +363,7 @@ internal static class WindowsPtyBackend
             {
                 while (!TryRefreshExitState())
                 {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
                     cancellationToken.ThrowIfCancellationRequested();
 
                     var waitResult = WindowsInterop.WaitForSingleObject(_processInfo.hProcess, WaitPollMs);

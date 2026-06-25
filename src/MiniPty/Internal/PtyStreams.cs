@@ -6,9 +6,13 @@ namespace MiniPty.Internal;
 /// <summary>Read stream over a PTY output handle. Does not close the underlying handle.</summary>
 internal sealed class PtyHandleReadStream : Stream
 {
-    private readonly SafeFileHandle _handle;
+    private readonly SafeFileHandle handle;
+    private PtySession? session;
+    private int rawHoldActive;
 
-    public PtyHandleReadStream(SafeFileHandle handle) => _handle = handle;
+    public PtyHandleReadStream(SafeFileHandle handle) => this.handle = handle;
+
+    internal void BindOutputGate(PtySession outputSession) => session = outputSession;
 
     public override bool CanRead => true;
     public override bool CanSeek => false;
@@ -30,21 +34,47 @@ internal sealed class PtyHandleReadStream : Stream
         if (buffer.IsEmpty)
             return 0;
 
+        session?.BeforeRawOutputRead(ref rawHoldActive);
+        try
+        {
+            return EndRawOutputRead(ReadTransport(buffer));
+        }
+        catch
+        {
+            session?.AfterRawOutputRead(ref rawHoldActive);
+            throw;
+        }
+    }
+
+    internal int ReadTransport(Span<byte> buffer)
+    {
+        if (buffer.IsEmpty)
+            return 0;
+
         unsafe
         {
             fixed (byte* ptr = buffer)
             {
-                if (!WindowsInterop.ReadFile(_handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
+                if (!WindowsInterop.ReadFile(handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
                 {
                     var error = Marshal.GetLastPInvokeError();
                     if (error == 109) // ERROR_BROKEN_PIPE
                         return 0;
+
                     throw new IOException($"ReadFile failed (Win32 {error})");
                 }
 
                 return (int)read;
             }
         }
+    }
+
+    private int EndRawOutputRead(int read)
+    {
+        if (read == 0)
+            session?.AfterRawOutputRead(ref rawHoldActive);
+
+        return read;
     }
 
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
@@ -91,9 +121,13 @@ internal sealed class PtyHandleWriteStream : Stream
 /// <summary>Read stream over a Unix PTY master fd. Does not close the fd.</summary>
 internal sealed class PtyFdReadStream : Stream
 {
-    private readonly int _fd;
+    private readonly int fd;
+    private PtySession? session;
+    private int rawHoldActive;
 
-    public PtyFdReadStream(int fd) => _fd = fd;
+    public PtyFdReadStream(int fd) => this.fd = fd;
+
+    internal void BindOutputGate(PtySession outputSession) => session = outputSession;
 
     public override bool CanRead => true;
     public override bool CanSeek => false;
@@ -115,24 +149,53 @@ internal sealed class PtyFdReadStream : Stream
         if (buffer.IsEmpty)
             return 0;
 
-        fixed (byte* ptr = buffer)
+        session?.BeforeRawOutputRead(ref rawHoldActive);
+        try
         {
-            while (true)
-            {
-                var read = UnixInterop.Read(_fd, ptr, (nuint)buffer.Length);
-                if (read < 0)
-                {
-                    var errno = Marshal.GetLastPInvokeError();
-                    if (errno == UnixInterop.EINTR)
-                        continue;
-                    if (errno is 0 or UnixInterop.EIO)
-                        return 0;
-                    throw new IOException($"read failed (errno {errno})");
-                }
+            return EndRawOutputRead(ReadTransport(buffer));
+        }
+        catch
+        {
+            session?.AfterRawOutputRead(ref rawHoldActive);
+            throw;
+        }
+    }
 
-                return read;
+    internal int ReadTransport(Span<byte> buffer)
+    {
+        if (buffer.IsEmpty)
+            return 0;
+
+        unsafe
+        {
+            fixed (byte* ptr = buffer)
+            {
+                while (true)
+                {
+                    var read = UnixInterop.Read(fd, ptr, (nuint)buffer.Length);
+                    if (read < 0)
+                    {
+                        var errno = Marshal.GetLastPInvokeError();
+                        if (errno == UnixInterop.EINTR)
+                            continue;
+                        if (errno is 0 or UnixInterop.EIO)
+                            return 0;
+
+                        throw new IOException($"read failed (errno {errno})");
+                    }
+
+                    return read;
+                }
             }
         }
+    }
+
+    private int EndRawOutputRead(int read)
+    {
+        if (read == 0)
+            session?.AfterRawOutputRead(ref rawHoldActive);
+
+        return read;
     }
 
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();

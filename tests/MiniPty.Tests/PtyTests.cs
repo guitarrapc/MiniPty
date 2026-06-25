@@ -925,6 +925,193 @@ public sealed class PtyTests
         await Assert.That(result.Chunks.Count).IsGreaterThan(1);
     }
 
+    [Test]
+    public async Task PtyCompleteAsyncRejectsWhileReadOutputAsyncActive()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("echo ready & ping -n 6 127.0.0.1 >nul")
+            : UnixShell("printf ready; sleep 6"));
+
+        await using var reader = session.ReadOutputAsync().GetAsyncEnumerator();
+        await Assert.That(await reader.MoveNextAsync()).IsTrue();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            session.CompleteAsync(new PtyCompleteOptions()));
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncRejectsWhileRawOutputActive()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("echo ready & ping -n 6 127.0.0.1 >nul")
+            : UnixShell("printf ready; sleep 6"));
+
+        var bytes = new byte[256];
+        var readTask = session.Output.ReadAsync(bytes);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await using var reader = session.ReadOutputAsync().GetAsyncEnumerator();
+            await reader.MoveNextAsync();
+        });
+
+        await readTask;
+    }
+
+    [Test]
+    public async Task PtyCompleteAsyncRejectsWhileRawOutputActive()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("echo ready & ping -n 6 127.0.0.1 >nul")
+            : UnixShell("printf ready; sleep 6"));
+
+        var bytes = new byte[256];
+        var readTask = session.Output.ReadAsync(bytes);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            session.CompleteAsync(new PtyCompleteOptions()));
+
+        await readTask;
+    }
+
+    [Test]
+    public async Task PtyDisposeDuringWaitForExitThrowsObjectDisposed()
+    {
+        var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("ping -n 8 127.0.0.1 >nul")
+            : UnixShell("sleep 8"));
+
+        var waitTask = session.WaitForExitAsync();
+        await Task.Delay(200);
+        session.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await waitTask);
+    }
+
+    [Test]
+    public async Task PtyDisposeDuringWriteInputThrowsObjectDisposed()
+    {
+        var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("ping -n 8 127.0.0.1 >nul")
+            : UnixShell("sleep 8"));
+
+        session.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () =>
+            await session.WriteInputAsync("hello"));
+    }
+
+    [Test]
+    public async Task PtyReadOutputAsyncConcurrentWithWaitForExitAsync()
+    {
+        const string marker = "lifecycle-concurrent-wait";
+
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand($"echo {marker}")
+            : UnixShell($"printf {marker}"));
+
+        var waitTask = session.WaitForExitAsync();
+        var text = await ReadOutputTextAsync(session, marker);
+        var exitCode = await waitTask;
+
+        await Assert.That(exitCode).IsEqualTo(0);
+        await Assert.That(text).Contains(marker);
+    }
+
+    [Test]
+    public async Task PtyCancelReadDoesNotCancelWaitForExit()
+    {
+        using var readCts = new CancellationTokenSource();
+        using var waitCts = new CancellationTokenSource();
+
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("echo ready & ping -n 8 127.0.0.1 >nul")
+            : UnixShell("printf ready; sleep 8"));
+
+        var waitTask = session.WaitForExitAsync(waitCts.Token);
+        await using var reader = session.ReadOutputAsync(readCts.Token).GetAsyncEnumerator();
+        await Assert.That(await reader.MoveNextAsync()).IsTrue();
+
+        await readCts.CancelAsync();
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await reader.MoveNextAsync());
+
+        waitCts.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await waitTask);
+        await Assert.That(session.HasExited).IsFalse();
+    }
+
+    [Test]
+    public async Task PtyKillDuringReadOutputAsyncDrainsOutput()
+    {
+        const string marker = "lifecycle-kill-drain";
+
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? Spawn(Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+            ["/c", $"echo {marker} & ping -n 20 127.0.0.1 >nul"])
+            : UnixShell($"printf '{marker}'; sleep 20"));
+
+        using var output = new MemoryStream();
+        var readTask = Task.Run(async () =>
+        {
+            await foreach (var chunk in session.ReadOutputAsync())
+                await output.WriteAsync(chunk.Data);
+        });
+
+        await Task.Delay(300);
+        session.Kill();
+        await readTask;
+
+        var text = Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
+        await Assert.That(text).Contains(marker);
+    }
+
+    [Test]
+    public async Task PtyWindowsSpawnAllowsImmediateWriteInput()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        if (!TryResolveWindowsPowerShell(out var powershell))
+            return;
+
+        await using var session = Pty.Start(Spawn(powershell,
+        [
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            "$line = [Console]::In.ReadLine(); [Console]::Out.WriteLine('got:' + $line)"
+        ]));
+
+        await session.WriteInputAsync("immediate\r\n");
+        var text = await ReadOutputTextAsync(session, "got:immediate");
+
+        await Assert.That(text).Contains("got:immediate");
+    }
+
+    [Test]
+    public async Task PtyWindowsSpawnAllowsImmediateResize()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using var session = Pty.Start(WindowsCommand("exit /b 0"));
+        session.Resize(new(100, 30));
+        await Assert.That(session.Size).IsEqualTo(new PtySize(100, 30));
+    }
+
+    [Test]
+    public async Task PtyWindowsEmptyStdinSendEofDoesNotFailFast()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using var session = Pty.Start(WindowsCommand("exit /b 0"));
+        session.SendEof();
+        var exitCode = await session.WaitForExitAsync();
+
+        await Assert.That(exitCode).IsEqualTo(0);
+    }
+
     private static PtyStartInfo Spawn(string fileName, IReadOnlyList<string> arguments) =>
         new() { FileName = fileName, Arguments = arguments, Size = new(40, 8) };
 
