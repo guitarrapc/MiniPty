@@ -459,6 +459,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
         private async Task ProduceAsync()
         {
+            // Transport reads are synchronous. Yield before the first read so the
+            // ReadOutputAsync caller is not blocked and can write stdin concurrently.
+            await Task.Yield();
+
             Task<int>? exitTask = null;
             try
             {
