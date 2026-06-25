@@ -318,19 +318,65 @@ internal static partial class UnixPtyBackend
 
             DrainMasterOutputBeforeEot();
 
+            if (TryRefreshExitState())
+            {
+                CompleteEotSignaling();
+                return;
+            }
+
             // Canonical line discipline: one EOT on a non-empty buffer submits the line but
             // does not signal EOF; a second EOT on the empty buffer ends input for programs like cat.
             // Stage the two EOT writes on separate wait polls so the child can attach and consume the submit.
             if (_inputWritten && !_inputEndsWithNewline && !_eotLineSubmitSent)
             {
-                PtyIo.WriteAll(_master, stackalloc byte[1] { InputEot });
-                _eotLineSubmitSent = true;
+                if (TryWriteEotByte())
+                    _eotLineSubmitSent = true;
+                else
+                    CompleteEotSignaling();
                 return;
             }
 
-            PtyIo.WriteAll(_master, stackalloc byte[1] { InputEot });
+            TryWriteEotByte();
+            CompleteEotSignaling();
+        }
+
+        private void CompleteEotSignaling()
+        {
             _eofPending = false;
             _eofSent = true;
+        }
+
+        /// <summary>
+        /// Writes one EOT byte. Returns <see langword="false"/> when the slave is gone (EIO/EPIPE), which is benign after exit.
+        /// </summary>
+        private unsafe bool TryWriteEotByte()
+        {
+            Span<byte> eot = stackalloc byte[1] { InputEot };
+            fixed (byte* ptr = eot)
+            {
+                while (true)
+                {
+                    var written = UnixInterop.Write(_master, ptr, 1);
+                    if (written == 1)
+                        return true;
+                    if (written < 0)
+                    {
+                        switch (Marshal.GetLastPInvokeError())
+                        {
+                            case UnixInterop.EINTR:
+                                continue;
+                            case UnixInterop.EIO:
+                            case UnixInterop.EPIPE:
+                                TryRefreshExitState();
+                                return false;
+                            default:
+                                throw new IOException($"write failed (errno {Marshal.GetLastPInvokeError()})");
+                        }
+                    }
+
+                    throw new IOException("write wrote 0 bytes");
+                }
+            }
         }
 
         /// <summary>
