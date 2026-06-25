@@ -39,10 +39,12 @@ These are verification choices, not API requirements, but they document pitfalls
 |---|---|---|
 | Linux | `bash -lc` on a PTY often stays interactive after `-c` completes. | Prefer `sh -c`, or spawn utilities directly. |
 | Linux | A single EOT with no trailing newline does not signal EOF in canonical mode. | One-shot stdin tests using EOT end input with `\n` before `SendEof()`. |
+| Windows | Ctrl+Z without a preceding line submit does not signal EOF for line-oriented readers. | `SendEof` submits a pending line with CR when input lacks a trailing `\r`/`\n`, then sends Ctrl+Z + CR; `PtyStdinEof_withoutTrailingNewline` covers Windows. |
 | Linux | GNU `stty rows` / `stty columns` without arguments set size instead of printing it. | Query via `stty size`. |
 | macOS | Spawn paths that do not attach a controlling terminal make `stty` and resize probes unreliable. | Unix targets use `forkpty` + native `execve`. |
 | macOS ARM | Variadic `ioctl` for `TIOCSWINSZ` is unsafe to P/Invoke directly. | Resize runs in `libminipty_unix`. |
-| Windows | Closing ConPTY stdin while a child is still attaching can yield `STATUS_CONTROL_C_EXIT`. | Stdin-drain checks use stable built-in commands and staged EOF. |
+| Windows | Closing ConPTY stdin while a child is still attaching can yield `STATUS_CONTROL_C_EXIT`. | Empty-stdin EOF is staged; one-shot writes use Ctrl+Z + CR stream EOF instead of wait-loop pipe close. |
+| Windows | Input pipe close after bytes were written yields `STATUS_CONTROL_C_EXIT` for direct stdin readers (`sort`, `more`). | `SendEof` writes Ctrl+Z + CR and keeps the pipe open until exit; tests assert ExitCode 0 for `sort`. |
 | Windows | `pwsh` is optional on runners. | Prefer built-in Windows PowerShell unless pwsh-only behavior is needed. |
 
 ## Lessons Learned

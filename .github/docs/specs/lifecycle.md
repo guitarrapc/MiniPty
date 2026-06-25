@@ -48,10 +48,11 @@ Exactly **one** active output consumer is allowed per session. The first started
 
 | Platform | Behavior |
 |---|---|
-| Windows | Closes the ConPTY input pipe. EOF may be staged to avoid closing stdin before the child has attached. |
+| Windows (bytes written) | Writes Ctrl+Z + CR (`0x1A`, `0x0D`) to the ConPTY input stream; keeps the input pipe open until the child exits. Pipe close during the wait loop is not used — it is observed as `STATUS_CONTROL_C_EXIT`, not EOF. |
+| Windows (no bytes) | Closes the ConPTY input pipe after staging (attach deferral). |
 | Unix | Writes EOT (`0x04`, Ctrl-D) to the PTY master. It does not close the master fd. |
 
-Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-mode shell-wrapped one-shot commands, but not for raw-mode TUI programs.
+Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-mode shell-wrapped one-shot commands, but not for raw-mode TUI programs. Windows stream EOF uses the legacy console Ctrl+Z + CR convention; when input lacks a trailing line terminator, an extra CR is written first to submit the pending line. Raw/TUI programs are not guaranteed.
 
 ### ConPTY spawn readiness
 
@@ -86,7 +87,8 @@ MiniPty does not fall back to pipe redirect when PTY creation fails.
 ## Lessons Learned
 
 - **ConPTY pipes are transport, not the terminal.** `HPCON` is the pseudo-console; mishandling pipe ends after `CreatePseudoConsole` causes missing output, hangs, or leaks to the parent console.
-- **Child stdin must not be closed before launch completes on Windows.** Early ConPTY input pipe close yields `STATUS_CONTROL_C_EXIT` (0xC000013A). EOF is staged to the first wait poll or transport close.
+- **Child stdin must not be closed before launch completes on Windows.** Early ConPTY input pipe close yields `STATUS_CONTROL_C_EXIT` (0xC000013A). Empty-stdin EOF is staged to the first wait poll or transport close.
+- **ConPTY input pipe close after a write is not clean EOF.** For one-shot stdin with bytes, MiniPty writes Ctrl+Z + CR and waits for natural exit; pipe close is deferred to transport cleanup after exit.
 - **Unix PTY master fds cannot be half-closed.** Closing the master ends both read and write, so `SendEof()` writes EOT instead.
 - **Canonical EOT is not kernel EOF on Unix.** One EOT on a non-empty line buffer delivers buffered bytes but does not end input; a submitted line or a second EOT may be needed.
 - **Output drain after child exit needs bounded waits on one-shot paths.** `OutputDrainGrace` and `OutputReaderCloseTimeout` prevent hung readers without dropping ordinary slow flushes. Persistent `ReadOutputAsync` does not use those timeouts.

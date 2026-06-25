@@ -176,7 +176,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// Signals end of stdin to the child.
     /// </summary>
     /// <remarks>
-    /// <para>Windows: closes the ConPTY input pipe (deferred until the first wait poll when staged).</para>
+    /// <para>Windows: after bytes were written, writes Ctrl+Z + CR to the ConPTY input stream and leaves the pipe open until the child exits; with no prior bytes, closes the input pipe (deferred when staged).</para>
     /// <para>Unix: writes EOT (<c>0x04</c>, Ctrl-D) to the PTY master; does not close the master fd.</para>
     /// </remarks>
     public void SendEof()

@@ -19,13 +19,22 @@ if (-not $csv) {
 }
 
 $rows = Import-Csv $csv.FullName
+
+function Get-BenchmarkRow {
+    param([string]$Name)
+    $matches = $rows | Where-Object { $_.Method -eq $Name }
+    $shortRun = $matches | Where-Object { $_.Job -eq "ShortRun" } | Select-Object -First 1
+    if ($shortRun) { return $shortRun }
+    return $matches | Select-Object -First 1
+}
+
 $failures = New-Object System.Collections.Generic.List[string]
 $improvements = New-Object System.Collections.Generic.List[string]
 
 foreach ($property in $baseline.benchmarks.PSObject.Properties) {
     $name = $property.Name
     $expected = [long]$property.Value
-    $row = $rows | Where-Object { $_.Method -eq $name } | Select-Object -First 1
+    $row = Get-BenchmarkRow -Name $name
     if (-not $row) {
         $failures.Add("MISSING: $name (not in benchmark results)")
         continue
