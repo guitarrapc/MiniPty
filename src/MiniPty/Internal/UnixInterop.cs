@@ -24,5 +24,8 @@ internal static partial class UnixInterop
     internal static partial int kill(int pid, int sig);
 
     [LibraryImport("libc", SetLastError = true)]
+    internal static partial int tcdrain(int fd);
+
+    [LibraryImport("libc", SetLastError = true)]
     internal static partial int close(int fd);
 }

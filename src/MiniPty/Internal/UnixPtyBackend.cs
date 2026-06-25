@@ -104,6 +104,7 @@ internal static partial class UnixPtyBackend
         private readonly InputTrackingWriteStream _inputStream;
         private bool _eofSent;
         private bool _eofPending;
+        private bool _eotLineSubmitSent;
         private bool _inputWritten;
         private bool _inputEndsWithNewline;
         private bool _masterClosed;
@@ -163,16 +164,10 @@ internal static partial class UnixPtyBackend
         public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState() || _eofSent)
+            if (TryRefreshExitState() || _eofSent || _eofPending)
                 return;
 
-            if (_inputWritten)
-            {
-                WriteEotToMaster();
-                return;
-            }
-
-            // Empty stdin EOF: defer EOT until the wait loop gives the child time to attach.
+            // Defer EOT until the wait loop gives the child time to attach (same attach race as ConPTY).
             _eofPending = true;
         }
 
@@ -215,10 +210,10 @@ internal static partial class UnixPtyBackend
                     ObjectDisposedException.ThrowIf(_disposed, this);
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    SendEotIfPending();
-
                     if (PollForChildExit(WaitPollMs, cancellationToken))
                         break;
+
+                    SendEotIfPending();
 
                     await Task.Yield();
                 }
@@ -321,14 +316,37 @@ internal static partial class UnixPtyBackend
             if (_eofSent || _exited || _masterClosed)
                 return;
 
-            PtyIo.WriteAll(_master, stackalloc byte[1] { InputEot });
+            DrainMasterOutputBeforeEot();
+
             // Canonical line discipline: one EOT on a non-empty buffer submits the line but
             // does not signal EOF; a second EOT on the empty buffer ends input for programs like cat.
-            if (_inputWritten && !_inputEndsWithNewline)
+            // Stage the two EOT writes on separate wait polls so the child can attach and consume the submit.
+            if (_inputWritten && !_inputEndsWithNewline && !_eotLineSubmitSent)
+            {
                 PtyIo.WriteAll(_master, stackalloc byte[1] { InputEot });
+                _eotLineSubmitSent = true;
+                return;
+            }
 
+            PtyIo.WriteAll(_master, stackalloc byte[1] { InputEot });
             _eofPending = false;
             _eofSent = true;
+        }
+
+        /// <summary>
+        /// Blocks until prior master writes reach the slave, or the slave opens, so staged EOT is not lost to attach races.
+        /// </summary>
+        private void DrainMasterOutputBeforeEot()
+        {
+            if (!_inputWritten)
+                return;
+
+            while (UnixInterop.tcdrain(_master) != 0)
+            {
+                if (Marshal.GetLastPInvokeError() is UnixInterop.EINTR)
+                    continue;
+                return;
+            }
         }
 
         /// Polls for child exit for up to <paramref name="timeoutMs"/> without allocating a delay task.
