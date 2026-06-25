@@ -46,6 +46,26 @@ internal sealed class PtyHandleReadStream : Stream
         }
     }
 
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (buffer.IsEmpty)
+            return 0;
+
+        cancellationToken.ThrowIfCancellationRequested();
+        session?.BeforeRawOutputRead(ref rawHoldActive);
+        try
+        {
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            return EndRawOutputRead(ReadTransport(buffer.Span));
+        }
+        catch
+        {
+            session?.AfterRawOutputRead(ref rawHoldActive);
+            throw;
+        }
+    }
+
     internal int ReadTransport(Span<byte> buffer)
     {
         if (buffer.IsEmpty)
@@ -153,6 +173,26 @@ internal sealed class PtyFdReadStream : Stream
         try
         {
             return EndRawOutputRead(ReadTransport(buffer));
+        }
+        catch
+        {
+            session?.AfterRawOutputRead(ref rawHoldActive);
+            throw;
+        }
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (buffer.IsEmpty)
+            return 0;
+
+        cancellationToken.ThrowIfCancellationRequested();
+        session?.BeforeRawOutputRead(ref rawHoldActive);
+        try
+        {
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            return EndRawOutputRead(ReadTransport(buffer.Span));
         }
         catch
         {
