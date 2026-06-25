@@ -4,7 +4,6 @@ using MiniPty.Capture;
 
 namespace MiniPty.Tests;
 
-[NotInParallel]
 public sealed class PtyTests
 {
     [Test]
@@ -250,8 +249,8 @@ public sealed class PtyTests
     public async Task PtyReadOutputAsyncCancellationDoesNotKillChild()
     {
         await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? WindowsCommand("echo ready & ping -n 3 127.0.0.1 >nul")
-            : UnixShell("printf ready; sleep 2"));
+            ? WindowsCommand("echo ready & set /p DUMMY=")
+            : UnixShell("printf ready; IFS= read -r _"));
 
         using var cts = new CancellationTokenSource();
         await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
