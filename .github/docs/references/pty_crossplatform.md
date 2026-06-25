@@ -142,6 +142,8 @@ PTY master fds are **not** sockets. `shutdown(master, SHUT_WR)` is invalid (`ENO
 
 EOT is a **terminal convention**, not a kernel EOF like closing a pipe. It is reliable for shell-wrapped one-shot commands when the line discipline is in **canonical mode**.
 
+Staged EOT writes are best-effort: if the slave is already closed (for example after the child exits), `EIO` or `EPIPE` on the master is harmless and does not throw.
+
 **Does not work reliably for:** raw-mode readers, full-screen TUIs (`vim`, `less`), REPLs, or apps that bind Ctrl-D to another action.
 
 **Windows vs Unix asymmetry:** `SendEof()` signals EOF differently—Windows writes Ctrl+Z + CR when bytes were written (pipe close only for empty stdin); Unix writes Ctrl-D only (does **not** close the PTY master fd). Both use the same **staged** rule below for empty stdin.

@@ -8,6 +8,7 @@ internal static partial class UnixInterop
     internal const int EIO = 5;
     internal const int EBADF = 9;
     internal const int ECHILD = 10;
+    internal const int EPIPE = 32;
     internal const int WaitNoHang = 1;
     internal const int SigKill = 9;
 
@@ -22,6 +23,9 @@ internal static partial class UnixInterop
 
     [LibraryImport("libc", SetLastError = true)]
     internal static partial int kill(int pid, int sig);
+
+    [LibraryImport("libc", SetLastError = true)]
+    internal static partial int tcdrain(int fd);
 
     [LibraryImport("libc", SetLastError = true)]
     internal static partial int close(int fd);

@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Buffers;
+using System.Text;
 using MiniPty.Internal;
 
 namespace MiniPty.Capture;
@@ -10,6 +11,67 @@ internal static class PtyCapturePump
     private readonly record struct ByteChunkMeta(TimeSpan Time, int Start, int Length);
 
     private readonly record struct TextChunkMeta(TimeSpan Time, int Start, int Length);
+
+    internal static Task<PtyCapturePumpResult> ReadSessionAsync(
+        PtySession session,
+        long originTimestamp,
+        TimeProvider timeProvider,
+        Encoding encoding,
+        bool decodeOutput,
+        CancellationToken cancellationToken) =>
+        ReadSessionCoreAsync(session, originTimestamp, timeProvider, encoding, decodeOutput, cancellationToken);
+
+    private static async Task<PtyCapturePumpResult> ReadSessionCoreAsync(
+        PtySession session,
+        long originTimestamp,
+        TimeProvider timeProvider,
+        Encoding encoding,
+        bool decodeOutput,
+        CancellationToken cancellationToken)
+    {
+        var byteChunkMeta = new List<ByteChunkMeta>(capacity: 64);
+        var byteAccumulator = new CaptureByteAccumulator();
+
+        List<TextChunkMeta>? textChunkMeta = decodeOutput ? new List<TextChunkMeta>(capacity: 64) : null;
+        PtyGrowingBuffer<char>? charBuffer = decodeOutput ? new PtyGrowingBuffer<char>() : null;
+        using var chars = decodeOutput ? PtyReadBuffer.RentChars(encoding) : default;
+        var decoder = decodeOutput ? encoding.GetDecoder() : null;
+
+        try
+        {
+            await foreach (var chunk in session.ReadOutputAsync(cancellationToken).ConfigureAwait(false))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var data = chunk.Data;
+                if (data.IsEmpty)
+                    continue;
+
+                var read = data.Length;
+                byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteAccumulator.Length, read));
+                byteAccumulator.ReserveForSustainedOutput(read);
+                byteAccumulator.Append(data.Span);
+
+                if (decodeOutput)
+                    AppendDecodedBytes(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, data.Span, chars.Span);
+            }
+
+            if (decodeOutput)
+                AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
+
+            var outputBytes = byteAccumulator.Detach();
+            var chunks = BuildByteChunks(outputBytes, byteChunkMeta);
+            if (!decodeOutput)
+                return new PtyCapturePumpResult(outputBytes, null, encoding, chunks, null);
+
+            var outputChars = charBuffer!.Detach();
+            var textChunks = BuildTextChunks(outputChars, textChunkMeta!);
+            return new PtyCapturePumpResult(outputBytes, outputChars, encoding, chunks, textChunks);
+        }
+        finally
+        {
+            charBuffer?.Dispose();
+        }
+    }
 
     internal static Task<PtyCapturePumpResult> ReadAsync(
         Stream stream,
@@ -138,6 +200,23 @@ internal static class PtyCapturePump
     private static TimeSpan ElapsedSinceStart(long originTimestamp, TimeProvider timeProvider) =>
         timeProvider.GetElapsedTime(originTimestamp);
 
+    private static void AppendDecodedBytes(
+        long originTimestamp,
+        TimeProvider timeProvider,
+        List<TextChunkMeta> textChunkMeta,
+        PtyGrowingBuffer<char> charBuffer,
+        Decoder decoder,
+        ReadOnlySpan<byte> bytes,
+        Span<char> chars)
+    {
+        while (!bytes.IsEmpty)
+        {
+            var slice = bytes.Length > chars.Length ? bytes[..chars.Length] : bytes;
+            AppendTextChunk(originTimestamp, timeProvider, textChunkMeta, charBuffer, decoder, slice, chars, flush: false);
+            bytes = bytes[slice.Length..];
+        }
+    }
+
     private static void AppendTextChunk(
         long originTimestamp,
         TimeProvider timeProvider,
@@ -184,5 +263,107 @@ internal static class PtyCapturePump
     {
         if (output.Length == readBufferLength && read == readBufferLength)
             output.EnsureCapacity(SustainedOutputInitialCapacity);
+    }
+
+    /// <summary>
+    /// Single destination buffer for <see cref="ReadSessionCoreAsync"/> merged bytes.
+    /// Pre-sizes once for sustained output so ReadOutputAsync chunks copy directly into the result array
+    /// without a separate <see cref="PtyGrowingBuffer{T}"/> growth path alongside <c>BoundedOutputBuffer</c>.
+    /// </summary>
+    private struct CaptureByteAccumulator
+    {
+        private byte[] buffer;
+        private int length;
+
+        public CaptureByteAccumulator()
+        {
+            buffer = [];
+        }
+
+        internal int Length => length;
+
+        internal void ReserveForSustainedOutput(int read)
+        {
+            if (length == 0 && read >= PtyReadBuffer.Size)
+                EnsureCapacity(SustainedOutputInitialCapacity);
+        }
+
+        internal void Append(ReadOnlySpan<byte> data)
+        {
+            if (data.IsEmpty)
+                return;
+
+            GrowIfNeeded(length + data.Length);
+            data.CopyTo(buffer.AsSpan(length));
+            length += data.Length;
+        }
+
+        internal byte[] Detach()
+        {
+            if (length == 0)
+            {
+                ReleaseBuffer();
+                return [];
+            }
+
+            if (buffer.Length == length)
+            {
+                var exact = buffer;
+                buffer = [];
+                length = 0;
+                return exact;
+            }
+
+            var trimmed = GC.AllocateUninitializedArray<byte>(length);
+            buffer.AsSpan(0, length).CopyTo(trimmed);
+            ReleaseBuffer();
+            length = 0;
+            return trimmed;
+        }
+
+        private void GrowIfNeeded(int required)
+        {
+            if (required <= buffer.Length)
+                return;
+
+            Grow(required);
+        }
+
+        private void EnsureCapacity(int required)
+        {
+            if (required <= buffer.Length)
+                return;
+
+            Grow(required);
+        }
+
+        private void Grow(int required)
+        {
+            var next = buffer.Length == 0 ? PtyReadBuffer.Size : buffer.Length * 2;
+            while (next < required)
+                next *= 2;
+
+            var rented = ArrayPool<byte>.Shared.Rent(next);
+            if (length > 0)
+                buffer.AsSpan(0, length).CopyTo(rented);
+
+            ReturnBuffer();
+            buffer = rented;
+        }
+
+        private void ReturnBuffer()
+        {
+            if (buffer.Length > 0)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+                buffer = [];
+            }
+        }
+
+        private void ReleaseBuffer()
+        {
+            ReturnBuffer();
+            length = 0;
+        }
     }
 }

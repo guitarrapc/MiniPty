@@ -35,6 +35,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     private readonly Lock outputReaderLock = new();
     private BoundedOutputBuffer? _outputBuffer;
     private int _outputReaderActive;
+    private int _completionOrchestrationDepth;
+    private int _exitWaitDepth;
     private bool _disposed;
 
     internal PtySession(IPtyBackend backend)
@@ -67,6 +69,40 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     public Stream Output => outputTransport;
 
     internal Stream OutputTransport => outputTransport;
+
+    internal bool IsCompletionOrchestrated => Volatile.Read(ref _completionOrchestrationDepth) > 0;
+
+    internal bool IsExitWaitActive => Volatile.Read(ref _exitWaitDepth) > 0;
+
+    internal ExitWaitScope EnterExitWait() => new(this);
+
+    internal readonly struct ExitWaitScope : IDisposable
+    {
+        private readonly PtySession _session;
+
+        internal ExitWaitScope(PtySession session)
+        {
+            _session = session;
+            Interlocked.Increment(ref session._exitWaitDepth);
+        }
+
+        public void Dispose() => Interlocked.Decrement(ref _session._exitWaitDepth);
+    }
+
+    internal CompletionOrchestrationScope EnterCompletionOrchestration() => new(this);
+
+    internal readonly struct CompletionOrchestrationScope : IDisposable
+    {
+        private readonly PtySession _session;
+
+        internal CompletionOrchestrationScope(PtySession session)
+        {
+            _session = session;
+            Interlocked.Increment(ref session._completionOrchestrationDepth);
+        }
+
+        public void Dispose() => Interlocked.Decrement(ref _session._completionOrchestrationDepth);
+    }
 
     /// <summary>
     /// Reads persistent PTY output as raw byte chunks.
@@ -223,7 +259,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     public Task<int> WaitForExitAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        return WaitForExitInternalAsync(cancellationToken, killOnCancellation: false);
+        return WaitForExitInternalScopedAsync(cancellationToken, killOnCancellation: false);
     }
 
     /// <summary>
@@ -288,8 +324,17 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         return ValueTask.CompletedTask;
     }
 
-    internal Task<int> WaitForExitInternalAsync(CancellationToken cancellationToken, bool killOnCancellation) =>
-        _backend.WaitForExitAsync(cancellationToken, killOnCancellation);
+    internal Task<int> WaitForExitInternalAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true) =>
+        WaitForExitInternalCoreAsync(cancellationToken, killOnCancellation, closeTransportOnExit);
+
+    private async Task<int> WaitForExitInternalScopedAsync(CancellationToken cancellationToken, bool killOnCancellation)
+    {
+        using var exitWait = EnterExitWait();
+        return await _backend.WaitForExitAsync(cancellationToken, killOnCancellation).ConfigureAwait(false);
+    }
+
+    private Task<int> WaitForExitInternalCoreAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit) =>
+        _backend.WaitForExitAsync(cancellationToken, killOnCancellation, closeTransportOnExit);
 
     internal void CloseOutputTransport() => _backend.CloseOutputTransport();
 
@@ -367,6 +412,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         private readonly byte[] _buffer;
         private readonly CancellationTokenSource _producerCancellation = new();
         private readonly Task _producer;
+        private long _lastProduceProgressTicks;
         private bool _bufferReturned;
         private int _readOffset;
         private int _writeOffset;
@@ -464,10 +510,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             // WaitForExitAsync concurrently (PtyReadOutputAsyncSupportsPersistentCommandLoop).
             await Task.Yield();
 
-            Task<int>? exitTask = null;
+            var exitObserveTask = _session.IsCompletionOrchestrated
+                ? Task.CompletedTask
+                : ObserveExitForOutputDrainAsync();
+
+            void MarkProduceProgress() => _lastProduceProgressTicks = Environment.TickCount64;
+            MarkProduceProgress();
             try
             {
-                exitTask = _session.WaitForExitInternalAsync(CancellationToken.None, killOnCancellation: false);
                 using var bytes = PtyReadBuffer.RentBytes(OutputStreamChunkSize);
                 while (true)
                 {
@@ -476,11 +526,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     if (read <= 0)
                         break;
 
+                    MarkProduceProgress();
+
                     var consumed = 0;
                     while (consumed < read)
                     {
                         var written = await WriteAsync(bytes.Memory.Slice(consumed, read - consumed), _producerCancellation.Token).ConfigureAwait(false);
                         consumed += written;
+                        MarkProduceProgress();
                     }
                 }
 
@@ -490,7 +543,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             {
                 Complete(null);
             }
-            catch (Exception ex) when (_session._disposed && ex is IOException or ObjectDisposedException or System.ComponentModel.Win32Exception)
+            catch (ObjectDisposedException)
+            {
+                Complete(null);
+            }
+            catch (Exception ex) when (_session._disposed && ex is System.ComponentModel.Win32Exception)
             {
                 Complete(new ObjectDisposedException(nameof(PtySession), ex));
             }
@@ -500,8 +557,53 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             }
             finally
             {
-                if (exitTask is { IsCompleted: true, IsFaulted: true })
-                    _ = exitTask.Exception;
+                _producerCancellation.Cancel();
+                try
+                {
+                    await exitObserveTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+        }
+
+        /// <summary>
+        /// On Windows, ConPTY output may not EOF until the transport is closed after the child exits.
+        /// </summary>
+        private async Task ObserveExitForOutputDrainAsync()
+        {
+            const int PostExitStallBeforeCloseMs = 100;
+
+            try
+            {
+                await _session.WaitForExitInternalAsync(_producerCancellation.Token, killOnCancellation: false, closeTransportOnExit: false).ConfigureAwait(false);
+
+                if (_session.IsExitWaitActive)
+                    return;
+
+                var exitObservedAt = Environment.TickCount64;
+                while (!_producerCancellation.IsCancellationRequested)
+                {
+                    lock (_gate)
+                    {
+                        if (_completed || _disposed)
+                            return;
+                    }
+
+                    var now = Environment.TickCount64;
+                    if (now - _lastProduceProgressTicks >= PostExitStallBeforeCloseMs
+                        && now - exitObservedAt >= PostExitStallBeforeCloseMs)
+                    {
+                        _session.CloseOutputTransport();
+                        return;
+                    }
+
+                    await Task.Delay(10, _producerCancellation.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (_producerCancellation.IsCancellationRequested)
+            {
             }
         }
 

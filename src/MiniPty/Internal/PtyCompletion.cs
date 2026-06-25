@@ -4,7 +4,23 @@ internal static class PtyCompletion
 {
     internal delegate Task<TOutput> OutputPump<TOutput>(Stream output, CancellationToken cancellationToken);
 
-    internal static async Task<(TOutput Output, int ExitCode)> RunAsync<TOutput>(
+    internal delegate Task<TOutput> SessionOutputPump<TOutput>(PtySession session, CancellationToken cancellationToken);
+
+    internal static Task<(TOutput Output, int ExitCode)> RunAsync<TOutput>(
+        PtySession session,
+        PtyCompleteOptions options,
+        OutputPump<TOutput> pump,
+        CancellationToken cancellationToken) =>
+        RunWithTransportPumpAsync(session, options, (output, ct) => pump(output, ct), cancellationToken);
+
+    internal static Task<(TOutput Output, int ExitCode)> RunAsync<TOutput>(
+        PtySession session,
+        PtyCompleteOptions options,
+        SessionOutputPump<TOutput> pump,
+        CancellationToken cancellationToken) =>
+        RunWithSessionPumpAsync(session, options, pump, cancellationToken);
+
+    private static async Task<(TOutput Output, int ExitCode)> RunWithTransportPumpAsync<TOutput>(
         PtySession session,
         PtyCompleteOptions options,
         OutputPump<TOutput> pump,
@@ -14,6 +30,7 @@ internal static class PtyCompletion
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(pump);
 
+        using var orchestration = session.EnterCompletionOrchestration();
         var pumpTask = pump(session.OutputTransport, cancellationToken);
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
         var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
@@ -24,6 +41,32 @@ internal static class PtyCompletion
             options.OutputReaderCloseTimeout,
             throwOnTimeout: true,
             transportAlreadyClosed: false,
+            cancellationToken).ConfigureAwait(false);
+
+        return (output, exitCode);
+    }
+
+    private static async Task<(TOutput Output, int ExitCode)> RunWithSessionPumpAsync<TOutput>(
+        PtySession session,
+        PtyCompleteOptions options,
+        SessionOutputPump<TOutput> pump,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(pump);
+
+        using var orchestration = session.EnterCompletionOrchestration();
+        var pumpTask = pump(session, cancellationToken);
+        await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
+        // Match transport-pump ordering (exit then drain). Defer CloseTransport on Windows until after
+        // ReadOutputAsync finishes so BoundedOutputBuffer's producer is not mid-read on a disposed handle.
+        var exitCode = await WaitForExitAsync(session, options, cancellationToken, closeTransportOnExit: false).ConfigureAwait(false);
+        var output = await PtyOutputDrain.AwaitSessionPumpAsync(
+            pumpTask,
+            session.CloseOutputTransport,
+            options.OutputDrainGrace,
+            options.OutputReaderCloseTimeout,
             cancellationToken).ConfigureAwait(false);
 
         return (output, exitCode);
@@ -44,9 +87,10 @@ internal static class PtyCompletion
     private static async Task<int> WaitForExitAsync(
         PtySession session,
         PtyCompleteOptions options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool closeTransportOnExit = true)
     {
-        var waitTask = session.WaitForExitInternalAsync(cancellationToken, options.KillOnCancellation);
+        var waitTask = session.WaitForExitInternalAsync(cancellationToken, options.KillOnCancellation, closeTransportOnExit);
 
         if (!options.ExitTimeout.HasValue)
             return await waitTask.ConfigureAwait(false);

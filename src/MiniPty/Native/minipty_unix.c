@@ -124,7 +124,8 @@ static void minipty_execve_compat(const char *path, char *const *argv, char *con
 
     execve(path, argv, envp);
 
-    if (errno != ENOEXEC)
+    /* ENOEXEC: plain script without shebang. EACCES: exists but not executable (e.g. noexec mount). */
+    if (errno != ENOEXEC && errno != EACCES)
         return;
 
     while (argv[argc] != NULL)
