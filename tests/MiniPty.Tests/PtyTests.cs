@@ -871,7 +871,7 @@ public sealed class PtyTests
 
         await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? WindowsCommand("echo ready & set /p DUMMY=")
-            : UnixShell("printf ready; sleep 8"));
+            : UnixShell("printf ready; IFS= read -r _"));
 
         var waitTask = session.WaitForExitAsync(waitCts.Token);
         await using var reader = session.ReadOutputAsync(readCts.Token).GetAsyncEnumerator();

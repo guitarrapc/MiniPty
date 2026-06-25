@@ -500,7 +500,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             }
             finally
             {
-                _ = ObserveExitAsync(exitTask);
+                if (exitTask is { IsCompleted: true, IsFaulted: true })
+                    _ = exitTask.Exception;
             }
         }
 
@@ -577,20 +578,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             }
 
             ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
-        }
-
-        private static async Task ObserveExitAsync(Task<int>? exitTask)
-        {
-            if (exitTask is null)
-                return;
-
-            try
-            {
-                await exitTask.ConfigureAwait(false);
-            }
-            catch
-            {
-            }
         }
     }
 }
