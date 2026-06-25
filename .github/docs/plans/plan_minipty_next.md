@@ -417,11 +417,11 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 
 **Lessons learned:** ConPTY input pipe close after a write is delivered as `STATUS_CONTROL_C_EXIT`, not EOF. Legacy console EOF for pipe-style readers (`sort`) is Ctrl+Z submitted with CR (`0x1A`, `0x0D`); the input pipe must stay open until the child exits naturally. When input lacks a trailing line terminator, an extra CR is written before Ctrl+Z + CR (mirror Unix EOT newline awareness). Track stream-EOF vs pipe-close with an explicit `StreamEofSignaled` invariant (`_eofSignaled &&` bytes written)—not a sentinel in `_eofDeferPollsRemaining`. Pack stdin tail into `_inputTailByte` with `InputTailUnset` so newline-aware EOF does not add instance fields.
 
-### Milestone 3.5: Capture Alignment (deferred; was Milestone 2.5)
+### Milestone 3.5: Capture Alignment (in progress; was Milestone 2.5)
 
-**Status: deferred.** Do not start until the prerequisites below are met and recorded in this plan or an ADR.
+**Status: in progress.** Prerequisites satisfied (M3, M3.1). Phase 0 measured gap and design decisions recorded below.
 
-**Placement rationale:** Originally scheduled immediately after Milestone 2. An integration attempt showed that Capture-on-`ReadOutputAsync` conflicts with Milestone 2 transport semantics and benchmark baselines unless core backpressure is weakened. Lifecycle ordering (stdin, read, exit, drain) also needs Milestone 3 hardening before Capture can migrate safely. Resume after Milestone 3, not in parallel with core transport work.
+**Placement rationale:** Originally scheduled immediately after Milestone 2. An integration attempt showed that Capture-on-`ReadOutputAsync` conflicts with Milestone 2 transport semantics and benchmark baselines unless core backpressure is weakened. Lifecycle ordering (stdin, read, exit, drain) also needs Milestone 3 hardening before Capture can migrate safely.
 
 Goal: migrate safely without expanding Milestone 2 risk.
 
@@ -431,31 +431,86 @@ Goal: migrate safely without expanding Milestone 2 risk.
 - Validate parity with existing one-shot capture behavior via focused tests/benchmarks.
 - Keep PRs small and separable from Milestone 2 core transport changes.
 
-**Prerequisites before resuming:**
+**Prerequisites (satisfied):**
 
-| Prerequisite | Why |
+| Prerequisite | Status |
 |---|---|
-| Milestone 3 complete (or equivalent lifecycle tests landed) | Capture migration needs stable stdin/read/exit/drain ordering; parallel completion pumps deadlocked against `ReadOutputAsync`. |
-| **Milestone 3.1 complete** | Capture parity contract requires equivalent `ExitCode`; Windows write-then-`SendEof` currently yields `0xC000013A` for verified one-shot children. |
-| Measured gap documented | Benchmark `Capture` (stream path) vs `Capture` (`ReadOutputAsync` path) vs `Session_32KiB_StreamBytes` on the same machine and commit. |
-| Design choice recorded | One of: (a) accept Capture allocation/latency overhead on `ReadOutputAsync`, (b) Milestone 2.x core optimization without weakening backpressure, or (c) Capture-only internal fast path — reviewed before coding. |
-| No open Milestone 2 contract changes | `ReadOutputAsync` bounded buffering and producer-wait semantics remain as implemented in Milestone 2 unless a separate core milestone says otherwise. |
+| Milestone 3 complete | ✅ |
+| Milestone 3.1 complete | ✅ |
+| Measured gap documented | ✅ (see Phase 0 below) |
+| Design choice recorded | ✅ path **(a)** + structural improvements (not baseline surrender) |
+| No open Milestone 2 contract changes | ✅ |
+
+#### Phase 0: measured gap (2026-06-25, commit `1d3c18c`, Windows x64, ShortRun)
+
+| Benchmark | Allocated | Role |
+|---|---:|---|
+| `Session_32KiB_OutputStreamBytes` | 3.9 KB | Current Capture transport read path |
+| `Session_32KiB_StreamBytes` | 32.2 KB | `ReadOutputAsync` (`BoundedOutputBuffer`; not async-enumerator overhead) |
+| `Session_32KiB_Bytes` | 40.7 KB | `CompleteAsync` one-shot |
+| `Capture_32KiB_Bytes` | 46.8 KB | Current Capture baseline (M3.1 `integration.json`) |
+
+Naïve Capture-on-`ReadOutputAsync` estimate: **~75 KB** (32 KB bounded buffer + 32 KB Capture `PtyGrowingBuffer` duplicate + metadata). Primary fix: path **(a)** plus Capture dedupe in PR2; core micro-opt in PR1.
+
+#### Resolved design decisions
+
+| Decision | Choice |
+|---|---|
+| Design path | **(a)** Capture consumes `ReadOutputAsync`; do not weaken M2 backpressure |
+| Structural improvement | Required — Span/Memory/ArrayPool/stackalloc; allocation regression not acceptable |
+| PR split | **B — 2 PRs** (core micro-opt, then Capture migration) |
+| PR2 orchestration | **A** — internal `PtyCompletion` overload (`Func<PtySession, CT, Task<T>>`); `CompleteAsync` stays on transport in PR2 |
+| Benchmark gate | **C** — `Capture_*` ≤ M3.1 baseline; `Session_32KiB_StreamBytes` ≤ PR1 improved value; explicit baseline update only as documented fallback |
+
+#### PR1: Core `BoundedOutputBuffer` micro-opt
+
+**Scope:** `BoundedOutputBuffer` only; no Capture changes; no public API changes.
+
+| In scope | Out of scope |
+|---|---|
+| `ManualResetValueTaskSourceCore` or TCS reuse for producer/consumer signals | Buffer capacity / chunk size changes |
+| Remove `Dispose` `ContinueWith` — return pooled buffer from producer `finally` | `CompleteAsync` → `ReadOutputAsync` |
+| Exit-task observation without `async` state machine | |
+
+**Gate:** all `Session_*` Integration benchmarks ≤ pre-PR1 allocation; `Session_32KiB_StreamBytes` should improve or hold.
+
+#### PR1 implementation record (2026-06-25)
+
+| Item | Value |
+|---|---|
+| Change | Replace `ObserveExitAsync` (`async Task` + `await exitTask`) with synchronous fault observation in `ProduceAsync` `finally` when `exitTask` is already faulted |
+| Reverted attempts | `SignalWait` / pending-flag TCS refactor (+~16 KiB on `Session_32KiB_StreamBytes`); `ManualResetValueTaskSourceCore` blocked by `ValueTask`/`IValueTaskSource` interop in library builds |
+| Benchmark (ShortRun vs `integration.json`) | `Session_32KiB_StreamBytes` **−51 B** (33,014 vs 33,065); other `Session_*` ≤ baseline or within measurement noise on untouched paths |
+| Tests | 61/61 green |
+
+#### PR2: Capture → `ReadOutputAsync`
+
+**Scope:**
+
+- `PtyCompletion` internal session-pump overload
+- `PtyCapturePump` reads `ReadOutputAsync`; remove double buffer (`PtyGrowingBuffer` → direct copy into result `byte[]`)
+- `PtyCapture.RunAsync` calls new completion path
+
+**Parity contract (unchanged):** merged `Output`, decoded text, `ExitCode` equivalent; per-chunk count and split points **not** stable.
+
+**Gate (C):** `Capture_*` ≤ M3.1 baseline; `Session_32KiB_StreamBytes` ≤ PR1 post-value.
 
 **Non-negotiable constraints (do not violate for Capture convenience):**
 
 | Constraint | Detail |
 |---|---|
 | Do not weaken Milestone 2 `ReadOutputAsync` | Keep bounded managed buffering, producer wait on pressure, no data drop, and up-to-16 KiB chunk delivery. Do not replace with a pull-through `Output` wrapper to fix Capture benchmarks. |
-| Do not change core in a Capture-only PR | Changes to `PtySession.ReadOutputAsync` belong in an explicit Milestone 2.x / core PR with separate review — not under a Capture Alignment PR title. |
-| Benchmark gate | Capture integration must not regress Capture benchmark allocations vs the pre-migration baseline. If `ReadOutputAsync` is heavier, document the delta and get an explicit plan decision; do not hide it by altering core. |
+| Do not change core in a Capture-only PR | Changes to `PtySession.ReadOutputAsync` belong in PR1 or an explicit Milestone 2.x / core PR — not under a Capture Alignment PR title. |
+| Benchmark gate | See gate **C** above. |
 | Parity contract | Merged `Output` bytes, decoded text, and `ExitCode` must remain equivalent. Per-chunk count and split points are **not** a stability contract. |
 | Layering | Timestamping and decode stay in `MiniPty.Capture`. Core stays bytes-first. |
-| Orchestration in Capture | Stdin-before-read or caller-thread drain belongs in Capture/completion orchestration, not in shortcuts that bypass Milestone 2 backpressure. |
+| Orchestration | `PtyCompletion` session-pump overload owns stdin / wait / drain / timeout; Capture does not bypass M2 backpressure. |
 
 Lessons learned from the deferred attempt:
 
 - Satisfying Capture allocation targets by removing `BoundedOutputBuffer` traded Milestone 2 backpressure for OS-level PTY blocking and changed chunk sizing — unacceptable without a core milestone revision.
-- `ReadOutputAsync` integration cost is real and pre-existing; Milestone 2.5 cannot assume it is free compared to `Output` + `PtyCompletion`.
+- `ReadOutputAsync` integration cost is real and pre-existing; Milestone 3.5 cannot assume it is free compared to `Output` + `PtyCompletion`.
+- The ~28 KB Stream-vs-transport gap is primarily the 32 KB ring buffer, not `IAsyncEnumerable`. Capture migration regressions come mainly from **double buffering**, fixable without spec change.
 - A failed integration should stop the milestone and escalate a design choice, not proceed by editing core transport under Capture scope.
 
 ### Milestone 4: Interactive Sample
@@ -523,7 +578,7 @@ As milestones land, update:
 
 ## Open Questions
 
-- When resuming Milestone 3.5 (Capture Alignment), which design path applies: accept `ReadOutputAsync` overhead, optimize core first (Milestone 2.x), or add a Capture-only internal path?
+- ~~When resuming Milestone 3.5 (Capture Alignment), which design path applies~~ — resolved: path **(a)** + PR1/PR2 split (see Milestone 3.5).
 - Should we later expose an advanced low-allocation reader API (`WaitToReadAsync` + `TryRead`) in addition to `IAsyncEnumerable`?
 - Should backpressure limits (buffer upper bound, chunk size) become configurable start/read options?
 - Is Unix `uid` / `gid` worth supporting in a minimal AOT-friendly library?
