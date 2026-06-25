@@ -13,6 +13,35 @@ Implemented lifecycle, cancellation, EOF, drain, and failure behavior for MiniPt
 
 This split lets embedders observe cancellation without tearing down long-running children, while one-shot capture runs default to killing on cancellation so hung children do not leak.
 
+### Concurrent cancellation
+
+When `ReadOutputAsync` and `WaitForExitAsync` run concurrently, cancellation is **scoped to the operation whose token was canceled**. Canceling one does not cancel the other and does not kill the child.
+
+After `ReadOutputAsync` is canceled, the same session may start a new `ReadOutputAsync` enumeration. After `WaitForExitAsync` is canceled, the same session may call `WaitForExitAsync` again.
+
+## Timeouts
+
+| API / option | Timeout behavior |
+|---|---|
+| `CompleteAsync` / `PtyCapture.RunAsync` | `ExitTimeout`, `OutputDrainGrace`, and `OutputReaderCloseTimeout` from `PtyCompleteOptions` apply. |
+| `ReadOutputAsync` | No implicit drain or read timeout. Use `CancellationToken` only. |
+| `PtySession.WaitForExitAsync` | No implicit exit timeout. Use `CancellationToken` only. |
+
+One-shot completion may bound waits to avoid hung children in fire-and-forget scenarios. Persistent streaming expects the embedder to supply cancellation.
+
+## Output consumer exclusivity
+
+Exactly **one** active output consumer is allowed per session. The first started consumer holds exclusivity until that read path ends (enumeration completed, canceled, or faulted).
+
+| Active consumer | Forbidden (throws `InvalidOperationException`) | Allowed concurrently |
+|---|---|---|
+| `ReadOutputAsync` | Second `ReadOutputAsync`; raw `Output` read; `CompleteAsync` | `WriteInputAsync`, `SendEof`, `WaitForExitAsync`, `Resize`, `Kill`, `Dispose` |
+| Raw `Output` read | `ReadOutputAsync`; `CompleteAsync` | `WriteInputAsync`, `SendEof`, `WaitForExitAsync`, `Resize`, `Kill`, `Dispose` |
+
+`CompleteAsync` is not queued or blocked behind an active output consumer. Callers must finish or cancel the active read before starting one-shot completion.
+
+`ReadOutputAsync` and `WaitForExitAsync` **may run concurrently** without deadlock, data loss, or premature transport close. Duplicate `WaitForExitAsync` calls are allowed.
+
 ## EOF
 
 `SendEof()` is platform-specific:
@@ -24,14 +53,20 @@ This split lets embedders observe cancellation without tearing down long-running
 
 Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-mode shell-wrapped one-shot commands, but not for raw-mode TUI programs.
 
-## Drain And Disposal
+### ConPTY spawn readiness
+
+Windows may defer stdin EOF until the wait loop has given the child time to attach. Milestone 3 validates that immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof` do not cause spurious child failure (for example `STATUS_CONTROL_C_EXIT`). This remains an internal transport concern; there is no public ready-state API.
+
+## Drain, kill, and disposal
 
 | Behavior | Contract |
 |---|---|
 | `ReadOutputAsync` after child exit | Drains remaining output and then completes normally. |
+| `ReadOutputAsync` after `Kill()` | Same as exit: drain remaining output, then complete normally (EOF). |
 | `CompleteAsync` after child exit | Drains output for `OutputDrainGrace`, then closes transport if needed. |
-| Output reader close | Waits up to `OutputReaderCloseTimeout`. |
-| `Dispose` while child running | Kills the child, then releases handles. |
+| Output reader close (one-shot) | Waits up to `OutputReaderCloseTimeout`. |
+| `Dispose` / `DisposeAsync` while child running | Kills the child, then releases handles. |
+| `Dispose` while operations are in flight | All in-flight `ReadOutputAsync`, `WaitForExitAsync`, and `WriteInputAsync` operations fail immediately with `ObjectDisposedException`. |
 | `Kill()` | Terminates the child but does not release handles. Call `Dispose` afterward. |
 
 ## Failure Behavior
@@ -41,10 +76,10 @@ Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-
 | Unsupported OS | `PlatformNotSupportedException` from `Pty.Start`. |
 | Spawn, ConPTY, `openpty`, or `forkpty` failure | OS exception with error code; run aborts. |
 | Child non-zero exit | Returned as `ExitCode`; MiniPty does not throw for non-zero child exits. |
-| Concurrent `ReadOutputAsync` readers | `InvalidOperationException`. |
+| Second output consumer | `InvalidOperationException`. |
 | Session disposed while output streaming | `ObjectDisposedException`. |
-| `ExitTimeout` exceeded | `TimeoutException`. |
-| Output drain or reader close timeout | `TimeoutException`. |
+| `ExitTimeout` exceeded (`CompleteAsync` / capture) | `TimeoutException`. |
+| Output drain or reader close timeout (one-shot) | `TimeoutException`. |
 
 MiniPty does not fall back to pipe redirect when PTY creation fails.
 
@@ -54,5 +89,6 @@ MiniPty does not fall back to pipe redirect when PTY creation fails.
 - **Child stdin must not be closed before launch completes on Windows.** Early ConPTY input pipe close yields `STATUS_CONTROL_C_EXIT` (0xC000013A). EOF is staged to the first wait poll or transport close.
 - **Unix PTY master fds cannot be half-closed.** Closing the master ends both read and write, so `SendEof()` writes EOT instead.
 - **Canonical EOT is not kernel EOF on Unix.** One EOT on a non-empty line buffer delivers buffered bytes but does not end input; a submitted line or a second EOT may be needed.
-- **Output drain after child exit needs bounded waits.** `OutputDrainGrace` and `OutputReaderCloseTimeout` prevent hung readers without dropping ordinary slow flushes.
+- **Output drain after child exit needs bounded waits on one-shot paths.** `OutputDrainGrace` and `OutputReaderCloseTimeout` prevent hung readers without dropping ordinary slow flushes. Persistent `ReadOutputAsync` does not use those timeouts.
 - **Cancel semantics differ by use case.** Waiting cancellation does not kill; one-shot completion defaults to killing when canceled.
+- **Do not queue `CompleteAsync` behind active output reads.** Fail fast with `InvalidOperationException` so read, wait, and completion cannot deadlock inside hidden session queues.

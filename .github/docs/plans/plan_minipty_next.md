@@ -295,15 +295,88 @@ Lessons learned while specifying this milestone:
 - `ReadOutputAsync` is structurally heavier than reading `Output` directly: a bounded managed buffer, background producer, and exit observation are part of the contract, not optional overhead to remove for downstream convenience.
 - Benchmarks must compare paths separately (`CompleteAsync`, `ReadOutputAsync`, raw `Output` stream). Collapsing `ReadOutputAsync` into a thin `Output` wrapper changes Milestone 2 semantics and invalidates backpressure tests.
 
-### Milestone 3: Lifecycle Hardening
+### Milestone 3: Lifecycle Hardening **(implemented)**
 
 Goal: make persistent sessions reliable under cancellation, exit, and disposal.
 
-- Specify and test cancellation of read, wait, and completion separately.
-- Test child exit while output reader is active.
-- Test dispose while read/write/wait operations are pending.
-- Test output drain after process exit.
-- Review Windows ConPTY startup readiness and whether write/resize deferral is needed.
+**Scope:** Specify contracts in `lifecycle.md`, add focused tests, and fix behavior only where tests prove gaps. **No new public readiness APIs** (ConPTY deferral stays internal).
+
+**Delivery:** One PR containing spec updates, tests, implementation, baseline snapshot, and allocation comparison script.
+
+#### Implementation record
+
+| Item | Value |
+|---|---|
+| Baseline commit (pre-M3) | `7bd4eff80108a927fda9aced2d984cf2282fefcf` |
+| Implementation commits | `b12bfcf` (lifecycle core) → `3371ba9` (producer yield) → `3773ebe` (ReadAsync gate) → `b816a19` (parallel tests) |
+| Spec | `.github/docs/specs/lifecycle.md` |
+| Allocation gate script | `scripts/compare-benchmark-allocations.ps1` |
+| Baseline snapshot | `BenchmarkDotNet.Artifacts/baselines/integration.json` (local; `BenchmarkDotNet.Artifacts/` is gitignored — force-add `baselines/` or adjust `.gitignore` before PR) |
+
+**Core implementation (no new public API):**
+
+- Output consumer exclusivity (`ReadOutputAsync` / raw `Output` / `CompleteAsync`) in `PtySession`
+- `ThrowIfDisposed` on in-flight wait/write; `CompleteAsync` / pumps use `OutputTransport` (ungated)
+- `BoundedOutputBuffer` producer: `await Task.Yield()` before synchronous transport reads (stdin/write concurrency)
+- `Output.ReadAsync`: acquire gate synchronously at call start; `Task.Yield` before blocking transport read when pipe is empty
+
+**Tests:** 55/55 green (Release, parallel). `[NotInParallel]` removed; cancellation tests use stdin-blocking children (`read` / `set /p`) instead of short `sleep` to avoid parallel scheduling flakes.
+
+#### Benchmark results (Release, OOP, Windows — 2026-06-25)
+
+Compared to baseline `7bd4eff` via `scripts/compare-benchmark-allocations.ps1`:
+
+| Benchmark | Baseline (B) | M3 (B) | Δ (B) | Gate |
+|---|---:|---:|---:|---|
+| `Session_Exit0_Bytes` | 3817 | 3410 | −407 | pass |
+| `Session_Echo_Bytes` | 4096 | 3584 | −512 | pass |
+| `Capture_Echo_Bytes` | 5335 | 4803 | −532 | pass |
+| `Session_32KiB_Bytes` | 55890 | 41718 | −14172 | pass |
+| `Capture_32KiB_Bytes` | 62095 | 47944 | −14151 | pass |
+| `Session_32KiB_StreamBytes` | 47155 | 32993 | −14162 | pass |
+| `Session_32KiB_OutputStreamBytes` | 18032 | 3983 | −14049 | pass |
+| `Session_Echo_Text` | 4423 | 3912 | −511 | pass |
+| `Capture_Echo_Text` | 6835 | 6308 | −527 | pass |
+| `Capture_32KiB_Text` | 142684 | 128492 | −14192 | pass |
+| `Capture_32KiB_DisplayPlain` | 212869 | 195594 | −17275 | pass |
+
+**Hot-path fix:** `Output.ReadAsync` acquires the gate synchronously on every call; `Task.Yield` runs only on the **first** read of an exclusive raw-output session (`rawHoldActive == 0`). Continuing reads use `ValueTask.FromResult(ReadTransport(...))` with no async state machine.
+
+Latency (`Mean`) remained within +10% on all integration benchmarks in the same run.
+
+#### Resolved contracts
+
+| Area | Decision |
+|---|---|
+| `Dispose` / `DisposeAsync` | In-flight `ReadOutputAsync`, `WaitForExitAsync`, and `WriteInputAsync` fail immediately with `ObjectDisposedException`. No cooperative wait. Child is killed if still running; handles are released. |
+| `ReadOutputAsync` ∥ `WaitForExitAsync` | **Allowed and guaranteed** without deadlock, data loss, or premature transport close. Duplicate `WaitForExitAsync` calls are allowed. |
+| Output consumer exclusivity | **Single consumer, bidirectional.** While `ReadOutputAsync` **or** a raw `Output` read is active: a second `ReadOutputAsync`, `CompleteAsync`, or the other output path throws `InvalidOperationException`. No queuing of `CompleteAsync`. |
+| Allowed during `ReadOutputAsync` | `WriteInputAsync`, `SendEof`, `WaitForExitAsync`, `Resize`, `Kill`, `Dispose`. |
+| `Kill()` during active read | Same as normal child exit: drain remaining output, then `ReadOutputAsync` completes normally (EOF). |
+| Cancellation (concurrent ops) | Scoped per operation. Canceling read does not cancel wait (and vice versa). Child is not killed. After cancel, the same session may start a new `ReadOutputAsync` or `WaitForExitAsync`. |
+| Timeouts | `ExitTimeout`, `OutputDrainGrace`, and `OutputReaderCloseTimeout` apply to **one-shot** `CompleteAsync` / `PtyCapture.RunAsync` only. Persistent `ReadOutputAsync` and `PtySession.WaitForExitAsync` use caller `CancellationToken` only. |
+| ConPTY spawn readiness | Document current internal EOF/write deferral. Add Windows smoke tests for immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof`. Fix only if tests fail. |
+
+#### Definition of done
+
+- [x] `lifecycle.md` updated with operation matrix (dispose, cancel, kill, concurrency, exclusivity, timeouts).
+- [x] Tests cover every row in the matrix above (including dispose during wait/write, kill during read, concurrent wait+read, bidirectional output exclusivity).
+- [x] Windows ConPTY spawn smoke tests (immediate write / resize / empty `SendEof`).
+- [x] Full test suite green (55/55, parallel).
+- [x] **Benchmark gate:** `PtyIntegrationBenchmarks` on Release; compare against baseline snapshot at M3 start (`7bd4eff`).
+- [x] **Allocation rule:** all Integration benchmarks ≤ baseline `Allocated` (11/11 pass after raw `ReadAsync` hot-path optimization).
+- [x] Latency (`Mean`) within +10% vs baseline.
+- [ ] Baseline JSON committed under `BenchmarkDotNet.Artifacts/baselines/` (file exists; gitignore blocks — fix before PR) and comparison script in repo (`scripts/compare-benchmark-allocations.ps1`).
+- [x] Milestone 3.5 prerequisite “M3 complete” satisfied (allocation gate closed; baseline JSON commit pending).
+
+#### Lessons learned (specification)
+
+- Do not queue or block `CompleteAsync` behind an active output consumer; fail fast with `InvalidOperationException` instead. Queuing hides deadlocks between read, wait, and one-shot completion.
+- Persistent and one-shot APIs have different timeout models; do not silently apply `PtyCompleteOptions` drain timeouts to `ReadOutputAsync`.
+- `BoundedOutputBuffer` must `await Task.Yield()` before the first synchronous `ReadOutputTransport`; otherwise `ReadOutputAsync` blocks the caller and stdin cannot be written (persistent loop deadlock).
+- Output exclusivity for raw `Output.ReadAsync` must acquire the consumer **when `ReadAsync` is invoked**, not when the transport read runs; otherwise a racing `ReadOutputAsync` slips through.
+- Parallel lifecycle tests must not use short `sleep`/`ping` windows to assert “child still alive”; use stdin-blocking children instead.
+- Raw `Output.ReadAsync` hot path: gate synchronously at call start; defer `Task.Yield` to the first read only—per-read `Yield` was ~3 KB/iteration overhead, not inherent to exclusivity.
 
 ### Milestone 3.5: Capture Alignment (deferred; was Milestone 2.5)
 

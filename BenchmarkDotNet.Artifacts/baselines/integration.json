@@ -1,0 +1,17 @@
+{
+  "baselineCommit": "7bd4eff80108a927fda9aced2d984cf2282fefcf",
+  "description": "Milestone 3 baseline. Allocated bytes from BenchmarkDotNet MemoryDiagnoser (1 KB = 1024 B).",
+  "benchmarks": {
+    "Session_Exit0_Bytes": 3817,
+    "Session_Echo_Bytes": 4096,
+    "Capture_Echo_Bytes": 5335,
+    "Session_32KiB_Bytes": 55890,
+    "Capture_32KiB_Bytes": 62095,
+    "Session_32KiB_StreamBytes": 47155,
+    "Session_32KiB_OutputStreamBytes": 18032,
+    "Session_Echo_Text": 4423,
+    "Capture_Echo_Text": 6835,
+    "Capture_32KiB_Text": 142684,
+    "Capture_32KiB_DisplayPlain": 212869
+  }
+}

@@ -14,7 +14,7 @@ internal static class PtyCompletion
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(pump);
 
-        var pumpTask = pump(session.Output, cancellationToken);
+        var pumpTask = pump(session.OutputTransport, cancellationToken);
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
         var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
         var output = await PtyOutputDrain.AwaitPumpAsync(

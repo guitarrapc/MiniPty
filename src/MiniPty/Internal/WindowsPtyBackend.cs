@@ -68,7 +68,7 @@ internal static class WindowsPtyBackend
     private static readonly IntPtr InvalidHandleValue = new(-1);
     private const uint WaitPollMs = 100;
     private const uint HandleFlagInherit = 0x00000001;
-    private const int EofDeferPollsAfterInput = 3;
+    private const int EofDeferPollsAfterInput = 40;
     private const int EofDeferPollsEmptyInput = 40;
     private const uint CreateUnicodeEnvironment = 0x00000400;
 
@@ -318,17 +318,10 @@ internal static class WindowsPtyBackend
         public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState() || _inputClosed || _eofSignaled)
+            if (TryRefreshExitState() || _inputClosed || _eofSignaled || _eofPending)
                 return;
 
-            if (_inputWritten)
-            {
-                _eofSignaled = true;
-                _eofDeferPollsRemaining = EofDeferPollsAfterInput;
-                return;
-            }
-
-            // Empty stdin EOF: defer pipe close until the wait loop gives the child time to attach.
+            // Always stage EOF to the wait loop. WriteFile can succeed before ConPTY stdin is attached.
             _eofPending = true;
         }
 
@@ -337,6 +330,11 @@ internal static class WindowsPtyBackend
             if (_disposed || TryRefreshExitState() || _processInfo.hProcess == IntPtr.Zero)
                 return;
 
+            KillCore();
+        }
+
+        private void KillCore()
+        {
             WindowsInterop.TerminateProcess(_processInfo.hProcess, 1);
         }
 
@@ -363,6 +361,7 @@ internal static class WindowsPtyBackend
             {
                 while (!TryRefreshExitState())
                 {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
                     cancellationToken.ThrowIfCancellationRequested();
 
                     var waitResult = WindowsInterop.WaitForSingleObject(_processInfo.hProcess, WaitPollMs);
@@ -380,6 +379,7 @@ internal static class WindowsPtyBackend
 
                 CloseTransport();
                 cancellationToken.ThrowIfCancellationRequested();
+                ObjectDisposedException.ThrowIf(_disposed, this);
                 return _exitCode;
             }
             finally
@@ -403,7 +403,7 @@ internal static class WindowsPtyBackend
 
             _disposed = true;
             if (!TryRefreshExitState())
-                Kill();
+                KillCore();
 
             CloseTransport();
             CloseOutputPipe();
@@ -466,7 +466,7 @@ internal static class WindowsPtyBackend
 
             _eofPending = false;
             _eofSignaled = true;
-            _eofDeferPollsRemaining = EofDeferPollsEmptyInput;
+            _eofDeferPollsRemaining = _inputWritten ? EofDeferPollsAfterInput : EofDeferPollsEmptyInput;
         }
 
         private void CloseInputPipeIfEofSignaled()

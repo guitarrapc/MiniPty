@@ -181,6 +181,11 @@ internal static partial class UnixPtyBackend
             if (_disposed || TryRefreshExitState())
                 return;
 
+            KillCore();
+        }
+
+        private void KillCore()
+        {
             UnixInterop.kill(_pid, UnixInterop.SigKill);
         }
 
@@ -204,6 +209,7 @@ internal static partial class UnixPtyBackend
             {
                 while (!TryRefreshExitState())
                 {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
                     cancellationToken.ThrowIfCancellationRequested();
 
                     SendEotIfPending();
@@ -215,6 +221,7 @@ internal static partial class UnixPtyBackend
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
+                ObjectDisposedException.ThrowIf(_disposed, this);
                 return _exitCode;
             }
             finally
@@ -240,7 +247,7 @@ internal static partial class UnixPtyBackend
             _disposed = true;
             if (!TryRefreshExitState())
             {
-                Kill();
+                KillCore();
                 TryReapChild();
             }
 

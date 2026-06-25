@@ -11,7 +11,78 @@ internal static class PtyCapturePump
 
     private readonly record struct TextChunkMeta(TimeSpan Time, int Start, int Length);
 
-    internal static async Task<PtyCapturePumpResult> ReadAsync(
+    internal static Task<PtyCapturePumpResult> ReadAsync(
+        Stream stream,
+        long originTimestamp,
+        TimeProvider timeProvider,
+        Encoding encoding,
+        bool decodeOutput,
+        CancellationToken cancellationToken)
+    {
+        if (PtyTransportRead.IsTransport(stream))
+        {
+            return Task.Run(
+                () => ReadTransport(stream, originTimestamp, timeProvider, encoding, decodeOutput, cancellationToken),
+                cancellationToken);
+        }
+
+        return ReadCoreAsync(stream, originTimestamp, timeProvider, encoding, decodeOutput, cancellationToken);
+    }
+
+    private static PtyCapturePumpResult ReadTransport(
+        Stream stream,
+        long originTimestamp,
+        TimeProvider timeProvider,
+        Encoding encoding,
+        bool decodeOutput,
+        CancellationToken cancellationToken)
+    {
+        var byteChunkMeta = new List<ByteChunkMeta>(capacity: 64);
+        using var byteBuffer = new PtyGrowingBuffer<byte>();
+        using var bytes = PtyReadBuffer.RentBytes();
+
+        List<TextChunkMeta>? textChunkMeta = decodeOutput ? new List<TextChunkMeta>(capacity: 64) : null;
+        PtyGrowingBuffer<char>? charBuffer = decodeOutput ? new PtyGrowingBuffer<char>() : null;
+        using var chars = decodeOutput ? PtyReadBuffer.RentChars(encoding) : default;
+        var decoder = decodeOutput ? encoding.GetDecoder() : null;
+
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var read = PtyTransportRead.Read(stream, bytes.Span);
+                if (read <= 0)
+                    break;
+
+                var slice = bytes.Span[..read];
+                byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteBuffer.Length, read));
+                ReserveForSustainedOutput(byteBuffer, read, bytes.Memory.Length);
+                byteBuffer.Append(slice);
+
+                if (decodeOutput)
+                    AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, slice, chars.Span, flush: false);
+            }
+
+            if (decodeOutput)
+                AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
+
+            var outputBytes = byteBuffer.Detach();
+            var chunks = BuildByteChunks(outputBytes, byteChunkMeta);
+            if (!decodeOutput)
+                return new PtyCapturePumpResult(outputBytes, null, encoding, chunks, null);
+
+            var outputChars = charBuffer!.Detach();
+            var textChunks = BuildTextChunks(outputChars, textChunkMeta!);
+            return new PtyCapturePumpResult(outputBytes, outputChars, encoding, chunks, textChunks);
+        }
+        finally
+        {
+            charBuffer?.Dispose();
+        }
+    }
+
+    private static async Task<PtyCapturePumpResult> ReadCoreAsync(
         Stream stream,
         long originTimestamp,
         TimeProvider timeProvider,
