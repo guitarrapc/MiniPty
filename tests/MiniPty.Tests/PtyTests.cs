@@ -95,10 +95,20 @@ public sealed class PtyTests
     [Test]
     public async Task PtyStdinEof_withoutTrailingNewline()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return;
-
         const string marker = "pty-stdin-eof-no-nl";
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var sort = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "sort.exe");
+            var result = await PtyCapture.RunAsync(
+                Spawn(sort, []),
+                new PtyCaptureOptions { Completion = new() { Input = marker } });
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Contains(marker)).IsTrue();
+            return;
+        }
+
         var unix = await PtyCapture.RunAsync(
             Spawn("cat", []),
             new PtyCaptureOptions { Completion = new() { Input = marker } });

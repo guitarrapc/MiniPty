@@ -52,7 +52,7 @@ Exactly **one** active output consumer is allowed per session. The first started
 | Windows (no bytes) | Closes the ConPTY input pipe after staging (attach deferral). |
 | Unix | Writes EOT (`0x04`, Ctrl-D) to the PTY master. It does not close the master fd. |
 
-Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-mode shell-wrapped one-shot commands, but not for raw-mode TUI programs. Windows stream EOF uses the legacy console Ctrl+Z convention; raw/TUI programs are not guaranteed.
+Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-mode shell-wrapped one-shot commands, but not for raw-mode TUI programs. Windows stream EOF uses the legacy console Ctrl+Z + CR convention; when input lacks a trailing line terminator, an extra CR is written first to submit the pending line. Raw/TUI programs are not guaranteed.
 
 ### ConPTY spawn readiness
 

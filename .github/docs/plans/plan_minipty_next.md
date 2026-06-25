@@ -415,7 +415,7 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 - [x] Full test suite green (61/61 local).
 - [x] **Benchmark gate:** `PtyIntegrationBenchmarks` allocation ≤ baseline at M3.1 start (`fd589fe`, ShortRun; 11/11 pass).
 
-**Lessons learned:** ConPTY input pipe close after a write is delivered as `STATUS_CONTROL_C_EXIT`, not EOF. Legacy console EOF for pipe-style readers (`sort`) is Ctrl+Z submitted with CR (`0x1A`, `0x0D`); the input pipe must stay open until the child exits naturally.
+**Lessons learned:** ConPTY input pipe close after a write is delivered as `STATUS_CONTROL_C_EXIT`, not EOF. Legacy console EOF for pipe-style readers (`sort`) is Ctrl+Z submitted with CR (`0x1A`, `0x0D`); the input pipe must stay open until the child exits naturally. When input lacks a trailing line terminator, an extra CR is written before Ctrl+Z + CR (mirror Unix EOT newline awareness). Track stream-EOF vs pipe-close with an explicit `StreamEofSignaled` invariant (`_eofSignaled &&` bytes written)—not a sentinel in `_eofDeferPollsRemaining`. Pack stdin tail into `_inputTailByte` with `InputTailUnset` so newline-aware EOF does not add instance fields.
 
 ### Milestone 3.5: Capture Alignment (deferred; was Milestone 2.5)
 

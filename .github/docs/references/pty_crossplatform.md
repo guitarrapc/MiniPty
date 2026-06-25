@@ -40,7 +40,7 @@ Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps th
 | `Pty.Start(PtyStartInfo)` | Spawns the child. Does not wait. |
 | `HasExited` | Polls the child (`WaitForSingleObject(0)` / `waitpid(WNOHANG)`). On Unix, a successful poll reaps the zombie and records the exit code. |
 | `WriteInputAsync` | Writes UTF-8 (default) or raw bytes to PTY stdin. Does not close stdin. |
-| `SendEof()` | **Windows:** after bytes were written, writes Ctrl+Z + CR (`0x1A`, `0x0D`) and keeps the input pipe open until exit (pipe close during wait yields `0xC000013A`); with no bytes, defers input pipe close to the first wait poll—see [Staged stdin EOF](#staged-stdin-eof). **Unix:** writes EOT (`0x04`, Ctrl-D); immediate after successful write, deferred when there were no bytes. |
+| `SendEof()` | **Windows:** after bytes were written, writes Ctrl+Z + CR (`0x1A`, `0x0D`) and keeps the input pipe open until exit (pipe close during wait yields `0xC000013A`); when input lacks a trailing `\r`/`\n`, an extra CR is written first. With no bytes, defers input pipe close to the first wait poll—see [Staged stdin EOF](#staged-stdin-eof). **Unix:** writes EOT (`0x04`, Ctrl-D); immediate after successful write, deferred when there were no bytes. |
 | `WaitForExitAsync(CancellationToken)` | Polls the child. Cancellation stops waiting only; the child keeps running (`OperationCanceledException`). |
 | `CompleteAsync(PtyCompleteOptions, CancellationToken)` | Optional stdin, wait for exit, drain output, return `PtyResult`. Cancellation kills the child when `KillOnCancellation` is true (default). |
 | `Kill()` | `TerminateProcess` (Windows) or `kill(SIGKILL)` (Unix). Does not release handles; call `Dispose` afterward. |
