@@ -450,7 +450,7 @@ Goal: migrate safely without expanding Milestone 2 risk.
 | `Session_32KiB_Bytes` | 40.7 KB | `CompleteAsync` one-shot |
 | `Capture_32KiB_Bytes` | 46.8 KB | Current Capture baseline (M3.1 `integration.json`) |
 
-Naïve Capture-on-`ReadOutputAsync` estimate: **~75 KB** (32 KB bounded buffer + 32 KB Capture `PtyGrowingBuffer` duplicate + metadata). Primary fix: path **(a)** plus Capture dedupe in PR2; core micro-opt in PR1.
+Naïve Capture-on-`ReadOutputAsync` estimate: **~75 KB** (32 KB `BoundedOutputBuffer` ring + 32 KB Capture merge buffer duplicate + metadata). This is **double buffering**, not a double ring. **PR2** removes the Capture merge duplicate; **PR3** targets the remaining ~32 KB ring cost on fast-consumer paths (see PR3).
 
 #### Resolved design decisions
 
@@ -458,9 +458,9 @@ Naïve Capture-on-`ReadOutputAsync` estimate: **~75 KB** (32 KB bounded buffer +
 |---|---|
 | Design path | **(a)** Capture consumes `ReadOutputAsync`; do not weaken M2 backpressure |
 | Structural improvement | Required — Span/Memory/ArrayPool/stackalloc; allocation regression not acceptable |
-| PR split | **B — 2 PRs** (core micro-opt, then Capture migration) |
+| PR split | **B — 3 PRs** (PR1 core micro-opt; PR2 Capture migration + dedupe; PR3 core lazy-ring / pass-through) |
 | PR2 orchestration | **A** — internal `PtyCompletion` overload (`Func<PtySession, CT, Task<T>>`); `CompleteAsync` stays on transport in PR2 |
-| Benchmark gate | **C** — `Capture_*` ≤ M3.1 baseline; `Session_32KiB_StreamBytes` ≤ PR1 improved value; explicit baseline update only as documented fallback |
+| Benchmark gate | **C** — `Capture_*` ≤ M3.1 baseline; `Session_32KiB_StreamBytes` ≤ PR1 improved value; **PR2** may land with Capture gate open; **PR3** must close gate **C** for `Capture_*` |
 
 #### PR1: Core `BoundedOutputBuffer` micro-opt
 
@@ -487,21 +487,29 @@ Naïve Capture-on-`ReadOutputAsync` estimate: **~75 KB** (32 KB bounded buffer +
 
 **Scope:**
 
-- `PtyCompletion` internal session-pump overload
-- `PtyCapturePump` reads `ReadOutputAsync`; remove double buffer (`PtyGrowingBuffer` → direct copy into result `byte[]`)
+- `PtyCompletion` internal session-pump overload (transport vs session orchestration split)
+- `PtyCapturePump` reads `ReadOutputAsync`
+- **Capture dedupe (this PR):** replace `PtyGrowingBuffer<byte>` on the session path with `CaptureByteAccumulator` — pre-size once for sustained output, copy each chunk directly into the result `byte[]`, `Detach` transfers ownership without a second merge buffer
 - `PtyCapture.RunAsync` calls new completion path
+- Transport-path `ReadAsync` / `PtyGrowingBuffer` unchanged (legacy one-shot stream pump)
+
+**Out of scope for PR2 (defer to PR3):**
+
+- `BoundedOutputBuffer` producer pass-through / lazy-ring allocation (direct handoff when consumer keeps pace)
+- Removing or weakening the 32 KB managed ring
+- `CompleteAsync` → `ReadOutputAsync` migration
 
 **Parity contract (unchanged):** merged `Output`, decoded text, `ExitCode` equivalent; per-chunk count and split points **not** stable.
 
-**Gate (C):** `Capture_*` ≤ M3.1 baseline; `Session_32KiB_StreamBytes` ≤ PR1 post-value.
+**Gate (C):** PR2 lands Capture on `ReadOutputAsync` with tests green; **`Capture_*` allocation gate deferred to PR3** (see measured gap after step 4). `Session_32KiB_StreamBytes` ≤ PR1 post-value.
 
 **Non-negotiable constraints (do not violate for Capture convenience):**
 
 | Constraint | Detail |
 |---|---|
 | Do not weaken Milestone 2 `ReadOutputAsync` | Keep bounded managed buffering, producer wait on pressure, no data drop, and up-to-16 KiB chunk delivery. Do not replace with a pull-through `Output` wrapper to fix Capture benchmarks. |
-| Do not change core in a Capture-only PR | Changes to `PtySession.ReadOutputAsync` belong in PR1 or an explicit Milestone 2.x / core PR — not under a Capture Alignment PR title. |
-| Benchmark gate | See gate **C** above. |
+| Do not change core in a Capture-only PR | Changes to `PtySession.ReadOutputAsync` / `BoundedOutputBuffer` belong in PR1 or **PR3** — not under a Capture Alignment PR title. |
+| Benchmark gate | PR2: tests + `Session_32KiB_StreamBytes`; PR3: full gate **C** for `Capture_*`. |
 | Parity contract | Merged `Output` bytes, decoded text, and `ExitCode` must remain equivalent. Per-chunk count and split points are **not** a stability contract. |
 | Layering | Timestamping and decode stay in `MiniPty.Capture`. Core stays bytes-first. |
 | Orchestration | `PtyCompletion` session-pump overload owns stdin / wait / drain / timeout; Capture does not bypass M2 backpressure. |
@@ -510,8 +518,54 @@ Lessons learned from the deferred attempt:
 
 - Satisfying Capture allocation targets by removing `BoundedOutputBuffer` traded Milestone 2 backpressure for OS-level PTY blocking and changed chunk sizing — unacceptable without a core milestone revision.
 - `ReadOutputAsync` integration cost is real and pre-existing; Milestone 3.5 cannot assume it is free compared to `Output` + `PtyCompletion`.
-- The ~28 KB Stream-vs-transport gap is primarily the 32 KB ring buffer, not `IAsyncEnumerable`. Capture migration regressions come mainly from **double buffering**, fixable without spec change.
+- The ~28 KB Stream-vs-transport gap is primarily the 32 KB ring buffer, not `IAsyncEnumerable`. PR2 dedupe fixed the merge duplicate; the remaining **~30 KB Capture regression** maps to the ring pool rent on fast-consumer paths and is **PR3** scope.
 - A failed integration should stop the milestone and escalate a design choice, not proceed by editing core transport under Capture scope.
+- `ReadOutputAsync` delivers up-to-16 KiB chunks; Capture decode must slice input to the rented char scratch buffer. Session-pump orchestration must run exit wait concurrently with drain (not exit-before-drain) to avoid pipe backpressure deadlock on large output.
+
+#### PR2 implementation record (2026-06-25)
+
+| Step | Change | Tests |
+|---|---|---|
+| 1 | `PtyCompletion` `SessionOutputPump` delegate only | 61/61 |
+| 2 | `PtyCapture` wires session overload (still transport read) | 61/61 |
+| 3 | `ReadSessionAsync` + `ReadOutputAsync`; concurrent exit+drain for session pump; decode slicing | 61/61 |
+| 4 | `CaptureByteAccumulator` dedupe (session path; pre-size 32 KiB on sustained output; direct chunk copy) | 61/61 |
+
+**Benchmark (ShortRun vs `integration.json`, after step 4):**
+
+| Benchmark | Baseline | After step 4 | Gate |
+|---|---:|---:|---|
+| `Session_32KiB_StreamBytes` | 33,065 B | 32,778 B | pass |
+| `Capture_32KiB_Bytes` | 47,933 B | 78,223 B | **fail** (+30 KB) → PR3 |
+| `Capture_Echo_Bytes` | 4,803 B | 6,164 B | **fail** → PR3 |
+
+Capture dedupe removes the merge duplicate but does **not** close gate **C**: `BoundedOutputBuffer` (~32 KiB pool) is still eagerly rented. **PR3** lazy-ring / pass-through is expected to recover the ~30 KiB on fast-consumer benchmarks (`Capture_*`, and likely `Session_32KiB_StreamBytes`).
+
+**Rejected in PR2 scope:** core `BoundedOutputBuffer` direct handoff (large-output deadlock / timeout before orchestration + decode fixes landed); reverting session orchestration to exit-before-drain (`PtyCancellationKill` regression).
+
+#### PR3: Core `BoundedOutputBuffer` lazy-ring / pass-through
+
+**Placement:** Milestone 3.5 follow-up; **core-only** PR. Depends on PR2 (Capture on `ReadOutputAsync`, session orchestration, dedupe).
+
+**Problem:** On fast consumers (Capture pump, `Session_32KiB_StreamBytes`), the producer often keeps pace with the reader. Eager `ArrayPool` rent of the 32 KiB ring is pure overhead versus the transport baseline.
+
+**Scope:**
+
+| In scope | Out of scope |
+|---|---|
+| Lazy ring allocation — rent the 32 KiB buffer only when backlog requires it | Removing `BoundedOutputBuffer` or weakening no-drop backpressure |
+| Producer pass-through when consumer is waiting and ring is empty — hand off transport read memory, block producer until `Advance` | `CompleteAsync` → `ReadOutputAsync` migration |
+| Preserve ring path when `_count > 0` or consumer falls behind | Capture-layer changes (PR2 is sufficient) |
+
+**Expected outcome:** Fast-consumer paths avoid the 32 KiB ring rent. Post-PR2 measured gap **+~30 KB** on `Capture_32KiB_Bytes` (78 KB → **~48 KB**, matching M3.1 baseline) and similar improvement on `Capture_Echo_*` / `Capture_32KiB_Text*`. `Session_32KiB_StreamBytes` may also drop toward transport-like levels when the reader keeps pace.
+
+**Gate (C):** `Capture_*` ≤ M3.1 baseline (`integration.json`); `Session_32KiB_StreamBytes` ≤ PR1 post-value (must not regress).
+
+**Correctness gate:** 61/61 tests; especially `PtyLargeOutputDoesNotBlock`, `PtyReadOutputAsyncDrainsOutputAcrossBoundedBufferCapacity` (slow / backlog consumer must still use the ring).
+
+**Risk (known from PR2 spike):** Naïve direct handoff deadlocked or timed out before PR2 orchestration (concurrent exit+drain) and decode slicing landed. PR3 must re-validate on top of PR2; do not land pass-through without large-output and bounded-capacity tests green.
+
+**Not acceptable:** Satisfying allocation by removing the ring entirely — that trades M2 backpressure for OS-level PTY blocking (see lessons learned).
 
 ### Milestone 4: Interactive Sample
 
@@ -578,7 +632,7 @@ As milestones land, update:
 
 ## Open Questions
 
-- ~~When resuming Milestone 3.5 (Capture Alignment), which design path applies~~ — resolved: path **(a)** + PR1/PR2 split (see Milestone 3.5).
+- ~~When resuming Milestone 3.5 (Capture Alignment), which design path applies~~ — resolved: path **(a)** + PR1/PR2/PR3 split (see Milestone 3.5).
 - Should we later expose an advanced low-allocation reader API (`WaitToReadAsync` + `TryRead`) in addition to `IAsyncEnumerable`?
 - Should backpressure limits (buffer upper bound, chunk size) become configurable start/read options?
 - Is Unix `uid` / `gid` worth supporting in a minimal AOT-friendly library?
