@@ -295,13 +295,54 @@ Lessons learned while specifying this milestone:
 - `ReadOutputAsync` is structurally heavier than reading `Output` directly: a bounded managed buffer, background producer, and exit observation are part of the contract, not optional overhead to remove for downstream convenience.
 - Benchmarks must compare paths separately (`CompleteAsync`, `ReadOutputAsync`, raw `Output` stream). Collapsing `ReadOutputAsync` into a thin `Output` wrapper changes Milestone 2 semantics and invalidates backpressure tests.
 
-### Milestone 3: Lifecycle Hardening
+### Milestone 3: Lifecycle Hardening **(implemented; allocation gate open item)**
 
 Goal: make persistent sessions reliable under cancellation, exit, and disposal.
 
 **Scope:** Specify contracts in `lifecycle.md`, add focused tests, and fix behavior only where tests prove gaps. **No new public readiness APIs** (ConPTY deferral stays internal).
 
 **Delivery:** One PR containing spec updates, tests, implementation, baseline snapshot, and allocation comparison script.
+
+#### Implementation record
+
+| Item | Value |
+|---|---|
+| Baseline commit (pre-M3) | `7bd4eff80108a927fda9aced2d984cf2282fefcf` |
+| Implementation commits | `b12bfcf` (lifecycle core) → `3371ba9` (producer yield) → `3773ebe` (ReadAsync gate) → `b816a19` (parallel tests) |
+| Spec | `.github/docs/specs/lifecycle.md` |
+| Allocation gate script | `scripts/compare-benchmark-allocations.ps1` |
+| Baseline snapshot | `BenchmarkDotNet.Artifacts/baselines/integration.json` (local; `BenchmarkDotNet.Artifacts/` is gitignored — force-add `baselines/` or adjust `.gitignore` before PR) |
+
+**Core implementation (no new public API):**
+
+- Output consumer exclusivity (`ReadOutputAsync` / raw `Output` / `CompleteAsync`) in `PtySession`
+- `ThrowIfDisposed` on in-flight wait/write; `CompleteAsync` / pumps use `OutputTransport` (ungated)
+- `BoundedOutputBuffer` producer: `await Task.Yield()` before synchronous transport reads (stdin/write concurrency)
+- `Output.ReadAsync`: acquire gate synchronously at call start; `Task.Yield` before blocking transport read when pipe is empty
+
+**Tests:** 55/55 green (Release, parallel). `[NotInParallel]` removed; cancellation tests use stdin-blocking children (`read` / `set /p`) instead of short `sleep` to avoid parallel scheduling flakes.
+
+#### Benchmark results (Release, OOP, Windows — 2026-06-25)
+
+Compared to baseline `7bd4eff` via `scripts/compare-benchmark-allocations.ps1`:
+
+| Benchmark | Baseline (B) | M3 (B) | Δ (B) | Gate |
+|---|---:|---:|---:|---|
+| `Session_Exit0_Bytes` | 3817 | 3410 | −407 | pass |
+| `Session_Echo_Bytes` | 4096 | 3584 | −512 | pass |
+| `Capture_Echo_Bytes` | 5335 | 4803 | −532 | pass |
+| `Session_32KiB_Bytes` | 55890 | 41718 | −14172 | pass |
+| `Capture_32KiB_Bytes` | 62095 | 47944 | −14151 | pass |
+| `Session_32KiB_StreamBytes` | 47155 | 32993 | −14162 | pass |
+| `Session_32KiB_OutputStreamBytes` | 18032 | 20982 | **+2950** | **fail** |
+| `Session_Echo_Text` | 4423 | 3912 | −511 | pass |
+| `Capture_Echo_Text` | 6835 | 6308 | −527 | pass |
+| `Capture_32KiB_Text` | 142684 | 128492 | −14192 | pass |
+| `Capture_32KiB_DisplayPlain` | 212869 | 195594 | −17275 | pass |
+
+**Open item:** `Session_32KiB_OutputStreamBytes` regresses +2950 B because M3 requires `Output.ReadAsync` to hold the raw-output consumer from call start (exclusivity spec). Pre-M3 baseline used the BCL default `ReadAsync` without that gate. Fix options: zero-alloc gated `ReadAsync` (e.g. `IValueTaskSource` reuse, or fast-path when `IsCompletedSuccessfully`) before closing the gate; or revise baseline with documented justification if the cost is accepted as spec-mandated.
+
+Latency (`Mean`) remained within +10% on all integration benchmarks in the same run.
 
 #### Resolved contracts
 
@@ -318,20 +359,23 @@ Goal: make persistent sessions reliable under cancellation, exit, and disposal.
 
 #### Definition of done
 
-- [ ] `lifecycle.md` updated with operation matrix (dispose, cancel, kill, concurrency, exclusivity, timeouts).
-- [ ] Tests cover every row in the matrix above (including dispose during wait/write, kill during read, concurrent wait+read, bidirectional output exclusivity).
-- [ ] Windows ConPTY spawn smoke tests (immediate write / resize / empty `SendEof`).
-- [ ] Full test suite green.
-- [ ] **Benchmark gate:** `PtyIntegrationBenchmarks` on Release; compare against baseline snapshot taken at Milestone 3 start (record baseline commit SHA in this section when work begins).
-- [ ] **Allocation rule:** `Allocated` must not increase on any Integration benchmark vs baseline. BenchmarkDotNet allocation counts are treated as deterministic; **any increase is an implementation defect**, not measurement noise. Improve allocations on hot paths touched by this milestone where possible (`Session_32KiB_StreamBytes`, `Session_32KiB_OutputStreamBytes`, `Capture_32KiB_*`).
-- [ ] Latency (`Mean`) within +10% vs baseline (lower priority than allocation).
-- [ ] Baseline JSON committed under `BenchmarkDotNet.Artifacts/baselines/` and a comparison script fails CI/PR checks on allocation regression.
-- [ ] Milestone 3.5 prerequisite “M3 complete” satisfied (checklist above).
+- [x] `lifecycle.md` updated with operation matrix (dispose, cancel, kill, concurrency, exclusivity, timeouts).
+- [x] Tests cover every row in the matrix above (including dispose during wait/write, kill during read, concurrent wait+read, bidirectional output exclusivity).
+- [x] Windows ConPTY spawn smoke tests (immediate write / resize / empty `SendEof`).
+- [x] Full test suite green (55/55, parallel).
+- [x] **Benchmark gate:** `PtyIntegrationBenchmarks` on Release; compare against baseline snapshot at M3 start (`7bd4eff`).
+- [ ] **Allocation rule:** all Integration benchmarks ≤ baseline `Allocated`. **10/11 pass;** `Session_32KiB_OutputStreamBytes` +2950 B (see open item above).
+- [x] Latency (`Mean`) within +10% vs baseline.
+- [ ] Baseline JSON committed under `BenchmarkDotNet.Artifacts/baselines/` (file exists; gitignore blocks — fix before PR) and comparison script in repo (`scripts/compare-benchmark-allocations.ps1`).
+- [ ] Milestone 3.5 prerequisite “M3 complete” satisfied (pending allocation gate close-out).
 
 #### Lessons learned (specification)
 
 - Do not queue or block `CompleteAsync` behind an active output consumer; fail fast with `InvalidOperationException` instead. Queuing hides deadlocks between read, wait, and one-shot completion.
 - Persistent and one-shot APIs have different timeout models; do not silently apply `PtyCompleteOptions` drain timeouts to `ReadOutputAsync`.
+- `BoundedOutputBuffer` must `await Task.Yield()` before the first synchronous `ReadOutputTransport`; otherwise `ReadOutputAsync` blocks the caller and stdin cannot be written (persistent loop deadlock).
+- Output exclusivity for raw `Output.ReadAsync` must acquire the consumer **when `ReadAsync` is invoked**, not when the transport read runs; otherwise a racing `ReadOutputAsync` slips through.
+- Parallel lifecycle tests must not use short `sleep`/`ping` windows to assert “child still alive”; use stdin-blocking children instead.
 
 ### Milestone 3.5: Capture Alignment (deferred; was Milestone 2.5)
 
