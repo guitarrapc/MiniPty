@@ -332,8 +332,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         return await AwaitExitAsync(_backend.WaitForExitAsync(cancellationToken, killOnCancellation)).ConfigureAwait(false);
     }
 
-    private Task<int> WaitForExitInternalCoreAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit) =>
-        AwaitExitAsync(_backend.WaitForExitAsync(cancellationToken, killOnCancellation, closeTransportOnExit));
+    private async Task<int> WaitForExitInternalCoreAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit)
+    {
+        await Task.Yield();
+        return await AwaitExitAsync(_backend.WaitForExitAsync(cancellationToken, killOnCancellation, closeTransportOnExit)).ConfigureAwait(false);
+    }
 
     private async Task<int> AwaitExitAsync(Task<int> exitTask)
     {

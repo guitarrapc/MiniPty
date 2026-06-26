@@ -13,9 +13,13 @@ internal interface IPtyBackend : IDisposable
     public void Kill();
     public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true);
     /// <summary>
-    /// Blocks until the child exits or <paramref name="cancellationToken"/> is canceled.
-    /// Allocation-free path for <see cref="PtySession.ReadOutputAsync"/> exit observation.
+    /// Blocks until the child exits or <paramref name="cancellationToken"/> is canceled; allocation-free path for <see cref="PtySession.ReadOutputAsync"/> exit observation.
     /// </summary>
+    /// <param name="cancellationToken">Token used to cancel the wait.</param>
+    /// <param name="closeTransportOnExit">
+    /// When <see langword="true"/>, Windows closes the ConPTY transport after exit is observed.
+    /// Unix ignores this flag; PTY reads EOF naturally and callers close the transport when draining.
+    /// </param>
     public void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit);
     public void CloseOutputTransport();
 }
