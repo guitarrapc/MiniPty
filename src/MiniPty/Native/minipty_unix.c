@@ -308,3 +308,45 @@ int minipty_peek_readable_bytes(int fd, int *bytes_available)
     *bytes_available = nbytes;
     return 0;
 }
+
+int minipty_try_read(int fd, void *buf, unsigned int count, int *bytes_read, int *is_eof)
+{
+    int flags;
+    ssize_t n;
+    int saved_errno;
+
+    if (bytes_read == NULL || is_eof == NULL || buf == NULL)
+        return -1;
+
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0)
+        return -1;
+
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        return -1;
+
+    n = read(fd, buf, count);
+    saved_errno = errno;
+    fcntl(fd, F_SETFL, flags);
+
+    if (n < 0) {
+        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) {
+            *bytes_read = 0;
+            *is_eof = 0;
+            return 0;
+        }
+
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (n == 0) {
+        *bytes_read = 0;
+        *is_eof = 1;
+        return 0;
+    }
+
+    *bytes_read = (int)n;
+    *is_eof = 0;
+    return 0;
+}

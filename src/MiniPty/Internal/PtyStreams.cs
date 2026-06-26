@@ -382,18 +382,26 @@ internal sealed class PtyFdReadStream : Stream
         return true;
     }
 
-    /// <summary>Reads when bytes are immediately available; returns 0 when the pipe would block.</summary>
+    /// <summary>
+    /// Reads when bytes are immediately available; returns 0 when the pipe would block.
+    /// macOS PTY masters report zero via <c>FIONREAD</c> even when more output is readable, so this uses a
+    /// temporary <c>O_NONBLOCK</c> read instead of peek-then-block.
+    /// </summary>
     internal unsafe int TryReadTransportIfReady(Span<byte> buffer, out bool eof)
     {
         eof = false;
         if (buffer.IsEmpty)
             return 0;
 
-        if (!TryGetAvailableBytes(out var available) || available == 0)
-            return 0;
+        int read;
+        int isEof;
+        fixed (byte* ptr = buffer)
+        {
+            if (UnixInterop.minipty_try_read(fd, ptr, (uint)buffer.Length, &read, &isEof) != 0)
+                throw new IOException($"minipty_try_read failed (errno {Marshal.GetLastPInvokeError()})");
+        }
 
-        var read = ReadTransport(buffer);
-        if (read == 0)
+        if (isEof != 0)
             eof = true;
 
         return read;
