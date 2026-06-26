@@ -73,6 +73,11 @@ static int spawn_pty_child_forkpty(
 }
 
 #if defined(__APPLE__)
+static int minipty_spawn_err_is_transient(int err)
+{
+    return err == EAGAIN || err == ENOMEM || err == ENXIO;
+}
+
 static int minipty_resolve_helper_path(char *out, size_t out_len)
 {
     Dl_info info;
@@ -322,7 +327,7 @@ static int spawn_pty_child_darwin(
         err = minipty_spawn_darwin_once(master, winp, cwd, child_argv, envp, pid_out);
         if (err == 0)
             return 0;
-        if (err != EAGAIN && err != ENOMEM)
+        if (!minipty_spawn_err_is_transient(err))
             return err;
         if (*master >= 0) {
             close(*master);

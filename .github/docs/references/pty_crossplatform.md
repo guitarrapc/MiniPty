@@ -164,7 +164,7 @@ minipty_spawn_helper:
 | cwd | Internal env key `MINIPTY_CWD`; never passed to the target child; stripped from parent env and ignored in `PtyStartInfo.Environment` overlay |
 | envp | Explicit block from managed overlay via `posix_spawn` env argument |
 | exec semantics | Shared `minipty_unix_exec.c` (`PATH`, plain-script `sh` fallback) |
-| Transient spawn errors | macOS only: retry up to 4× on `EAGAIN` / `ENOMEM` with 25 ms × attempt backoff |
+| Transient spawn errors | macOS only: retry up to 4× on `EAGAIN` / `ENOMEM` / `ENXIO` with 25 ms × attempt backoff |
 | Spawn errors to managed | `minipty_fork_pty_exec` returns positive errno; `IOException` uses that value |
 
 Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux.
