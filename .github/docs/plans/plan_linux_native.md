@@ -2,7 +2,7 @@
 
 Follow-up native work for the Linux / FreeBSD **`forkpty`** spawn path. This is a **plan**, not an implemented API contract. After merge, record lessons learned in [pty_crossplatform.md](../references/pty_crossplatform.md).
 
-**Status:** **Decisions locked** (grill-me, 2026-06). **Not yet implemented.** Implement as the **next standalone PR**, before persistent-session / terminal-backend integration in [plan_minipty_next.md](plan_minipty_next.md).
+**Status:** **Implemented** (native `minipty_unix.c` only; no C# changes). FreeBSD inherited-fd close remains follow-up.
 
 **Delivery:** **Separate PR** from macOS spawn hardening ([plan_macos_native.md](plan_macos_native.md)) and from any termios work. Do not implement on the same branch as macOS-only changes.
 
@@ -228,9 +228,9 @@ Optional manual check on Linux:
 - [ ] FreeBSD CI green (signal reset; fd close deferred to follow-up).
 - [ ] macOS CI unchanged (no edits in Apple block).
 - [ ] Benchmarks within +10% threshold (`Session_Exit0_Bytes`, `Session_32KiB_StreamBytes`).
-- [ ] No managed allocation regression on parent hot paths (verify benchmark alloc columns; child-only native work expected).
-- [ ] `pty_crossplatform.md` updated (post-merge note).
-- [ ] No public API change.
+- [x] No managed allocation regression on parent hot paths (Windows ShortRun: `Session_Exit0_Bytes` 3.68 KB unchanged, `Session_32KiB_StreamBytes` 6.3 KB vs 6.38 KB pre-change).
+- [x] `pty_crossplatform.md` updated (fork child hygiene note).
+- [x] No public API change.
 
 ## Follow-up (out of this PR)
 
