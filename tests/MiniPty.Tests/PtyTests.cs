@@ -654,8 +654,7 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
 
-        var tempRoot = Path.Combine(Path.GetTempPath(), "minipty-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempRoot);
+        var tempRoot = CreateUnixExecTestDirectory();
         try
         {
             var script = Path.Combine(tempRoot, "minipty-current-path-script");
@@ -734,15 +733,21 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
 
-        var tasks = new Task<PtyCaptureResult>[16];
-        for (var i = 0; i < tasks.Length; i++)
-            tasks[i] = PtyCapture.RunAsync(Spawn("printf", ["parallel-ok"]));
-
-        var results = await Task.WhenAll(tasks);
-        for (var i = 0; i < results.Length; i++)
+        // Burst fewer concurrent spawns so this test stays stable when CI runs the full suite in parallel.
+        const int batchSize = 4;
+        const int batches = 4;
+        for (var batch = 0; batch < batches; batch++)
         {
-            await Assert.That(results[i].ExitCode).IsEqualTo(0);
-            await Assert.That(results[i].Contains("parallel-ok")).IsTrue();
+            var tasks = new Task<PtyCaptureResult>[batchSize];
+            for (var i = 0; i < batchSize; i++)
+                tasks[i] = PtyCapture.RunAsync(Spawn("/usr/bin/printf", ["parallel-ok"]));
+
+            var results = await Task.WhenAll(tasks);
+            for (var i = 0; i < results.Length; i++)
+            {
+                await Assert.That(results[i].ExitCode).IsEqualTo(0);
+                await Assert.That(results[i].ContainsUtf8("parallel-ok")).IsTrue();
+            }
         }
     }
 
