@@ -409,24 +409,26 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     {
         private readonly PtySession _session;
         private readonly Lock _gate = new();
-        private readonly byte[] _buffer;
         private readonly CancellationTokenSource _producerCancellation = new();
         private readonly Task _producer;
         private long _lastProduceProgressTicks;
+        private byte[]? _buffer;
         private bool _bufferReturned;
         private int _readOffset;
         private int _writeOffset;
         private int _count;
+        private ReadOnlyMemory<byte> _handoff;
+        private bool _consumerWaiting;
         private bool _completed;
         private bool _disposed;
         private Exception? _error;
         private TaskCompletionSource? _dataAvailable;
         private TaskCompletionSource? _spaceAvailable;
+        private TaskCompletionSource? _producerReady;
 
         internal BoundedOutputBuffer(PtySession session)
         {
             _session = session;
-            _buffer = ArrayPool<byte>.Shared.Rent(OutputBufferCapacity);
             _producer = ProduceAsync();
         }
 
@@ -435,6 +437,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             while (true)
             {
                 Task? wait;
+                TaskCompletionSource? signalProducerReady = null;
                 lock (_gate)
                 {
                     if (_disposed)
@@ -444,7 +447,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     {
                         var length = Math.Min(_count, OutputBufferCapacity - _readOffset);
                         length = Math.Min(length, OutputStreamChunkSize);
-                        return _buffer.AsMemory(_readOffset, length);
+                        _consumerWaiting = false;
+                        return _buffer!.AsMemory(_readOffset, length);
+                    }
+
+                    if (!_handoff.IsEmpty)
+                    {
+                        _consumerWaiting = false;
+                        return _handoff;
                     }
 
                     if (_error is not null)
@@ -453,9 +463,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     if (_completed)
                         return ReadOnlyMemory<byte>.Empty;
 
+                    _consumerWaiting = true;
                     wait = (_dataAvailable ??= CreateSignal()).Task;
+                    signalProducerReady = _producerReady;
+                    _producerReady = null;
                 }
 
+                signalProducerReady?.TrySetResult();
                 await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
         }
@@ -468,8 +482,15 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             TaskCompletionSource? signal = null;
             lock (_gate)
             {
-                _readOffset = (_readOffset + length) % OutputBufferCapacity;
-                _count -= length;
+                if (!_handoff.IsEmpty)
+                    _handoff = default;
+                else if (_count > 0)
+                {
+                    _readOffset = (_readOffset + length) % OutputBufferCapacity;
+                    _count -= length;
+                }
+
+                TryReturnEmptyRing();
                 signal = _spaceAvailable;
                 _spaceAvailable = null;
             }
@@ -522,19 +543,16 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 while (true)
                 {
                     _producerCancellation.Token.ThrowIfCancellationRequested();
+                    if (!await WaitUntilReadyToReadAsync(_producerCancellation.Token).ConfigureAwait(false))
+                        break;
+
                     var read = _session.ReadOutputTransport(bytes.Span);
                     if (read <= 0)
                         break;
 
                     MarkProduceProgress();
-
-                    var consumed = 0;
-                    while (consumed < read)
-                    {
-                        var written = await WriteAsync(bytes.Memory.Slice(consumed, read - consumed), _producerCancellation.Token).ConfigureAwait(false);
-                        consumed += written;
-                        MarkProduceProgress();
-                    }
+                    await HandoffAsync(bytes.Memory.Slice(0, read), _producerCancellation.Token).ConfigureAwait(false);
+                    MarkProduceProgress();
                 }
 
                 Complete(null);
@@ -607,6 +625,70 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             }
         }
 
+        private async ValueTask<bool> WaitUntilReadyToReadAsync(CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Task? wait;
+                lock (_gate)
+                {
+                    if (_disposed)
+                        throw new ObjectDisposedException(nameof(PtySession));
+
+                    if (_completed && _count == 0 && _handoff.IsEmpty)
+                        return false;
+
+                    if (!_handoff.IsEmpty || _count > 0)
+                        wait = (_spaceAvailable ??= CreateSignal()).Task;
+                    else if (!_consumerWaiting)
+                        wait = (_producerReady ??= CreateSignal()).Task;
+                    else
+                        return true;
+                }
+
+                await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        private async ValueTask HandoffAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+        {
+            Task wait;
+            lock (_gate)
+            {
+                if (_disposed)
+                    throw new ObjectDisposedException(nameof(PtySession));
+
+                _handoff = data;
+                _consumerWaiting = false;
+                var signal = _dataAvailable;
+                _dataAvailable = null;
+                signal?.TrySetResult();
+                wait = (_spaceAvailable ??= CreateSignal()).Task;
+            }
+
+            await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        private byte[] RentRingBuffer()
+        {
+            if (_buffer is null)
+                _buffer = ArrayPool<byte>.Shared.Rent(OutputBufferCapacity);
+
+            return _buffer;
+        }
+
+        private void TryReturnEmptyRing()
+        {
+            if (_count == 0 && _handoff.IsEmpty && _buffer is not null && !_bufferReturned)
+            {
+                ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
+                _buffer = null;
+                _readOffset = 0;
+                _writeOffset = 0;
+            }
+        }
+
         private async ValueTask<int> WriteAsync(ReadOnlyMemory<byte> source, CancellationToken cancellationToken)
         {
             while (true)
@@ -622,7 +704,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     {
                         var length = Math.Min(source.Length, free);
                         length = Math.Min(length, OutputBufferCapacity - _writeOffset);
-                        source[..length].CopyTo(_buffer.AsMemory(_writeOffset, length));
+                        var buffer = RentRingBuffer();
+                        source[..length].CopyTo(buffer.AsMemory(_writeOffset, length));
                         _writeOffset = (_writeOffset + length) % OutputBufferCapacity;
                         _count += length;
                         var signal = _dataAvailable;
@@ -653,16 +736,20 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         {
             TaskCompletionSource? data;
             TaskCompletionSource? space;
+            TaskCompletionSource? producerReady;
             lock (_gate)
             {
                 data = _dataAvailable;
                 space = _spaceAvailable;
+                producerReady = _producerReady;
                 _dataAvailable = null;
                 _spaceAvailable = null;
+                _producerReady = null;
             }
 
             data?.TrySetResult();
             space?.TrySetResult();
+            producerReady?.TrySetResult();
         }
 
         private static TaskCompletionSource CreateSignal() =>
@@ -677,9 +764,12 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     return;
 
                 _bufferReturned = true;
+                if (_buffer is not null)
+                {
+                    ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
+                    _buffer = null;
+                }
             }
-
-            ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
         }
     }
 }

@@ -598,6 +598,10 @@ Capture dedupe removes the merge duplicate but does **not** close gate **C**: `B
 
 **Not acceptable:** Satisfying allocation by removing the ring entirely — that trades M2 backpressure for OS-level PTY blocking (see lessons learned).
 
+**Lessons (handoff backpressure):** Under strict pass-through, producer backpressure is often **handoff wait** (blocked until consumer `Advance`), not only ring-full wait. The OS PTY pipe still applies when the consumer stops reading. Documented in `core_session.md` Backpressure.
+
+**Implementation status (in progress):** Steps 1–3 landed (pass-through handoff, lazy ring rent, empty-ring return). **61/61** green. **Gate C still open:** producer `await` per handoff (`HandoffAsync` / `WaitUntilReadyToReadAsync`) regresses allocations vs eager ring on fast-consumer benchmarks (~34 KB → ~79 KB `Session_32KiB_StreamBytes` ShortRun). Next: zero/low-alloc producer wait (e.g. `Monitor` outside lock or `ManualResetValueTaskSourceCore`) without breaking Capture orchestration — `Monitor`-only attempt deadlocked 12 Capture/interactive tests.
+
 ### Milestone 4: Interactive Sample
 
 Goal: prove the core API can drive a long-lived process without a console adapter.
