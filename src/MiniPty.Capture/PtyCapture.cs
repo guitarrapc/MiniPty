@@ -6,7 +6,10 @@ namespace MiniPty.Capture;
 /// High-level API for spawning a PTY child and observing timestamped output in one call.
 /// </summary>
 /// <remarks>
-/// Built on <see cref="Pty.Start"/> and <see cref="PtySession.ReadOutputAsync"/>.
+/// Built on <see cref="Pty.Start"/> and the session output transport.
+/// <see cref="PtySession.ReadOutputAsync"/> remains the persistent public streaming API; <see cref="RunAsync"/>
+/// reads the transport directly during completion orchestration to avoid double-buffering with
+/// <c>BoundedOutputBuffer</c> on fast-consumer paths.
 /// Each <see cref="PtyCaptureChunk"/> records one read from the PTY output stream with elapsed time since session start (immediately after spawn).
 /// </remarks>
 public static class PtyCapture
@@ -43,8 +46,8 @@ public static class PtyCapture
         var (capture, exitCode) = await PtyCompletion.RunAsync(
             session,
             completion,
-            (s, ct) => PtyCapturePump.ReadSessionAsync(
-                s,
+            (output, ct) => PtyCapturePump.ReadAsync(
+                output,
                 originTimestamp,
                 timeProvider,
                 completion.OutputEncoding,

@@ -1,6 +1,6 @@
 ﻿using System.Runtime.CompilerServices;
-using System.Buffers;
 using System.Text;
+using System.Threading.Tasks.Sources;
 using MiniPty.Internal;
 
 namespace MiniPty;
@@ -27,8 +27,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     internal const string OutputConsumerConflictMessage = "Only one PTY output reader can be active at a time.";
 
     private static readonly PtyCompleteOptions DefaultCompleteOptions = new();
-    private const int OutputBufferCapacity = 32 * 1024;
-    private const int OutputStreamChunkSize = 16 * 1024;
 
     private readonly IPtyBackend _backend;
     private readonly Stream outputTransport;
@@ -405,28 +403,25 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             return _outputBuffer ??= new BoundedOutputBuffer(this);
     }
 
-    private sealed class BoundedOutputBuffer : IDisposable
+    private sealed class BoundedOutputBuffer : IDisposable, IValueTaskSource
     {
         private readonly PtySession _session;
-        private readonly Lock _gate = new();
-        private readonly byte[] _buffer;
+        private readonly object _sync = new();
         private readonly CancellationTokenSource _producerCancellation = new();
         private readonly Task _producer;
+        private ManualResetValueTaskSourceCore<bool> _dataWaitState;
+        private short _dataWaitToken;
         private long _lastProduceProgressTicks;
-        private bool _bufferReturned;
-        private int _readOffset;
-        private int _writeOffset;
-        private int _count;
+        private ReadOnlyMemory<byte> _handoff;
+        private bool _consumerWaiting;
+        private bool _dataWaitArmed;
         private bool _completed;
         private bool _disposed;
         private Exception? _error;
-        private TaskCompletionSource? _dataAvailable;
-        private TaskCompletionSource? _spaceAvailable;
 
         internal BoundedOutputBuffer(PtySession session)
         {
             _session = session;
-            _buffer = ArrayPool<byte>.Shared.Rent(OutputBufferCapacity);
             _producer = ProduceAsync();
         }
 
@@ -434,17 +429,15 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         {
             while (true)
             {
-                Task? wait;
-                lock (_gate)
+                lock (_sync)
                 {
                     if (_disposed)
                         throw new ObjectDisposedException(nameof(PtySession));
 
-                    if (_count > 0)
+                    if (!_handoff.IsEmpty)
                     {
-                        var length = Math.Min(_count, OutputBufferCapacity - _readOffset);
-                        length = Math.Min(length, OutputStreamChunkSize);
-                        return _buffer.AsMemory(_readOffset, length);
+                        _consumerWaiting = false;
+                        return _handoff;
                     }
 
                     if (_error is not null)
@@ -453,10 +446,35 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     if (_completed)
                         return ReadOnlyMemory<byte>.Empty;
 
-                    wait = (_dataAvailable ??= CreateSignal()).Task;
+                    _consumerWaiting = true;
+                    _dataWaitState.Reset();
+                    _dataWaitToken = _dataWaitState.Version;
+                    _dataWaitArmed = true;
+                    Monitor.PulseAll(_sync);
                 }
 
-                await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (!cancellationToken.CanBeCanceled)
+                {
+                    await new ValueTask(this, _dataWaitToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    var registration = cancellationToken.Register(
+                        static state => ((BoundedOutputBuffer)state!).CancelDataWait(),
+                        this);
+
+                    try
+                    {
+                        await new ValueTask(this, _dataWaitToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        registration.Dispose();
+                    }
+                }
+
+                lock (_sync)
+                    _dataWaitArmed = false;
             }
         }
 
@@ -465,21 +483,18 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             if (length <= 0)
                 return;
 
-            TaskCompletionSource? signal = null;
-            lock (_gate)
+            lock (_sync)
             {
-                _readOffset = (_readOffset + length) % OutputBufferCapacity;
-                _count -= length;
-                signal = _spaceAvailable;
-                _spaceAvailable = null;
-            }
+                if (!_handoff.IsEmpty)
+                    _handoff = default;
 
-            signal?.TrySetResult();
+                Monitor.PulseAll(_sync);
+            }
         }
 
         public void Dispose()
         {
-            lock (_gate)
+            lock (_sync)
             {
                 if (_disposed)
                     return;
@@ -491,17 +506,19 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             SignalAll();
             if (_producer.IsCompleted)
             {
-                ReturnBuffer();
+                DisposeProducerCancellation();
                 return;
             }
 
             _ = _producer.ContinueWith(
-                static (task, state) => ((BoundedOutputBuffer)state!).ReturnBuffer(),
+                static (_, state) => ((BoundedOutputBuffer)state!).DisposeProducerCancellation(),
                 this,
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
         }
+
+        private void DisposeProducerCancellation() => _producerCancellation.Dispose();
 
         private async Task ProduceAsync()
         {
@@ -518,23 +535,20 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             MarkProduceProgress();
             try
             {
-                using var bytes = PtyReadBuffer.RentBytes(OutputStreamChunkSize);
+                using var bytes = PtyReadBuffer.RentBytes();
                 while (true)
                 {
                     _producerCancellation.Token.ThrowIfCancellationRequested();
+                    if (!WaitUntilReadyToRead(_producerCancellation.Token))
+                        break;
+
                     var read = _session.ReadOutputTransport(bytes.Span);
                     if (read <= 0)
                         break;
 
                     MarkProduceProgress();
-
-                    var consumed = 0;
-                    while (consumed < read)
-                    {
-                        var written = await WriteAsync(bytes.Memory.Slice(consumed, read - consumed), _producerCancellation.Token).ConfigureAwait(false);
-                        consumed += written;
-                        MarkProduceProgress();
-                    }
+                    Handoff(bytes.Memory.Slice(0, read), _producerCancellation.Token);
+                    MarkProduceProgress();
                 }
 
                 Complete(null);
@@ -585,7 +599,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 var exitObservedAt = Environment.TickCount64;
                 while (!_producerCancellation.IsCancellationRequested)
                 {
-                    lock (_gate)
+                    lock (_sync)
                     {
                         if (_completed || _disposed)
                             return;
@@ -607,40 +621,66 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             }
         }
 
-        private async ValueTask<int> WriteAsync(ReadOnlyMemory<byte> source, CancellationToken cancellationToken)
+        private bool WaitUntilReadyToRead(CancellationToken cancellationToken)
         {
-            while (true)
+            lock (_sync)
             {
-                Task? wait;
-                lock (_gate)
+                while (true)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (_disposed)
                         throw new ObjectDisposedException(nameof(PtySession));
 
-                    var free = OutputBufferCapacity - _count;
-                    if (free > 0)
+                    if (_completed && _handoff.IsEmpty)
+                        return false;
+
+                    if (_handoff.IsEmpty && _consumerWaiting)
+                        return true;
+
+                    Monitor.Wait(_sync);
+                }
+            }
+        }
+
+        private void Handoff(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+        {
+            lock (_sync)
+            {
+                if (_disposed)
+                    throw new ObjectDisposedException(nameof(PtySession));
+
+                _handoff = data;
+                _consumerWaiting = false;
+                if (_dataWaitArmed)
+                    _dataWaitState.SetResult(true);
+
+                Monitor.PulseAll(_sync);
+            }
+
+            WaitForHandoffCleared(cancellationToken);
+        }
+
+        private void WaitForHandoffCleared(CancellationToken cancellationToken)
+        {
+            lock (_sync)
+            {
+                while (!_handoff.IsEmpty)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (_disposed || _completed)
                     {
-                        var length = Math.Min(source.Length, free);
-                        length = Math.Min(length, OutputBufferCapacity - _writeOffset);
-                        source[..length].CopyTo(_buffer.AsMemory(_writeOffset, length));
-                        _writeOffset = (_writeOffset + length) % OutputBufferCapacity;
-                        _count += length;
-                        var signal = _dataAvailable;
-                        _dataAvailable = null;
-                        signal?.TrySetResult();
-                        return length;
+                        _handoff = default;
+                        return;
                     }
 
-                    wait = (_spaceAvailable ??= CreateSignal()).Task;
+                    Monitor.Wait(_sync);
                 }
-
-                await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
         }
 
         private void Complete(Exception? error)
         {
-            lock (_gate)
+            lock (_sync)
             {
                 _error = error;
                 _completed = true;
@@ -651,35 +691,37 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
         private void SignalAll()
         {
-            TaskCompletionSource? data;
-            TaskCompletionSource? space;
-            lock (_gate)
+            lock (_sync)
             {
-                data = _dataAvailable;
-                space = _spaceAvailable;
-                _dataAvailable = null;
-                _spaceAvailable = null;
-            }
+                _handoff = default;
+                if (_dataWaitArmed)
+                    _dataWaitState.SetResult(true);
 
-            data?.TrySetResult();
-            space?.TrySetResult();
+                _dataWaitArmed = false;
+                Monitor.PulseAll(_sync);
+            }
         }
 
-        private static TaskCompletionSource CreateSignal() =>
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        private void ReturnBuffer()
+        private void CancelDataWait()
         {
-            _producerCancellation.Dispose();
-            lock (_gate)
+            lock (_sync)
             {
-                if (_bufferReturned)
-                    return;
-
-                _bufferReturned = true;
+                if (_dataWaitArmed)
+                    _dataWaitState.SetException(new OperationCanceledException());
             }
-
-            ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
         }
+
+        void IValueTaskSource.OnCompleted(
+            Action<object?> continuation,
+            object? state,
+            short token,
+            ValueTaskSourceOnCompletedFlags flags) =>
+            _dataWaitState.OnCompleted(continuation, state, token, flags);
+
+        ValueTaskSourceStatus IValueTaskSource.GetStatus(short token) =>
+            _dataWaitState.GetStatus(token);
+
+        void IValueTaskSource.GetResult(short token) =>
+            _dataWaitState.GetResult(token);
     }
 }

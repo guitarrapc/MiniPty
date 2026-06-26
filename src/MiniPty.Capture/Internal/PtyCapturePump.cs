@@ -12,67 +12,6 @@ internal static class PtyCapturePump
 
     private readonly record struct TextChunkMeta(TimeSpan Time, int Start, int Length);
 
-    internal static Task<PtyCapturePumpResult> ReadSessionAsync(
-        PtySession session,
-        long originTimestamp,
-        TimeProvider timeProvider,
-        Encoding encoding,
-        bool decodeOutput,
-        CancellationToken cancellationToken) =>
-        ReadSessionCoreAsync(session, originTimestamp, timeProvider, encoding, decodeOutput, cancellationToken);
-
-    private static async Task<PtyCapturePumpResult> ReadSessionCoreAsync(
-        PtySession session,
-        long originTimestamp,
-        TimeProvider timeProvider,
-        Encoding encoding,
-        bool decodeOutput,
-        CancellationToken cancellationToken)
-    {
-        var byteChunkMeta = new List<ByteChunkMeta>(capacity: 64);
-        var byteAccumulator = new CaptureByteAccumulator();
-
-        List<TextChunkMeta>? textChunkMeta = decodeOutput ? new List<TextChunkMeta>(capacity: 64) : null;
-        PtyGrowingBuffer<char>? charBuffer = decodeOutput ? new PtyGrowingBuffer<char>() : null;
-        using var chars = decodeOutput ? PtyReadBuffer.RentChars(encoding) : default;
-        var decoder = decodeOutput ? encoding.GetDecoder() : null;
-
-        try
-        {
-            await foreach (var chunk in session.ReadOutputAsync(cancellationToken).ConfigureAwait(false))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var data = chunk.Data;
-                if (data.IsEmpty)
-                    continue;
-
-                var read = data.Length;
-                byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteAccumulator.Length, read));
-                byteAccumulator.ReserveForSustainedOutput(read);
-                byteAccumulator.Append(data.Span);
-
-                if (decodeOutput)
-                    AppendDecodedBytes(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, data.Span, chars.Span);
-            }
-
-            if (decodeOutput)
-                AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
-
-            var outputBytes = byteAccumulator.Detach();
-            var chunks = BuildByteChunks(outputBytes, byteChunkMeta);
-            if (!decodeOutput)
-                return new PtyCapturePumpResult(outputBytes, null, encoding, chunks, null);
-
-            var outputChars = charBuffer!.Detach();
-            var textChunks = BuildTextChunks(outputChars, textChunkMeta!);
-            return new PtyCapturePumpResult(outputBytes, outputChars, encoding, chunks, textChunks);
-        }
-        finally
-        {
-            charBuffer?.Dispose();
-        }
-    }
-
     internal static Task<PtyCapturePumpResult> ReadAsync(
         Stream stream,
         long originTimestamp,
@@ -100,7 +39,7 @@ internal static class PtyCapturePump
         CancellationToken cancellationToken)
     {
         var byteChunkMeta = new List<ByteChunkMeta>(capacity: 64);
-        using var byteBuffer = new PtyGrowingBuffer<byte>();
+        var byteAccumulator = new CaptureByteAccumulator();
         using var bytes = PtyReadBuffer.RentBytes();
 
         List<TextChunkMeta>? textChunkMeta = decodeOutput ? new List<TextChunkMeta>(capacity: 64) : null;
@@ -118,9 +57,9 @@ internal static class PtyCapturePump
                     break;
 
                 var slice = bytes.Span[..read];
-                byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteBuffer.Length, read));
-                ReserveForSustainedOutput(byteBuffer, read, bytes.Memory.Length);
-                byteBuffer.Append(slice);
+                byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteAccumulator.Length, read));
+                byteAccumulator.ReserveForSustainedOutput(read);
+                byteAccumulator.Append(slice);
 
                 if (decodeOutput)
                     AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, slice, chars.Span, flush: false);
@@ -129,7 +68,7 @@ internal static class PtyCapturePump
             if (decodeOutput)
                 AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
 
-            var outputBytes = byteBuffer.Detach();
+            var outputBytes = byteAccumulator.Detach();
             var chunks = BuildByteChunks(outputBytes, byteChunkMeta);
             if (!decodeOutput)
                 return new PtyCapturePumpResult(outputBytes, null, encoding, chunks, null);
@@ -200,23 +139,6 @@ internal static class PtyCapturePump
     private static TimeSpan ElapsedSinceStart(long originTimestamp, TimeProvider timeProvider) =>
         timeProvider.GetElapsedTime(originTimestamp);
 
-    private static void AppendDecodedBytes(
-        long originTimestamp,
-        TimeProvider timeProvider,
-        List<TextChunkMeta> textChunkMeta,
-        PtyGrowingBuffer<char> charBuffer,
-        Decoder decoder,
-        ReadOnlySpan<byte> bytes,
-        Span<char> chars)
-    {
-        while (!bytes.IsEmpty)
-        {
-            var slice = bytes.Length > chars.Length ? bytes[..chars.Length] : bytes;
-            AppendTextChunk(originTimestamp, timeProvider, textChunkMeta, charBuffer, decoder, slice, chars, flush: false);
-            bytes = bytes[slice.Length..];
-        }
-    }
-
     private static void AppendTextChunk(
         long originTimestamp,
         TimeProvider timeProvider,
@@ -266,9 +188,8 @@ internal static class PtyCapturePump
     }
 
     /// <summary>
-    /// Single destination buffer for <see cref="ReadSessionCoreAsync"/> merged bytes.
-    /// Pre-sizes once for sustained output so ReadOutputAsync chunks copy directly into the result array
-    /// without a separate <see cref="PtyGrowingBuffer{T}"/> growth path alongside <c>BoundedOutputBuffer</c>.
+    /// Single destination buffer for <see cref="ReadTransport"/> merged bytes.
+    /// Pre-sizes once for sustained output so transport reads copy directly into the result array.
     /// </summary>
     private struct CaptureByteAccumulator
     {

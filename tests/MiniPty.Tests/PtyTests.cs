@@ -379,8 +379,11 @@ public sealed class PtyTests
         await Assert.That(chunkDecode.ToString()).DoesNotContain(expected);
     }
 
+    /// <summary>
+    /// Regression test: sustained large output (2 MiB) must drain without data loss under strict handoff.
+    /// </summary>
     [Test]
-    public async Task PtyReadOutputAsyncDrainsOutputAcrossBoundedBufferCapacity()
+    public async Task PtyReadOutputAsyncDrainsLargeOutputWithoutDropping()
     {
         const int minimumLength = 2 * 1024 * 1024;
 
