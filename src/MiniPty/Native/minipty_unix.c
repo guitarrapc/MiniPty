@@ -121,11 +121,14 @@ static char **minipty_build_inherited_envp(void)
 static void minipty_execve_compat(const char *path, char *const *argv, char *const *envp)
 {
     size_t argc = 0;
+    static const char *shells[] = { "/bin/sh", "/usr/bin/sh" };
 
     execve(path, argv, envp);
 
-    /* ENOEXEC: plain script without shebang. EACCES: exists but not executable (e.g. noexec mount). */
-    if (errno != ENOEXEC && errno != EACCES)
+    /* ENOEXEC: plain script without shebang. EACCES: exists but not executable (e.g. noexec mount).
+       ENOENT: shebang interpreter missing while the script file itself exists. */
+    if (errno != ENOEXEC && errno != EACCES
+        && !(errno == ENOENT && access(path, F_OK) == 0))
         return;
 
     while (argv[argc] != NULL)
@@ -138,7 +141,11 @@ static void minipty_execve_compat(const char *path, char *const *argv, char *con
         shell_argv[i + 1] = argv[i];
     shell_argv[argc + 1] = NULL;
 
-    execve("/bin/sh", shell_argv, envp);
+    for (size_t i = 0; i < sizeof(shells) / sizeof(shells[0]); i++) {
+        execve(shells[i], shell_argv, envp);
+        if (errno != ENOENT && errno != ENOTDIR)
+            break;
+    }
 }
 
 static void minipty_execve_path(const char *dir, size_t dir_len, const char *file, char *const *argv, char *const *envp)
