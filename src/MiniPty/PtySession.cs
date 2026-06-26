@@ -1,5 +1,4 @@
 ﻿using System.Runtime.CompilerServices;
-using System.Buffers;
 using System.Text;
 using System.Threading.Tasks.Sources;
 using MiniPty.Internal;
@@ -28,8 +27,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     internal const string OutputConsumerConflictMessage = "Only one PTY output reader can be active at a time.";
 
     private static readonly PtyCompleteOptions DefaultCompleteOptions = new();
-    private const int OutputBufferCapacity = 32 * 1024;
-    private const int OutputStreamChunkSize = 16 * 1024;
 
     private readonly IPtyBackend _backend;
     private readonly Stream outputTransport;
@@ -415,11 +412,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         private ManualResetValueTaskSourceCore<bool> _dataWaitState;
         private short _dataWaitToken;
         private long _lastProduceProgressTicks;
-        private byte[]? _buffer;
-        private bool _bufferReturned;
-        private int _readOffset;
-        private int _writeOffset;
-        private int _count;
         private ReadOnlyMemory<byte> _handoff;
         private bool _consumerWaiting;
         private bool _dataWaitArmed;
@@ -441,14 +433,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 {
                     if (_disposed)
                         throw new ObjectDisposedException(nameof(PtySession));
-
-                    if (_count > 0)
-                    {
-                        var length = Math.Min(_count, OutputBufferCapacity - _readOffset);
-                        length = Math.Min(length, OutputStreamChunkSize);
-                        _consumerWaiting = false;
-                        return _buffer!.AsMemory(_readOffset, length);
-                    }
 
                     if (!_handoff.IsEmpty)
                     {
@@ -503,13 +487,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             {
                 if (!_handoff.IsEmpty)
                     _handoff = default;
-                else if (_count > 0)
-                {
-                    _readOffset = (_readOffset + length) % OutputBufferCapacity;
-                    _count -= length;
-                }
 
-                TryReturnEmptyRing();
                 Monitor.PulseAll(_sync);
             }
         }
@@ -528,17 +506,19 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             SignalAll();
             if (_producer.IsCompleted)
             {
-                ReturnBuffer();
+                DisposeProducerCancellation();
                 return;
             }
 
             _ = _producer.ContinueWith(
-                static (task, state) => ((BoundedOutputBuffer)state!).ReturnBuffer(),
+                static (_, state) => ((BoundedOutputBuffer)state!).DisposeProducerCancellation(),
                 this,
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
         }
+
+        private void DisposeProducerCancellation() => _producerCancellation.Dispose();
 
         private async Task ProduceAsync()
         {
@@ -651,10 +631,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     if (_disposed)
                         throw new ObjectDisposedException(nameof(PtySession));
 
-                    if (_completed && _count == 0 && _handoff.IsEmpty)
+                    if (_completed && _handoff.IsEmpty)
                         return false;
 
-                    if (_handoff.IsEmpty && _count == 0 && _consumerWaiting)
+                    if (_handoff.IsEmpty && _consumerWaiting)
                         return true;
 
                     Monitor.Wait(_sync);
@@ -698,56 +678,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             }
         }
 
-        private byte[] RentRingBuffer()
-        {
-            if (_buffer is null)
-                _buffer = ArrayPool<byte>.Shared.Rent(OutputBufferCapacity);
-
-            return _buffer;
-        }
-
-        private void TryReturnEmptyRing()
-        {
-            if (_count == 0 && _handoff.IsEmpty && _buffer is not null && !_bufferReturned)
-            {
-                ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
-                _buffer = null;
-                _readOffset = 0;
-                _writeOffset = 0;
-            }
-        }
-
-        private int WriteSync(ReadOnlyMemory<byte> source, CancellationToken cancellationToken)
-        {
-            lock (_sync)
-            {
-                while (true)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (_disposed)
-                        throw new ObjectDisposedException(nameof(PtySession));
-
-                    var free = OutputBufferCapacity - _count;
-                    if (free > 0)
-                    {
-                        var length = Math.Min(source.Length, free);
-                        length = Math.Min(length, OutputBufferCapacity - _writeOffset);
-                        var buffer = RentRingBuffer();
-                        source[..length].CopyTo(buffer.AsMemory(_writeOffset, length));
-                        _writeOffset = (_writeOffset + length) % OutputBufferCapacity;
-                        _count += length;
-                        if (_dataWaitArmed)
-                            _dataWaitState.SetResult(true);
-
-                        Monitor.PulseAll(_sync);
-                        return length;
-                    }
-
-                    Monitor.Wait(_sync);
-                }
-            }
-        }
-
         private void Complete(Exception? error)
         {
             lock (_sync)
@@ -778,23 +708,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             {
                 if (_dataWaitArmed)
                     _dataWaitState.SetException(new OperationCanceledException());
-            }
-        }
-
-        private void ReturnBuffer()
-        {
-            _producerCancellation.Dispose();
-            lock (_sync)
-            {
-                if (_bufferReturned)
-                    return;
-
-                _bufferReturned = true;
-                if (_buffer is not null)
-                {
-                    ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
-                    _buffer = null;
-                }
             }
         }
 

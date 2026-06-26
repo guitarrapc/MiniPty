@@ -456,11 +456,12 @@ Naïve Capture-on-`ReadOutputAsync` estimate: **~75 KB** (32 KB `BoundedOutputBu
 
 | Decision | Choice |
 |---|---|
-| Design path | **(a)** Capture consumes `ReadOutputAsync`; do not weaken M2 backpressure |
+| Persistent output | `ReadOutputAsync` — strict handoff producer (`BoundedOutputBuffer`; no managed ring) |
+| One-shot output | `CompleteAsync` and `PtyCapture.RunAsync` read `OutputTransport` directly (transport pump) |
 | Structural improvement | Required — Span/Memory/ArrayPool/stackalloc; allocation regression not acceptable |
-| PR split | **B — 3 PRs** (PR1 core micro-opt; PR2 Capture migration + dedupe; PR3 core lazy-ring / pass-through) |
-| PR2 orchestration | **A** — internal `PtyCompletion` overload (`Func<PtySession, CT, Task<T>>`); `CompleteAsync` stays on transport in PR2 |
-| Benchmark gate | **C** — `Capture_*` ≤ M3.1 baseline; `Session_32KiB_StreamBytes` ≤ PR1 improved value; **PR2** may land with Capture gate open; **PR3** must close gate **C** for `Capture_*` |
+| PR split | **B — 3 PRs** (PR1 core micro-opt; PR2 Capture dedupe + session pump infra; PR3 core pass-through) |
+| PR2 orchestration | **A** — internal `PtyCompletion` overload (`Func<PtySession, CT, Task<T>>`); one-shot APIs stay on transport |
+| Benchmark gate | **C** — `Capture_*` ≤ M3.1 baseline; `Session_32KiB_StreamBytes` ≤ PR1 improved value |
 
 #### PR1: Core `BoundedOutputBuffer` micro-opt
 
@@ -574,35 +575,29 @@ Capture dedupe removes the merge duplicate but does **not** close gate **C**: `B
 
 **CI lessons (step 5):** `OutputDrainGrace` is defined as **post-exit** drain (`completion.md`). Applying transport close during grace while the child is still running violates the lifecycle contract and broke macOS (`exit 129`), Ubuntu (missing markers), and Windows CI (`ObjectDisposedException`). Session pump must defer `CloseTransport` on exit wait and let `AwaitPumpAsync` own post-exit close — same as transport pump semantics with a deferred Windows `CloseTransport`.
 
-#### PR3: Core `BoundedOutputBuffer` lazy-ring / pass-through
+#### PR3: Core `BoundedOutputBuffer` strict handoff
 
-**Placement:** Milestone 3.5 follow-up; **core-only** PR. Depends on PR2 (Capture on `ReadOutputAsync`, session orchestration, dedupe).
+**Placement:** Milestone 3.5 follow-up; core + Capture routing cleanup. Depends on PR2 (session orchestration, `CaptureByteAccumulator`).
 
-**Problem:** On fast consumers (Capture pump, `Session_32KiB_StreamBytes`), the producer often keeps pace with the reader. Eager `ArrayPool` rent of the 32 KiB ring is pure overhead versus the transport baseline.
+**Problem:** On fast consumers (`Session_32KiB_StreamBytes`), eager `ArrayPool` rent of a 32 KiB ring was pure overhead. A managed ring also duplicated OS PTY pipe backpressure under strict consumer handoff.
 
 **Scope:**
 
 | In scope | Out of scope |
 |---|---|
-| Lazy ring allocation — rent the 32 KiB buffer only when backlog requires it | Removing `BoundedOutputBuffer` or weakening no-drop backpressure |
-| Producer pass-through when consumer is waiting and ring is empty — hand off transport read memory, block producer until `Advance` | `CompleteAsync` → `ReadOutputAsync` migration |
-| Preserve ring path when `_count > 0` or consumer falls behind | Capture-layer changes (PR2 is sufficient) |
+| Strict handoff — producer reads when consumer waits, hands off transport-read memory, blocks until `Advance` | Removing `BoundedOutputBuffer` or weakening no-drop backpressure |
+| No managed ring — backpressure via handoff wait + OS PTY pipe | `CompleteAsync` → `ReadOutputAsync` migration |
+| `PtyCapture.RunAsync` on transport pump (gate **C**); remove unused `ReadSessionAsync` | Re-introducing Capture-on-`ReadOutputAsync` without a new milestone decision |
 
-**Expected outcome:** Fast-consumer paths avoid the 32 KiB ring rent. Post-PR2 measured gap **+~30 KB** on `Capture_32KiB_Bytes` (78 KB → **~48 KB**, matching M3.1 baseline) and similar improvement on `Capture_Echo_*` / `Capture_32KiB_Text*`. `Session_32KiB_StreamBytes` may also drop toward transport-like levels when the reader keeps pace.
+**Expected outcome:** Fast-consumer paths avoid the 32 KiB ring rent entirely. `Session_32KiB_StreamBytes` drops toward transport-like levels when the reader keeps pace. `Capture_*` meets M3.1 via transport pump.
 
 **Gate (C):** `Capture_*` ≤ M3.1 baseline (`integration.json`); `Session_32KiB_StreamBytes` ≤ PR1 post-value (must not regress).
 
-**Correctness gate:** 61/61 tests; especially `PtyLargeOutputDoesNotBlock`, `PtyReadOutputAsyncDrainsOutputAcrossBoundedBufferCapacity` (slow / backlog consumer must still use the ring).
+**Correctness gate:** 61/61 tests; especially `PtyLargeOutputDoesNotBlock`, `PtyReadOutputAsyncDrainsLargeOutputWithoutDropping` (2 MiB sustained output, no-drop under strict handoff).
 
-**Risk (known from PR2 spike):** Naïve direct handoff deadlocked or timed out before step-5 session orchestration and decode slicing landed. PR3 must re-validate on top of PR2; do not land pass-through without large-output and bounded-capacity tests green.
+**Lessons (handoff backpressure):** Under strict handoff, producer backpressure is **handoff wait** (blocked until consumer `Advance`); the OS PTY pipe applies when the consumer stops reading. A managed ring was not required for no-drop correctness once session orchestration landed. Documented in `core_session.md` Backpressure.
 
-**Not acceptable:** Satisfying allocation by removing the ring entirely — that trades M2 backpressure for OS-level PTY blocking (see lessons learned).
-
-**Lessons (handoff backpressure):** Under strict pass-through, producer backpressure is often **handoff wait** (blocked until consumer `Advance`), not only ring-full wait. The OS PTY pipe still applies when the consumer stops reading. Documented in `core_session.md` Backpressure.
-
-**Implementation status:** Steps 1–3 complete with low-allocation producer sync (`Monitor` handoff wait; consumer `ManualResetValueTaskSourceCore` via `IValueTaskSource` on `BoundedOutputBuffer`; 4 KiB `PtyReadBuffer.RentBytes()` producer read buffer). **61/61** green.
-
-**Capture gate closure (transport pump):** `PtyCapture.RunAsync` reads `session.OutputTransport` directly (M3.1-era path) so `Capture_*` avoids `BoundedOutputBuffer` double-buffering. `ReadTransport` uses `CaptureByteAccumulator` (same pre-size strategy as the session pump). `ReadOutputAsync` remains the persistent streaming API for `Session_*` benchmarks.
+**Implementation status:** Strict handoff complete; managed ring and dead `WriteSync` path removed. Low-allocation producer sync (`Monitor` handoff wait; consumer `ManualResetValueTaskSourceCore` via `IValueTaskSource`; 4 KiB `PtyReadBuffer.RentBytes()`). `ReadSessionAsync` removed; `PtyCapture.RunAsync` on transport pump.
 
 **Benchmark (ShortRun, Windows — 2026-06-26, gate C vs M3.1 `integration.json` baselines):**
 
