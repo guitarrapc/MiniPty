@@ -325,7 +325,10 @@ int minipty_try_read(int fd, void *buf, unsigned int count, int *bytes_read, int
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
         return -1;
 
-    n = read(fd, buf, count);
+    do {
+        n = read(fd, buf, count);
+    } while (n < 0 && errno == EINTR);
+
     saved_errno = errno;
     fcntl(fd, F_SETFL, flags);
 

@@ -186,15 +186,17 @@ internal sealed class PtyHandleReadStream : Stream
         Span<byte> scratch = stackalloc byte[1];
         fixed (byte* ptr = scratch)
         {
-            if (WindowsInterop.PeekNamedPipe(handle, ptr, 1, out _, out totalAvail, IntPtr.Zero)
-                && totalAvail > 0)
+            if (!WindowsInterop.PeekNamedPipe(handle, ptr, 1, out _, out totalAvail, IntPtr.Zero))
             {
-                available = (int)totalAvail;
+                if (Marshal.GetLastPInvokeError() != 109) // ERROR_BROKEN_PIPE
+                    return false;
+
                 return true;
             }
-        }
 
-        return true;
+            available = (int)totalAvail;
+            return true;
+        }
     }
 
     private int EndRawOutputRead(int read)
