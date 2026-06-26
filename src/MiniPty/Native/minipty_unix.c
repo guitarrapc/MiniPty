@@ -15,7 +15,9 @@
 #endif
 
 #if defined(__linux__)
+#include <linux/close_range.h>
 #include <pty.h>
+#include <sys/syscall.h>
 #elif defined(__APPLE__)
 #include <dlfcn.h>
 #include <libgen.h>
@@ -24,6 +26,56 @@
 #elif defined(__FreeBSD__)
 #include <libutil.h>
 #endif
+
+#if !defined(__APPLE__)
+
+#ifndef NSIG
+#define NSIG 32
+#endif
+
+static void minipty_reset_child_signals(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+
+    for (int sig = 1; sig < NSIG; sig++)
+        sigaction(sig, &sa, NULL);
+}
+
+#if defined(__linux__)
+
+static int minipty_set_close_on_exec(int fd)
+{
+    int flags = fcntl(fd, F_GETFD, 0);
+
+    if (flags == -1)
+        return flags;
+    if (flags & FD_CLOEXEC)
+        return 0;
+
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
+static void minipty_close_inherited_fds(void)
+{
+#if defined(SYS_close_range) && defined(CLOSE_RANGE_CLOEXEC)
+    if (syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC) == 0)
+        return;
+#endif
+
+    for (int fd = 3; ; fd++) {
+        if (minipty_set_close_on_exec(fd) && fd > 15)
+            break;
+    }
+}
+
+#endif /* __linux__ */
+
+#endif /* !__APPLE__ */
 
 static int spawn_pty_child_forkpty(
     int *master,
@@ -49,6 +101,11 @@ static int spawn_pty_child_forkpty(
 
     pid = forkpty(master, NULL, NULL, (struct winsize *)winp);
 
+#if !defined(__APPLE__)
+    if (pid == 0)
+        minipty_reset_child_signals();
+#endif
+
     pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 
     if (pid < 0) {
@@ -61,6 +118,9 @@ static int spawn_pty_child_forkpty(
     if (pid == 0) {
         if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
             _exit(126);
+#if defined(__linux__)
+        minipty_close_inherited_fds();
+#endif
         minipty_execvpe(file, argv, child_envp);
         _exit(127);
     }
