@@ -14,7 +14,9 @@
     <MiniPtyUnixNativeLibraryName Condition="'$(MiniPtyUnixNativeLibraryName)' == ''">libminipty_unix.so</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLinkFlags Condition="$([MSBuild]::IsOSPlatform('Linux')) Or $([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD'))">-lutil</MiniPtyUnixNativeLinkFlags>
     <MiniPtyUnixNativeLinkFlags Condition="'$(MiniPtyUnixNativeLinkFlags)' == ''"></MiniPtyUnixNativeLinkFlags>
+    <_MiniPtyUnixNativeSources>$(MSBuildThisFileDirectory)Native/minipty_unix.c $(MSBuildThisFileDirectory)Native/minipty_unix_exec.c</_MiniPtyUnixNativeSources>
     <_MiniPtyUnixNativeOutput Condition="'$(MiniPtyBuildUnixNative)' == 'true'">$(OutputPath)$(MiniPtyUnixNativeLibraryName)</_MiniPtyUnixNativeOutput>
+    <_MiniPtySpawnHelperOutput Condition="'$(MiniPtyBuildUnixNative)' == 'true' and $([MSBuild]::IsOSPlatform('OSX'))">$(OutputPath)minipty_spawn_helper</_MiniPtySpawnHelperOutput>
   </PropertyGroup>
 
   <ItemGroup>
@@ -38,11 +40,19 @@
   <Target Name="BuildMiniPtyUnixNative" BeforeTargets="AssignTargetPaths"
           Condition="'$(MiniPtyBuildUnixNative)' == 'true'">
     <MakeDir Directories="$(OutputPath)" Condition="!Exists('$(OutputPath)')" />
-    <Exec Command="cc -shared -fPIC -O2 $(MiniPtyUnixNativeLinkFlags) -o &quot;$(_MiniPtyUnixNativeOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix.c&quot;" />
+    <Exec Command="cc -shared -fPIC -O2 $(MiniPtyUnixNativeLinkFlags) -o &quot;$(_MiniPtyUnixNativeOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot;" />
+    <Exec Condition="$([MSBuild]::IsOSPlatform('OSX'))"
+          Command="cc -O2 -o &quot;$(_MiniPtySpawnHelperOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_spawn_helper.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot;" />
     <ItemGroup>
       <FileWrites Include="$(_MiniPtyUnixNativeOutput)" />
       <None Include="$(_MiniPtyUnixNativeOutput)">
         <Link>$(MiniPtyUnixNativeLibraryName)</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </None>
+      <FileWrites Include="$(_MiniPtySpawnHelperOutput)" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
+      <None Include="$(_MiniPtySpawnHelperOutput)" Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+        <Link>minipty_spawn_helper</Link>
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </None>

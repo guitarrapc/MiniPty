@@ -10,7 +10,9 @@ required=(
   "linux-x64/native/libminipty_unix.so"
   "linux-arm64/native/libminipty_unix.so"
   "osx-x64/native/libminipty_unix.dylib"
+  "osx-x64/native/minipty_spawn_helper"
   "osx-arm64/native/libminipty_unix.dylib"
+  "osx-arm64/native/minipty_spawn_helper"
 )
 
 for rel in "${required[@]}"; do

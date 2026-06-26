@@ -1,3 +1,5 @@
+#include "minipty_unix_internal.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -15,206 +17,15 @@
 #if defined(__linux__)
 #include <pty.h>
 #elif defined(__APPLE__)
+#include <dlfcn.h>
+#include <libgen.h>
+#include <spawn.h>
 #include <util.h>
 #elif defined(__FreeBSD__)
 #include <libutil.h>
 #endif
 
-extern char **environ;
-
-static const char minipty_default_term[] = "TERM=xterm-256color";
-static const char minipty_default_path[] = "/bin:/usr/bin";
-
-static int minipty_has_env_name(const char *entry, const char *name)
-{
-    size_t name_len = strlen(name);
-    return strncmp(entry, name, name_len) == 0 && entry[name_len] == '=';
-}
-
-static int minipty_is_sanitized_key(const char *entry)
-{
-    static const char *keys[] = {
-        "TMUX",
-        "TMUX_PANE",
-        "STY",
-        "WINDOW",
-        "WINDOWID",
-        "TERMCAP",
-        "COLUMNS",
-        "LINES",
-    };
-
-    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-        if (minipty_has_env_name(entry, keys[i]))
-            return 1;
-    }
-
-    return 0;
-}
-
-static const char *minipty_get_env_value(char *const *envp, const char *name)
-{
-    size_t name_len = strlen(name);
-
-    if (envp == NULL)
-        return NULL;
-
-    for (char *const *entry = envp; *entry != NULL; entry++) {
-        if (minipty_has_env_name(*entry, name))
-            return *entry + name_len + 1;
-    }
-
-    return NULL;
-}
-
-static const char *minipty_get_path(char *const *envp)
-{
-    const char *path = minipty_get_env_value(envp, "PATH");
-
-    if (path != NULL)
-        return path;
-
-    return NULL;
-}
-
-static char **minipty_build_inherited_envp(void)
-{
-    size_t count = 0;
-    size_t kept = 0;
-    int has_term = 0;
-
-    if (environ == NULL) {
-        char **envp = malloc(2 * sizeof(char *));
-        if (envp == NULL)
-            return NULL;
-
-        envp[0] = (char *)minipty_default_term;
-        envp[1] = NULL;
-        return envp;
-    }
-
-    while (environ[count] != NULL) {
-        if (!minipty_is_sanitized_key(environ[count]))
-            kept++;
-        if (minipty_has_env_name(environ[count], "TERM"))
-            has_term = 1;
-        count++;
-    }
-
-    char **envp = malloc((kept + (has_term ? 0 : 1) + 1) * sizeof(char *));
-    if (envp == NULL)
-        return NULL;
-
-    size_t index = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (!minipty_is_sanitized_key(environ[i]))
-            envp[index++] = environ[i];
-    }
-
-    if (!has_term)
-        envp[index++] = (char *)minipty_default_term;
-
-    envp[index] = NULL;
-    return envp;
-}
-
-static void minipty_execve_compat(const char *path, char *const *argv, char *const *envp)
-{
-    size_t argc = 0;
-    static const char *shells[] = { "/bin/sh", "/usr/bin/sh" };
-
-    execve(path, argv, envp);
-
-    /* ENOEXEC: plain script without shebang. EACCES: exists but not executable (e.g. noexec mount).
-       ENOENT: shebang interpreter missing while the script file itself exists. */
-    if (errno != ENOEXEC && errno != EACCES
-        && !(errno == ENOENT && access(path, F_OK) == 0))
-        return;
-
-    while (argv[argc] != NULL)
-        argc++;
-
-    char *shell_argv[argc + 2];
-    shell_argv[0] = (char *)"sh";
-    shell_argv[1] = (char *)path;
-    for (size_t i = 1; i < argc; i++)
-        shell_argv[i + 1] = argv[i];
-    shell_argv[argc + 1] = NULL;
-
-    for (size_t i = 0; i < sizeof(shells) / sizeof(shells[0]); i++) {
-        execve(shells[i], shell_argv, envp);
-        if (errno != ENOENT && errno != ENOTDIR)
-            break;
-    }
-}
-
-static void minipty_execve_path(const char *dir, size_t dir_len, const char *file, char *const *argv, char *const *envp)
-{
-    size_t file_len = strlen(file);
-    size_t needs_slash = dir_len > 0 ? 1 : 0;
-    char path[PATH_MAX];
-
-    if (dir_len == 0) {
-        minipty_execve_compat(file, argv, envp);
-        return;
-    }
-
-    if (dir_len + needs_slash + file_len + 1 > sizeof(path)) {
-        errno = ENAMETOOLONG;
-        return;
-    }
-
-    if (dir_len > 0)
-        memcpy(path, dir, dir_len);
-    if (needs_slash)
-        path[dir_len] = '/';
-    memcpy(path + dir_len + needs_slash, file, file_len);
-    path[dir_len + needs_slash + file_len] = '\0';
-
-    minipty_execve_compat(path, argv, envp);
-}
-
-static void minipty_execvpe(const char *file, char *const *argv, char *const *envp)
-{
-    const char *path;
-    const char *cursor;
-    int saved_errno = ENOENT;
-    int saw_eacces = 0;
-
-    if (file == NULL || file[0] == '\0') {
-        errno = ENOENT;
-        return;
-    }
-
-    if (strchr(file, '/') != NULL) {
-        minipty_execve_compat(file, argv, envp);
-        return;
-    }
-
-    path = minipty_get_path(envp);
-    if (path == NULL)
-        path = minipty_default_path;
-
-    cursor = path;
-    while (1) {
-        const char *separator = strchr(cursor, ':');
-        size_t dir_len = separator == NULL ? strlen(cursor) : (size_t)(separator - cursor);
-
-        minipty_execve_path(cursor, dir_len, file, argv, envp);
-        if (errno == EACCES)
-            saw_eacces = 1;
-        else if (errno != ENOENT && errno != ENOTDIR)
-            saved_errno = errno;
-
-        if (separator == NULL)
-            break;
-        cursor = separator + 1;
-    }
-
-    errno = saw_eacces ? EACCES : saved_errno;
-}
-
-static int spawn_pty_child(
+static int spawn_pty_child_forkpty(
     int *master,
     const struct winsize *winp,
     const char *cwd,
@@ -226,10 +37,11 @@ static int spawn_pty_child(
     pid_t pid;
     sigset_t newmask;
     sigset_t oldmask;
-    char **child_envp = envp == NULL ? minipty_build_inherited_envp() : (char **)envp;
+    char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
+
     if (child_envp == NULL) {
         errno = ENOMEM;
-        return -1;
+        return ENOMEM;
     }
 
     sigfillset(&newmask);
@@ -240,9 +52,10 @@ static int spawn_pty_child(
     pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 
     if (pid < 0) {
+        int err = errno > 0 ? errno : EINVAL;
         if (envp == NULL)
             free(child_envp);
-        return -1;
+        return err;
     }
 
     if (pid == 0) {
@@ -259,6 +72,237 @@ static int spawn_pty_child(
     return 0;
 }
 
+#if defined(__APPLE__)
+static int minipty_resolve_helper_path(char *out, size_t out_len)
+{
+    Dl_info info;
+
+    if (dladdr((void *)&minipty_fork_pty_exec, &info) == 0 || info.dli_fname == NULL)
+        return -1;
+
+    {
+        char dir_buf[PATH_MAX];
+        char *dir;
+        int written;
+
+        if (strlen(info.dli_fname) >= sizeof(dir_buf))
+            return -1;
+
+        memcpy(dir_buf, info.dli_fname, strlen(info.dli_fname) + 1);
+        dir = dirname(dir_buf);
+        written = snprintf(out, out_len, "%s/%s", dir, MINIPTY_SPAWN_HELPER_NAME);
+        if (written < 0 || (size_t)written >= out_len)
+            return -1;
+    }
+
+    if (access(out, X_OK) != 0)
+        return -1;
+
+    return 0;
+}
+
+static void minipty_free_spawn_env(char **spawn_envp, char **owned_inherited)
+{
+    char *cwd_entry = NULL;
+
+    if (spawn_envp != NULL) {
+        for (size_t i = 0; spawn_envp[i] != NULL; i++) {
+            if (strncmp(spawn_envp[i], MINIPTY_CWD_KEY "=", sizeof(MINIPTY_CWD_KEY)) == 0) {
+                cwd_entry = spawn_envp[i];
+                break;
+            }
+        }
+    }
+
+    free(cwd_entry);
+    free(spawn_envp);
+    free(owned_inherited);
+}
+
+static int minipty_spawn_darwin_once(
+    int *master,
+    const struct winsize *winp,
+    const char *cwd,
+    char *const *argv,
+    char *const *envp,
+    pid_t *pid_out)
+{
+    char helper_path[PATH_MAX];
+    char slave_name[128];
+    char **spawn_envp = NULL;
+    char **owned_inherited = NULL;
+    char **helper_argv = NULL;
+    char *helper_path_copy = NULL;
+    size_t argc = 0;
+    int slave = -1;
+    int err = 0;
+    int spawn_err;
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attrs;
+    sigset_t signal_set;
+
+    if (minipty_resolve_helper_path(helper_path, sizeof(helper_path)) != 0)
+        return ENOENT;
+
+    *master = posix_openpt(O_RDWR | O_CLOEXEC);
+    if (*master < 0)
+        return errno > 0 ? errno : EINVAL;
+
+    if (grantpt(*master) != 0) {
+        err = errno > 0 ? errno : EINVAL;
+        close(*master);
+        *master = -1;
+        return err;
+    }
+
+    if (unlockpt(*master) != 0) {
+        err = errno > 0 ? errno : EINVAL;
+        close(*master);
+        *master = -1;
+        return err;
+    }
+
+    if (ioctl(*master, TIOCPTYGNAME, slave_name) != 0) {
+        err = errno > 0 ? errno : EINVAL;
+        close(*master);
+        *master = -1;
+        return err;
+    }
+
+    slave = open(slave_name, O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (slave < 0) {
+        err = errno > 0 ? errno : EINVAL;
+        close(*master);
+        *master = -1;
+        return err;
+    }
+
+    if (winp != NULL && ioctl(slave, TIOCSWINSZ, winp) != 0) {
+        err = errno > 0 ? errno : EINVAL;
+        close(slave);
+        close(*master);
+        *master = -1;
+        return err;
+    }
+
+    if (minipty_envp_append_cwd(envp, cwd, &spawn_envp, &owned_inherited) != 0) {
+        err = errno > 0 ? errno : ENOMEM;
+        close(slave);
+        close(*master);
+        *master = -1;
+        return err;
+    }
+
+    while (argv[argc] != NULL)
+        argc++;
+
+    helper_argv = malloc((argc + 2) * sizeof(char *));
+    helper_path_copy = strdup(helper_path);
+    if (helper_argv == NULL || helper_path_copy == NULL) {
+        minipty_free_spawn_env(spawn_envp, owned_inherited);
+        free(helper_argv);
+        free(helper_path_copy);
+        close(slave);
+        close(*master);
+        *master = -1;
+        return ENOMEM;
+    }
+
+    helper_argv[0] = helper_path_copy;
+    for (size_t i = 0; i < argc; i++)
+        helper_argv[i + 1] = argv[i];
+    helper_argv[argc + 1] = NULL;
+
+    posix_spawn_file_actions_init(&actions);
+    posix_spawnattr_init(&attrs);
+
+    posix_spawn_file_actions_adddup2(&actions, slave, STDIN_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, slave, STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, slave, STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, slave);
+    posix_spawn_file_actions_addclose(&actions, *master);
+
+    posix_spawnattr_setflags(
+        &attrs,
+        POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSID);
+
+    sigfillset(&signal_set);
+    posix_spawnattr_setsigdefault(&attrs, &signal_set);
+    sigemptyset(&signal_set);
+    posix_spawnattr_setsigmask(&attrs, &signal_set);
+
+    spawn_err = posix_spawn(pid_out, helper_argv[0], &actions, &attrs, helper_argv, spawn_envp != NULL ? spawn_envp : (char **)envp);
+
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attrs);
+    close(slave);
+
+    free(helper_path_copy);
+    free(helper_argv);
+    minipty_free_spawn_env(spawn_envp, owned_inherited);
+
+    if (spawn_err != 0) {
+        close(*master);
+        *master = -1;
+        return spawn_err;
+    }
+
+    return 0;
+}
+
+static int spawn_pty_child_darwin(
+    int *master,
+    const struct winsize *winp,
+    const char *cwd,
+    const char *file,
+    char *const *argv,
+    char *const *envp,
+    pid_t *pid_out)
+{
+    char *const *child_argv;
+    size_t argc = 0;
+    int err = 0;
+
+    (void)file;
+
+    while (argv[argc] != NULL)
+        argc++;
+
+    child_argv = argv;
+
+    for (int attempt = 0; attempt < MINIPTY_SPAWN_RETRY_MAX; attempt++) {
+        err = minipty_spawn_darwin_once(master, winp, cwd, child_argv, envp, pid_out);
+        if (err == 0)
+            return 0;
+        if (err != EAGAIN && err != ENOMEM)
+            return err;
+        if (*master >= 0) {
+            close(*master);
+            *master = -1;
+        }
+        usleep(MINIPTY_SPAWN_RETRY_BASE_US * (unsigned int)(attempt + 1));
+    }
+
+    return err > 0 ? err : EINVAL;
+}
+#endif
+
+static int spawn_pty_child(
+    int *master,
+    const struct winsize *winp,
+    const char *cwd,
+    const char *file,
+    char *const *argv,
+    char *const *envp,
+    pid_t *pid_out)
+{
+#if defined(__APPLE__)
+    return spawn_pty_child_darwin(master, winp, cwd, file, argv, envp, pid_out);
+#else
+    return spawn_pty_child_forkpty(master, winp, cwd, file, argv, envp, pid_out);
+#endif
+}
+
 int minipty_fork_pty_exec(
     int *master,
     const struct winsize *winp,
@@ -269,9 +313,11 @@ int minipty_fork_pty_exec(
     int *pid_out)
 {
     pid_t pid = -1;
+    int err;
 
-    if (spawn_pty_child(master, winp, working_directory, file, argv, envp, &pid) != 0)
-        return -1;
+    err = spawn_pty_child(master, winp, working_directory, file, argv, envp, &pid);
+    if (err != 0)
+        return err;
 
     *pid_out = (int)pid;
     return 0;
