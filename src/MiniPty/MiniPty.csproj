@@ -32,9 +32,17 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(MiniPtyPackUnixNative)' == 'true'">
-    <None Include="$(_MiniPtyRuntimesRoot)\**\*.*"
+    <None Include="$(_MiniPtyRuntimesRoot)\**\*.so;
+                  $(_MiniPtyRuntimesRoot)\**\*.dylib"
           Pack="true"
           PackagePath="runtimes/%(RecursiveDir)%(Filename)%(Extension)" />
+    <!-- Extensionless helper: set PackagePath to the destination directory only. -->
+    <None Include="$(_MiniPtyRuntimesRoot)\osx-arm64\native\minipty_spawn_helper"
+          Pack="true"
+          PackagePath="runtimes/osx-arm64/native" />
+    <None Include="$(_MiniPtyRuntimesRoot)\osx-x64\native\minipty_spawn_helper"
+          Pack="true"
+          PackagePath="runtimes/osx-x64/native" />
   </ItemGroup>
 
   <Target Name="BuildMiniPtyUnixNative" BeforeTargets="AssignTargetPaths"

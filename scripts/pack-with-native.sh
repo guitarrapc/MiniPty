@@ -41,4 +41,11 @@ if command -v unzip >/dev/null 2>&1; then
     echo "No runtimes/ entries found in $nupkg" >&2
     exit 1
   }
+  for rel in "${required[@]}"; do
+    if ! unzip -l "$nupkg" | awk '{print $4}' | grep -Fx "runtimes/$rel" >/dev/null; then
+      echo "Missing or mis-pathed nupkg entry: runtimes/$rel" >&2
+      unzip -l "$nupkg" | grep -E 'spawn_helper|native/' >&2 || true
+      exit 1
+    fi
+  done
 fi
