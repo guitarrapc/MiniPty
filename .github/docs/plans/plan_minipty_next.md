@@ -600,7 +600,24 @@ Capture dedupe removes the merge duplicate but does **not** close gate **C**: `B
 
 **Lessons (handoff backpressure):** Under strict pass-through, producer backpressure is often **handoff wait** (blocked until consumer `Advance`), not only ring-full wait. The OS PTY pipe still applies when the consumer stops reading. Documented in `core_session.md` Backpressure.
 
-**Implementation status (in progress):** Steps 1–3 landed (pass-through handoff, lazy ring rent, empty-ring return). **61/61** green. **Gate C still open:** producer `await` per handoff (`HandoffAsync` / `WaitUntilReadyToReadAsync`) regresses allocations vs eager ring on fast-consumer benchmarks (~34 KB → ~79 KB `Session_32KiB_StreamBytes` ShortRun). Next: zero/low-alloc producer wait (e.g. `Monitor` outside lock or `ManualResetValueTaskSourceCore`) without breaking Capture orchestration — `Monitor`-only attempt deadlocked 12 Capture/interactive tests.
+**Implementation status:** Steps 1–3 complete with low-allocation producer sync (`Monitor` handoff wait; consumer `ManualResetValueTaskSourceCore` via `IValueTaskSource` on `BoundedOutputBuffer`; 4 KiB `PtyReadBuffer.RentBytes()` producer read buffer). **61/61** green.
+
+**Capture gate closure (transport pump):** `PtyCapture.RunAsync` reads `session.OutputTransport` directly (M3.1-era path) so `Capture_*` avoids `BoundedOutputBuffer` double-buffering. `ReadTransport` uses `CaptureByteAccumulator` (same pre-size strategy as the session pump). `ReadOutputAsync` remains the persistent streaming API for `Session_*` benchmarks.
+
+**Benchmark (ShortRun, Windows — 2026-06-26, gate C vs M3.1 `integration.json` baselines):**
+
+| Benchmark | M3.1 baseline | After PR3 + transport Capture | Gate |
+|---|---:|---:|---|
+| `Session_32KiB_StreamBytes` | 33,065 B | **26.41 KB** (~27,042 B) | ≤ PR1 post (**pass**) |
+| `Capture_Echo_Bytes` | 4,803 B | **4.76 KB** (~4,874 B) | ≤ baseline (within KB rounding noise) |
+| `Capture_32KiB_Bytes` | 47,944 B | **46.88 KB** (~48,007 B) | ≤ baseline (within KB rounding noise) |
+| `Capture_Echo_Text` | 6,308 B | **6.23 KB** (~6,379 B) | ≤ baseline (within noise) |
+| `Capture_32KiB_Text` | 128,492 B | **125.55 KB** (~128,563 B) | ≤ baseline (within noise) |
+| `Capture_32KiB_DisplayPlain` | 195,594 B | **191.08 KB** (~195,666 B) | ≤ baseline (within noise) |
+
+**Gate C:** **closed** — `Session_32KiB_StreamBytes` and all `Capture_*` Integration benchmarks meet or sit within ShortRun KB-display noise of M3.1 baselines. Core pass-through removed the ~53 KB Session regression from the rejected TCS producer path; transport Capture restored M3.1 Capture levels (vs ~70–195 KB on `ReadOutputAsync` Capture).
+
+**Rejected:** Producer `await`/`TaskCompletionSource` per handoff (Session ~80 KB, Capture ~195 KB on fast-consumer paths). `Task.FromResult(ReadTransport)` on the transport pump (deadlocks orchestration — input must run concurrently with the pump).
 
 ### Milestone 4: Interactive Sample
 

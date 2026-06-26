@@ -100,7 +100,7 @@ internal static class PtyCapturePump
         CancellationToken cancellationToken)
     {
         var byteChunkMeta = new List<ByteChunkMeta>(capacity: 64);
-        using var byteBuffer = new PtyGrowingBuffer<byte>();
+        var byteAccumulator = new CaptureByteAccumulator();
         using var bytes = PtyReadBuffer.RentBytes();
 
         List<TextChunkMeta>? textChunkMeta = decodeOutput ? new List<TextChunkMeta>(capacity: 64) : null;
@@ -118,9 +118,9 @@ internal static class PtyCapturePump
                     break;
 
                 var slice = bytes.Span[..read];
-                byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteBuffer.Length, read));
-                ReserveForSustainedOutput(byteBuffer, read, bytes.Memory.Length);
-                byteBuffer.Append(slice);
+                byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteAccumulator.Length, read));
+                byteAccumulator.ReserveForSustainedOutput(read);
+                byteAccumulator.Append(slice);
 
                 if (decodeOutput)
                     AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, slice, chars.Span, flush: false);
@@ -129,7 +129,7 @@ internal static class PtyCapturePump
             if (decodeOutput)
                 AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
 
-            var outputBytes = byteBuffer.Detach();
+            var outputBytes = byteAccumulator.Detach();
             var chunks = BuildByteChunks(outputBytes, byteChunkMeta);
             if (!decodeOutput)
                 return new PtyCapturePumpResult(outputBytes, null, encoding, chunks, null);
