@@ -336,6 +336,12 @@ int minipty_try_read(int fd, void *buf, unsigned int count, int *bytes_read, int
             return 0;
         }
 
+        if (saved_errno == EIO) {
+            *bytes_read = 0;
+            *is_eof = 1;
+            return 0;
+        }
+
         errno = saved_errno;
         return -1;
     }
