@@ -178,14 +178,80 @@ Record each commit's `StreamBytes` Allocated in the PR description (monotonic de
 
 Do **not** assume the PR merges. At PR end, choose among (no fixed priority):
 
-1. **Allocation profiler** — `dotnet run ... --profiler EP` or similar on `Session_32KiB_StreamBytes` to split spawn vs drain vs async state machine.
-2. **Further core work** — e.g. shrink `ProduceAsync` / `IAsyncEnumerable` state machines (higher risk).
+1. **Allocation profiler** — ~~`dotnet run ... --profiler EP`~~ **Done** — see [Profiler findings](#profiler-findings-2026-06-26-windows).
+2. **Further core work** — e.g. shrink `ProduceAsync` / `IAsyncEnumerable` state machines, or coalesce ConPTY micro-reads before handoff (**highest ROI per profiler**).
 3. **Benchmark isolation** — optional PowerShell child change to separate measurement from library cost.
 4. **Stop** — revert or withhold PR until a new plan is agreed.
 
 Document the chosen path and measured residual in this file and in `pty_crossplatform.md`.
 
-## Lessons (pre-implementation)
+## Profiler findings (2026-06-26, Windows)
+
+**Method:** B-set differential benchmarks + `GC.GetTotalAllocatedBytes` diagnostic + EventPipe (`--profiler EP`) call stacks.
+
+### 1. Spawn vs transport vs ReadOutputAsync (B-set, ShortRun)
+
+| Benchmark | Allocated | Δ vs Exit0 | What it measures |
+|-----------|----------:|-----------:|------------------|
+| `Session_Exit0_Bytes` | 3.44 KB | — | ConPTY spawn only |
+| `Session_32KiB_OutputStreamBytes` | 3.78 KB | **+0.34 KB** | spawn + raw `Output.ReadAsync` loop + post-exit drain |
+| `Session_32KiB_StreamBytes` | 24.04 KB | **+20.60 KB** | spawn + `ReadOutputAsync` (`BoundedOutputBuffer`) |
+
+**Takeaway:** ConPTY transport I/O and drain are cheap (~0.34 KB over spawn for 32 KiB). **~86% of `StreamBytes` (20.6 / 24.0 KB) is `ReadOutputAsync`-specific**, not spawn and not raw pipe reads.
+
+Cross-OS gap decomposition (CI numbers from plan header):
+
+| Component | Ubuntu | Windows | Δ |
+|-----------|-------:|--------:|--:|
+| Spawn (`Exit0`) | 1.50 KB | 3.44 KB | +1.94 KB |
+| Transport + drain (`OutputStream`) | 1.24 KB | 3.78 KB | +2.54 KB |
+| **ReadOutputAsync overhead** (Stream − Output) | **~3.4 KB** | **~20.3 KB** | **~+16.9 KB** |
+
+Windows is worse primarily in the **editor-backend path**, not because ConPTY spawn is 5× slower to allocate.
+
+### 2. Chunk count drives multiplication
+
+Diagnostic (`SmallStdout` PowerShell child, 32 KiB target):
+
+| Metric | Value |
+|--------|------:|
+| `transport_reads` (`Output.ReadAsync`, 4 KiB buffer) | **~125** |
+| `ReadOutputAsync` chunks | **~125** (1:1 with transport reads) |
+| Bytes delivered | ~37 KiB (PowerShell `[string]` overhead) |
+| Average read size | **~297 B** |
+
+Linux benchmark child is `head -c 32768 /dev/zero` (binary, no shell string expansion). With a 4 KiB read buffer that path typically yields **~8 reads**, not ~125.
+
+**Estimated per-chunk async overhead:** (24.04 − 3.78) KB / 125 chunks ≈ **166 B/chunk** — consistent with `ProduceAsync` + `ReadAsync` + `ReadOutputAsync` state-machine boxes, `ValueTask`/`ManualResetValueTaskSourceCore`, and `Monitor.Wait`/`PulseAll` per handoff cycle.
+
+Commits 1–3 removed **timer/`Task.Yield` drain polling** (~2.17 KB total). They did **not** reduce per-chunk multiplication; that explains why 15 KB stretch remains unreachable without a new design.
+
+### 3. EventPipe stacks (qualitative)
+
+Dominant frames in `Session_32KiB_StreamBytes` trace:
+
+- `BoundedOutputBuffer.ProduceAsync` / `+<ProduceAsync>d__*.MoveNext`
+- `BoundedOutputBuffer.ObserveExitForOutputDrainAsync` (exit poll + stall + `CloseOutputTransport`)
+- `BoundedOutputBuffer.Handoff` / `+<ReadAsync>d__*.MoveNext`
+- `PtySession+<ReadOutputAsync>d__*.MoveNext` (consumer `await foreach`)
+- `AsyncTaskMethodBuilder` / `AsyncStateMachineBox` (thread-pool continuations)
+
+Drain polling (`PollForChildExitUntilExited`, `Thread.Sleep` stall) appears in the trace but is **not** the bulk allocator compared with ~125 handoff cycles.
+
+### 4. Decision (post-profiler)
+
+| Option | Assessment |
+|--------|------------|
+| **Profiler** | Done — see above. |
+| **Further core work** | **Primary lever:** reduce allocations **per handoff** (state-machine shrink, fewer `Task`/box allocations) and/or **coalesce** small ConPTY reads before exposing chunks. Higher risk; needs new spec for chunk coalescing semantics. |
+| **Benchmark isolation** | PowerShell child inflates bytes (~37 KiB) and may affect read granularity; swapping to a lighter child improves CI fairness but **does not remove** per-chunk `ReadOutputAsync` cost. Optional reference phase. |
+| **Stop / withhold** | Not required if merging current −2.17 KB drain win; **15 KB stretch needs a follow-up plan** (not this PR). |
+
+**Recommended follow-up:** spec + prototype **chunk coalescing** in `BoundedOutputBuffer` (accumulate into rented buffer until ≥N bytes or producer idle) and/or **manual async state machine** for `ProduceAsync`/`ReadAsync` hot loop. Target: bring Windows ReadOutputAsync overhead from ~20 KB toward Linux-like ~3–4 KB at similar chunk counts, or reduce effective chunk count without breaking no-drop handoff.
+
+Trace artifacts: `BenchmarkDotNet.Artifacts/MiniPty.Benchmarks.PtyIntegrationBenchmarks.Session_32KiB_StreamBytes-*.speedscope.json`
+
+## Lessons (implementation)
 
 | Lesson | Detail |
 |---|---|
