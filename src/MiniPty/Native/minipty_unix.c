@@ -185,6 +185,21 @@ static void minipty_free_spawn_env(char **spawn_envp, char **owned_inherited)
     free(owned_inherited);
 }
 
+static int minipty_stdio_slot_is_vacant(int fd)
+{
+    return fcntl(fd, F_GETFD) == -1 && errno == EBADF;
+}
+
+static int minipty_any_stdio_slot_vacant(void)
+{
+    for (int slot = STDIN_FILENO; slot <= STDERR_FILENO; slot++) {
+        if (minipty_stdio_slot_is_vacant(slot))
+            return 1;
+    }
+
+    return 0;
+}
+
 static int minipty_spawn_darwin_once(
     int *master,
     const struct winsize *winp,
@@ -213,23 +228,25 @@ static int minipty_spawn_darwin_once(
 
     *master = -1;
 
-    for (size_t i = 0; i < 3; i++) {
-        int fd = posix_openpt(O_RDWR | O_CLOEXEC);
-        if (fd < 0) {
-            err = errno > 0 ? errno : EINVAL;
-            goto done;
-        }
+    if (minipty_any_stdio_slot_vacant()) {
+        for (size_t i = 0; i < 3; i++) {
+            int fd = posix_openpt(O_RDWR | O_CLOEXEC);
+            if (fd < 0) {
+                err = errno > 0 ? errno : EINVAL;
+                goto done;
+            }
 
-        /* Reserve only vacant stdio slots (0/1/2). If fd >= 3, nothing to reserve. */
-        if (fd >= (STDERR_FILENO + 1)) {
-            close(fd);
-            break;
-        }
+            /* Reserve vacant stdio slots (0/1/2). If fd >= 3, all occupied slots are filled. */
+            if (fd >= (STDERR_FILENO + 1)) {
+                close(fd);
+                break;
+            }
 
-        low_fds[i] = fd;
-        low_fd_opened = i + 1;
-        if (fd >= STDERR_FILENO)
-            break;
+            low_fds[i] = fd;
+            low_fd_opened = i + 1;
+            if (fd >= STDERR_FILENO)
+                break;
+        }
     }
 
     if (minipty_resolve_helper_path(helper_path, sizeof(helper_path)) != 0) {

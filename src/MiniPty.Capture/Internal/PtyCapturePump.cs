@@ -22,7 +22,7 @@ internal static class PtyCapturePump
     {
         if (PtyTransportRead.IsTransport(stream))
         {
-            return Task.Run(
+            return PtyTransportRead.RunBlockingTransportPump(
                 () => ReadTransport(stream, originTimestamp, timeProvider, encoding, decodeOutput, cancellationToken),
                 cancellationToken);
         }
