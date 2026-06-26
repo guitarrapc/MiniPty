@@ -67,9 +67,16 @@ static void minipty_close_inherited_fds(void)
         return;
 #endif
 
-    for (int fd = 3; ; fd++) {
-        if (minipty_set_close_on_exec(fd) && fd > 15)
-            break;
+    /*
+     * Scan every fd slot; do not stop on a single gap (e.g. fd 16 closed but 100 open).
+     * End after many consecutive missing fds past the last open slot.
+     */
+    int bad_streak = 0;
+    for (int fd = 3; bad_streak < 256; fd++) {
+        if (minipty_set_close_on_exec(fd) < 0)
+            bad_streak++;
+        else
+            bad_streak = 0;
     }
 }
 
