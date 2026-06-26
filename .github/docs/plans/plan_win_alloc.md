@@ -44,22 +44,38 @@ Related: [plan_minipty_next.md](plan_minipty_next.md) (Milestone 3 PR3 / Gate C)
 - All **61** tests must pass after every commit.
 - **No `integration.json` update per commit** — update once at PR merge if the Windows baseline improves.
 
-## PR start baseline (recorded before Commit 1)
+## Benchmark log (Windows ShortRun)
 
-Windows 11, Ryzen 9 7950X3D, .NET 10.0.9, ShortRun, 2026-06-26.
+Machine: Windows 11, Ryzen 9 7950X3D, .NET 10.0.9.
 
-| Benchmark | Allocated | Notes |
-|---|---:|---|
-| `Session_32KiB_StreamBytes` | **26.21 KB** | primary gate |
-| `Session_32KiB_OutputStreamBytes` | **3.91 KB** | control (transport) |
-| `Session_Exit0_Bytes` | **3.44 KB** | control (spawn) |
+**Gate (every commit):** B-set Allocated must be **≤ prior step** for all three benchmarks. **Stretch:** `StreamBytes` ≤ 15 KB.
 
-Commit log (fill as implemented):
+### Allocated per step (ShortRun)
 
-| Commit | `StreamBytes` | `OutputStreamBytes` | `Exit0` | Tests |
-|---|---:|---:|---:|---|
+| Step | StreamBytes | OutputStream | Exit0 | Tests |
+|------|------------:|-------------:|------:|------:|
 | PR start | 26.21 KB | 3.91 KB | 3.44 KB | — |
-| 1 — `Thread.Sleep` stall poll + `concurrentExitWait` fix | 24.17 KB | 3.91 KB | 3.44 KB | 61/61 |
+| Commit 1 | 24.17 KB | 3.91 KB | 3.44 KB | 61/61 |
+| Commit 2 | 24.11 KB | 3.91 KB | 3.44 KB | 61/61 |
+| Commit 3 | 24.04 KB | 3.78 KB | 3.44 KB | 61/61 |
+
+### Δ vs prior step
+
+| Step | StreamBytes | OutputStream | Exit0 | Gate |
+|------|------------:|-------------:|------:|------|
+| Commit 1 | −2.04 KB | 0 | 0 | pass |
+| Commit 2 | −0.06 KB | 0 | 0 | pass |
+| Commit 3 | −0.07 KB | −0.13 KB | 0 | pass |
+
+### Δ vs PR start (cumulative, Commit 3)
+
+| Benchmark | PR start | Commit 3 | Δ |
+|-----------|----------:|---------:|--:|
+| `Session_32KiB_StreamBytes` | 26.21 KB | 24.04 KB | −2.17 KB |
+| `Session_32KiB_OutputStreamBytes` | 3.91 KB | 3.78 KB | −0.13 KB |
+| `Session_Exit0_Bytes` | 3.44 KB | 3.44 KB | 0 |
+
+**Stretch target:** `StreamBytes` 24.04 KB — still **> 15 KB**; see [Decision gate](#decision-gate-if-15-kb-not-met).
 
 ## Commit plan (single PR)
 
@@ -100,7 +116,7 @@ With `Thread.Sleep(remaining)` **outside** `_sync`, using `Environment.TickCount
 - `src/MiniPty/Internal/WindowsPtyBackend.cs` — add private `PollForChildExit(int timeoutMs, CancellationToken)` mirroring Unix (`TryRefreshExitState`, `WaitForSingleObject` with bounded wait, `Thread.Sleep` for remainder, `PromoteEofIfPending` / `CloseInputPipeIfEofSignaled` as in existing async loop).
 - `src/MiniPty/PtySession.cs` — internal dispatch from `ObserveExitForOutputDrainAsync`; replace `await WaitForExitInternalAsync(..., closeTransportOnExit: false)` with synchronous polling until exit (or cancellation).
 
-Keep `if (_session.IsExitWaitActive) return;` behavior unchanged.
+Keep `concurrentExitWait` captured **before** exit polling (see Commit 1). Replace `await WaitForExitInternalAsync(..., closeTransportOnExit: false)` with `_session.PollForChildExitUntilExited(..., closeTransportOnExit: false)` — allocation-free, no `Task.Yield`.
 
 **Gates:** same as Commit 1. **Focus tests:**
 
@@ -178,6 +194,9 @@ Document the chosen path and measured residual in this file and in `pty_crosspla
 | `CloseOutputTransport` under `_sync` | Deadlocks producer `Complete()`; always call outside buffer lock. |
 | `_producer.Wait()` in `Dispose` | Deadlocks with `ProduceAsync` finally awaiting exit observer; keep `ContinueWith` or equivalent non-blocking cleanup. |
 | Incremental commits | Hang during exploration traced to uncommitted drain changes; always gate each commit with tests + bench. |
+| Sync observer on producer thread | `ObserveExitForOutputDrainAsync` must `await Task.Yield()` before blocking exit poll; `ProduceAsync` assigns the task without awaiting. |
+| `WaitForExitAsync` evaluated before `await` | `await AwaitExitAsync(_backend.WaitForExitAsync(...))` runs sync `Poll` on the caller thread; blocks dispose test and starves concurrent reads. Fix: `await Task.Yield()` in `WaitForExitInternalScopedAsync` only; backend keeps `TryRefreshExitState` fast path + `Task.FromResult`. |
+| `Task.Yield` in backend `WaitForExitAsync` | Adds ~0.36 KB to `Exit0` / `OutputStream` vs fast-path `Task.FromResult`; do not yield on already-exited children. |
 
 ## Post-merge
 

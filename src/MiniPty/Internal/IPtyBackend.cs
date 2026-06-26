@@ -12,5 +12,10 @@ internal interface IPtyBackend : IDisposable
     public void SendEof();
     public void Kill();
     public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true);
+    /// <summary>
+    /// Blocks until the child exits or <paramref name="cancellationToken"/> is canceled.
+    /// Allocation-free path for <see cref="PtySession.ReadOutputAsync"/> exit observation.
+    /// </summary>
+    public void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit);
     public void CloseOutputTransport();
 }

@@ -328,13 +328,24 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     private async Task<int> WaitForExitInternalScopedAsync(CancellationToken cancellationToken, bool killOnCancellation)
     {
         using var exitWait = EnterExitWait();
-        return await _backend.WaitForExitAsync(cancellationToken, killOnCancellation).ConfigureAwait(false);
+        await Task.Yield();
+        return await AwaitExitAsync(_backend.WaitForExitAsync(cancellationToken, killOnCancellation)).ConfigureAwait(false);
     }
 
     private Task<int> WaitForExitInternalCoreAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit) =>
-        _backend.WaitForExitAsync(cancellationToken, killOnCancellation, closeTransportOnExit);
+        AwaitExitAsync(_backend.WaitForExitAsync(cancellationToken, killOnCancellation, closeTransportOnExit));
+
+    private async Task<int> AwaitExitAsync(Task<int> exitTask)
+    {
+        var exitCode = await exitTask.ConfigureAwait(false);
+        ThrowIfDisposed();
+        return exitCode;
+    }
 
     internal void CloseOutputTransport() => _backend.CloseOutputTransport();
+
+    internal void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit) =>
+        _backend.PollForChildExitUntilExited(cancellationToken, closeTransportOnExit);
 
     private void ThrowIfDisposed()
     {
@@ -587,12 +598,15 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         /// </summary>
         private async Task ObserveExitForOutputDrainAsync()
         {
+            // Must not run exit polling on the producer thread; ProduceAsync assigns this Task without awaiting.
+            await Task.Yield();
+
             const int PostExitStallBeforeCloseMs = 100;
 
             try
             {
                 var concurrentExitWait = _session.IsExitWaitActive;
-                await _session.WaitForExitInternalAsync(_producerCancellation.Token, killOnCancellation: false, closeTransportOnExit: false).ConfigureAwait(false);
+                _session.PollForChildExitUntilExited(_producerCancellation.Token, closeTransportOnExit: false);
 
                 if (concurrentExitWait)
                     return;

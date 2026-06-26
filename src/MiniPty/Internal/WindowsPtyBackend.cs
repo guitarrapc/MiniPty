@@ -350,7 +350,7 @@ internal static class WindowsPtyBackend
             WindowsInterop.TerminateProcess(_processInfo.hProcess, 1);
         }
 
-        public async Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true)
+        public void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (TryRefreshExitState())
@@ -358,7 +358,41 @@ internal static class WindowsPtyBackend
                 if (closeTransportOnExit)
                     CloseTransport();
 
-                return _exitCode;
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                return;
+            }
+
+            while (!TryRefreshExitState())
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var waitResult = WindowsInterop.WaitForSingleObject(_processInfo.hProcess, WaitPollMs);
+                PromoteEofIfPending();
+                CloseInputPipeIfEofSignaled();
+                if (waitResult == WindowsInterop.WaitFailed)
+                    throw new Win32Exception(Marshal.GetLastPInvokeError(), "WaitForSingleObject failed");
+
+                if (waitResult != WindowsInterop.WaitObject0 && waitResult != WindowsInterop.WaitTimeout)
+                    throw new InvalidOperationException($"WaitForSingleObject returned unexpected code 0x{waitResult:X8}");
+            }
+
+            if (closeTransportOnExit)
+                CloseTransport();
+
+            cancellationToken.ThrowIfCancellationRequested();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+        }
+
+        public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (TryRefreshExitState())
+            {
+                if (closeTransportOnExit)
+                    CloseTransport();
+
+                return Task.FromResult(_exitCode);
             }
 
             CancellationTokenRegistration registration = default;
@@ -373,30 +407,8 @@ internal static class WindowsPtyBackend
 
             try
             {
-                while (!TryRefreshExitState())
-                {
-                    ObjectDisposedException.ThrowIf(_disposed, this);
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    var waitResult = WindowsInterop.WaitForSingleObject(_processInfo.hProcess, WaitPollMs);
-                    PromoteEofIfPending();
-                    CloseInputPipeIfEofSignaled();
-                    if (waitResult == WindowsInterop.WaitFailed)
-                        throw new Win32Exception(Marshal.GetLastPInvokeError(), "WaitForSingleObject failed");
-
-                    if (waitResult != WindowsInterop.WaitObject0 && waitResult != WindowsInterop.WaitTimeout)
-                        throw new InvalidOperationException($"WaitForSingleObject returned unexpected code 0x{waitResult:X8}");
-
-                    if (waitResult == WindowsInterop.WaitTimeout)
-                        await Task.Yield();
-                }
-
-                if (closeTransportOnExit)
-                    CloseTransport();
-
-                cancellationToken.ThrowIfCancellationRequested();
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                return _exitCode;
+                PollForChildExitUntilExited(cancellationToken, closeTransportOnExit);
+                return Task.FromResult(_exitCode);
             }
             finally
             {

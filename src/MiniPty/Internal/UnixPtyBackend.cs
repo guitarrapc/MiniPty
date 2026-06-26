@@ -187,6 +187,27 @@ internal static partial class UnixPtyBackend
         public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true) =>
             WaitForExitCoreAsync(cancellationToken, killOnCancellation);
 
+        public void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (TryRefreshExitState())
+                return;
+
+            while (!TryRefreshExitState())
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (PollForChildExit(WaitPollMs, cancellationToken))
+                    break;
+
+                SendEotIfPending();
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+        }
+
         private async Task<int> WaitForExitCoreAsync(CancellationToken cancellationToken, bool killOnCancellation)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
