@@ -96,11 +96,22 @@ static int spawn_pty_child_forkpty(
     pid_t pid;
     sigset_t newmask;
     sigset_t oldmask;
+    char *cwd_owned = NULL;
     char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
 
     if (child_envp == NULL) {
         errno = ENOMEM;
         return ENOMEM;
+    }
+
+    if (cwd != NULL && cwd[0] != '\0') {
+        cwd_owned = strdup(cwd);
+        if (cwd_owned == NULL) {
+            if (envp == NULL)
+                free(child_envp);
+            errno = ENOMEM;
+            return ENOMEM;
+        }
     }
 
     sigfillset(&newmask);
@@ -117,14 +128,16 @@ static int spawn_pty_child_forkpty(
 
     if (pid < 0) {
         int err = errno > 0 ? errno : EINVAL;
+        free(cwd_owned);
         if (envp == NULL)
             free(child_envp);
         return err;
     }
 
     if (pid == 0) {
-        if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
+        if (cwd_owned != NULL && chdir(cwd_owned) != 0)
             _exit(126);
+        free(cwd_owned);
 #if defined(__linux__)
         minipty_close_inherited_fds();
 #endif
@@ -132,6 +145,7 @@ static int spawn_pty_child_forkpty(
         _exit(127);
     }
 
+    free(cwd_owned);
     if (envp == NULL)
         free(child_envp);
 
