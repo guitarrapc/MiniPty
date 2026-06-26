@@ -328,13 +328,27 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     private async Task<int> WaitForExitInternalScopedAsync(CancellationToken cancellationToken, bool killOnCancellation)
     {
         using var exitWait = EnterExitWait();
-        return await _backend.WaitForExitAsync(cancellationToken, killOnCancellation).ConfigureAwait(false);
+        await Task.Yield();
+        return await AwaitExitAsync(_backend.WaitForExitAsync(cancellationToken, killOnCancellation)).ConfigureAwait(false);
     }
 
-    private Task<int> WaitForExitInternalCoreAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit) =>
-        _backend.WaitForExitAsync(cancellationToken, killOnCancellation, closeTransportOnExit);
+    private async Task<int> WaitForExitInternalCoreAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit)
+    {
+        await Task.Yield();
+        return await AwaitExitAsync(_backend.WaitForExitAsync(cancellationToken, killOnCancellation, closeTransportOnExit)).ConfigureAwait(false);
+    }
+
+    private async Task<int> AwaitExitAsync(Task<int> exitTask)
+    {
+        var exitCode = await exitTask.ConfigureAwait(false);
+        ThrowIfDisposed();
+        return exitCode;
+    }
 
     internal void CloseOutputTransport() => _backend.CloseOutputTransport();
+
+    internal void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit) =>
+        _backend.PollForChildExitUntilExited(cancellationToken, closeTransportOnExit);
 
     private void ThrowIfDisposed()
     {
@@ -587,13 +601,17 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         /// </summary>
         private async Task ObserveExitForOutputDrainAsync()
         {
+            // Must not run exit polling on the producer thread; ProduceAsync assigns this Task without awaiting.
+            await Task.Yield();
+
             const int PostExitStallBeforeCloseMs = 100;
 
             try
             {
-                await _session.WaitForExitInternalAsync(_producerCancellation.Token, killOnCancellation: false, closeTransportOnExit: false).ConfigureAwait(false);
+                var concurrentExitWait = _session.IsExitWaitActive;
+                _session.PollForChildExitUntilExited(_producerCancellation.Token, closeTransportOnExit: false);
 
-                if (_session.IsExitWaitActive)
+                if (concurrentExitWait)
                     return;
 
                 var exitObservedAt = Environment.TickCount64;
@@ -613,7 +631,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                         return;
                     }
 
-                    await Task.Delay(10, _producerCancellation.Token).ConfigureAwait(false);
+                    var pollDeadline = Environment.TickCount64 + 10;
+                    while (Environment.TickCount64 < pollDeadline)
+                    {
+                        _producerCancellation.Token.ThrowIfCancellationRequested();
+                        var remaining = (int)Math.Min(10, pollDeadline - Environment.TickCount64);
+                        if (remaining > 0)
+                            Thread.Sleep(remaining);
+                    }
                 }
             }
             catch (OperationCanceledException) when (_producerCancellation.IsCancellationRequested)
