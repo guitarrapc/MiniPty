@@ -14,7 +14,7 @@
     <MiniPtyUnixNativeLibraryName Condition="'$(MiniPtyUnixNativeLibraryName)' == ''">libminipty_unix.so</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLinkFlags Condition="$([MSBuild]::IsOSPlatform('Linux')) Or $([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD'))">-lutil</MiniPtyUnixNativeLinkFlags>
     <MiniPtyUnixNativeLinkFlags Condition="'$(MiniPtyUnixNativeLinkFlags)' == ''"></MiniPtyUnixNativeLinkFlags>
-    <_MiniPtyUnixNativeSources>$(MSBuildThisFileDirectory)Native/minipty_unix.c $(MSBuildThisFileDirectory)Native/minipty_unix_exec.c</_MiniPtyUnixNativeSources>
+    <_MiniPtyUnixNativeSources>&quot;$(MSBuildThisFileDirectory)Native/minipty_unix.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot;</_MiniPtyUnixNativeSources>
     <_MiniPtyUnixNativeOutput Condition="'$(MiniPtyBuildUnixNative)' == 'true'">$(OutputPath)$(MiniPtyUnixNativeLibraryName)</_MiniPtyUnixNativeOutput>
     <_MiniPtySpawnHelperOutput Condition="'$(MiniPtyBuildUnixNative)' == 'true' and $([MSBuild]::IsOSPlatform('OSX'))">$(OutputPath)minipty_spawn_helper</_MiniPtySpawnHelperOutput>
   </PropertyGroup>

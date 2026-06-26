@@ -310,21 +310,14 @@ static int spawn_pty_child_darwin(
     char *const *envp,
     pid_t *pid_out)
 {
-    char *const *child_argv;
-    size_t argc = 0;
     int err = 0;
 
     *master = -1;
 
-    while (argv[argc] != NULL)
-        argc++;
-
     (void)file;
 
-    child_argv = argv;
-
     for (int attempt = 0; attempt < MINIPTY_SPAWN_RETRY_MAX; attempt++) {
-        err = minipty_spawn_darwin_once(master, winp, cwd, child_argv, envp, pid_out);
+        err = minipty_spawn_darwin_once(master, winp, cwd, argv, envp, pid_out);
         if (err == 0)
             return 0;
         if (!minipty_spawn_err_is_transient(err))
