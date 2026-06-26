@@ -181,7 +181,9 @@ Shared session logic lives in `UnixPtyBackend`; the `forkpty` boundary and resiz
 | macOS | `<util.h>` / `libutil` |
 | FreeBSD | `<libutil.h>` / `libutil` |
 
-`waitpid`, `kill`, `read`, `write`, and other syscalls remain on `libc` in the shared partial class. `TIOCSWINSZ` resize uses `minipty_set_winsize` in `libminipty_unix`—not a direct `ioctl` P/Invoke—because `ioctl` is variadic and mis-marshals on macOS arm64.
+`waitpid`, `kill`, `read`, `write`, and other syscalls remain on `libc` in the shared partial class. `TIOCSWINSZ` resize uses `minipty_set_winsize` in `libminipty_unix`—not a direct `ioctl` P/Invoke—because `ioctl` is variadic and mis-marshals on macOS arm64. `FIONREAD` peek for `ReadOutputAsync` coalescing uses `minipty_peek_readable_bytes` in the same native library for the same reason.
+
+On Windows ConPTY, `ReadOutputAsync` coalescing uses `PIPE_NOWAIT` on the output pipe because `PeekNamedPipe` is unreliable on anonymous ConPTY pipes; see `core_session.md` lessons learned.
 
 ## Shared Rules
 

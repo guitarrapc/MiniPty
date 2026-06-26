@@ -53,17 +53,20 @@ Replace per-read `Handoff`:
 ```text
 offset = 0
 loop while consumer waiting (existing WaitUntilReadyToRead):
-  read = ReadOutputTransport(buffer[offset..])
+  read = ReadOutputTransport(buffer[offset..])        // blocking when offset == 0
   if read <= 0: break
   offset += read
   if offset == buffer.Length: break
-  if !TryGetAvailableBytes(out available) || available == 0: break
+  read = TryReadOutputTransportIfReady(buffer[offset..])  // non-blocking continuation
+  if read <= 0: micro-window retry, then break
 Handoff(buffer[0..offset])
 WaitForHandoffCleared (existing)
 ```
 
+**Implemented (Windows ConPTY):** `TryReadOutputTransportIfReady` uses `PIPE_NOWAIT` because `PeekNamedPipe` is unreliable on anonymous ConPTY pipes; a 1 ms micro-window batches micro-slices without blocking the first byte. Unix uses `FIONREAD` via `minipty_peek_readable_bytes` before continuation reads.
+
 - **EOF:** `read == 0` with `offset > 0` → handoff remainder, then complete.
-- **Peek failure:** treat as no bytes available → handoff partial (safe fallback; do not spin).
+- **Peek failure / no immediate bytes:** handoff partial (safe fallback; do not spin).
 
 ### Transport peek
 

@@ -205,6 +205,63 @@ public sealed class PtyTests
         await Assert.That(text).Contains(marker);
     }
 
+    /// <summary>
+    /// Bulk stdout on Windows ConPTY used to produce ~125 handoff-sized chunks; coalescing should batch to far fewer.
+    /// </summary>
+    [Test]
+    public async Task PtyReadOutputAsyncCoalescesBulkStdoutOnWindows()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        if (!TryResolveWindowsPowerShell(out var powershell))
+            return;
+
+        await using var session = Pty.Start(Spawn(powershell,
+            ["-NoLogo", "-NoProfile", "-Command", "[Console]::Out.Write(([string]::new('x',32768)))"]));
+
+        var totalBytes = 0;
+        var chunks = 0;
+        var maxChunk = 0;
+        await foreach (var chunk in session.ReadOutputAsync())
+        {
+            chunks++;
+            totalBytes += chunk.Data.Length;
+            if (chunk.Data.Length > maxChunk)
+                maxChunk = chunk.Data.Length;
+        }
+
+        await Assert.That(totalBytes).IsGreaterThanOrEqualTo(32_768);
+        await Assert.That(chunks).IsLessThan(40);
+        await Assert.That(maxChunk).IsLessThanOrEqualTo(4096);
+        await Assert.That(maxChunk).IsGreaterThan(1024);
+    }
+
+    /// <summary>Binary bulk stdout on Unix should remain few large chunks (coalesce must not regress large reads).</summary>
+    [Test]
+    public async Task PtyReadOutputAsyncPreservesLargeChunksOnUnix()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using var session = Pty.Start(Spawn("head", ["-c", "32768", "/dev/zero"]));
+
+        var totalBytes = 0;
+        var chunks = 0;
+        var maxChunk = 0;
+        await foreach (var chunk in session.ReadOutputAsync())
+        {
+            chunks++;
+            totalBytes += chunk.Data.Length;
+            if (chunk.Data.Length > maxChunk)
+                maxChunk = chunk.Data.Length;
+        }
+
+        await Assert.That(totalBytes).IsEqualTo(32_768);
+        await Assert.That(chunks).IsLessThanOrEqualTo(16);
+        await Assert.That(maxChunk).IsGreaterThanOrEqualTo(4096);
+    }
+
     [Test]
     public async Task PtyReadOutputAsyncSupportsPersistentCommandLoop()
     {

@@ -113,7 +113,7 @@ internal sealed class PtyHandleReadStream : Stream
                 if (!WindowsInterop.ReadFile(handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
                 {
                     var error = Marshal.GetLastPInvokeError();
-                    if (error is 109 or WindowsInterop.ErrorNoData) // ERROR_BROKEN_PIPE, ERROR_NO_DATA
+                    if (error == 109) // ERROR_BROKEN_PIPE
                         return 0;
 
                     throw new IOException($"ReadFile failed (Win32 {error})");
