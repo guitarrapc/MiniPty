@@ -1051,18 +1051,38 @@ public sealed class PtyTests
         const string marker = "lifecycle-kill-drain";
 
         await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? Spawn(Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-            ["/c", $"echo {marker} & ping -n 20 127.0.0.1 >nul"])
+            ? WindowsCommand($"echo {marker} & ping -n 20 127.0.0.1 >nul")
             : UnixShell($"printf '{marker}'; sleep 20"));
 
         using var output = new MemoryStream();
+        var markerSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var readTask = Task.Run(async () =>
         {
-            await foreach (var chunk in session.ReadOutputAsync())
-                await output.WriteAsync(chunk.Data);
+            try
+            {
+                await foreach (var chunk in session.ReadOutputAsync())
+                {
+                    await output.WriteAsync(chunk.Data);
+                    if (markerSeen.Task.IsCompleted)
+                        continue;
+
+                    var len = checked((int)output.Length);
+                    if (len == 0)
+                        continue;
+
+                    var text = Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, len));
+                    if (text.Contains(marker, StringComparison.Ordinal))
+                        markerSeen.TrySetResult();
+                }
+            }
+            catch (Exception ex)
+            {
+                markerSeen.TrySetException(ex);
+            }
         });
 
-        await Task.Delay(300);
+        using var readyCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await markerSeen.Task.WaitAsync(readyCts.Token);
         session.Kill();
         await readTask;
 
