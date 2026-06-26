@@ -17,6 +17,7 @@ internal static partial class UnixPtyBackend
         var arguments = startInfo.Arguments as string[] ?? startInfo.Arguments.ToArray();
         var environment = PtyEnvironment.BuildUnix(startInfo);
         var exec = UnixExecPayload.Create(startInfo.FileName, arguments, startInfo.WorkingDirectory, environment);
+        UnixExecPayload? execHold = exec;
         try
         {
             var pid = 0;
@@ -28,11 +29,13 @@ internal static partial class UnixPtyBackend
                     throw new IOException($"PTY spawn failed (errno {spawnError})");
             }
 
-            return new UnixPtyBackendInstance(master, pid, size);
+            var backend = new UnixPtyBackendInstance(master, pid, size, execHold);
+            execHold = null;
+            return backend;
         }
         finally
         {
-            exec.Dispose();
+            execHold?.Dispose();
         }
     }
 
@@ -102,6 +105,7 @@ internal static partial class UnixPtyBackend
     {
         private readonly int _master;
         private readonly int _pid;
+        private readonly UnixExecPayload? _execHold;
         private readonly InputTrackingWriteStream _inputStream;
         private bool _eofSent;
         private bool _eofPending;
@@ -114,10 +118,11 @@ internal static partial class UnixPtyBackend
         private bool _disposed;
         private PtySize _size;
 
-        public UnixPtyBackendInstance(int master, int pid, PtySize size)
+        public UnixPtyBackendInstance(int master, int pid, PtySize size, UnixExecPayload? execHold = null)
         {
             _master = master;
             _pid = pid;
+            _execHold = execHold;
             _size = size;
             _inputStream = new InputTrackingWriteStream(new PtyFdWriteStream(master), OnInputWritten);
             Input = _inputStream;
@@ -272,6 +277,7 @@ internal static partial class UnixPtyBackend
             }
 
             CloseTransport();
+            _execHold?.Dispose();
         }
 
         private void TryReapChild()
