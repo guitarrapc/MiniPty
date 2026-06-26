@@ -14,6 +14,8 @@ internal sealed class PtyHandleReadStream : Stream
 
     internal void BindOutputGate(PtySession outputSession) => session = outputSession;
 
+    internal void SignalTransportPumpStarted() => session?.SignalTransportPumpHandshake();
+
     public override bool CanRead => true;
     public override bool CanSeek => false;
     public override bool CanWrite => false;
@@ -258,6 +260,10 @@ internal sealed class PtyFdReadStream : Stream
     public PtyFdReadStream(int fd) => this.fd = fd;
 
     internal void BindOutputGate(PtySession outputSession) => session = outputSession;
+
+    internal void SignalTransportPumpStarted() => session?.SignalTransportPumpHandshake();
+
+    internal bool IsChildExited => session?.HasExited ?? true;
 
     public override bool CanRead => true;
     public override bool CanSeek => false;

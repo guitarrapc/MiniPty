@@ -35,6 +35,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     private int _outputReaderActive;
     private int _completionOrchestrationDepth;
     private int _exitWaitDepth;
+    private int _transportPumpHandshake;
     private bool _disposed;
 
     internal PtySession(IPtyBackend backend)
@@ -69,6 +70,27 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     internal Stream OutputTransport => outputTransport;
 
     internal bool IsCompletionOrchestrated => Volatile.Read(ref _completionOrchestrationDepth) > 0;
+
+    internal void ResetTransportPumpHandshake() => Volatile.Write(ref _transportPumpHandshake, 0);
+
+    internal void SignalTransportPumpHandshake() => Volatile.Write(ref _transportPumpHandshake, 1);
+
+    internal void WaitForTransportPumpHandshake(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        var spin = new SpinWait();
+        while (Volatile.Read(ref _transportPumpHandshake) == 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Environment.TickCount64 >= deadline)
+            {
+                throw new TimeoutException(
+                    "PTY transport pump did not start reading within the configured timeout.");
+            }
+
+            spin.SpinOnce();
+        }
+    }
 
     internal bool IsExitWaitActive => Volatile.Read(ref _exitWaitDepth) > 0;
 

@@ -11,7 +11,7 @@ internal static class PtyCompletion
         PtyCompleteOptions options,
         OutputPump<TOutput> pump,
         CancellationToken cancellationToken) =>
-        RunWithTransportPumpAsync(session, options, (output, ct) => pump(output, ct), cancellationToken);
+        RunWithTransportPumpAsync(session, options, pump, cancellationToken);
 
     internal static Task<(TOutput Output, int ExitCode)> RunAsync<TOutput>(
         PtySession session,
@@ -31,16 +31,17 @@ internal static class PtyCompletion
         ArgumentNullException.ThrowIfNull(pump);
 
         using var orchestration = session.EnterCompletionOrchestration();
+        session.ResetTransportPumpHandshake();
         var pumpTask = pump(session.OutputTransport, cancellationToken);
+        session.WaitForTransportPumpHandshake(TimeSpan.FromSeconds(5), cancellationToken);
+
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
-        var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
-        var output = await PtyOutputDrain.AwaitPumpAsync(
+        var exitCode = await WaitForExitAsync(session, options, cancellationToken, closeTransportOnExit: false).ConfigureAwait(false);
+        var output = await PtyOutputDrain.AwaitSessionPumpAsync(
             pumpTask,
             session.CloseOutputTransport,
             options.OutputDrainGrace,
             options.OutputReaderCloseTimeout,
-            throwOnTimeout: true,
-            transportAlreadyClosed: false,
             cancellationToken).ConfigureAwait(false);
 
         return (output, exitCode);

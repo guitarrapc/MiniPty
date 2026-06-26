@@ -10,8 +10,53 @@ internal static class PtyTransportRead
     /// instead of waiting behind a saturated thread pool (fast macOS PTY children can finish before
     /// a queued thread-pool read begins, losing output while exit code is still 0).
     /// </summary>
-    internal static Task<T> RunBlockingTransportPump<T>(Func<T> work, CancellationToken cancellationToken) =>
-        Task.Factory.StartNew(work, cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+    internal static Task<T> RunBlockingTransportPump<T>(
+        Func<CancellationToken, T> work,
+        CancellationToken cancellationToken) =>
+        Task.Factory.StartNew(
+            () => work(cancellationToken),
+            cancellationToken,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+
+    internal static void SignalTransportPumpStarted(Stream stream)
+    {
+        switch (stream)
+        {
+            case PtyFdReadStream unix:
+                unix.SignalTransportPumpStarted();
+                break;
+            case PtyHandleReadStream windows:
+                windows.SignalTransportPumpStarted();
+                break;
+        }
+    }
+
+    internal enum TransportPumpReadStatus
+    {
+        Data,
+        Retry,
+        End,
+    }
+
+    /// <summary>
+    /// Reads one transport pump chunk. macOS PTY masters can return a spurious zero-byte EOF while
+    /// the child is still running; yield and retry until the session reports exit.
+    /// </summary>
+    internal static TransportPumpReadStatus ReadTransportPumpChunk(Stream stream, Span<byte> buffer, out int read)
+    {
+        read = Read(stream, buffer);
+        if (read > 0)
+            return TransportPumpReadStatus.Data;
+
+        if (stream is PtyFdReadStream unix && !unix.IsChildExited)
+        {
+            Thread.Sleep(0);
+            return TransportPumpReadStatus.Retry;
+        }
+
+        return TransportPumpReadStatus.End;
+    }
 
     internal static int Read(Stream stream, Span<byte> buffer) =>
         stream switch

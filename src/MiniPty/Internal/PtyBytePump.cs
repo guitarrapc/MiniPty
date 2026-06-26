@@ -15,7 +15,7 @@ internal static class PtyBytePump
         if (PtyTransportRead.IsTransport(stream))
         {
             return PtyTransportRead.RunBlockingTransportPump(
-                () => ReadAllTransport(stream, encoding, decodeOutput, cancellationToken),
+                ct => ReadAllTransport(stream, encoding, decodeOutput, ct),
                 cancellationToken);
         }
 
@@ -31,19 +31,26 @@ internal static class PtyBytePump
         using var byteBuffer = new PtyGrowingBuffer<byte>();
         using var bytes = PtyReadBuffer.RentBytes();
 
+        PtyTransportRead.SignalTransportPumpStarted(stream);
+
         if (!decodeOutput)
         {
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var read = PtyTransportRead.Read(stream, bytes.Span);
-                if (read <= 0)
-                    break;
+                switch (PtyTransportRead.ReadTransportPumpChunk(stream, bytes.Span, out var read))
+                {
+                    case PtyTransportRead.TransportPumpReadStatus.Retry:
+                        continue;
+                    case PtyTransportRead.TransportPumpReadStatus.End:
+                        goto transport_done_bytes;
+                }
 
                 ReserveForSustainedOutput(byteBuffer, read, bytes.Memory.Length);
                 byteBuffer.Append(bytes.Span[..read]);
             }
 
+        transport_done_bytes:
             return new PtyPumpOutput(byteBuffer.Detach(), null, encoding);
         }
 
@@ -54,15 +61,21 @@ internal static class PtyBytePump
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var read = PtyTransportRead.Read(stream, bytes.Span);
-            if (read <= 0)
-                break;
+            switch (PtyTransportRead.ReadTransportPumpChunk(stream, bytes.Span, out var read))
+            {
+                case PtyTransportRead.TransportPumpReadStatus.Retry:
+                    continue;
+                case PtyTransportRead.TransportPumpReadStatus.End:
+                    goto transport_done_text;
+            }
 
             ReserveForSustainedOutput(byteBuffer, read, bytes.Memory.Length);
-            byteBuffer.Append(bytes.Span[..read]);
-            AppendDecoded(decoder, bytes.Span[..read], chars.Span, charBuffer);
+            var slice = bytes.Span[..read];
+            byteBuffer.Append(slice);
+            AppendDecoded(decoder, slice, chars.Span, charBuffer);
         }
 
+    transport_done_text:
         AppendDecoded(decoder, ReadOnlySpan<byte>.Empty, chars.Span, charBuffer, flush: true);
         return new PtyPumpOutput(byteBuffer.Detach(), charBuffer.Detach(), encoding);
     }

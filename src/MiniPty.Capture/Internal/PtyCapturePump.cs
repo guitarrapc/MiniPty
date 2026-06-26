@@ -23,7 +23,7 @@ internal static class PtyCapturePump
         if (PtyTransportRead.IsTransport(stream))
         {
             return PtyTransportRead.RunBlockingTransportPump(
-                () => ReadTransport(stream, originTimestamp, timeProvider, encoding, decodeOutput, cancellationToken),
+                ct => ReadTransport(stream, originTimestamp, timeProvider, encoding, decodeOutput, ct),
                 cancellationToken);
         }
 
@@ -49,12 +49,17 @@ internal static class PtyCapturePump
 
         try
         {
+            PtyTransportRead.SignalTransportPumpStarted(stream);
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var read = PtyTransportRead.Read(stream, bytes.Span);
-                if (read <= 0)
-                    break;
+                switch (PtyTransportRead.ReadTransportPumpChunk(stream, bytes.Span, out var read))
+                {
+                    case PtyTransportRead.TransportPumpReadStatus.Retry:
+                        continue;
+                    case PtyTransportRead.TransportPumpReadStatus.End:
+                        goto transport_done;
+                }
 
                 var slice = bytes.Span[..read];
                 byteChunkMeta.Add(new ByteChunkMeta(ElapsedSinceStart(originTimestamp, timeProvider), byteAccumulator.Length, read));
@@ -65,6 +70,7 @@ internal static class PtyCapturePump
                     AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, slice, chars.Span, flush: false);
             }
 
+        transport_done:
             if (decodeOutput)
                 AppendTextChunk(originTimestamp, timeProvider, textChunkMeta!, charBuffer!, decoder!, ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
 
