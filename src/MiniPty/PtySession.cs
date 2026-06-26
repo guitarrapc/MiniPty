@@ -398,6 +398,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             _ => throw new InvalidOperationException("Unsupported PTY output transport.")
         };
 
+    internal int TryReadOutputTransportIfReady(Span<byte> buffer, out bool eof) =>
+        outputTransport switch
+        {
+            PtyHandleReadStream windowsOutput => windowsOutput.TryReadTransportIfReady(buffer, out eof),
+            PtyFdReadStream unixOutput => unixOutput.TryReadTransportIfReady(buffer, out eof),
+            _ => throw new InvalidOperationException("Unsupported PTY output transport.")
+        };
+
     private void BindOutputGate(Stream output)
     {
         switch (output)
@@ -556,13 +564,54 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     if (!WaitUntilReadyToRead(_producerCancellation.Token))
                         break;
 
-                    var read = _session.ReadOutputTransport(bytes.Span);
-                    if (read <= 0)
-                        break;
+                    var offset = 0;
+                    var eof = false;
+                    while (true)
+                    {
+                        int read;
+                        if (offset == 0)
+                        {
+                            read = _session.ReadOutputTransport(bytes.Span);
+                            if (read <= 0)
+                            {
+                                eof = true;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            read = _session.TryReadOutputTransportIfReady(bytes.Span.Slice(offset), out var readEof);
+                            if (read <= 0 && !readEof)
+                            {
+                                var coalesceDeadline = Environment.TickCount64 + 1;
+                                while (read <= 0 && Environment.TickCount64 < coalesceDeadline)
+                                {
+                                    Thread.Sleep(0);
+                                    read = _session.TryReadOutputTransportIfReady(bytes.Span.Slice(offset), out readEof);
+                                }
+                            }
 
-                    MarkProduceProgress();
-                    Handoff(bytes.Memory.Slice(0, read), _producerCancellation.Token);
-                    MarkProduceProgress();
+                            if (read <= 0)
+                            {
+                                eof = readEof;
+                                break;
+                            }
+                        }
+
+                        offset += read;
+                        if (offset >= bytes.Span.Length)
+                            break;
+                    }
+
+                    if (offset > 0)
+                    {
+                        MarkProduceProgress();
+                        Handoff(bytes.Memory.Slice(0, offset), _producerCancellation.Token);
+                        MarkProduceProgress();
+                    }
+
+                    if (eof)
+                        break;
                 }
 
                 Complete(null);

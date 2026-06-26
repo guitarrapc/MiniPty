@@ -291,3 +291,20 @@ int minipty_set_winsize(int master, unsigned short rows, unsigned short cols)
 
     return 0;
 }
+
+int minipty_peek_readable_bytes(int fd, int *bytes_available)
+{
+    int nbytes = 0;
+
+    if (bytes_available == NULL)
+        return -1;
+
+    if (ioctl(fd, FIONREAD, &nbytes) != 0)
+        return -1;
+
+    if (nbytes < 0)
+        nbytes = 0;
+
+    *bytes_available = nbytes;
+    return 0;
+}

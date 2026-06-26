@@ -113,7 +113,7 @@ internal sealed class PtyHandleReadStream : Stream
                 if (!WindowsInterop.ReadFile(handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
                 {
                     var error = Marshal.GetLastPInvokeError();
-                    if (error == 109) // ERROR_BROKEN_PIPE
+                    if (error is 109 or WindowsInterop.ErrorNoData) // ERROR_BROKEN_PIPE, ERROR_NO_DATA
                         return 0;
 
                     throw new IOException($"ReadFile failed (Win32 {error})");
@@ -122,6 +122,79 @@ internal sealed class PtyHandleReadStream : Stream
                 return (int)read;
             }
         }
+    }
+
+    /// <summary>
+    /// Reads when bytes are immediately available; returns 0 when the pipe would block.
+    /// ConPTY anonymous pipes use <c>PIPE_NOWAIT</c> because <see cref="TryGetAvailableBytes"/> is unreliable there.
+    /// </summary>
+    internal unsafe int TryReadTransportIfReady(Span<byte> buffer, out bool eof)
+    {
+        eof = false;
+        if (buffer.IsEmpty)
+            return 0;
+
+        uint nowait = WindowsInterop.PipeNowait;
+        if (!WindowsInterop.SetNamedPipeHandleState(handle, &nowait, IntPtr.Zero, IntPtr.Zero))
+            return 0;
+
+        try
+        {
+            fixed (byte* ptr = buffer)
+            {
+                if (!WindowsInterop.ReadFile(handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
+                {
+                    var error = Marshal.GetLastPInvokeError();
+                    if (error == 109) // ERROR_BROKEN_PIPE
+                    {
+                        eof = true;
+                        return 0;
+                    }
+
+                    if (error == WindowsInterop.ErrorNoData)
+                        return 0;
+
+                    throw new IOException($"ReadFile failed (Win32 {error})");
+                }
+
+                return (int)read;
+            }
+        }
+        finally
+        {
+            uint wait = WindowsInterop.PipeWait;
+            _ = WindowsInterop.SetNamedPipeHandleState(handle, &wait, IntPtr.Zero, IntPtr.Zero);
+        }
+    }
+
+    /// <summary>Returns immediately readable bytes without consuming them. Peek failure is reported as <see langword="false"/>.</summary>
+    internal unsafe bool TryGetAvailableBytes(out int available)
+    {
+        available = 0;
+        if (WindowsInterop.PeekNamedPipe(handle, null, 0, out _, out var totalAvail, IntPtr.Zero))
+        {
+            available = (int)totalAvail;
+            if (available > 0)
+                return true;
+        }
+        else if (Marshal.GetLastPInvokeError() != 109) // ERROR_BROKEN_PIPE
+        {
+            return false;
+        }
+
+        // ConPTY anonymous pipes often report zero via byte-count peek; buffer peek can still observe pending bytes.
+        Span<byte> scratch = stackalloc byte[1];
+        fixed (byte* ptr = scratch)
+        {
+            if (WindowsInterop.PeekNamedPipe(handle, ptr, 1, out _, out totalAvail, IntPtr.Zero)
+                && totalAvail > 0)
+            {
+                available = (int)totalAvail;
+                return true;
+            }
+        }
+
+        return true;
     }
 
     private int EndRawOutputRead(int read)
@@ -271,33 +344,59 @@ internal sealed class PtyFdReadStream : Stream
         }
     }
 
-    internal int ReadTransport(Span<byte> buffer)
+    internal unsafe int ReadTransport(Span<byte> buffer)
     {
         if (buffer.IsEmpty)
             return 0;
 
-        unsafe
+        fixed (byte* ptr = buffer)
         {
-            fixed (byte* ptr = buffer)
+            while (true)
             {
-                while (true)
+                var read = UnixInterop.Read(fd, ptr, (nuint)buffer.Length);
+                if (read < 0)
                 {
-                    var read = UnixInterop.Read(fd, ptr, (nuint)buffer.Length);
-                    if (read < 0)
-                    {
-                        var errno = Marshal.GetLastPInvokeError();
-                        if (errno == UnixInterop.EINTR)
-                            continue;
-                        if (errno is 0 or UnixInterop.EIO or UnixInterop.EBADF)
-                            return 0;
+                    var errno = Marshal.GetLastPInvokeError();
+                    if (errno == UnixInterop.EINTR)
+                        continue;
+                    if (errno is 0 or UnixInterop.EIO or UnixInterop.EBADF)
+                        return 0;
 
-                        throw new IOException($"read failed (errno {errno})");
-                    }
-
-                    return read;
+                    throw new IOException($"read failed (errno {errno})");
                 }
+
+                return read;
             }
         }
+    }
+
+    /// <summary>Returns immediately readable bytes without consuming them. Peek failure is reported as <see langword="false"/>.</summary>
+    internal unsafe bool TryGetAvailableBytes(out int available)
+    {
+        available = 0;
+        int count;
+        if (UnixInterop.minipty_peek_readable_bytes(fd, &count) != 0)
+            return false;
+
+        available = count;
+        return true;
+    }
+
+    /// <summary>Reads when bytes are immediately available; returns 0 when the pipe would block.</summary>
+    internal unsafe int TryReadTransportIfReady(Span<byte> buffer, out bool eof)
+    {
+        eof = false;
+        if (buffer.IsEmpty)
+            return 0;
+
+        if (!TryGetAvailableBytes(out var available) || available == 0)
+            return 0;
+
+        var read = ReadTransport(buffer);
+        if (read == 0)
+            eof = true;
+
+        return read;
     }
 
     private int EndRawOutputRead(int read)

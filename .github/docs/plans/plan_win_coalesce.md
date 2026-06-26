@@ -146,3 +146,14 @@ Record chunk count diagnostic (optional): transport reads and `ReadOutputAsync` 
 | Transport-only fix insufficient | `ReadFile` already uses 4 KiB buffer; ConPTY returns ~300 B available per call. |
 | Linux parity via transport | Not realistic for PowerShell/Console children; library-side coalesce normalizes handoff count. |
 | Partial read + blocking second read | Without peek, coalescing delays first byte to consumer; peek flush preserves REPL latency. |
+| ConPTY `PeekNamedPipe` unreliable | Byte-count and buffer peek often return 0 while more data arrives microseconds later. Use `PIPE_NOWAIT` + `TryReadTransportIfReady` for non-blocking continuation reads, plus a 1 ms micro-window (`Thread.Sleep(0)`) to batch ConPTY micro-slices without blocking the first byte. |
+
+## Benchmark log (Windows ShortRun, 2026-06-26)
+
+| Benchmark | Phase 1 end | Coalesce PR | Δ |
+|-----------|------------:|------------:|--:|
+| `Session_32KiB_StreamBytes` | 24.04 KB | **6.14 KB** | **−17.9 KB** |
+| `Session_32KiB_OutputStreamBytes` | 3.78 KB | 3.69 KB | −0.09 KB |
+| `Session_Exit0_Bytes` | 3.44 KB | 3.69 KB | +0.25 KB |
+
+Stretch target `StreamBytes` ≤ 15 KB: **met**. Commit 3 (16 KiB buffer) not required.

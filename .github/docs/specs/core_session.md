@@ -61,7 +61,7 @@ A PTY has backpressure. If the child writes output and nothing reads PTY output,
 
 Only one active `ReadOutputAsync` reader is allowed per session. A concurrent reader attempt throws `InvalidOperationException`. The existing `Output` stream remains available as the low-level stream API, but callers should not read `Output` concurrently with `ReadOutputAsync`.
 
-`ReadOutputAsync` uses strict consumer handoff and does not drop data. The producer reads only when the consumer is waiting, hands off one transport-read slice (up to the producer read buffer size), and blocks until `Advance`. Backpressure therefore appears as handoff wait and, when the consumer stops reading, OS PTY pipe fill. Chunk delivery is bounded by the producer read buffer; the maximum per-chunk size is an implementation detail and may change.
+`ReadOutputAsync` uses strict consumer handoff and does not drop data. The producer reads only when the consumer is waiting, may coalesce multiple transport reads into one handoff slice (up to the producer read buffer size) when more bytes are immediately available, and blocks until `Advance`. Backpressure therefore appears as handoff wait and, when the consumer stops reading, OS PTY pipe fill. Chunk delivery is bounded by the producer read buffer; the maximum per-chunk size is an implementation detail and may change.
 
 ## Lessons Learned
 
