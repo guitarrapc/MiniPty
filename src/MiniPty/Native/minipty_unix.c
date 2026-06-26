@@ -195,6 +195,16 @@ static int minipty_spawn_darwin_once(
         return err;
     }
 
+    if (spawn_envp == NULL && envp == NULL) {
+        spawn_envp = minipty_envp_for_child(NULL);
+        if (spawn_envp == NULL) {
+            close(slave);
+            close(*master);
+            *master = -1;
+            return ENOMEM;
+        }
+    }
+
     while (argv[argc] != NULL)
         argc++;
 
@@ -222,22 +232,38 @@ static int minipty_spawn_darwin_once(
         goto spawn_setup_fail;
     }
 
-    posix_spawn_file_actions_adddup2(&actions, slave, STDIN_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, slave, STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, slave, STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&actions, slave);
-    posix_spawn_file_actions_addclose(&actions, *master);
+    spawn_err = posix_spawn_file_actions_adddup2(&actions, slave, STDIN_FILENO);
+    if (spawn_err != 0)
+        goto spawn_attrs_fail;
+    spawn_err = posix_spawn_file_actions_adddup2(&actions, slave, STDOUT_FILENO);
+    if (spawn_err != 0)
+        goto spawn_attrs_fail;
+    spawn_err = posix_spawn_file_actions_adddup2(&actions, slave, STDERR_FILENO);
+    if (spawn_err != 0)
+        goto spawn_attrs_fail;
+    spawn_err = posix_spawn_file_actions_addclose(&actions, slave);
+    if (spawn_err != 0)
+        goto spawn_attrs_fail;
+    spawn_err = posix_spawn_file_actions_addclose(&actions, *master);
+    if (spawn_err != 0)
+        goto spawn_attrs_fail;
 
-    posix_spawnattr_setflags(
+    spawn_err = posix_spawnattr_setflags(
         &attrs,
         POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSID);
+    if (spawn_err != 0)
+        goto spawn_attrs_fail;
 
     sigfillset(&signal_set);
     sigdelset(&signal_set, SIGKILL);
     sigdelset(&signal_set, SIGSTOP);
-    posix_spawnattr_setsigdefault(&attrs, &signal_set);
+    spawn_err = posix_spawnattr_setsigdefault(&attrs, &signal_set);
+    if (spawn_err != 0)
+        goto spawn_attrs_fail;
     sigemptyset(&signal_set);
-    posix_spawnattr_setsigmask(&attrs, &signal_set);
+    spawn_err = posix_spawnattr_setsigmask(&attrs, &signal_set);
+    if (spawn_err != 0)
+        goto spawn_attrs_fail;
 
     spawn_err = posix_spawn(pid_out, helper_argv[0], &actions, &attrs, helper_argv, spawn_envp != NULL ? spawn_envp : (char **)envp);
 
@@ -255,6 +281,11 @@ static int minipty_spawn_darwin_once(
     }
 
     return 0;
+
+spawn_attrs_fail:
+    posix_spawnattr_destroy(&attrs);
+    posix_spawn_file_actions_destroy(&actions);
+    goto spawn_setup_fail;
 
 spawn_setup_fail:
     free(helper_argv);

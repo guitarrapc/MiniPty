@@ -18,8 +18,11 @@ int main(int argc, char **argv)
 
     {
         const char *slave = ttyname(STDIN_FILENO);
-        if (slave != NULL)
-            close(open(slave, O_RDWR));
+        if (slave != NULL) {
+            int fd = open(slave, O_RDWR);
+            if (fd >= 0)
+                close(fd);
+        }
     }
 
     cwd = minipty_env_get_cwd(environ);
