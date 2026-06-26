@@ -179,7 +179,7 @@ Record each commit's `StreamBytes` Allocated in the PR description (monotonic de
 Do **not** assume the PR merges. At PR end, choose among (no fixed priority):
 
 1. **Allocation profiler** — ~~`dotnet run ... --profiler EP`~~ **Done** — see [Profiler findings](#profiler-findings-2026-06-26-windows).
-2. **Further core work** — e.g. shrink `ProduceAsync` / `IAsyncEnumerable` state machines, or coalesce ConPTY micro-reads before handoff (**highest ROI per profiler**).
+2. **Further core work** — [plan_win_coalesce.md](plan_win_coalesce.md) (producer coalescing + transport peek; **separate PR**). Optional: shrink async state machines if coalesce alone misses target.
 3. **Benchmark isolation** — optional PowerShell child change to separate measurement from library cost.
 4. **Stop** — revert or withhold PR until a new plan is agreed.
 
@@ -247,7 +247,7 @@ Drain polling (`PollForChildExitUntilExited`, `Thread.Sleep` stall) appears in t
 | **Benchmark isolation** | PowerShell child inflates bytes (~37 KiB) and may affect read granularity; swapping to a lighter child improves CI fairness but **does not remove** per-chunk `ReadOutputAsync` cost. Optional reference phase. |
 | **Stop / withhold** | Not required if merging current −2.17 KB drain win; **15 KB stretch needs a follow-up plan** (not this PR). |
 
-**Recommended follow-up:** spec + prototype **chunk coalescing** in `BoundedOutputBuffer` (accumulate into rented buffer until ≥N bytes or producer idle) and/or **manual async state machine** for `ProduceAsync`/`ReadAsync` hot loop. Target: bring Windows ReadOutputAsync overhead from ~20 KB toward Linux-like ~3–4 KB at similar chunk counts, or reduce effective chunk count without breaking no-drop handoff.
+**Recommended follow-up:** [plan_win_coalesce.md](plan_win_coalesce.md) — producer coalescing with transport peek (separate PR).
 
 Trace artifacts: `BenchmarkDotNet.Artifacts/MiniPty.Benchmarks.PtyIntegrationBenchmarks.Session_32KiB_StreamBytes-*.speedscope.json`
 
@@ -269,3 +269,4 @@ Trace artifacts: `BenchmarkDotNet.Artifacts/MiniPty.Benchmarks.PtyIntegrationBen
 - Update `integration.json` once if Windows allocations improved.
 - Add a short cross-OS note to `pty_crossplatform.md` (ConPTY drain polling, why `Thread.Sleep` not `Task.Delay`).
 - Link resolved outcome back to [plan_minipty_next.md](plan_minipty_next.md) Gate C / follow-up section.
+- Phase 2 coalescing: [plan_win_coalesce.md](plan_win_coalesce.md) (separate PR).

@@ -616,7 +616,7 @@ Capture dedupe removes the merge duplicate but does **not** close gate **C**: `B
 
 ### Follow-up: Windows `ReadOutputAsync` allocation (cross-OS gap)
 
-Gate C closed the managed-ring / handoff regression on Windows, but CI still shows a large gap on `Session_32KiB_StreamBytes` vs Linux (ConPTY drain polling + allocating `Task.Delay` / `Task.Yield` waits). Implementation plan: [plan_win_alloc.md](plan_win_alloc.md).
+Gate C closed the managed-ring / handoff regression on Windows, but CI still shows a large gap on `Session_32KiB_StreamBytes` vs Linux (ConPTY drain polling + allocating `Task.Delay` / `Task.Yield` waits). Phase 1 (drain): [plan_win_alloc.md](plan_win_alloc.md). Phase 2 (coalescing): [plan_win_coalesce.md](plan_win_coalesce.md).
 
 ### Milestone 4: Interactive Sample
 
