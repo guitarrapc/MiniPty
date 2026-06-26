@@ -107,7 +107,8 @@ static void minipty_free_spawn_env(char **spawn_envp, char **owned_inherited)
 
     if (spawn_envp != NULL) {
         for (size_t i = 0; spawn_envp[i] != NULL; i++) {
-            if (strncmp(spawn_envp[i], MINIPTY_CWD_KEY "=", sizeof(MINIPTY_CWD_KEY)) == 0) {
+            const char *entry = spawn_envp[i];
+            if (strncmp(entry, MINIPTY_CWD_KEY "=", strlen(MINIPTY_CWD_KEY) + 1) == 0) {
                 cwd_entry = spawn_envp[i];
                 break;
             }
@@ -132,7 +133,6 @@ static int minipty_spawn_darwin_once(
     char **spawn_envp = NULL;
     char **owned_inherited = NULL;
     char **helper_argv = NULL;
-    char *helper_path_copy = NULL;
     size_t argc = 0;
     int slave = -1;
     int err = 0;
@@ -140,6 +140,8 @@ static int minipty_spawn_darwin_once(
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attrs;
     sigset_t signal_set;
+
+    *master = -1;
 
     if (minipty_resolve_helper_path(helper_path, sizeof(helper_path)) != 0)
         return ENOENT;
@@ -197,18 +199,15 @@ static int minipty_spawn_darwin_once(
         argc++;
 
     helper_argv = malloc((argc + 2) * sizeof(char *));
-    helper_path_copy = strdup(helper_path);
-    if (helper_argv == NULL || helper_path_copy == NULL) {
+    if (helper_argv == NULL) {
         minipty_free_spawn_env(spawn_envp, owned_inherited);
-        free(helper_argv);
-        free(helper_path_copy);
         close(slave);
         close(*master);
         *master = -1;
         return ENOMEM;
     }
 
-    helper_argv[0] = helper_path_copy;
+    helper_argv[0] = helper_path;
     for (size_t i = 0; i < argc; i++)
         helper_argv[i + 1] = argv[i];
     helper_argv[argc + 1] = NULL;
@@ -237,7 +236,6 @@ static int minipty_spawn_darwin_once(
     posix_spawnattr_destroy(&attrs);
     close(slave);
 
-    free(helper_path_copy);
     free(helper_argv);
     minipty_free_spawn_env(spawn_envp, owned_inherited);
 
@@ -263,10 +261,12 @@ static int spawn_pty_child_darwin(
     size_t argc = 0;
     int err = 0;
 
-    (void)file;
+    *master = -1;
 
     while (argv[argc] != NULL)
         argc++;
+
+    (void)file;
 
     child_argv = argv;
 

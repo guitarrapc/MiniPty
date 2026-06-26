@@ -126,6 +126,7 @@ public sealed class PtyEnvironmentTests
         await Assert.That(ContainsKey(result!, "COLUMNS")).IsFalse();
         await Assert.That(ContainsKey(result!, "LINES")).IsFalse();
         await Assert.That(ContainsKey(result!, "TMUX")).IsFalse();
+        await Assert.That(ContainsKey(result!, "MINIPTY_CWD")).IsFalse();
         await Assert.That(TryGetValue(result!, "PATH", out var path)).IsTrue();
         await Assert.That(path).IsEqualTo("/bin");
     }
@@ -140,6 +141,22 @@ public sealed class PtyEnvironmentTests
         await Assert.That(result).IsNotNull();
         await Assert.That(TryGetValue(result!, "COLUMNS", out var columns)).IsTrue();
         await Assert.That(columns).IsEqualTo("120");
+    }
+
+    [Test]
+    public async Task BuildUnix_OverlayCannotInjectInternalCwdKey()
+    {
+        var result = PtyEnvironment.BuildUnix(
+            BaseStartInfo() with
+            {
+                Environment = new Dictionary<string, string?> { ["MINIPTY_CWD"] = "/tmp/hijack" }
+            },
+            new Dictionary<string, string> { ["MINIPTY_CWD"] = "/tmp/parent", ["PATH"] = "/bin" });
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(ContainsKey(result!, "MINIPTY_CWD")).IsFalse();
+        await Assert.That(TryGetValue(result!, "PATH", out var path)).IsTrue();
+        await Assert.That(path).IsEqualTo("/bin");
     }
 
     [Test]

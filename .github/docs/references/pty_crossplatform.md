@@ -161,7 +161,7 @@ minipty_spawn_helper:
 |---|---|
 | Helper binary | `minipty_spawn_helper` next to `libminipty_unix.dylib` (`runtimes/osx-*/native/`) |
 | argv to helper | `[helper_path, file, arg1, …]` — not node-pty's `[helper, cwd, file, …]` |
-| cwd | Internal env key `MINIPTY_CWD`; never passed to the target child |
+| cwd | Internal env key `MINIPTY_CWD`; never passed to the target child; stripped from parent env and ignored in `PtyStartInfo.Environment` overlay |
 | envp | Explicit block from managed overlay via `posix_spawn` env argument |
 | exec semantics | Shared `minipty_unix_exec.c` (`PATH`, plain-script `sh` fallback) |
 | Transient spawn errors | macOS only: retry up to 4× on `EAGAIN` / `ENOMEM` with 25 ms × attempt backoff |

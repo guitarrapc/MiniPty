@@ -34,6 +34,7 @@ static int minipty_is_sanitized_key(const char *entry)
         "TERMCAP",
         "COLUMNS",
         "LINES",
+        MINIPTY_CWD_KEY,
     };
 
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
@@ -298,17 +299,26 @@ int minipty_envp_append_cwd(char *const *envp, const char *cwd, char ***out_envp
     while (base[count] != NULL)
         count++;
 
-    result = malloc((count + 2) * sizeof(char *));
+    size_t kept = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!minipty_has_env_name(base[i], MINIPTY_CWD_KEY))
+            kept++;
+    }
+
+    result = malloc((kept + 2) * sizeof(char *));
     if (result == NULL) {
         free(cwd_copy);
         free(inherited);
         return -1;
     }
 
-    for (size_t i = 0; i < count; i++)
-        result[i] = base[i];
-    result[count] = cwd_copy;
-    result[count + 1] = NULL;
+    size_t index = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!minipty_has_env_name(base[i], MINIPTY_CWD_KEY))
+            result[index++] = base[i];
+    }
+    result[index++] = cwd_copy;
+    result[index] = NULL;
 
     *out_envp = result;
     if (owned_inherited != NULL)
