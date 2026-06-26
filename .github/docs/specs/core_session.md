@@ -61,7 +61,7 @@ A PTY has backpressure. If the child writes output and nothing reads PTY output,
 
 Only one active `ReadOutputAsync` reader is allowed per session. A concurrent reader attempt throws `InvalidOperationException`. The existing `Output` stream remains available as the low-level stream API, but callers should not read `Output` concurrently with `ReadOutputAsync`.
 
-`ReadOutputAsync` uses strict consumer handoff and does not drop data. The producer reads only when the consumer is waiting, hands off one transport-read slice (up to the producer read buffer size), and blocks until `Advance`. Backpressure therefore appears as handoff wait and, when the consumer stops reading, OS PTY pipe fill. Chunk delivery is bounded by the producer read buffer; the maximum per-chunk size is an implementation detail and may change.
+`ReadOutputAsync` uses strict consumer handoff and does not drop data. The producer reads only when the consumer is waiting, may coalesce multiple transport reads into one handoff slice (up to the producer read buffer size), and blocks until `Advance`. Coalescing stops before blocking for bytes that are not yet available so interactive output is not delayed to fill a buffer. Backpressure therefore appears as handoff wait and, when the consumer stops reading, OS PTY pipe fill. Chunk delivery is bounded by the producer read buffer; the maximum per-chunk size is an implementation detail and may change.
 
 ## Lessons Learned
 
@@ -69,3 +69,4 @@ Only one active `ReadOutputAsync` reader is allowed per session. A concurrent re
 - Unix terminal-size variables such as `COLUMNS` and `LINES` can make a fresh PTY behave like the parent terminal. Sanitizing them before overlay avoids stale child-visible terminal state.
 - Windows does not preserve empty environment variables as child-visible empty values. MiniPty keeps the API distinction so Unix can express empty values, but Windows children observe them like missing variables.
 - A fixed public buffer capacity is a poor contract for `ReadOutputAsync`: it turns an allocation/backpressure tuning knob into observable API surface. The stable contract is bounded no-drop streaming with producer wait; capacity should remain internal unless a future options API exposes it deliberately.
+- On Windows ConPTY, `PeekNamedPipe` often reports zero pending bytes even when more output is in flight. `ReadOutputAsync` coalescing therefore uses non-blocking continuation reads (`PIPE_NOWAIT`) and a short micro-window before handing off a partial buffer, so bulk output batches without delaying the first byte of interactive output.

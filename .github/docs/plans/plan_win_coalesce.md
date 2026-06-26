@@ -53,17 +53,20 @@ Replace per-read `Handoff`:
 ```text
 offset = 0
 loop while consumer waiting (existing WaitUntilReadyToRead):
-  read = ReadOutputTransport(buffer[offset..])
+  read = ReadOutputTransport(buffer[offset..])        // blocking when offset == 0
   if read <= 0: break
   offset += read
   if offset == buffer.Length: break
-  if !TryGetAvailableBytes(out available) || available == 0: break
+  read = TryReadOutputTransportIfReady(buffer[offset..])  // non-blocking continuation
+  if read <= 0: micro-window retry, then break
 Handoff(buffer[0..offset])
 WaitForHandoffCleared (existing)
 ```
 
+**Implemented (Windows ConPTY):** `TryReadOutputTransportIfReady` uses `PIPE_NOWAIT` because `PeekNamedPipe` is unreliable on anonymous ConPTY pipes; a 1 ms micro-window batches micro-slices without blocking the first byte. Unix uses `FIONREAD` via `minipty_peek_readable_bytes` before continuation reads.
+
 - **EOF:** `read == 0` with `offset > 0` → handoff remainder, then complete.
-- **Peek failure:** treat as no bytes available → handoff partial (safe fallback; do not spin).
+- **Peek failure / no immediate bytes:** handoff partial (safe fallback; do not spin).
 
 ### Transport peek
 
@@ -146,3 +149,14 @@ Record chunk count diagnostic (optional): transport reads and `ReadOutputAsync` 
 | Transport-only fix insufficient | `ReadFile` already uses 4 KiB buffer; ConPTY returns ~300 B available per call. |
 | Linux parity via transport | Not realistic for PowerShell/Console children; library-side coalesce normalizes handoff count. |
 | Partial read + blocking second read | Without peek, coalescing delays first byte to consumer; peek flush preserves REPL latency. |
+| ConPTY `PeekNamedPipe` unreliable | Byte-count and buffer peek often return 0 while more data arrives microseconds later. Use `PIPE_NOWAIT` + `TryReadTransportIfReady` for non-blocking continuation reads, plus a 1 ms micro-window (`Thread.Sleep(0)`) to batch ConPTY micro-slices without blocking the first byte. |
+
+## Benchmark log (Windows ShortRun, 2026-06-26)
+
+| Benchmark | Phase 1 end | Coalesce PR | Δ |
+|-----------|------------:|------------:|--:|
+| `Session_32KiB_StreamBytes` | 24.04 KB | **6.14 KB** | **−17.9 KB** |
+| `Session_32KiB_OutputStreamBytes` | 3.78 KB | 3.69 KB | −0.09 KB |
+| `Session_Exit0_Bytes` | 3.44 KB | 3.69 KB | +0.25 KB |
+
+Stretch target `StreamBytes` ≤ 15 KB: **met**. Commit 3 (16 KiB buffer) not required.

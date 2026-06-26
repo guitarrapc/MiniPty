@@ -398,6 +398,22 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             _ => throw new InvalidOperationException("Unsupported PTY output transport.")
         };
 
+    internal int TryReadOutputTransportIfReady(Span<byte> buffer, out bool eof) =>
+        outputTransport switch
+        {
+            PtyHandleReadStream windowsOutput => windowsOutput.TryReadTransportIfReady(buffer, out eof),
+            PtyFdReadStream unixOutput => unixOutput.TryReadTransportIfReady(buffer, out eof),
+            _ => throw new InvalidOperationException("Unsupported PTY output transport.")
+        };
+
+    internal bool TryGetAvailableOutputBytes(out int available) =>
+        outputTransport switch
+        {
+            PtyHandleReadStream windowsOutput => windowsOutput.TryGetAvailableBytes(out available),
+            PtyFdReadStream unixOutput => unixOutput.TryGetAvailableBytes(out available),
+            _ => throw new InvalidOperationException("Unsupported PTY output transport.")
+        };
+
     private void BindOutputGate(Stream output)
     {
         switch (output)
@@ -419,6 +435,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
     private sealed class BoundedOutputBuffer : IDisposable, IValueTaskSource
     {
+        /// <summary>ConPTY may deliver the next micro-slice shortly after the previous read; peek is unreliable there.</summary>
+        private const int CoalesceMicroWindowMs = 1;
+
         private readonly PtySession _session;
         private readonly object _sync = new();
         private readonly CancellationTokenSource _producerCancellation = new();
@@ -556,13 +575,54 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     if (!WaitUntilReadyToRead(_producerCancellation.Token))
                         break;
 
-                    var read = _session.ReadOutputTransport(bytes.Span);
-                    if (read <= 0)
-                        break;
+                    var offset = 0;
+                    var eof = false;
+                    while (true)
+                    {
+                        int read;
+                        if (offset == 0)
+                        {
+                            read = _session.ReadOutputTransport(bytes.Span);
+                            if (read <= 0)
+                            {
+                                eof = true;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            read = _session.TryReadOutputTransportIfReady(bytes.Span.Slice(offset), out var readEof);
+                            if (read <= 0 && !readEof)
+                            {
+                                var coalesceDeadline = Environment.TickCount64 + CoalesceMicroWindowMs;
+                                while (read <= 0 && Environment.TickCount64 < coalesceDeadline)
+                                {
+                                    Thread.Sleep(0);
+                                    read = _session.TryReadOutputTransportIfReady(bytes.Span.Slice(offset), out readEof);
+                                }
+                            }
 
-                    MarkProduceProgress();
-                    Handoff(bytes.Memory.Slice(0, read), _producerCancellation.Token);
-                    MarkProduceProgress();
+                            if (read <= 0)
+                            {
+                                eof = readEof;
+                                break;
+                            }
+                        }
+
+                        offset += read;
+                        if (offset >= bytes.Span.Length)
+                            break;
+                    }
+
+                    if (offset > 0)
+                    {
+                        MarkProduceProgress();
+                        Handoff(bytes.Memory.Slice(0, offset), _producerCancellation.Token);
+                        MarkProduceProgress();
+                    }
+
+                    if (eof)
+                        break;
                 }
 
                 Complete(null);
