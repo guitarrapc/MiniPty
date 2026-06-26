@@ -693,7 +693,9 @@ public sealed class PtyTests
             });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(result.Contains(tempRoot)).IsTrue();
+            var pwd = result.GetTextString().Trim();
+            var leaf = Path.GetFileName(tempRoot);
+            await Assert.That(pwd.EndsWith('/' + leaf, StringComparison.Ordinal)).IsTrue();
         }
         finally
         {

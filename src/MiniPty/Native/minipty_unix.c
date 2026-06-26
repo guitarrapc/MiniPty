@@ -212,8 +212,15 @@ static int minipty_spawn_darwin_once(
         helper_argv[i + 1] = argv[i];
     helper_argv[argc + 1] = NULL;
 
-    posix_spawn_file_actions_init(&actions);
-    posix_spawnattr_init(&attrs);
+    spawn_err = posix_spawn_file_actions_init(&actions);
+    if (spawn_err != 0)
+        goto spawn_setup_fail;
+
+    spawn_err = posix_spawnattr_init(&attrs);
+    if (spawn_err != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        goto spawn_setup_fail;
+    }
 
     posix_spawn_file_actions_adddup2(&actions, slave, STDIN_FILENO);
     posix_spawn_file_actions_adddup2(&actions, slave, STDOUT_FILENO);
@@ -226,6 +233,8 @@ static int minipty_spawn_darwin_once(
         POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSID);
 
     sigfillset(&signal_set);
+    sigdelset(&signal_set, SIGKILL);
+    sigdelset(&signal_set, SIGSTOP);
     posix_spawnattr_setsigdefault(&attrs, &signal_set);
     sigemptyset(&signal_set);
     posix_spawnattr_setsigmask(&attrs, &signal_set);
@@ -246,6 +255,14 @@ static int minipty_spawn_darwin_once(
     }
 
     return 0;
+
+spawn_setup_fail:
+    free(helper_argv);
+    minipty_free_spawn_env(spawn_envp, owned_inherited);
+    close(slave);
+    close(*master);
+    *master = -1;
+    return spawn_err > 0 ? spawn_err : EINVAL;
 }
 
 static int spawn_pty_child_darwin(

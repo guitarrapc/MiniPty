@@ -48,7 +48,7 @@
   <Target Name="BuildMiniPtyUnixNative" BeforeTargets="AssignTargetPaths"
           Condition="'$(MiniPtyBuildUnixNative)' == 'true'">
     <MakeDir Directories="$(OutputPath)" Condition="!Exists('$(OutputPath)')" />
-    <Exec Command="cc -shared -fPIC -O2 $(MiniPtyUnixNativeLinkFlags) -o &quot;$(_MiniPtyUnixNativeOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot;" />
+    <Exec Command="cc -shared -fPIC -O2 $(MiniPtyUnixNativeLinkFlags) -o &quot;$(_MiniPtyUnixNativeOutput)&quot; $(_MiniPtyUnixNativeSources)" />
     <Exec Condition="$([MSBuild]::IsOSPlatform('OSX'))"
           Command="cc -O2 -o &quot;$(_MiniPtySpawnHelperOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_spawn_helper.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot;" />
     <ItemGroup>
