@@ -46,6 +46,7 @@ These are verification choices, not API requirements, but they document pitfalls
 | Windows | Closing ConPTY stdin while a child is still attaching can yield `STATUS_CONTROL_C_EXIT`. | Empty-stdin EOF is staged; one-shot writes use Ctrl+Z + CR stream EOF instead of wait-loop pipe close. |
 | Windows | Input pipe close after bytes were written yields `STATUS_CONTROL_C_EXIT` for direct stdin readers (`sort`, `more`). | `SendEof` writes Ctrl+Z + CR and keeps the pipe open until exit; tests assert ExitCode 0 for `sort`. |
 | Windows | `pwsh` is optional on runners. | Prefer built-in Windows PowerShell unless pwsh-only behavior is needed. |
+| Linux (CI) | GitHub-hosted runners (including `ubuntu-24.04-arm`) may mount `/tmp` with `noexec`. Shebang execution of scripts under `/tmp` can fail with exit **127** even when `sh script` would work. | Integration tests that spawn executable fixtures use a directory under the test output (`AppContext.BaseDirectory`), not `Path.GetTempPath()`. PATH-overlay tests for plain scripts exercise the `ENOEXEC` → `sh` fallback, not shebang exec. |
 
 ## Lessons Learned
 
@@ -53,6 +54,8 @@ These are verification choices, not API requirements, but they document pitfalls
 - **winpty is a poor fit for NativeAOT single-binary goals.** Bundled helpers add environment dependency; in-process ConPTY avoids that.
 - **macOS spawn must establish a controlling terminal.** A `posix_openpt` + `posix_spawn` path left the slave without a controlling tty; Unix targets use `forkpty` + native `execve`.
 - **Explicit Unix environments require `execve`.** Passing `envp` means MiniPty cannot rely on plain `execvp`; the native shim provides portable path lookup before `execve`.
+- **Unix plain-script fallback differs from shebang exec.** `ENOEXEC` / `EACCES` / missing-interpreter `ENOENT` retry via `/bin/sh` then `/usr/bin/sh`. Shebang execution is attempted first and is sensitive to `noexec` mounts; see [pty_crossplatform.md](../references/pty_crossplatform.md) → Plain scripts and shell fallback.
+- **Do not assume `/tmp` is exec-enabled on Linux CI.** Hardened runners treat `/tmp` as data-only; spawn tests that need executable fixtures belong under the build output tree or another exec-enabled path.
 - **Capture timing requires concurrent reads.** Reading only after exit loses TUI animation timing.
 - **PTY output includes terminal echo.** Tests that drive stdin manually may capture echoed input and control characters.
 - **Raw PTY text can break the parent console.** Use [Display text](display_text.md) helpers for logs or keep escaped/raw bytes for inspection.

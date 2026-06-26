@@ -528,12 +528,11 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
 
-        var tempRoot = Path.Combine(Path.GetTempPath(), "minipty-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempRoot);
+        var tempRoot = CreateUnixExecTestDirectory();
         try
         {
             var script = Path.Combine(tempRoot, "minipty-plain-script");
-            await File.WriteAllTextAsync(script, "#!/bin/sh\nprintf path-overlay-shell-fallback\n");
+            await File.WriteAllTextAsync(script, "printf path-overlay-shell-fallback\n");
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
             var result = await PtyCapture.RunAsync(Spawn("minipty-plain-script", []) with
@@ -543,6 +542,33 @@ public sealed class PtyTests
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Contains("path-overlay-shell-fallback")).IsTrue();
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task PtyUnixPathLookupFallsBackToShellWhenShebangInterpreterMissing()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        var tempRoot = CreateUnixExecTestDirectory();
+        try
+        {
+            var script = Path.Combine(tempRoot, "minipty-bad-shebang-script");
+            await File.WriteAllTextAsync(script, "#!/no-such-minipty-interpreter\nprintf bad-shebang-shell-fallback\n");
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var result = await PtyCapture.RunAsync(Spawn("minipty-bad-shebang-script", []) with
+            {
+                Environment = new Dictionary<string, string?> { ["PATH"] = tempRoot }
+            });
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Contains("bad-shebang-shell-fallback")).IsTrue();
         }
         finally
         {
@@ -964,6 +990,14 @@ public sealed class PtyTests
         new() { FileName = fileName, Arguments = arguments, Size = new(40, 8) };
 
     private static PtyStartInfo UnixShell(string command) => Spawn("sh", ["-c", command]);
+
+    /// <summary>GitHub-hosted /tmp may be <c>noexec</c>; keep exec-test fixtures under the test output directory.</summary>
+    private static string CreateUnixExecTestDirectory()
+    {
+        var dir = Path.Combine(AppContext.BaseDirectory, "minipty-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
 
     private static PtyStartInfo WindowsCommand(string command)
     {
