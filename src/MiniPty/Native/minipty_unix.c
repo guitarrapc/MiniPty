@@ -139,74 +139,86 @@ static int minipty_spawn_darwin_once(
     char **owned_inherited = NULL;
     char **helper_argv = NULL;
     size_t argc = 0;
+    int low_fds[3] = {-1, -1, -1};
+    size_t low_fd_opened = 0;
     int slave = -1;
     int err = 0;
-    int spawn_err;
+    int spawn_err = 0;
+    int actions_initialized = 0;
+    int attrs_initialized = 0;
+    int success = 0;
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attrs;
     sigset_t signal_set;
 
     *master = -1;
 
-    if (minipty_resolve_helper_path(helper_path, sizeof(helper_path)) != 0)
-        return ENOENT;
+    for (size_t i = 0; i < 3; i++) {
+        int fd = posix_openpt(O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
+            err = errno > 0 ? errno : EINVAL;
+            goto done;
+        }
+
+        /* Reserve only vacant stdio slots (0/1/2). If fd >= 3, nothing to reserve. */
+        if (fd >= (STDERR_FILENO + 1)) {
+            close(fd);
+            break;
+        }
+
+        low_fds[i] = fd;
+        low_fd_opened = i + 1;
+        if (fd >= STDERR_FILENO)
+            break;
+    }
+
+    if (minipty_resolve_helper_path(helper_path, sizeof(helper_path)) != 0) {
+        err = ENOENT;
+        goto done;
+    }
 
     *master = posix_openpt(O_RDWR | O_CLOEXEC);
-    if (*master < 0)
-        return errno > 0 ? errno : EINVAL;
+    if (*master < 0) {
+        err = errno > 0 ? errno : EINVAL;
+        goto done;
+    }
 
     if (grantpt(*master) != 0) {
         err = errno > 0 ? errno : EINVAL;
-        close(*master);
-        *master = -1;
-        return err;
+        goto done;
     }
 
     if (unlockpt(*master) != 0) {
         err = errno > 0 ? errno : EINVAL;
-        close(*master);
-        *master = -1;
-        return err;
+        goto done;
     }
 
     if (ioctl(*master, TIOCPTYGNAME, slave_name) != 0) {
         err = errno > 0 ? errno : EINVAL;
-        close(*master);
-        *master = -1;
-        return err;
+        goto done;
     }
 
     slave = open(slave_name, O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (slave < 0) {
         err = errno > 0 ? errno : EINVAL;
-        close(*master);
-        *master = -1;
-        return err;
+        goto done;
     }
 
     if (winp != NULL && ioctl(slave, TIOCSWINSZ, winp) != 0) {
         err = errno > 0 ? errno : EINVAL;
-        close(slave);
-        close(*master);
-        *master = -1;
-        return err;
+        goto done;
     }
 
     if (minipty_envp_append_cwd(envp, cwd, &spawn_envp, &owned_inherited) != 0) {
         err = errno > 0 ? errno : ENOMEM;
-        close(slave);
-        close(*master);
-        *master = -1;
-        return err;
+        goto done;
     }
 
     if (spawn_envp == NULL && envp == NULL) {
         spawn_envp = minipty_envp_for_child(NULL);
         if (spawn_envp == NULL) {
-            close(slave);
-            close(*master);
-            *master = -1;
-            return ENOMEM;
+            err = ENOMEM;
+            goto done;
         }
     }
 
@@ -215,11 +227,8 @@ static int minipty_spawn_darwin_once(
 
     helper_argv = malloc((argc + 2) * sizeof(char *));
     if (helper_argv == NULL) {
-        minipty_free_spawn_env(spawn_envp, owned_inherited);
-        close(slave);
-        close(*master);
-        *master = -1;
-        return ENOMEM;
+        err = ENOMEM;
+        goto done;
     }
 
     helper_argv[0] = helper_path;
@@ -228,77 +237,98 @@ static int minipty_spawn_darwin_once(
     helper_argv[argc + 1] = NULL;
 
     spawn_err = posix_spawn_file_actions_init(&actions);
-    if (spawn_err != 0)
-        goto spawn_setup_fail;
+    if (spawn_err != 0) {
+        err = spawn_err;
+        goto done;
+    }
+    actions_initialized = 1;
 
     spawn_err = posix_spawnattr_init(&attrs);
     if (spawn_err != 0) {
-        posix_spawn_file_actions_destroy(&actions);
-        goto spawn_setup_fail;
+        err = spawn_err;
+        goto done;
     }
+    attrs_initialized = 1;
 
     spawn_err = posix_spawn_file_actions_adddup2(&actions, slave, STDIN_FILENO);
     if (spawn_err != 0)
-        goto spawn_attrs_fail;
+        goto spawn_setup_err;
     spawn_err = posix_spawn_file_actions_adddup2(&actions, slave, STDOUT_FILENO);
     if (spawn_err != 0)
-        goto spawn_attrs_fail;
+        goto spawn_setup_err;
     spawn_err = posix_spawn_file_actions_adddup2(&actions, slave, STDERR_FILENO);
     if (spawn_err != 0)
-        goto spawn_attrs_fail;
+        goto spawn_setup_err;
     spawn_err = posix_spawn_file_actions_addclose(&actions, slave);
     if (spawn_err != 0)
-        goto spawn_attrs_fail;
+        goto spawn_setup_err;
     spawn_err = posix_spawn_file_actions_addclose(&actions, *master);
     if (spawn_err != 0)
-        goto spawn_attrs_fail;
+        goto spawn_setup_err;
 
     spawn_err = posix_spawnattr_setflags(
         &attrs,
         POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSID);
     if (spawn_err != 0)
-        goto spawn_attrs_fail;
+        goto spawn_setup_err;
 
     sigfillset(&signal_set);
     sigdelset(&signal_set, SIGKILL);
     sigdelset(&signal_set, SIGSTOP);
     spawn_err = posix_spawnattr_setsigdefault(&attrs, &signal_set);
     if (spawn_err != 0)
-        goto spawn_attrs_fail;
+        goto spawn_setup_err;
     sigemptyset(&signal_set);
     spawn_err = posix_spawnattr_setsigmask(&attrs, &signal_set);
     if (spawn_err != 0)
-        goto spawn_attrs_fail;
+        goto spawn_setup_err;
 
-    spawn_err = posix_spawn(pid_out, helper_argv[0], &actions, &attrs, helper_argv, spawn_envp != NULL ? spawn_envp : (char **)envp);
-
-    posix_spawn_file_actions_destroy(&actions);
-    posix_spawnattr_destroy(&attrs);
-    close(slave);
-
-    free(helper_argv);
-    minipty_free_spawn_env(spawn_envp, owned_inherited);
+    do {
+        spawn_err = posix_spawn(
+            pid_out,
+            helper_argv[0],
+            &actions,
+            &attrs,
+            helper_argv,
+            spawn_envp != NULL ? spawn_envp : (char **)envp);
+    } while (spawn_err == EINTR);
 
     if (spawn_err != 0) {
-        close(*master);
-        *master = -1;
-        return spawn_err;
+        err = spawn_err;
+        goto done;
     }
 
-    return 0;
+    success = 1;
+    goto done;
 
-spawn_attrs_fail:
-    posix_spawnattr_destroy(&attrs);
-    posix_spawn_file_actions_destroy(&actions);
-    goto spawn_setup_fail;
+spawn_setup_err:
+    err = spawn_err > 0 ? spawn_err : EINVAL;
+    goto done;
 
-spawn_setup_fail:
+done:
+    if (actions_initialized)
+        posix_spawn_file_actions_destroy(&actions);
+    if (attrs_initialized)
+        posix_spawnattr_destroy(&attrs);
+    if (slave >= 0)
+        close(slave);
+    for (size_t i = 0; i < low_fd_opened; i++) {
+        if (low_fds[i] >= 0)
+            close(low_fds[i]);
+    }
+
     free(helper_argv);
     minipty_free_spawn_env(spawn_envp, owned_inherited);
-    close(slave);
-    close(*master);
-    *master = -1;
-    return spawn_err > 0 ? spawn_err : EINVAL;
+
+    if (!success && *master >= 0) {
+        close(*master);
+        *master = -1;
+    }
+
+    if (err != 0)
+        return err;
+
+    return 0;
 }
 
 static int spawn_pty_child_darwin(
