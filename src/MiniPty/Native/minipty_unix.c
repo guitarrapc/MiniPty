@@ -154,14 +154,21 @@ static int minipty_spawn_darwin_once(
     *master = -1;
 
     for (size_t i = 0; i < 3; i++) {
-        low_fds[i] = posix_openpt(O_RDWR | O_CLOEXEC);
-        if (low_fds[i] < 0) {
+        int fd = posix_openpt(O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
             err = errno > 0 ? errno : EINVAL;
             goto done;
         }
 
+        /* Reserve only vacant stdio slots (0/1/2). If fd >= 3, nothing to reserve. */
+        if (fd >= (STDERR_FILENO + 1)) {
+            close(fd);
+            break;
+        }
+
+        low_fds[i] = fd;
         low_fd_opened = i + 1;
-        if (low_fds[i] >= STDERR_FILENO)
+        if (fd >= STDERR_FILENO)
             break;
     }
 
