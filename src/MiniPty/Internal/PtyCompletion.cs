@@ -36,12 +36,14 @@ internal static class PtyCompletion
         session.WaitForTransportPumpHandshake(TimeSpan.FromSeconds(5), cancellationToken);
 
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
-        var exitCode = await WaitForExitAsync(session, options, cancellationToken, closeTransportOnExit: false).ConfigureAwait(false);
-        var output = await PtyOutputDrain.AwaitSessionPumpAsync(
+        var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
+        var output = await PtyOutputDrain.AwaitPumpAsync(
             pumpTask,
             session.CloseOutputTransport,
             options.OutputDrainGrace,
             options.OutputReaderCloseTimeout,
+            throwOnTimeout: true,
+            transportAlreadyClosed: false,
             cancellationToken).ConfigureAwait(false);
 
         return (output, exitCode);
