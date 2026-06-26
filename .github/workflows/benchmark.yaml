@@ -18,28 +18,35 @@ on:
 
 jobs:
   benchmark:
+    name: benchmark (${{ matrix.os }})
     permissions:
       contents: read
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact-suffix: linux
+          - os: windows-2025
+            artifact-suffix: windows
+          - os: macos-26
+            artifact-suffix: macos
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: app-token
-        with:
-          app-id: ${{ secrets.SYNCED_ACTIONS_BOT_APPID }}
-          private-key: ${{ secrets.SYNCED_ACTIONS_BOT_PRIVATE_KEY }}
-          permission-contents: write
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: guitarrapc/actions/.github/actions/setup-dotnet@main
+      - uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
         with:
-          dotnet-version: 10.0
+          dotnet-version: 10.0.x
       - name: dotnet build
+        shell: bash
         run: dotnet build -c Release
       - name: benchmark
         id: benchmark
+        shell: bash
         run: |
           dotnet run -c Release --no-build --no-launch-profile --project ./src/MiniPty.Benchmarks/MiniPty.Benchmarks.csproj -- --filter "${FILTER}"
           echo "result=success" >> "$GITHUB_OUTPUT"
@@ -52,28 +59,51 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f #v7.0.0
         with:
-          name: BenchmarkDotNet.Artifacts
+          name: BenchmarkDotNet.Artifacts-${{ matrix.artifact-suffix }}
           path: BenchmarkDotNet.Artifacts/
           if-no-files-found: error
 
       - name: Output results to JobSummary
+        shell: bash
         run: |
+          echo "# Benchmark (${{ matrix.os }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
           for file in $(find BenchmarkDotNet.Artifacts/results -name "*.md" | head -n 1); do
             machine_info=$(sed -n 's/^[[:space:]]*//; /^\|/p' "$file" | grep -v "|")
-            echo "$machine_info" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "$machine_info" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
           done
 
           for file in $(find BenchmarkDotNet.Artifacts/results -name "*.md" | sort); do
             title=$(basename "$file" .md | sed 's/-report-default//g')
             content=$(sed -n 's/^[[:space:]]*//; /^\|/p' "$file" | grep "|")
-            echo "## $title" >> $GITHUB_STEP_SUMMARY
-            echo "$content" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## $title" >> "$GITHUB_STEP_SUMMARY"
+            echo "$content" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
           done
 
+  update-readme:
+    name: update README benchmark link
+    needs: [benchmark]
+    if: ${{ inputs.benchmark == '*' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ secrets.SYNCED_ACTIONS_BOT_APPID }}
+          private-key: ${{ secrets.SYNCED_ACTIONS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Update README.md benchmark report link
-        if: ${{ inputs.benchmark == '*' }}
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
