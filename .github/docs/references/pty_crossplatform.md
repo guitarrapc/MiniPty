@@ -134,7 +134,7 @@ After `execve(path, …)` fails, the shim may retry with `/bin/sh` (then `/usr/b
 
 **Why this matters:** Plain scripts only need **read** permission for the `sh` fallback. Shebang execution tries to **exec** the script file first; on `noexec` mounts that path fails even when `sh script` would succeed. Callers spawning scripts on restrictive filesystems should either rely on this fallback (no shebang) or execute via an explicit interpreter (`sh`, `-c`, …).
 
-On total failure the child exits with status **127** (command not found), matching common shell convention.
+On total failure the child exits with status **127**, matching the common shell convention for a failed `exec` (not only a missing `PATH` lookup).
 
 ### Parent I/O
 

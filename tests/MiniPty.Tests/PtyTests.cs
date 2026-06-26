@@ -550,6 +550,33 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyUnixPathLookupFallsBackToShellWhenShebangInterpreterMissing()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        var tempRoot = CreateUnixExecTestDirectory();
+        try
+        {
+            var script = Path.Combine(tempRoot, "minipty-bad-shebang-script");
+            await File.WriteAllTextAsync(script, "#!/no-such-minipty-interpreter\nprintf bad-shebang-shell-fallback\n");
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var result = await PtyCapture.RunAsync(Spawn("minipty-bad-shebang-script", []) with
+            {
+                Environment = new Dictionary<string, string?> { ["PATH"] = tempRoot }
+            });
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Contains("bad-shebang-shell-fallback")).IsTrue();
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task PtyUnixPathLookupUsesFixedFallbackWhenPathIsAbsent()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
