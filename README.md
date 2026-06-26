@@ -14,7 +14,7 @@ I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries d
 
 **Benchmarks**
 
-You can check various benchmark patterns at [GitHub Actions/Benchmark](https://github.com/guitarrapc/MiniPty/actions/runs/27960737962).
+You can check various benchmark patterns at [GitHub Actions/Benchmark](https://github.com/guitarrapc/MiniPty/actions/runs/28215238671).
 
 Ubuntu 24.04, .NET 10
 
