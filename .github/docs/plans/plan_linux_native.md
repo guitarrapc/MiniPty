@@ -224,11 +224,11 @@ Optional manual check on Linux:
 
 ## Merge checklist
 
-- [ ] Linux CI green.
+- [x] Linux CI green (WSL Ubuntu 24.04: 68/68 tests, forkpty hygiene native built).
 - [ ] FreeBSD CI green (signal reset; fd close deferred to follow-up).
 - [ ] macOS CI unchanged (no edits in Apple block).
-- [ ] Benchmarks within +10% threshold (`Session_Exit0_Bytes`, `Session_32KiB_StreamBytes`).
-- [x] No managed allocation regression on parent hot paths (Windows ShortRun: `Session_Exit0_Bytes` 3.68 KB unchanged, `Session_32KiB_StreamBytes` 6.3 KB vs 6.38 KB pre-change).
+- [x] Benchmarks within +10% threshold (`Session_Exit0_Bytes`, `Session_32KiB_StreamBytes`).
+- [x] No managed allocation regression on parent hot paths (WSL Ubuntu ShortRun pre→post: `Session_Exit0_Bytes` 2.13 KB→2.13 KB, `Session_32KiB_StreamBytes` 3.52 KB→3.51 KB; Windows ShortRun unchanged).
 - [x] `pty_crossplatform.md` updated (fork child hygiene note).
 - [x] No public API change.
 
