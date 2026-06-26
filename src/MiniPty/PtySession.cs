@@ -591,9 +591,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
             try
             {
+                var concurrentExitWait = _session.IsExitWaitActive;
                 await _session.WaitForExitInternalAsync(_producerCancellation.Token, killOnCancellation: false, closeTransportOnExit: false).ConfigureAwait(false);
 
-                if (_session.IsExitWaitActive)
+                if (concurrentExitWait)
                     return;
 
                 var exitObservedAt = Environment.TickCount64;
@@ -613,7 +614,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                         return;
                     }
 
-                    await Task.Delay(10, _producerCancellation.Token).ConfigureAwait(false);
+                    var pollDeadline = Environment.TickCount64 + 10;
+                    while (Environment.TickCount64 < pollDeadline)
+                    {
+                        _producerCancellation.Token.ThrowIfCancellationRequested();
+                        var remaining = (int)Math.Min(10, pollDeadline - Environment.TickCount64);
+                        if (remaining > 0)
+                            Thread.Sleep(remaining);
+                    }
                 }
             }
             catch (OperationCanceledException) when (_producerCancellation.IsCancellationRequested)
