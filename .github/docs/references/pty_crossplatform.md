@@ -122,6 +122,20 @@ The native boundary uses `LibraryImport` with `byte* file`, `byte** argv`, and `
 
 If `file` contains `/`, the shim calls `execve` directly. Otherwise it searches the final child `PATH`; absent `PATH` falls back to `/bin:/usr/bin`, while an empty `PATH` is treated as an empty path entry for current-directory lookup. The fallback is fixed so the post-`forkpty()` child path does not need libc environment/path discovery calls before `execve`.
 
+### Plain scripts and shell fallback
+
+After `execve(path, …)` fails, the shim may retry with `/bin/sh` (then `/usr/bin/sh`) and the resolved file path as `argv[1]`—the same pattern as a manual `sh /path/to/script` invocation. This path is used when:
+
+| `errno` | Typical cause |
+|---|---|
+| `ENOEXEC` | Plain script with no shebang |
+| `EACCES` | File exists and is marked executable but the mount is `noexec` (common on hardened `/tmp`) |
+| `ENOENT` | Shebang names a missing interpreter while the script file itself exists |
+
+**Why this matters:** Plain scripts only need **read** permission for the `sh` fallback. Shebang execution tries to **exec** the script file first; on `noexec` mounts that path fails even when `sh script` would succeed. Callers spawning scripts on restrictive filesystems should either rely on this fallback (no shebang) or execute via an explicit interpreter (`sh`, `-c`, …).
+
+On total failure the child exits with status **127** (command not found), matching common shell convention.
+
 ### Parent I/O
 
 1. `forkpty()` returns the PTY master fd and child pid to the parent.
