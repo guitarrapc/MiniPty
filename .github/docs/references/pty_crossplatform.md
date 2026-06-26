@@ -19,7 +19,7 @@ MiniPty selects one OS-specific backend at runtime:
 | OS | API | Entry point |
 |---|---|---|
 | Windows | ConPTY (`CreatePseudoConsole`) | `WindowsPtyBackend.Start` |
-| Linux / macOS / FreeBSD | `forkpty` + native path lookup + `execve` | `UnixPtyBackend.Start` |
+| Linux / macOS / FreeBSD | Platform native shim + `execve` | `UnixPtyBackend.Start` |
 
 Layers:
 
@@ -102,7 +102,11 @@ Without this, command output can appear on the parent's console instead of the c
 
 ConPTY requires Windows 10 1809+ / Windows 11. MiniPty does not use winpty.
 
-## Unix: forkpty + execve
+## Unix spawn
+
+Linux and FreeBSD use `forkpty` + native `execve`. macOS uses `posix_openpt` + `posix_spawn` of a bundled helper so the child acquires a controlling terminal without `fork` from a multithreaded parent.
+
+### Linux / FreeBSD: forkpty + execve
 
 MiniPty uses a small `libminipty_unix` native shim that calls the platform `forkpty`, resolves executable names against the child environment `PATH`, then runs `execve` with an explicit environment block in the child process.
 
@@ -136,7 +140,36 @@ After `execve(path, …)` fails, the shim may retry with `/bin/sh` (then `/usr/b
 
 On total failure the child exits with status **127**, matching the common shell convention for a failed `exec` (not only a missing `PATH` lookup).
 
-### Parent I/O
+### macOS: posix_spawn + spawn-helper
+
+```text
+parent (libminipty_unix.dylib):
+  posix_openpt → grantpt → unlockpt
+  ioctl(TIOCPTYGNAME) → open slave, TIOCSWINSZ
+  resolve minipty_spawn_helper via dladdr(dylib path)
+  inject MINIPTY_CWD into envp when PtyStartInfo.WorkingDirectory is set
+  posix_spawn(helper, dup2 slave → stdio, SETSID, …)
+  close slave; keep master fd
+
+minipty_spawn_helper:
+  open(ttyname(STDIN), O_RDWR)   # controlling terminal
+  chdir(MINIPTY_CWD) when present; strip MINIPTY_CWD from env
+  minipty_execvpe(file, argv, envp)
+```
+
+| Item | Detail |
+|---|---|
+| Helper binary | `minipty_spawn_helper` next to `libminipty_unix.dylib` (`runtimes/osx-*/native/`) |
+| argv to helper | `[helper_path, file, arg1, …]` — not node-pty's `[helper, cwd, file, …]` |
+| cwd | Internal env key `MINIPTY_CWD`; never passed to the target child; stripped from parent env and ignored in `PtyStartInfo.Environment` overlay |
+| envp | Explicit block from managed overlay via `posix_spawn` env argument |
+| exec semantics | Shared `minipty_unix_exec.c` (`PATH`, plain-script `sh` fallback) |
+| Transient spawn errors | macOS only: retry up to 4× on `EAGAIN` / `ENOMEM` / `ENXIO` with 25 ms × attempt backoff |
+| Spawn errors to managed | `minipty_fork_pty_exec` returns positive errno; `IOException` uses that value |
+
+Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux.
+
+### Parent I/O (all Unix)
 
 1. `forkpty()` returns the PTY master fd and child pid to the parent.
 2. Consumer reads `Output` while the child runs.
@@ -173,12 +206,18 @@ Platform-specific staging avoids signaling EOF before the child has attached std
 
 ### Platform differences
 
-Shared session logic lives in `UnixPtyBackend`; the `forkpty` boundary and resize ioctl live in `libminipty_unix`. Runtime dispatch selects the correct native library for the target OS.
+Shared session logic lives in `UnixPtyBackend`; spawn and resize ioctl live in `libminipty_unix` (+ `minipty_spawn_helper` on macOS). Runtime dispatch selects the correct native library for the target OS.
 
-| OS | `forkpty` header/library |
+| OS | Spawn API | Controlling TTY |
+|---|---|---|
+| Linux | `forkpty` + child `execve` | `forkpty` session |
+| FreeBSD | `forkpty` + child `execve` | `forkpty` session |
+| macOS | `posix_spawn(minipty_spawn_helper)` | helper `open(slave)` |
+
+| OS | Native library / headers |
 |---|---|
 | Linux | `<pty.h>` / `libutil` |
-| macOS | `<util.h>` / `libutil` |
+| macOS | `<util.h>`, `<spawn.h>` / `libminipty_unix.dylib` + helper |
 | FreeBSD | `<libutil.h>` / `libutil` |
 
 `waitpid`, `kill`, `read`, `write`, and other syscalls remain on `libc` in the shared partial class. `TIOCSWINSZ` resize uses `minipty_set_winsize` in `libminipty_unix`—not a direct `ioctl` P/Invoke—because `ioctl` is variadic and mis-marshals on macOS arm64. `FIONREAD` peek for `ReadOutputAsync` coalescing uses `minipty_peek_readable_bytes` in the same native library for the same reason.

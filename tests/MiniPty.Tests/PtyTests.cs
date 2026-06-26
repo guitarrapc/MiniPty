@@ -654,8 +654,7 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
 
-        var tempRoot = Path.Combine(Path.GetTempPath(), "minipty-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempRoot);
+        var tempRoot = CreateUnixExecTestDirectory();
         try
         {
             var script = Path.Combine(tempRoot, "minipty-current-path-script");
@@ -674,6 +673,81 @@ public sealed class PtyTests
         finally
         {
             Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task PtyUnixWorkingDirectoryVisibleToChild()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        var tempRoot = Path.Combine(Path.GetTempPath(), "minipty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var result = await PtyCapture.RunAsync(Spawn("sh", ["-c", "pwd"]) with
+            {
+                WorkingDirectory = tempRoot,
+            });
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            var pwd = result.GetTextString().Trim();
+            var leaf = Path.GetFileName(tempRoot);
+            await Assert.That(pwd.EndsWith('/' + leaf, StringComparison.Ordinal)).IsTrue();
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task PtyUnixInternalCwdKeyNotVisibleToChild()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        var tempRoot = Path.Combine(Path.GetTempPath(), "minipty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var result = await PtyCapture.RunAsync(Spawn("sh", ["-c", "if [ -n \"$MINIPTY_CWD\" ]; then echo LEAKED; else echo CLEAN; fi"]) with
+            {
+                WorkingDirectory = tempRoot,
+            });
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Contains("CLEAN")).IsTrue();
+            await Assert.That(result.Contains("LEAKED")).IsFalse();
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task PtyUnixParallelSpawnCompletes()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        // Burst fewer concurrent spawns so this test stays stable when CI runs the full suite in parallel.
+        const int batchSize = 4;
+        const int batches = 4;
+        for (var batch = 0; batch < batches; batch++)
+        {
+            var tasks = new Task<PtyCaptureResult>[batchSize];
+            for (var i = 0; i < batchSize; i++)
+                tasks[i] = PtyCapture.RunAsync(Spawn("/usr/bin/printf", ["parallel-ok"]));
+
+            var results = await Task.WhenAll(tasks);
+            for (var i = 0; i < results.Length; i++)
+            {
+                await Assert.That(results[i].ExitCode).IsEqualTo(0);
+                await Assert.That(results[i].ContainsUtf8("parallel-ok")).IsTrue();
+            }
         }
     }
 

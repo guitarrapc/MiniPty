@@ -16,6 +16,7 @@ internal static class PtyEnvironment
         "TERMCAP",
         "COLUMNS",
         "LINES",
+        "MINIPTY_CWD",
     ];
 
     /// <summary>Builds the Unix child environment from <paramref name="startInfo"/> and an optional parent snapshot.</summary>
@@ -104,6 +105,8 @@ internal static class PtyEnvironment
                 termTouched = true;
 
             if (pair.Value is null)
+                entries.Remove(pair.Key);
+            else if (StringComparer.Ordinal.Equals(pair.Key, "MINIPTY_CWD"))
                 entries.Remove(pair.Key);
             else
                 entries[pair.Key] = new EnvironmentEntry(pair.Key, pair.Value);

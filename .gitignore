@@ -413,3 +413,4 @@ FodyWeavers.xsd
 _pack_probe/
 _pack_probe_linux/
 !BenchmarkDotNet.Artifacts/baselines/integration.json
+minipty_spawn_helper

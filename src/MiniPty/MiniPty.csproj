@@ -14,7 +14,9 @@
     <MiniPtyUnixNativeLibraryName Condition="'$(MiniPtyUnixNativeLibraryName)' == ''">libminipty_unix.so</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLinkFlags Condition="$([MSBuild]::IsOSPlatform('Linux')) Or $([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD'))">-lutil</MiniPtyUnixNativeLinkFlags>
     <MiniPtyUnixNativeLinkFlags Condition="'$(MiniPtyUnixNativeLinkFlags)' == ''"></MiniPtyUnixNativeLinkFlags>
+    <_MiniPtyUnixNativeSources>&quot;$(MSBuildThisFileDirectory)Native/minipty_unix.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot;</_MiniPtyUnixNativeSources>
     <_MiniPtyUnixNativeOutput Condition="'$(MiniPtyBuildUnixNative)' == 'true'">$(OutputPath)$(MiniPtyUnixNativeLibraryName)</_MiniPtyUnixNativeOutput>
+    <_MiniPtySpawnHelperOutput Condition="'$(MiniPtyBuildUnixNative)' == 'true' and $([MSBuild]::IsOSPlatform('OSX'))">$(OutputPath)minipty_spawn_helper</_MiniPtySpawnHelperOutput>
   </PropertyGroup>
 
   <ItemGroup>
@@ -30,19 +32,35 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(MiniPtyPackUnixNative)' == 'true'">
-    <None Include="$(_MiniPtyRuntimesRoot)\**\*.*"
+    <None Include="$(_MiniPtyRuntimesRoot)\**\*.so;
+                  $(_MiniPtyRuntimesRoot)\**\*.dylib"
           Pack="true"
           PackagePath="runtimes/%(RecursiveDir)%(Filename)%(Extension)" />
+    <!-- Extensionless helper: set PackagePath to the destination directory only. -->
+    <None Include="$(_MiniPtyRuntimesRoot)\osx-arm64\native\minipty_spawn_helper"
+          Pack="true"
+          PackagePath="runtimes/osx-arm64/native" />
+    <None Include="$(_MiniPtyRuntimesRoot)\osx-x64\native\minipty_spawn_helper"
+          Pack="true"
+          PackagePath="runtimes/osx-x64/native" />
   </ItemGroup>
 
   <Target Name="BuildMiniPtyUnixNative" BeforeTargets="AssignTargetPaths"
           Condition="'$(MiniPtyBuildUnixNative)' == 'true'">
     <MakeDir Directories="$(OutputPath)" Condition="!Exists('$(OutputPath)')" />
-    <Exec Command="cc -shared -fPIC -O2 $(MiniPtyUnixNativeLinkFlags) -o &quot;$(_MiniPtyUnixNativeOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix.c&quot;" />
+    <Exec Command="cc -shared -fPIC -O2 $(MiniPtyUnixNativeLinkFlags) -o &quot;$(_MiniPtyUnixNativeOutput)&quot; $(_MiniPtyUnixNativeSources)" />
+    <Exec Condition="$([MSBuild]::IsOSPlatform('OSX'))"
+          Command="cc -O2 -o &quot;$(_MiniPtySpawnHelperOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_spawn_helper.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot;" />
     <ItemGroup>
       <FileWrites Include="$(_MiniPtyUnixNativeOutput)" />
       <None Include="$(_MiniPtyUnixNativeOutput)">
         <Link>$(MiniPtyUnixNativeLibraryName)</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </None>
+      <FileWrites Include="$(_MiniPtySpawnHelperOutput)" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
+      <None Include="$(_MiniPtySpawnHelperOutput)" Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+        <Link>minipty_spawn_helper</Link>
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </None>

@@ -49,7 +49,7 @@ MiniPty creates a real PTY on each supported OS; it does not fall back to redire
 |----|---------|-------|
 | Windows | ConPTY (`CreatePseudoConsole`) | Uses Win32 ConPTY directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. Requires Windows 10 1809+ / Windows 11. No winpty or helper process is used. |
 | Ubuntu / Linux | `forkpty` | Uses the small `libminipty_unix` native shim to call the platform PTY API, then `execve` the child inside the PTY. Resize uses `TIOCSWINSZ`. |
-| macOS | `forkpty` | Uses the same Unix backend shape through `libminipty_unix.dylib`, backed by macOS `forkpty` / libutil. Resize uses `TIOCSWINSZ`. |
+| macOS | `posix_spawn` + helper | Uses the Unix backend through `libminipty_unix.dylib` with a `posix_spawn` helper process (not `forkpty`). Resize uses `TIOCSWINSZ`. |
 | FreeBSD | `forkpty` | Uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle. |
 
 ## Quick start

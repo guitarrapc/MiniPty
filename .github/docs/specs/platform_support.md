@@ -8,7 +8,7 @@ Implemented public platform support, verification constraints, and platform-leve
 |---|---|---|
 | Windows | ConPTY (`CreatePseudoConsole`) | Windows 10 1809+, Windows 11 |
 | Linux | `forkpty` + `execve` through native shim | Common glibc/musl targets |
-| macOS | `forkpty` + `execve` through native shim | Supported runners with `libutil` |
+| macOS | `posix_spawn` + `minipty_spawn_helper` through native shim | Supported runners; helper bundled in `runtimes/osx-*/native/` |
 | FreeBSD | `forkpty` + `execve` through native shim | `libutil` |
 
 Pipe redirect without ConPTY is not a PTY. On Windows, TUI tools require ConPTY-backed spawn.
@@ -41,7 +41,7 @@ These are verification choices, not API requirements, but they document pitfalls
 | Linux | A single EOT with no trailing newline does not signal EOF in canonical mode. | One-shot stdin tests using EOT end input with `\n` before `SendEof()`. |
 | Windows | Ctrl+Z without a preceding line submit does not signal EOF for line-oriented readers. | `SendEof` submits a pending line with CR when input lacks a trailing `\r`/`\n`, then sends Ctrl+Z + CR; `PtyStdinEof_withoutTrailingNewline` covers Windows. |
 | Linux | GNU `stty rows` / `stty columns` without arguments set size instead of printing it. | Query via `stty size`. |
-| macOS | Spawn paths that do not attach a controlling terminal make `stty` and resize probes unreliable. | Unix targets use `forkpty` + native `execve`. |
+| macOS | Spawn paths that do not attach a controlling terminal make `stty` and resize probes unreliable. | macOS uses `posix_spawn` + `minipty_spawn_helper` (controlling TTY via slave `open`); Linux/FreeBSD use `forkpty`. |
 | macOS ARM | Variadic `ioctl` for `TIOCSWINSZ` is unsafe to P/Invoke directly. | Resize runs in `libminipty_unix`. |
 | Windows | Closing ConPTY stdin while a child is still attaching can yield `STATUS_CONTROL_C_EXIT`. | Empty-stdin EOF is staged; one-shot writes use Ctrl+Z + CR stream EOF instead of wait-loop pipe close. |
 | Windows | Input pipe close after bytes were written yields `STATUS_CONTROL_C_EXIT` for direct stdin readers (`sort`, `more`). | `SendEof` writes Ctrl+Z + CR and keeps the pipe open until exit; tests assert ExitCode 0 for `sort`. |
@@ -52,7 +52,8 @@ These are verification choices, not API requirements, but they document pitfalls
 
 - **Pipe redirect is not a PTY.** Redirected stdin/stdout captures bytes but children report not-a-TTY.
 - **winpty is a poor fit for NativeAOT single-binary goals.** Bundled helpers add environment dependency; in-process ConPTY avoids that.
-- **macOS spawn must establish a controlling terminal.** A `posix_openpt` + `posix_spawn` path left the slave without a controlling tty; Unix targets use `forkpty` + native `execve`.
+- **macOS spawn must establish a controlling terminal.** A bare `posix_openpt` + `posix_spawn` path left the slave without a controlling tty. macOS uses `posix_spawn` of `minipty_spawn_helper`, which `open`s the slave from `ttyname(STDIN)` before `execve`. Linux and FreeBSD keep `forkpty` + native `execve`.
+- **`minipty_fork_pty_exec` returns spawn errno.** Failures return a positive errno to managed code; do not rely on `SetLastError` across the native shim boundary.
 - **Explicit Unix environments require `execve`.** Passing `envp` means MiniPty cannot rely on plain `execvp`; the native shim provides portable path lookup before `execve`.
 - **Unix plain-script fallback differs from shebang exec.** `ENOEXEC` / `EACCES` / missing-interpreter `ENOENT` retry via `/bin/sh` then `/usr/bin/sh`. Shebang execution is attempted first and is sensitive to `noexec` mounts; see [pty_crossplatform.md](../references/pty_crossplatform.md) → Plain scripts and shell fallback.
 - **Do not assume `/tmp` is exec-enabled on Linux CI.** Hardened runners treat `/tmp` as data-only; spawn tests that need executable fixtures belong under the build output tree or another exec-enabled path.

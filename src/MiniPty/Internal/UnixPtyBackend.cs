@@ -23,8 +23,9 @@ internal static partial class UnixPtyBackend
             var master = 0;
             unsafe
             {
-                if (ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid) != 0)
-                    throw new IOException($"PTY spawn failed (errno {Marshal.GetLastPInvokeError()})");
+                var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid);
+                if (spawnError != 0)
+                    throw new IOException($"PTY spawn failed (errno {spawnError})");
             }
 
             return new UnixPtyBackendInstance(master, pid, size);
@@ -504,7 +505,7 @@ internal static partial class UnixPtyBackend
         }
     }
 
-    [LibraryImport("minipty_unix", SetLastError = true)]
+    [LibraryImport("minipty_unix")]
     private static unsafe partial int minipty_fork_pty_exec(
         int* master,
         Winsize* winp,
