@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace MiniPty.Benchmarks;
 
@@ -21,16 +22,39 @@ internal static class BenchmarkPtyCommands
             : UnixShell("exit 0");
 
     /// <summary>
-    /// Child writes exactly <paramref name="byteCount"/> bytes to stdout (no shell pipeline).
+    /// Child writes exactly <paramref name="byteCount"/> zero bytes to stdout as a binary stream.
     /// </summary>
     /// <remarks>
-    /// Avoids <c>yes x | head</c> on Unix: line-buffered PTY reads create one capture chunk per
-    /// <c>"x\n"</c> pair (~16k chunks for 32 KiB) and inflate benchmark allocations.
+    /// Uses the same benchmark child executable on every OS so integration benchmarks compare
+    /// library cost rather than shell or runtime startup differences.
     /// </remarks>
     internal static PtyStartInfo SmallStdout(int byteCount) =>
-        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? WindowsPowerShell($"[Console]::Out.Write(([string]::new('x',{byteCount})))")
-            : Spawn("head", ["-c", byteCount.ToString(), "/dev/zero"]);
+        Spawn(ResolveBenchmarkChildPath(), ["--bytes", byteCount.ToString(CultureInfo.InvariantCulture)]);
+
+    private static string ResolveBenchmarkChildPath()
+    {
+        var baseDir = AppContext.BaseDirectory;
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var exe = Path.Combine(baseDir, "MiniPty.Benchmarks.Child.exe");
+            if (File.Exists(exe))
+                return exe;
+        }
+        else
+        {
+            var host = Path.Combine(baseDir, "MiniPty.Benchmarks.Child");
+            if (File.Exists(host))
+                return host;
+        }
+
+        var expected = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? Path.Combine(baseDir, "MiniPty.Benchmarks.Child.exe")
+            : Path.Combine(baseDir, "MiniPty.Benchmarks.Child");
+
+        throw new FileNotFoundException(
+            "Benchmark child executable was not copied to the output directory. Rebuild MiniPty.Benchmarks.",
+            expected);
+    }
 
     private static PtyStartInfo Spawn(string fileName, IReadOnlyList<string> arguments) =>
         new() { FileName = fileName, Arguments = arguments, Size = new(80, 24) };
@@ -41,16 +65,5 @@ internal static class BenchmarkPtyCommands
     {
         var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
         return Spawn(cmd, ["/c", command]);
-    }
-
-    private static PtyStartInfo WindowsPowerShell(string script)
-    {
-        var powershell = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System),
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
-
-        return Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", script]);
     }
 }

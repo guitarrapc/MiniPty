@@ -1,6 +1,7 @@
 <Solution>
   <Project Path="src/MiniPty/MiniPty.csproj" />
   <Project Path="src/MiniPty.Benchmarks/MiniPty.Benchmarks.csproj" />
+  <Project Path="src/MiniPty.Benchmarks.Child/MiniPty.Benchmarks.Child.csproj" />
   <Project Path="src/MiniPty.Capture/MiniPty.Capture.csproj" />
   <Project Path="tests/MiniPty.Tests/MiniPty.Tests.csproj" />
 </Solution>

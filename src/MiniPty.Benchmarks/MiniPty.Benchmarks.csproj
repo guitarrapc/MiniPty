@@ -10,6 +10,29 @@
     <PackageReference Include="BenchmarkDotNet" />
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Capture\MiniPty.Capture.csproj" />
+    <ProjectReference Include="..\MiniPty.Benchmarks.Child\MiniPty.Benchmarks.Child.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
   </ItemGroup>
+
+  <Target Name="CopyBenchmarkChild" AfterTargets="Build">
+    <PropertyGroup>
+      <_ChildProject>$(MSBuildThisFileDirectory)..\MiniPty.Benchmarks.Child\MiniPty.Benchmarks.Child.csproj</_ChildProject>
+    </PropertyGroup>
+    <MSBuild Projects="$(_ChildProject)"
+             Targets="GetTargetPath"
+             Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework)">
+      <Output TaskParameter="TargetOutputs" ItemName="_ChildTargetPaths" />
+    </MSBuild>
+    <ItemGroup>
+      <_ChildOutputDirs Include="@(_ChildTargetPaths->'%(RootDir)%(Directory)')" />
+      <_ChildOutputFiles Include="%(_ChildOutputDirs.Identity)MiniPty.Benchmarks.Child"
+                         Condition="Exists('%(_ChildOutputDirs.Identity)MiniPty.Benchmarks.Child')" />
+      <_ChildOutputFiles Include="%(_ChildOutputDirs.Identity)MiniPty.Benchmarks.Child.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ChildOutputFiles)"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>
