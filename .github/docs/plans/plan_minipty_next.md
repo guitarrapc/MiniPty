@@ -616,7 +616,7 @@ Capture dedupe removes the merge duplicate but does **not** close gate **C**: `B
 
 ### Follow-up: Windows `ReadOutputAsync` allocation (cross-OS gap)
 
-Gate C closed the managed-ring / handoff regression on Windows. Windows drain polling and `ReadOutputAsync` producer coalescing are implemented (see [core_session.md](../specs/core_session.md)). Cross-OS benchmark fairness for bulk stdout: [plan_benchmark_process.md](plan_benchmark_process.md).
+Gate C closed the managed-ring / handoff regression on Windows. Windows drain polling and `ReadOutputAsync` producer coalescing are implemented (see [core_session.md](../specs/core_session.md)). Cross-OS benchmark fairness for bulk stdout is implemented via `MiniPty.Benchmarks.Child` (see [platform_support.md](../specs/platform_support.md) → Verification).
 
 ### Milestone 4: Interactive Sample
 

@@ -31,6 +31,8 @@ CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows.
 
 Tests use property assertions, not golden byte captures, to reduce OS and timing flake.
 
+Cross-OS integration benchmarks (`*PtyIntegrationBenchmarks*`, especially `*32KiB*`) use `MiniPty.Benchmarks.Child` for bulk stdout: a shell-free child that writes exactly *n* zero bytes in 4 KiB chunks (`--bytes <n>`). `Echo` and `Exit0` scenarios still use lightweight shell commands where small spawn asymmetry is acceptable. `dotnet build -c Release` copies the child next to the benchmark assembly; missing child fails fast with a rebuild hint.
+
 ## Platform-specific Test Constraints
 
 These are verification choices, not API requirements, but they document pitfalls that broke CI when ignored.
@@ -63,3 +65,4 @@ These are verification choices, not API requirements, but they document pitfalls
 - **PTY output includes terminal echo.** Tests that drive stdin manually may capture echoed input and control characters.
 - **Raw PTY text can break the parent console.** Use [Display text](display_text.md) helpers for logs or keep escaped/raw bytes for inspection.
 - **Child-visible resize tests must synchronize with the parent.** Block the child until after parent `Resize` when asserting child-visible size.
+- **Cross-OS integration benchmarks need the same bulk child on every OS.** OS-specific children (for example PowerShell `[string]::new` on Windows vs `head -c` on Unix) skew latency, bytes on the wire, and ConPTY read granularity, so CI compared harness noise instead of library cost. `MiniPty.Benchmarks.Child` isolates measurement; library-side ConPTY coalescing and drain polling are separate concerns documented in [core_session.md](core_session.md) and [pty_crossplatform.md](../references/pty_crossplatform.md).
