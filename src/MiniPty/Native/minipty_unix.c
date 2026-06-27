@@ -86,8 +86,6 @@ static void minipty_prepare_fork_child(void)
 #endif
 }
 
-#endif /* !__APPLE__ */
-
 static int spawn_pty_child_forkpty(
     int *master,
     const struct winsize *winp,
@@ -112,10 +110,8 @@ static int spawn_pty_child_forkpty(
 
     pid = forkpty(master, NULL, NULL, (struct winsize *)winp);
 
-#if !defined(__APPLE__)
     if (pid == 0)
         minipty_reset_child_signals();
-#endif
 
     pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 
@@ -140,6 +136,8 @@ static int spawn_pty_child_forkpty(
     *pid_out = pid;
     return 0;
 }
+
+#endif /* !__APPLE__ */
 
 #if defined(__APPLE__)
 static int minipty_spawn_err_is_transient(int err)
