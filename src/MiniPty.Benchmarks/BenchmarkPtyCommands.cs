@@ -46,9 +46,13 @@ internal static class BenchmarkPtyCommands
                 return host;
         }
 
+        var expected = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? Path.Combine(baseDir, "MiniPty.Benchmarks.Child.exe")
+            : Path.Combine(baseDir, "MiniPty.Benchmarks.Child");
+
         throw new FileNotFoundException(
             "Benchmark child executable was not copied to the output directory. Rebuild MiniPty.Benchmarks.",
-            Path.Combine(baseDir, "MiniPty.Benchmarks.Child"));
+            expected);
     }
 
     private static PtyStartInfo Spawn(string fileName, IReadOnlyList<string> arguments) =>

@@ -14,7 +14,7 @@ const int ChunkSize = 4096;
 var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
 try
 {
-    Array.Clear(buffer);
+    Array.Clear(buffer, 0, ChunkSize);
     using var stdout = Console.OpenStandardOutput();
     var remaining = byteCount;
     while (remaining > 0)

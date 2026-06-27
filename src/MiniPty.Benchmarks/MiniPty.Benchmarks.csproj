@@ -18,13 +18,17 @@
   <Target Name="CopyBenchmarkChild" AfterTargets="Build">
     <PropertyGroup>
       <_ChildProject>$(MSBuildThisFileDirectory)..\MiniPty.Benchmarks.Child\MiniPty.Benchmarks.Child.csproj</_ChildProject>
-      <_ChildOutputDir>$(MSBuildThisFileDirectory)..\MiniPty.Benchmarks.Child\bin\$(Configuration)\net10.0\</_ChildOutputDir>
     </PropertyGroup>
     <MSBuild Projects="$(_ChildProject)"
-             Targets="Build"
-             Properties="Configuration=$(Configuration);TargetFramework=net10.0" />
+             Targets="GetTargetPath"
+             Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework)">
+      <Output TaskParameter="TargetOutputs" ItemName="_ChildTargetPaths" />
+    </MSBuild>
     <ItemGroup>
-      <_ChildOutputFiles Include="$(_ChildOutputDir)MiniPty.Benchmarks.Child.*" />
+      <_ChildOutputDirs Include="@(_ChildTargetPaths->'%(RootDir)%(Directory)')" />
+      <_ChildOutputFiles Include="%(_ChildOutputDirs.Identity)MiniPty.Benchmarks.Child"
+                         Condition="Exists('%(_ChildOutputDirs.Identity)MiniPty.Benchmarks.Child')" />
+      <_ChildOutputFiles Include="%(_ChildOutputDirs.Identity)MiniPty.Benchmarks.Child.*" />
     </ItemGroup>
     <Copy SourceFiles="@(_ChildOutputFiles)"
           DestinationFolder="$(OutputPath)"
