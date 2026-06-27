@@ -170,10 +170,12 @@ minipty_spawn_helper:
 | cwd | Internal env key `MINIPTY_CWD`; never passed to the target child; stripped from parent env and ignored in `PtyStartInfo.Environment` overlay |
 | envp | Explicit block from managed overlay via `posix_spawn` env argument |
 | exec semantics | Shared `minipty_unix_exec.c` (`PATH`, plain-script `sh` fallback) |
-| Transient spawn errors | macOS only: retry up to 4× on `EAGAIN` / `ENOMEM` / `ENXIO` with 25 ms × attempt backoff |
+| Low-fd reservation | Before opening the real master, open dummy PTYs on vacant stdio slots (0–2) until the next fd is `>= 3` or three slots are held — keeps `dup2(slave → 0/1/2)` reliable when the embedding host closed or repurposed low fds |
+| `posix_spawn` and `EINTR` | Retry `posix_spawn` in a tight inner loop on `EINTR` only, reusing the same `actions` / `attrs` — separate from the outer transient retry below |
+| Transient spawn errors | macOS only: outer retry up to 4× on `EAGAIN` / `ENOMEM` / `ENXIO` with 25 ms × attempt backoff; closes the master between attempts |
 | Spawn errors to managed | `minipty_fork_pty_exec` returns positive errno; `IOException` uses that value |
 
-Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux.
+Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux or macOS.
 
 ### Parent I/O (all Unix)
 
