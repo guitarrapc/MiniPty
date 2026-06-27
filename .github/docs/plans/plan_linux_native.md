@@ -120,13 +120,13 @@ static void minipty_prepare_fork_child(void);
 Call order in child:
 
 ```text
-minipty_prepare_fork_child()   /* signals + fds (Linux) */
+minipty_prepare_fork_child()   /* fds (Linux) */
 chdir(cwd)                     /* existing */
 minipty_execvpe(...)           /* existing */
 _exit(127)
 ```
 
-Keep work **async-signal-safe** where possible: no malloc, no stdio. Port node-pty's fd close (`fcntl`, `close`, `syscall(close_range)`, and `/proc` fallback) and signal reset — all acceptable in the pre-exec child.
+Keep work **async-signal-safe** where possible: no malloc, no stdio. Current implementation uses `syscall(close_range)` when available, else a bounded `fcntl(F_SETFD, FD_CLOEXEC)` scan, plus the signal reset loop — all acceptable in the pre-exec child.
 
 ### Signal reset
 
@@ -160,7 +160,7 @@ Port node-pty's `pty_close_inherited_fds` into `minipty_unix.c` (prefer staying 
 Strategy (Linux) — **full node-pty port, not a minimal subset:**
 
 1. Try `close_range(3, ~0U, CLOSE_RANGE_CLOEXEC)` when `SYS_close_range` and `CLOSE_RANGE_CLOEXEC` are available (glibc 2.34+, kernel 5.9+).
-2. Fallback: for `fd = 3, 4, …`, `fcntl(F_GETFD)` / `fcntl(F_SETFD, FD_CLOEXEC)` or unconditional `close(fd)` until first `SetCloseOnExec` failure past fd 15 (node-pty stops after fd 15 on persistent error).
+2. Fallback: for `fd = 3 … sysconf(_SC_OPEN_MAX)`, `fcntl(F_GETFD)` / `fcntl(F_SETFD, FD_CLOEXEC)` on every slot (handles sparse fd tables; node-pty's early-exit scan is intentionally improved here).
 
 FreeBSD (follow-up PR, not this one):
 
@@ -178,7 +178,7 @@ FreeBSD (follow-up PR, not this one):
 |---:|---|---|
 | 1 | `minipty_unix.c` | Add `minipty_reset_child_signals()` (forkpty platforms). Port from node-pty. |
 | 2 | `minipty_unix.c` | Add `minipty_close_inherited_fds()` (`#if defined(__linux__)`). Port full node-pty implementation. |
-| 3 | `minipty_unix.c` | Add `minipty_prepare_fork_child()` calling both; invoke at start of `pid == 0` branch. |
+| 3 | `minipty_unix.c` | Add `minipty_prepare_fork_child()` (Linux fd hygiene); invoke after signal reset in `pid == 0` branch. |
 | 4 | — | No change to macOS `#if defined(__APPLE__)` spawn block. |
 | 5 | — | No C# or public API changes. |
 | 6 | docs | After merge: note fork child hygiene in `pty_crossplatform.md` Unix spawn section. |

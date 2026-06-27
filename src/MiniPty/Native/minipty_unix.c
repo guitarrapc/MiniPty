@@ -15,7 +15,13 @@
 #endif
 
 #if defined(__linux__)
+#if defined(__has_include) && __has_include(<linux/close_range.h>)
 #include <linux/close_range.h>
+#else
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
+#endif
 #include <pty.h>
 #include <sys/syscall.h>
 #elif defined(__APPLE__)
@@ -68,12 +74,19 @@ static void minipty_close_inherited_fds(void)
 #endif
 
     /*
-     * node-pty fallback: set CLOEXEC on fds >= 3; try the first 16 unconditionally,
-     * then stop after the first error past fd 15.
+     * node-pty-style fallback: set CLOEXEC on fds >= 3. Scan through sysconf(_SC_OPEN_MAX)
+     * so sparse fd tables (e.g. fd 16 closed but fd 100 open) are not missed.
      */
-    for (int fd = 3; ; fd++) {
-        if (minipty_set_close_on_exec(fd) && fd > 15)
-            break;
+    {
+        long maxfd = sysconf(_SC_OPEN_MAX);
+
+        if (maxfd < 0)
+            maxfd = 4096;
+        if (maxfd > 65536)
+            maxfd = 65536;
+
+        for (int fd = 3; fd < maxfd; fd++)
+            minipty_set_close_on_exec(fd);
     }
 }
 

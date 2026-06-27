@@ -116,14 +116,14 @@ MiniPty uses a small `libminipty_unix` native shim that calls the platform `fork
 forkpty(master, NULL, NULL, winsize)
 child: reset signal handlers to SIG_DFL (before parent restores signal mask)
 parent: restore signal mask
-child: close inherited fds >= 3 (Linux only; close_range + node-pty fallback)
+child: set CLOEXEC on inherited fds >= 3 (Linux only; close_range + fcntl fallback)
 child: optional chdir(cwd)
 child: resolve file against child PATH when needed
 child: execve(file, argv, envp)
 parent: keep master fd for PTY input/output
 ```
 
-**Fork child hygiene:** After `forkpty`, the child inherits the parent's fd table and signal dispositions. Before `chdir` / `execve`, the native shim resets all signal handlers to `SIG_DFL` (Linux and FreeBSD) and closes inherited descriptors `>= 3` on Linux (`close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` when available, else node-pty's `fcntl` fallback). This matches node-pty and prevents a VS Code–style embedding host from leaking sockets, log files, or other PTY masters into spawned shells. Work is async-signal-safe (no malloc) and runs only in the short-lived fork child; the parent managed path is unchanged. FreeBSD fd close is tracked as follow-up work.
+**Fork child hygiene:** After `forkpty`, the child inherits the parent's fd table and signal dispositions. Before `chdir` / `execve`, the native shim resets all signal handlers to `SIG_DFL` (Linux and FreeBSD) and marks inherited descriptors `>= 3` close-on-exec on Linux (`close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` when available, else a bounded `fcntl(F_SETFD, FD_CLOEXEC)` scan). This matches node-pty and prevents a VS Code–style embedding host from leaking sockets, log files, or other PTY masters into spawned shells. Work is async-signal-safe (no malloc) and runs only in the short-lived fork child; the parent managed path is unchanged. FreeBSD fd close is tracked as follow-up work.
 
 **`forkpty()` safety:** Build executable path, `argv`, `envp`, and optional `cwd` as unmanaged UTF-8 C strings in the **parent** before `forkpty()`. The child path stays inside the native shim for `chdir`, path lookup, `execve`, and `_exit` after the fork boundary—no managed allocation, no `RuntimeInformation`, no string marshalling. The parent frees the payload after `forkpty()`; the child retains a copy-on-write mapping until `execve` replaces the address space.
 
