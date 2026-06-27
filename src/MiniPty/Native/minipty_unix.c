@@ -15,7 +15,15 @@
 #endif
 
 #if defined(__linux__)
+#if defined(__has_include) && __has_include(<linux/close_range.h>)
+#include <linux/close_range.h>
+#else
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
+#endif
 #include <pty.h>
+#include <sys/syscall.h>
 #elif defined(__APPLE__)
 #include <dlfcn.h>
 #include <libgen.h>
@@ -24,6 +32,81 @@
 #elif defined(__FreeBSD__)
 #include <libutil.h>
 #endif
+
+#if !defined(__APPLE__)
+
+#ifndef NSIG
+#define NSIG 32
+#endif
+
+static void minipty_reset_child_signals(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+
+    for (int sig = 1; sig < NSIG; sig++)
+        sigaction(sig, &sa, NULL);
+}
+
+#if defined(__linux__)
+
+#define MINIPTY_INHERITED_FD_SCAN_DEFAULT 4096
+#define MINIPTY_INHERITED_FD_SCAN_CAP 65536
+
+static int minipty_set_close_on_exec(int fd)
+{
+    int flags = fcntl(fd, F_GETFD, 0);
+
+    if (flags == -1)
+        return flags;
+    if (flags & FD_CLOEXEC)
+        return 0;
+
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
+static int minipty_compute_inherited_fd_scan_limit(void)
+{
+    long limit = sysconf(_SC_OPEN_MAX);
+
+    if (limit < 0)
+        return MINIPTY_INHERITED_FD_SCAN_DEFAULT;
+    if (limit > MINIPTY_INHERITED_FD_SCAN_CAP)
+        return MINIPTY_INHERITED_FD_SCAN_CAP;
+
+    return (int)limit;
+}
+
+static void minipty_scrub_inherited_fds(int scan_limit)
+{
+#if defined(SYS_close_range) && defined(CLOSE_RANGE_CLOEXEC)
+    if (syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC) == 0)
+        return;
+#endif
+
+    /*
+     * node-pty-style fallback: set FD_CLOEXEC on fds >= 3 (does not close(2)).
+     * scan_limit is computed in the parent before forkpty so the child avoids
+     * libc queries (async-signal-safe).
+     */
+    for (int fd = 3; fd < scan_limit; fd++)
+        minipty_set_close_on_exec(fd);
+}
+
+#endif /* __linux__ */
+
+static void minipty_prepare_fork_child(int inherited_fd_scan_limit)
+{
+#if defined(__linux__)
+    minipty_scrub_inherited_fds(inherited_fd_scan_limit);
+#else
+    (void)inherited_fd_scan_limit;
+#endif
+}
 
 static int spawn_pty_child_forkpty(
     int *master,
@@ -38,16 +121,24 @@ static int spawn_pty_child_forkpty(
     sigset_t newmask;
     sigset_t oldmask;
     char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
+    int inherited_fd_scan_limit = 0;
 
     if (child_envp == NULL) {
         errno = ENOMEM;
         return ENOMEM;
     }
 
+#if defined(__linux__)
+    inherited_fd_scan_limit = minipty_compute_inherited_fd_scan_limit();
+#endif
+
     sigfillset(&newmask);
     pthread_sigmask(SIG_BLOCK, &newmask, &oldmask);
 
     pid = forkpty(master, NULL, NULL, (struct winsize *)winp);
+
+    if (pid == 0)
+        minipty_reset_child_signals();
 
     pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 
@@ -59,6 +150,7 @@ static int spawn_pty_child_forkpty(
     }
 
     if (pid == 0) {
+        minipty_prepare_fork_child(inherited_fd_scan_limit);
         if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
             _exit(126);
         minipty_execvpe(file, argv, child_envp);
@@ -71,6 +163,8 @@ static int spawn_pty_child_forkpty(
     *pid_out = pid;
     return 0;
 }
+
+#endif /* !__APPLE__ */
 
 #if defined(__APPLE__)
 static int minipty_spawn_err_is_transient(int err)
