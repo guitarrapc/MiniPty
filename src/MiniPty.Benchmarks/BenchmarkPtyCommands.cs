@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace MiniPty.Benchmarks;
 
@@ -28,7 +29,7 @@ internal static class BenchmarkPtyCommands
     /// library cost rather than shell or runtime startup differences.
     /// </remarks>
     internal static PtyStartInfo SmallStdout(int byteCount) =>
-        Spawn(ResolveBenchmarkChildPath(), ["--bytes", byteCount.ToString()]);
+        Spawn(ResolveBenchmarkChildPath(), ["--bytes", byteCount.ToString(CultureInfo.InvariantCulture)]);
 
     private static string ResolveBenchmarkChildPath()
     {
