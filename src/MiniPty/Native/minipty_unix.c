@@ -54,6 +54,9 @@ static void minipty_reset_child_signals(void)
 
 #if defined(__linux__)
 
+#define MINIPTY_INHERITED_FD_SCAN_DEFAULT 4096
+#define MINIPTY_INHERITED_FD_SCAN_CAP 65536
+
 static int minipty_set_close_on_exec(int fd)
 {
     int flags = fcntl(fd, F_GETFD, 0);
@@ -66,7 +69,19 @@ static int minipty_set_close_on_exec(int fd)
     return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
-static void minipty_close_inherited_fds(void)
+static int minipty_compute_inherited_fd_scan_limit(void)
+{
+    long limit = sysconf(_SC_OPEN_MAX);
+
+    if (limit < 0)
+        return MINIPTY_INHERITED_FD_SCAN_DEFAULT;
+    if (limit > MINIPTY_INHERITED_FD_SCAN_CAP)
+        return MINIPTY_INHERITED_FD_SCAN_CAP;
+
+    return (int)limit;
+}
+
+static void minipty_close_inherited_fds(int scan_limit)
 {
 #if defined(SYS_close_range) && defined(CLOSE_RANGE_CLOEXEC)
     if (syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC) == 0)
@@ -74,28 +89,21 @@ static void minipty_close_inherited_fds(void)
 #endif
 
     /*
-     * node-pty-style fallback: set CLOEXEC on fds >= 3. Scan through sysconf(_SC_OPEN_MAX)
-     * so sparse fd tables (e.g. fd 16 closed but fd 100 open) are not missed.
+     * node-pty-style fallback: set CLOEXEC on fds >= 3. scan_limit is computed in
+     * the parent before forkpty so the child avoids libc queries (async-signal-safe).
      */
-    {
-        long maxfd = sysconf(_SC_OPEN_MAX);
-
-        if (maxfd < 0)
-            maxfd = 4096;
-        if (maxfd > 65536)
-            maxfd = 65536;
-
-        for (int fd = 3; fd < maxfd; fd++)
-            minipty_set_close_on_exec(fd);
-    }
+    for (int fd = 3; fd < scan_limit; fd++)
+        minipty_set_close_on_exec(fd);
 }
 
 #endif /* __linux__ */
 
-static void minipty_prepare_fork_child(void)
+static void minipty_prepare_fork_child(int inherited_fd_scan_limit)
 {
 #if defined(__linux__)
-    minipty_close_inherited_fds();
+    minipty_close_inherited_fds(inherited_fd_scan_limit);
+#else
+    (void)inherited_fd_scan_limit;
 #endif
 }
 
@@ -112,11 +120,16 @@ static int spawn_pty_child_forkpty(
     sigset_t newmask;
     sigset_t oldmask;
     char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
+    int inherited_fd_scan_limit = 0;
 
     if (child_envp == NULL) {
         errno = ENOMEM;
         return ENOMEM;
     }
+
+#if defined(__linux__)
+    inherited_fd_scan_limit = minipty_compute_inherited_fd_scan_limit();
+#endif
 
     sigfillset(&newmask);
     pthread_sigmask(SIG_BLOCK, &newmask, &oldmask);
@@ -136,7 +149,7 @@ static int spawn_pty_child_forkpty(
     }
 
     if (pid == 0) {
-        minipty_prepare_fork_child();
+        minipty_prepare_fork_child(inherited_fd_scan_limit);
         if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
             _exit(126);
         minipty_execvpe(file, argv, child_envp);

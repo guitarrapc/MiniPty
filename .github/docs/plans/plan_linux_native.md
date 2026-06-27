@@ -126,7 +126,7 @@ minipty_execvpe(...)           /* existing */
 _exit(127)
 ```
 
-Keep work **async-signal-safe** where possible: no malloc, no stdio. Current implementation uses `syscall(close_range)` when available, else a bounded `fcntl(F_SETFD, FD_CLOEXEC)` scan, plus the signal reset loop — all acceptable in the pre-exec child.
+Keep work **async-signal-safe** in the fork child: no malloc, no stdio, no libc queries after `forkpty`. The parent computes the fallback `fcntl` scan bound (`sysconf(_SC_OPEN_MAX)`); the child uses `syscall(close_range)` when available, else bounded `fcntl(F_SETFD, FD_CLOEXEC)`, plus the signal reset loop.
 
 ### Signal reset
 
@@ -160,7 +160,7 @@ Port node-pty's `pty_close_inherited_fds` into `minipty_unix.c` (prefer staying 
 Strategy (Linux) — **full node-pty port, not a minimal subset:**
 
 1. Try `close_range(3, ~0U, CLOSE_RANGE_CLOEXEC)` when `SYS_close_range` and `CLOSE_RANGE_CLOEXEC` are available (glibc 2.34+, kernel 5.9+).
-2. Fallback: for `fd = 3 … sysconf(_SC_OPEN_MAX)`, `fcntl(F_GETFD)` / `fcntl(F_SETFD, FD_CLOEXEC)` on every slot (handles sparse fd tables; node-pty's early-exit scan is intentionally improved here).
+2. Fallback: parent computes scan bound (`sysconf(_SC_OPEN_MAX)`, capped at 65536); child scans `fd = 3 … bound` with `fcntl(F_GETFD)` / `fcntl(F_SETFD, FD_CLOEXEC)` (handles sparse fd tables; node-pty's early-exit scan is intentionally improved here).
 
 FreeBSD (follow-up PR, not this one):
 
