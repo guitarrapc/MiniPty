@@ -10,6 +10,25 @@
     <PackageReference Include="BenchmarkDotNet" />
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Capture\MiniPty.Capture.csproj" />
+    <ProjectReference Include="..\MiniPty.Benchmarks.Child\MiniPty.Benchmarks.Child.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
   </ItemGroup>
+
+  <Target Name="CopyBenchmarkChild" AfterTargets="Build">
+    <PropertyGroup>
+      <_ChildProject>$(MSBuildThisFileDirectory)..\MiniPty.Benchmarks.Child\MiniPty.Benchmarks.Child.csproj</_ChildProject>
+      <_ChildOutputDir>$(MSBuildThisFileDirectory)..\MiniPty.Benchmarks.Child\bin\$(Configuration)\net10.0\</_ChildOutputDir>
+    </PropertyGroup>
+    <MSBuild Projects="$(_ChildProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration);TargetFramework=net10.0" />
+    <ItemGroup>
+      <_ChildOutputFiles Include="$(_ChildOutputDir)MiniPty.Benchmarks.Child.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ChildOutputFiles)"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

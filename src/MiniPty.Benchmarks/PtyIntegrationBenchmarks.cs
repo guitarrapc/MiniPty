@@ -15,6 +15,7 @@ namespace MiniPty.Benchmarks;
 /// <para><b>Text</b> — default decode during pump (bytes + decoded chars) and display helpers.</para>
 /// Allocations include OS process spawn. Capture cost scales with <b>PTY read count</b>, not only merged byte length.
 /// Compare <see cref="Session_32KiB_Bytes"/> vs <see cref="Capture_32KiB_Bytes"/> to isolate per-read chunk metadata.
+/// Bulk stdout scenarios use the shared <c>MiniPty.Benchmarks.Child</c> helper on all platforms.
 /// </remarks>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
