@@ -81,7 +81,7 @@ static int minipty_compute_inherited_fd_scan_limit(void)
     return (int)limit;
 }
 
-static void minipty_close_inherited_fds(int scan_limit)
+static void minipty_scrub_inherited_fds(int scan_limit)
 {
 #if defined(SYS_close_range) && defined(CLOSE_RANGE_CLOEXEC)
     if (syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC) == 0)
@@ -89,8 +89,9 @@ static void minipty_close_inherited_fds(int scan_limit)
 #endif
 
     /*
-     * node-pty-style fallback: set CLOEXEC on fds >= 3. scan_limit is computed in
-     * the parent before forkpty so the child avoids libc queries (async-signal-safe).
+     * node-pty-style fallback: set FD_CLOEXEC on fds >= 3 (does not close(2)).
+     * scan_limit is computed in the parent before forkpty so the child avoids
+     * libc queries (async-signal-safe).
      */
     for (int fd = 3; fd < scan_limit; fd++)
         minipty_set_close_on_exec(fd);
@@ -101,7 +102,7 @@ static void minipty_close_inherited_fds(int scan_limit)
 static void minipty_prepare_fork_child(int inherited_fd_scan_limit)
 {
 #if defined(__linux__)
-    minipty_close_inherited_fds(inherited_fd_scan_limit);
+    minipty_scrub_inherited_fds(inherited_fd_scan_limit);
 #else
     (void)inherited_fd_scan_limit;
 #endif
