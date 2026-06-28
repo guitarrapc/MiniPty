@@ -1,17 +1,17 @@
 {
-  "baselineCommit": "d39d5fa60602c6be9d61c4c06edb9b8210f0cef5",
-  "description": "Post PR #27 (unified MiniPty.Benchmarks.Child). Allocated bytes from BenchmarkDotNet MemoryDiagnoser ShortRun job (1 KB = 1024 B). Values are the max of two win-x64 runs on 2026-06-28.",
+  "baselineCommit": "f250e87dc0223056a834dbe8ad0b70d3fa4ba1b0",
+  "description": "Post ConPTY stdout drain fix (closeTransportOnExit: false + AwaitPumpAsync). Allocated bytes from BenchmarkDotNet MemoryDiagnoser ShortRun job (1 KB = 1024 B). win-x64 run on 2026-06-28.",
   "benchmarks": {
-    "Session_Exit0_Bytes": 3768,
-    "Session_Echo_Bytes": 3932,
-    "Capture_Echo_Bytes": 5130,
-    "Session_32KiB_Bytes": 5509,
-    "Capture_32KiB_Bytes": 6676,
-    "Session_32KiB_StreamBytes": 5263,
+    "Session_Exit0_Bytes": 5202,
+    "Session_Echo_Bytes": 5366,
+    "Capture_Echo_Bytes": 6564,
+    "Session_32KiB_Bytes": 43940,
+    "Capture_32KiB_Bytes": 50135,
+    "Session_32KiB_StreamBytes": 6646,
     "Session_32KiB_OutputStreamBytes": 4598,
-    "Session_Echo_Text": 4260,
-    "Capture_Echo_Text": 6636,
-    "Capture_32KiB_Text": 8366,
-    "Capture_32KiB_DisplayPlain": 8366
+    "Session_Echo_Text": 5765,
+    "Capture_Echo_Text": 8069,
+    "Capture_32KiB_Text": 130877,
+    "Capture_32KiB_DisplayPlain": 197980
   }
 }

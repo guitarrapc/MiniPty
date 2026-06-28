@@ -262,6 +262,46 @@ public sealed class PtyTests
         await Assert.That(maxChunk).IsGreaterThanOrEqualTo(4096);
     }
 
+    /// <summary>
+    /// Transport-pump completion must drain the full child stdout before closing ConPTY on Windows.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncDrainsBulkStdout()
+    {
+        if (!TryCreateBulkStdout32KiB(out var startInfo))
+            return;
+
+        await using var session = Pty.Start(startInfo);
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            await Assert.That(result.Output.Length).IsGreaterThanOrEqualTo(32_768);
+        else
+            await Assert.That(result.Output.Length).IsEqualTo(32_768);
+    }
+
+    /// <summary>
+    /// Capture transport pump shares completion orchestration with <see cref="PtyCompleteAsync"/>.
+    /// </summary>
+    [Test]
+    public async Task PtyCaptureDrainsBulkStdout()
+    {
+        if (!TryCreateBulkStdout32KiB(out var startInfo))
+            return;
+
+        var result = await PtyCapture.RunAsync(
+            startInfo,
+            new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = false } });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            await Assert.That(result.Output.Length).IsGreaterThanOrEqualTo(32_768);
+        else
+            await Assert.That(result.Output.Length).IsEqualTo(32_768);
+        await Assert.That(result.Chunks.Count).IsGreaterThan(0);
+    }
+
     [Test]
     public async Task PtyReadOutputAsyncSupportsPersistentCommandLoop()
     {
@@ -1121,6 +1161,25 @@ public sealed class PtyTests
         new() { FileName = fileName, Arguments = arguments, Size = new(40, 8) };
 
     private static PtyStartInfo UnixShell(string command) => Spawn("sh", ["-c", command]);
+
+    private static bool TryCreateBulkStdout32KiB(out PtyStartInfo startInfo)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            if (!TryResolveWindowsPowerShell(out var powershell))
+            {
+                startInfo = default!;
+                return false;
+            }
+
+            startInfo = Spawn(powershell,
+                ["-NoLogo", "-NoProfile", "-Command", "[Console]::Out.Write(([string]::new('x',32768)))"]);
+            return true;
+        }
+
+        startInfo = Spawn("head", ["-c", "32768", "/dev/zero"]);
+        return true;
+    }
 
     /// <summary>GitHub-hosted /tmp may be <c>noexec</c>; keep exec-test fixtures under the test output directory.</summary>
     private static string CreateUnixExecTestDirectory()

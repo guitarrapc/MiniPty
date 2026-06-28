@@ -106,21 +106,31 @@ internal sealed class PtyHandleReadStream : Stream
         if (buffer.IsEmpty)
             return 0;
 
-        unsafe
+        if (handle.IsClosed || handle.IsInvalid)
+            return 0;
+
+        try
         {
-            fixed (byte* ptr = buffer)
+            unsafe
             {
-                if (!WindowsInterop.ReadFile(handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
+                fixed (byte* ptr = buffer)
                 {
-                    var error = Marshal.GetLastPInvokeError();
-                    if (error == 109) // ERROR_BROKEN_PIPE
-                        return 0;
+                    if (!WindowsInterop.ReadFile(handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
+                    {
+                        var error = Marshal.GetLastPInvokeError();
+                        if (error is 109 or 6) // ERROR_BROKEN_PIPE, ERROR_INVALID_HANDLE
+                            return 0;
 
-                    throw new IOException($"ReadFile failed (Win32 {error})");
+                        throw new IOException($"ReadFile failed (Win32 {error})");
+                    }
+
+                    return (int)read;
                 }
-
-                return (int)read;
             }
+        }
+        catch (ObjectDisposedException)
+        {
+            return 0;
         }
     }
 
@@ -134,6 +144,12 @@ internal sealed class PtyHandleReadStream : Stream
         if (buffer.IsEmpty)
             return 0;
 
+        if (handle.IsClosed || handle.IsInvalid)
+        {
+            eof = true;
+            return 0;
+        }
+
         uint nowait = WindowsInterop.PipeNowait;
         if (!WindowsInterop.SetNamedPipeHandleState(handle, &nowait, IntPtr.Zero, IntPtr.Zero))
             return 0;
@@ -145,7 +161,7 @@ internal sealed class PtyHandleReadStream : Stream
                 if (!WindowsInterop.ReadFile(handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
                 {
                     var error = Marshal.GetLastPInvokeError();
-                    if (error == 109) // ERROR_BROKEN_PIPE
+                    if (error is 109 or 6) // ERROR_BROKEN_PIPE, ERROR_INVALID_HANDLE
                     {
                         eof = true;
                         return 0;
@@ -160,10 +176,18 @@ internal sealed class PtyHandleReadStream : Stream
                 return (int)read;
             }
         }
+        catch (ObjectDisposedException)
+        {
+            eof = true;
+            return 0;
+        }
         finally
         {
-            uint wait = WindowsInterop.PipeWait;
-            _ = WindowsInterop.SetNamedPipeHandleState(handle, &wait, IntPtr.Zero, IntPtr.Zero);
+            if (!handle.IsClosed && !handle.IsInvalid)
+            {
+                uint wait = WindowsInterop.PipeWait;
+                _ = WindowsInterop.SetNamedPipeHandleState(handle, &wait, IntPtr.Zero, IntPtr.Zero);
+            }
         }
     }
 
