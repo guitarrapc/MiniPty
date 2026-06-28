@@ -24,9 +24,9 @@ internal static class PtyOutputDrain
             if (outputTransport is PtyHandleReadStream windowsTransport
                 && OperatingSystem.IsWindows())
             {
-                if (await TryWindowsPostExitDrainAsync(pump, windowsTransport, closeOutputTransport, outputDrainGrace, cancellationToken).ConfigureAwait(false))
+                if (TryWindowsPostExitDrain(pump, windowsTransport, closeOutputTransport, outputDrainGrace, cancellationToken))
                     return await pump.ConfigureAwait(false);
-                // TryWindowsPostExitDrainAsync already consumed outputDrainGrace and closed transport when it returns false.
+                // TryWindowsPostExitDrain already consumed outputDrainGrace and closed transport when it returns false.
             }
             else
             {
@@ -52,7 +52,7 @@ internal static class PtyOutputDrain
     /// Post-exit drain for Windows ConPTY transport pumps: close when output has been quiet long enough,
     /// bounded by <paramref name="outputDrainGrace"/>. Does not claim command completion; only unblocks EOF.
     /// </summary>
-    private static async Task<bool> TryWindowsPostExitDrainAsync<T>(
+    private static bool TryWindowsPostExitDrain<T>(
         Task<T> pump,
         PtyHandleReadStream transport,
         Action closeOutputTransport,
@@ -71,7 +71,7 @@ internal static class PtyOutputDrain
 
             if (ShouldCloseAfterQuietPeriod(exitObservedAt, transport.LastTransportReadTick64))
             {
-                await RunMicroWindowQuietCheckAsync(pump, cancellationToken).ConfigureAwait(false);
+                RunMicroWindowQuietCheck(pump, cancellationToken);
                 if (pump.IsCompleted)
                     return true;
 
@@ -83,7 +83,7 @@ internal static class PtyOutputDrain
                 }
             }
 
-            await YieldUntilTickAsync(StallPollMs, cancellationToken).ConfigureAwait(false);
+            PollSleep(StallPollMs, cancellationToken);
         }
 
         if (!transportClosed)
@@ -113,7 +113,7 @@ internal static class PtyOutputDrain
         return now - lastReadTick >= PostExitStallBeforeCloseMs;
     }
 
-    private static async Task RunMicroWindowQuietCheckAsync<T>(
+    private static void RunMicroWindowQuietCheck<T>(
         Task<T> pump,
         CancellationToken cancellationToken)
     {
@@ -124,20 +124,23 @@ internal static class PtyOutputDrain
             if (pump.IsCompleted)
                 return;
 
-            await Task.Yield();
+            Thread.Sleep(0);
         }
     }
 
     /// <summary>
-    /// Yields until a tick deadline without timer-task allocations or thread-pool blocking sleeps.
+    /// Bounded 10ms poll (plan P1). Uses thread sleep instead of timer-based delays to avoid per-poll
+    /// allocations; one-shot completion tolerates briefly holding a pool thread during post-exit drain.
     /// </summary>
-    private static async ValueTask YieldUntilTickAsync(int milliseconds, CancellationToken cancellationToken)
+    private static void PollSleep(int milliseconds, CancellationToken cancellationToken)
     {
         var pollDeadline = Environment.TickCount64 + milliseconds;
         while (Environment.TickCount64 < pollDeadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await Task.Yield();
+            var remaining = (int)Math.Min(milliseconds, pollDeadline - Environment.TickCount64);
+            if (remaining > 0)
+                Thread.Sleep(remaining);
         }
     }
 
