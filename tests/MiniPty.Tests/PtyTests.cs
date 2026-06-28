@@ -333,25 +333,82 @@ public sealed class PtyTests
     [Test]
     public async Task PtyCompleteAsyncRetainsIntermittentStdoutOnWindows()
     {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        if (!TryStartWindowsIntermittentStdout(50, ["__GAP_HEAD__", "__GAP_TAIL__"], out var startInfo))
             return;
 
-        if (!TryResolveWindowsPowerShell(out var powershell))
-            return;
-
-        const string head = "__GAP_HEAD__";
-        const string tail = "__GAP_TAIL__";
-        var command =
-            $"Write-Output '{head}'; Start-Sleep -Milliseconds 50; Write-Output '{tail}'";
-
-        await using var session = Pty.Start(Spawn(powershell,
-            ["-NoLogo", "-NoProfile", "-Command", command]));
-
+        await using var session = Pty.Start(startInfo);
         var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
-        await Assert.That(result.Contains(head)).IsTrue();
-        await Assert.That(result.Contains(tail)).IsTrue();
+        await AssertContainsAllMarkers(result, "__GAP_HEAD__", "__GAP_TAIL__");
+    }
+
+    /// <summary>
+    /// Gaps longer than the internal post-exit stall threshold must not truncate while the child is still producing output.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncRetainsLongGapStdoutOnWindows()
+    {
+        if (!TryStartWindowsIntermittentStdout(150, ["__LONG_GAP_HEAD__", "__LONG_GAP_TAIL__"], out var startInfo))
+            return;
+
+        await using var session = Pty.Start(startInfo);
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await AssertContainsAllMarkers(result, "__LONG_GAP_HEAD__", "__LONG_GAP_TAIL__");
+    }
+
+    /// <summary>
+    /// Multiple intermittent segments must all appear in merged one-shot output.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncRetainsMultipleGapStdoutOnWindows()
+    {
+        if (!TryStartWindowsIntermittentStdout(50,
+                ["__MULTI_A__", "__MULTI_B__", "__MULTI_C__"],
+                out var startInfo))
+            return;
+
+        await using var session = Pty.Start(startInfo);
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await AssertContainsAllMarkers(result, "__MULTI_A__", "__MULTI_B__", "__MULTI_C__");
+    }
+
+    /// <summary>
+    /// Capture shares transport-pump drain orchestration with <see cref="PtySession.CompleteAsync"/>.
+    /// </summary>
+    [Test]
+    public async Task PtyCaptureRetainsIntermittentStdoutOnWindows()
+    {
+        if (!TryStartWindowsIntermittentStdout(50, ["__CAP_GAP_HEAD__", "__CAP_GAP_TAIL__"], out var startInfo))
+            return;
+
+        var result = await PtyCapture.RunAsync(
+            startInfo,
+            new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = true } });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await AssertContainsAllMarkers(result, "__CAP_GAP_HEAD__", "__CAP_GAP_TAIL__");
+    }
+
+    /// <summary>
+    /// Capture must retain output across gaps longer than the internal post-exit stall threshold.
+    /// </summary>
+    [Test]
+    public async Task PtyCaptureRetainsLongGapStdoutOnWindows()
+    {
+        if (!TryStartWindowsIntermittentStdout(150, ["__CAP_LONG_HEAD__", "__CAP_LONG_TAIL__"], out var startInfo))
+            return;
+
+        var result = await PtyCapture.RunAsync(
+            startInfo,
+            new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = true } });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await AssertContainsAllMarkers(result, "__CAP_LONG_HEAD__", "__CAP_LONG_TAIL__");
     }
 
     [Test]
@@ -1213,6 +1270,47 @@ public sealed class PtyTests
         new() { FileName = fileName, Arguments = arguments, Size = new(40, 8) };
 
     private static PtyStartInfo UnixShell(string command) => Spawn("sh", ["-c", command]);
+
+    private static bool TryStartWindowsIntermittentStdout(
+        int gapMilliseconds,
+        string[] markers,
+        out PtyStartInfo startInfo)
+    {
+        startInfo = default!;
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return false;
+
+        if (!TryResolveWindowsPowerShell(out var powershell))
+            return false;
+
+        if (markers.Length == 0)
+            return false;
+
+        startInfo = Spawn(powershell,
+            ["-NoLogo", "-NoProfile", "-Command", BuildWindowsIntermittentStdoutCommand(gapMilliseconds, markers)]);
+        return true;
+    }
+
+    private static string BuildWindowsIntermittentStdoutCommand(int gapMilliseconds, string[] markers)
+    {
+        var command = $"Write-Output '{markers[0]}'";
+        for (var i = 1; i < markers.Length; i++)
+            command += $"; Start-Sleep -Milliseconds {gapMilliseconds}; Write-Output '{markers[i]}'";
+
+        return command;
+    }
+
+    private static async Task AssertContainsAllMarkers(PtyResult result, params string[] markers)
+    {
+        foreach (var marker in markers)
+            await Assert.That(result.Contains(marker)).IsTrue();
+    }
+
+    private static async Task AssertContainsAllMarkers(PtyCaptureResult result, params string[] markers)
+    {
+        foreach (var marker in markers)
+            await Assert.That(result.Contains(marker)).IsTrue();
+    }
 
     private static bool TryCreateBulkStdout32KiB(out PtyStartInfo startInfo)
     {
