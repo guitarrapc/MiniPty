@@ -1,17 +1,17 @@
 {
-  "baselineCommit": "f250e87dc0223056a834dbe8ad0b70d3fa4ba1b0",
-  "description": "Post ConPTY stdout drain fix (closeTransportOnExit: false + AwaitPumpAsync). Allocated bytes from BenchmarkDotNet MemoryDiagnoser ShortRun job (1 KB = 1024 B). win-x64 run on 2026-06-28.",
+  "baselineCommit": "281283901ed3e3072d72131d4f86c4dd09723578",
+  "description": "Post Windows ConPTY one-shot stall drain (100ms quiet + OutputDrainGrace ceiling). Allocated bytes from BenchmarkDotNet MemoryDiagnoser ShortRun job (1 KB = 1024 B). win-x64 run on 2026-06-29.",
   "benchmarks": {
-    "Session_Exit0_Bytes": 5202,
-    "Session_Echo_Bytes": 5366,
-    "Capture_Echo_Bytes": 6564,
-    "Session_32KiB_Bytes": 43940,
-    "Capture_32KiB_Bytes": 50135,
-    "Session_32KiB_StreamBytes": 6646,
-    "Session_32KiB_OutputStreamBytes": 4598,
-    "Session_Echo_Text": 5765,
-    "Capture_Echo_Text": 8069,
-    "Capture_32KiB_Text": 130877,
-    "Capture_32KiB_DisplayPlain": 197980
+    "Session_Exit0_Bytes": 3840,
+    "Session_Echo_Bytes": 4004,
+    "Capture_Echo_Bytes": 5192,
+    "Session_32KiB_Bytes": 42639,
+    "Capture_32KiB_Bytes": 48824,
+    "Session_32KiB_StreamBytes": 6656,
+    "Session_32KiB_OutputStreamBytes": 4188,
+    "Session_Echo_Text": 4332,
+    "Capture_Echo_Text": 6697,
+    "Capture_32KiB_Text": 129567,
+    "Capture_32KiB_DisplayPlain": 196680
   }
 }

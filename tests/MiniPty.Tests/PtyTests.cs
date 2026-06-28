@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using MiniPty.Capture;
 
@@ -300,6 +301,99 @@ public sealed class PtyTests
         else
             await Assert.That(result.Output.Length).IsEqualTo(32_768);
         await Assert.That(result.Chunks.Count).IsGreaterThan(0);
+    }
+
+    /// <summary>
+    /// Windows one-shot completion should not consume the full <see cref="PtyCompleteOptions.OutputDrainGrace"/>
+    /// budget for short echo output. Uses a large grace and a relative upper bound so slow child startup
+    /// on CI runners does not false-fail while a regression that waits the full grace still does.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncReturnsBeforeOutputDrainGraceOnWindows()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using var session = Pty.Start(WindowsCommand("echo pty-drain-latency"));
+
+        var options = new PtyCompleteOptions
+        {
+            DecodeOutput = true,
+            OutputDrainGrace = TimeSpan.FromSeconds(10),
+        };
+        var maxElapsed = options.OutputDrainGrace - TimeSpan.FromSeconds(2);
+
+        var elapsed = Stopwatch.StartNew();
+        var result = await session.CompleteAsync(options);
+        elapsed.Stop();
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.Contains("pty-drain-latency")).IsTrue();
+        await Assert.That(elapsed.Elapsed).IsLessThan(maxElapsed);
+    }
+
+    /// <summary>
+    /// Post-exit quiet detection must not truncate output across representative gap classes.
+    /// </summary>
+    [Test]
+    [Arguments(50, "__GAP_HEAD__", "__GAP_TAIL__")]
+    [Arguments(100, "__THRESHOLD_HEAD__", "__THRESHOLD_TAIL__")]
+    [Arguments(150, "__LONG_GAP_HEAD__", "__LONG_GAP_TAIL__")]
+    public async Task PtyCompleteAsyncRetainsIntermittentStdoutAcrossGapClassesOnWindows(
+        int gapMilliseconds,
+        string headMarker,
+        string tailMarker)
+    {
+        if (!TryStartWindowsIntermittentStdout(gapMilliseconds, [headMarker, tailMarker], out var startInfo))
+            return;
+
+        await using var session = Pty.Start(startInfo);
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await AssertContainsAllMarkers(result, headMarker, tailMarker);
+    }
+
+    /// <summary>
+    /// Multiple intermittent segments must all appear in merged one-shot output.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncRetainsMultipleGapStdoutOnWindows()
+    {
+        if (!TryStartWindowsIntermittentStdout(50,
+                ["__MULTI_A__", "__MULTI_B__", "__MULTI_C__"],
+                out var startInfo))
+            return;
+
+        await using var session = Pty.Start(startInfo);
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await AssertContainsAllMarkers(result, "__MULTI_A__", "__MULTI_B__", "__MULTI_C__");
+    }
+
+    /// <summary>
+    /// Capture shares transport-pump drain orchestration with <see cref="PtySession.CompleteAsync"/>
+    /// and must retain output across representative gap classes.
+    /// </summary>
+    [Test]
+    [Arguments(50, "__CAP_GAP_HEAD__", "__CAP_GAP_TAIL__")]
+    [Arguments(100, "__CAP_THRESHOLD_HEAD__", "__CAP_THRESHOLD_TAIL__")]
+    [Arguments(150, "__CAP_LONG_HEAD__", "__CAP_LONG_TAIL__")]
+    public async Task PtyCaptureRetainsIntermittentStdoutAcrossGapClassesOnWindows(
+        int gapMilliseconds,
+        string headMarker,
+        string tailMarker)
+    {
+        if (!TryStartWindowsIntermittentStdout(gapMilliseconds, [headMarker, tailMarker], out var startInfo))
+            return;
+
+        var result = await PtyCapture.RunAsync(
+            startInfo,
+            new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = true } });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await AssertContainsAllMarkers(result, headMarker, tailMarker);
     }
 
     [Test]
@@ -1161,6 +1255,47 @@ public sealed class PtyTests
         new() { FileName = fileName, Arguments = arguments, Size = new(40, 8) };
 
     private static PtyStartInfo UnixShell(string command) => Spawn("sh", ["-c", command]);
+
+    private static bool TryStartWindowsIntermittentStdout(
+        int gapMilliseconds,
+        string[] markers,
+        out PtyStartInfo startInfo)
+    {
+        startInfo = default!;
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return false;
+
+        if (!TryResolveWindowsPowerShell(out var powershell))
+            return false;
+
+        if (markers.Length == 0)
+            return false;
+
+        startInfo = Spawn(powershell,
+            ["-NoLogo", "-NoProfile", "-Command", BuildWindowsIntermittentStdoutCommand(gapMilliseconds, markers)]);
+        return true;
+    }
+
+    private static string BuildWindowsIntermittentStdoutCommand(int gapMilliseconds, string[] markers)
+    {
+        var command = $"Write-Output '{markers[0]}'";
+        for (var i = 1; i < markers.Length; i++)
+            command += $"; Start-Sleep -Milliseconds {gapMilliseconds}; Write-Output '{markers[i]}'";
+
+        return command;
+    }
+
+    private static async Task AssertContainsAllMarkers(PtyResult result, params string[] markers)
+    {
+        foreach (var marker in markers)
+            await Assert.That(result.Contains(marker)).IsTrue();
+    }
+
+    private static async Task AssertContainsAllMarkers(PtyCaptureResult result, params string[] markers)
+    {
+        foreach (var marker in markers)
+            await Assert.That(result.Contains(marker)).IsTrue();
+    }
 
     private static bool TryCreateBulkStdout32KiB(out PtyStartInfo startInfo)
     {

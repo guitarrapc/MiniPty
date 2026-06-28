@@ -9,10 +9,14 @@ internal sealed class PtyHandleReadStream : Stream
     private readonly SafeFileHandle handle;
     private PtySession? session;
     private int rawHoldActive;
+    private long lastTransportReadTick64;
 
     public PtyHandleReadStream(SafeFileHandle handle) => this.handle = handle;
 
     internal void BindOutputGate(PtySession outputSession) => session = outputSession;
+
+    /// <summary>Tick count of the last successful <see cref="ReadTransport"/> (0 when none yet).</summary>
+    internal long LastTransportReadTick64 => Volatile.Read(ref lastTransportReadTick64);
 
     public override bool CanRead => true;
     public override bool CanSeek => false;
@@ -123,6 +127,9 @@ internal sealed class PtyHandleReadStream : Stream
 
                         throw new IOException($"ReadFile failed (Win32 {error})");
                     }
+
+                    if (read > 0)
+                        Volatile.Write(ref lastTransportReadTick64, Environment.TickCount64);
 
                     return (int)read;
                 }
@@ -278,10 +285,14 @@ internal sealed class PtyFdReadStream : Stream
     private readonly int fd;
     private PtySession? session;
     private int rawHoldActive;
+    private long lastTransportReadTick64;
 
     public PtyFdReadStream(int fd) => this.fd = fd;
 
     internal void BindOutputGate(PtySession outputSession) => session = outputSession;
+
+    /// <summary>Tick count of the last successful <see cref="ReadTransport"/> (0 when none yet).</summary>
+    internal long LastTransportReadTick64 => Volatile.Read(ref lastTransportReadTick64);
 
     public override bool CanRead => true;
     public override bool CanSeek => false;
@@ -390,6 +401,9 @@ internal sealed class PtyFdReadStream : Stream
 
                     throw new IOException($"read failed (errno {errno})");
                 }
+
+                if (read > 0)
+                    Volatile.Write(ref lastTransportReadTick64, Environment.TickCount64);
 
                 return read;
             }
