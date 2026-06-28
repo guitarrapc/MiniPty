@@ -360,6 +360,22 @@ public sealed class PtyTests
     }
 
     /// <summary>
+    /// Boundary case: a gap at the 100ms stall threshold must still preserve output.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncRetainsThresholdGapStdoutOnWindows()
+    {
+        if (!TryStartWindowsIntermittentStdout(100, ["__THRESHOLD_HEAD__", "__THRESHOLD_TAIL__"], out var startInfo))
+            return;
+
+        await using var session = Pty.Start(startInfo);
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await AssertContainsAllMarkers(result, "__THRESHOLD_HEAD__", "__THRESHOLD_TAIL__");
+    }
+
+    /// <summary>
     /// Multiple intermittent segments must all appear in merged one-shot output.
     /// </summary>
     [Test]
@@ -409,6 +425,23 @@ public sealed class PtyTests
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
         await AssertContainsAllMarkers(result, "__CAP_LONG_HEAD__", "__CAP_LONG_TAIL__");
+    }
+
+    /// <summary>
+    /// Capture boundary case: a gap at the 100ms stall threshold must still preserve output.
+    /// </summary>
+    [Test]
+    public async Task PtyCaptureRetainsThresholdGapStdoutOnWindows()
+    {
+        if (!TryStartWindowsIntermittentStdout(100, ["__CAP_THRESHOLD_HEAD__", "__CAP_THRESHOLD_TAIL__"], out var startInfo))
+            return;
+
+        var result = await PtyCapture.RunAsync(
+            startInfo,
+            new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = true } });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await AssertContainsAllMarkers(result, "__CAP_THRESHOLD_HEAD__", "__CAP_THRESHOLD_TAIL__");
     }
 
     [Test]
