@@ -282,7 +282,7 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// Capture transport pump shares completion orchestration with <see cref="PtyCompleteAsync"/>.
+    /// Capture transport pump shares completion orchestration with <see cref="PtySession.CompleteAsync"/>.
     /// </summary>
     [Test]
     public async Task PtyCaptureDrainsBulkStdout()

@@ -19,19 +19,26 @@ try
         buffer.AsSpan(0, ChunkSize).Fill((byte)'A');
 
     var remaining = byteCount;
-    while (remaining > 0)
+    if (OperatingSystem.IsWindows())
     {
-        var write = Math.Min(remaining, ChunkSize);
-        if (OperatingSystem.IsWindows())
-            WriteWindowsConsole(buffer.AsSpan(0, write));
-        else
+        while (remaining > 0)
         {
-            using var stdout = Console.OpenStandardOutput();
+            var write = Math.Min(remaining, ChunkSize);
+            WriteWindowsConsole(buffer.AsSpan(0, write));
+            remaining -= write;
+        }
+    }
+    else
+    {
+        using var stdout = Console.OpenStandardOutput();
+        while (remaining > 0)
+        {
+            var write = Math.Min(remaining, ChunkSize);
             stdout.Write(buffer.AsSpan(0, write));
-            stdout.Flush();
+            remaining -= write;
         }
 
-        remaining -= write;
+        stdout.Flush();
     }
 
     return 0;
@@ -44,7 +51,7 @@ finally
 static void WriteWindowsConsole(ReadOnlySpan<byte> data)
 {
     // ConPTY children must use console APIs; WriteFile on stdout is not wired to the pseudo console.
-    // WriteConsole rejects U+0000, so callers use byte value 1 on Windows for binary benchmarks.
+    // WriteConsole rejects U+0000, so this benchmark uses printable 'A' bytes on Windows.
     Span<char> chars = stackalloc char[256];
     var offset = 0;
     while (offset < data.Length)
