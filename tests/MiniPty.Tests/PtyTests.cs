@@ -304,7 +304,9 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// Windows one-shot completion should not wait the full OutputDrainGrace for short echo output.
+    /// Windows one-shot completion should not consume the full <see cref="PtyCompleteOptions.OutputDrainGrace"/>
+    /// budget for short echo output. Uses a large grace and a relative upper bound so slow child startup
+    /// on CI runners does not false-fail while a regression that waits the full grace still does.
     /// </summary>
     [Test]
     public async Task PtyCompleteAsyncReturnsBeforeOutputDrainGraceOnWindows()
@@ -312,17 +314,14 @@ public sealed class PtyTests
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
 
-        if (!TryResolveWindowsPowerShell(out var powershell))
-            return;
-
-        await using var session = Pty.Start(Spawn(powershell,
-            ["-NoLogo", "-NoProfile", "-Command", "Write-Output 'pty-drain-latency'"]));
+        await using var session = Pty.Start(WindowsCommand("echo pty-drain-latency"));
 
         var options = new PtyCompleteOptions
         {
             DecodeOutput = true,
-            OutputDrainGrace = TimeSpan.FromSeconds(3),
+            OutputDrainGrace = TimeSpan.FromSeconds(10),
         };
+        var maxElapsed = options.OutputDrainGrace - TimeSpan.FromSeconds(2);
 
         var elapsed = Stopwatch.StartNew();
         var result = await session.CompleteAsync(options);
@@ -330,7 +329,7 @@ public sealed class PtyTests
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
         await Assert.That(result.Contains("pty-drain-latency")).IsTrue();
-        await Assert.That(elapsed.Elapsed).IsLessThan(TimeSpan.FromSeconds(2));
+        await Assert.That(elapsed.Elapsed).IsLessThan(maxElapsed);
     }
 
     /// <summary>
