@@ -53,9 +53,12 @@ public sealed record PtyCompleteOptions
     public TimeSpan? ExitTimeout { get; init; }
 
     /// <summary>
-    /// Gets or sets how long to drain PTY output after the child exits, before closing the transport.
+    /// Gets or sets the maximum post-exit drain budget before forcing transport close.
     /// </summary>
-    /// <value>Default is 1 second.</value>
+    /// <value>
+    /// Default is 1 second. On Windows ConPTY one-shot paths, the transport may close earlier when
+    /// output has been quiet for an internal stall period. This controls drain timing only, not shell command completion.
+    /// </value>
     public TimeSpan OutputDrainGrace { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>

@@ -33,11 +33,12 @@ internal static class PtyCompletion
         using var orchestration = session.EnterCompletionOrchestration();
         var pumpTask = pump(session.OutputTransport, cancellationToken);
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
-        // Defer CloseTransport on child exit so ConPTY bulk stdout is not truncated; AwaitPumpAsync
-        // closes the transport after OutputDrainGrace if the pump is still blocked on Read.
+        // Defer CloseTransport on child exit so ConPTY bulk stdout is not truncated; post-exit drain
+        // may close the transport early on Windows when output has been quiet long enough.
         var exitCode = await WaitForExitAsync(session, options, cancellationToken, closeTransportOnExit: false).ConfigureAwait(false);
         var output = await PtyOutputDrain.AwaitPumpAsync(
             pumpTask,
+            session.OutputTransport,
             session.CloseOutputTransport,
             options.OutputDrainGrace,
             options.OutputReaderCloseTimeout,

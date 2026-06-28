@@ -2,8 +2,13 @@
 
 internal static class PtyOutputDrain
 {
+    private const int PostExitStallBeforeCloseMs = 100;
+    private const int StallPollMs = 10;
+    private const int CoalesceMicroWindowMs = 1;
+
     internal static async Task<T> AwaitPumpAsync<T>(
         Task<T> pump,
+        Stream? outputTransport,
         Action closeOutputTransport,
         TimeSpan outputDrainGrace,
         TimeSpan outputReaderCloseTimeout,
@@ -16,6 +21,11 @@ internal static class PtyOutputDrain
 
         if (!transportAlreadyClosed)
         {
+            if (outputTransport is PtyHandleReadStream windowsTransport
+                && OperatingSystem.IsWindows()
+                && TryWindowsPostExitDrain(pump, windowsTransport, closeOutputTransport, outputDrainGrace, cancellationToken))
+                return await pump.ConfigureAwait(false);
+
             if (await WaitForCompletionAsync(pump, outputDrainGrace, cancellationToken).ConfigureAwait(false))
                 return await pump.ConfigureAwait(false);
 
@@ -31,6 +41,91 @@ internal static class PtyOutputDrain
         return pump.IsCompleted
             ? await pump.ConfigureAwait(false)
             : throw new InvalidOperationException("PTY output pump did not complete.");
+    }
+
+    /// <summary>
+    /// Post-exit drain for Windows ConPTY transport pumps: close when output has been quiet long enough,
+    /// bounded by <paramref name="outputDrainGrace"/>. Does not claim command completion; only unblocks EOF.
+    /// </summary>
+    private static bool TryWindowsPostExitDrain<T>(
+        Task<T> pump,
+        PtyHandleReadStream transport,
+        Action closeOutputTransport,
+        TimeSpan outputDrainGrace,
+        CancellationToken cancellationToken)
+    {
+        var exitObservedAt = Environment.TickCount64;
+        var graceDeadline = exitObservedAt + (long)outputDrainGrace.TotalMilliseconds;
+        var transportClosed = false;
+
+        while (Environment.TickCount64 < graceDeadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (pump.IsCompleted)
+                return true;
+
+            if (ShouldCloseAfterQuietPeriod(exitObservedAt, transport.LastTransportReadTick64))
+            {
+                RunMicroWindowQuietCheck(pump, cancellationToken);
+                if (pump.IsCompleted)
+                    return true;
+
+                if (ShouldCloseAfterQuietPeriod(exitObservedAt, transport.LastTransportReadTick64))
+                {
+                    closeOutputTransport();
+                    transportClosed = true;
+                    break;
+                }
+            }
+
+            PollSleep(StallPollMs, cancellationToken);
+        }
+
+        if (!transportClosed)
+        {
+            if (pump.IsCompleted)
+                return true;
+
+            closeOutputTransport();
+        }
+
+        return false;
+    }
+
+    private static bool ShouldCloseAfterQuietPeriod(long exitObservedAt, long lastReadTick)
+    {
+        var now = Environment.TickCount64;
+        if (now - exitObservedAt < PostExitStallBeforeCloseMs)
+            return false;
+
+        return lastReadTick == 0 || now - lastReadTick >= PostExitStallBeforeCloseMs;
+    }
+
+    private static void RunMicroWindowQuietCheck<T>(
+        Task<T> pump,
+        CancellationToken cancellationToken)
+    {
+        var microDeadline = Environment.TickCount64 + CoalesceMicroWindowMs;
+        while (Environment.TickCount64 < microDeadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (pump.IsCompleted)
+                return;
+
+            Thread.Sleep(0);
+        }
+    }
+
+    private static void PollSleep(int milliseconds, CancellationToken cancellationToken)
+    {
+        var pollDeadline = Environment.TickCount64 + milliseconds;
+        while (Environment.TickCount64 < pollDeadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = (int)Math.Min(milliseconds, pollDeadline - Environment.TickCount64);
+            if (remaining > 0)
+                Thread.Sleep(remaining);
+        }
     }
 
     /// <summary>

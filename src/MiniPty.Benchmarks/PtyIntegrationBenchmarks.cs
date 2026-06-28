@@ -114,6 +114,7 @@ public class PtyIntegrationBenchmarks
         await session.WaitForExitInternalAsync(CancellationToken.None, killOnCancellation: false).ConfigureAwait(false);
         return await PtyOutputDrain.AwaitPumpAsync(
             readTask,
+            session.Output,
             session.CloseOutputTransport,
             BenchmarkOptions.BytesOnly.OutputDrainGrace,
             BenchmarkOptions.BytesOnly.OutputReaderCloseTimeout,

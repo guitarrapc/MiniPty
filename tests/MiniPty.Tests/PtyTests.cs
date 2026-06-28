@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using MiniPty.Capture;
 
@@ -300,6 +301,57 @@ public sealed class PtyTests
         else
             await Assert.That(result.Output.Length).IsEqualTo(32_768);
         await Assert.That(result.Chunks.Count).IsGreaterThan(0);
+    }
+
+    /// <summary>
+    /// Windows one-shot completion should not wait the full OutputDrainGrace for short echo output.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncReturnsBeforeOutputDrainGraceOnWindows()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        if (!TryResolveWindowsPowerShell(out var powershell))
+            return;
+
+        await using var session = Pty.Start(Spawn(powershell,
+            ["-NoLogo", "-NoProfile", "-Command", "Write-Output 'pty-drain-latency'"]));
+
+        var elapsed = Stopwatch.StartNew();
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
+        elapsed.Stop();
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.Contains("pty-drain-latency")).IsTrue();
+        await Assert.That(elapsed.Elapsed).IsLessThan(TimeSpan.FromMilliseconds(800));
+    }
+
+    /// <summary>
+    /// Post-exit quiet detection must not truncate output that resumes after a short gap.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncRetainsIntermittentStdoutOnWindows()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        if (!TryResolveWindowsPowerShell(out var powershell))
+            return;
+
+        const string head = "__GAP_HEAD__";
+        const string tail = "__GAP_TAIL__";
+        var command =
+            $"Write-Output '{head}'; Start-Sleep -Milliseconds 50; Write-Output '{tail}'";
+
+        await using var session = Pty.Start(Spawn(powershell,
+            ["-NoLogo", "-NoProfile", "-Command", command]));
+
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.Contains(head)).IsTrue();
+        await Assert.That(result.Contains(tail)).IsTrue();
     }
 
     [Test]
