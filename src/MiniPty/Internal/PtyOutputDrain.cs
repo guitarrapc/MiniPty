@@ -22,14 +22,19 @@ internal static class PtyOutputDrain
         if (!transportAlreadyClosed)
         {
             if (outputTransport is PtyHandleReadStream windowsTransport
-                && OperatingSystem.IsWindows()
-                && TryWindowsPostExitDrain(pump, windowsTransport, closeOutputTransport, outputDrainGrace, cancellationToken))
-                return await pump.ConfigureAwait(false);
+                && OperatingSystem.IsWindows())
+            {
+                if (TryWindowsPostExitDrain(pump, windowsTransport, closeOutputTransport, outputDrainGrace, cancellationToken))
+                    return await pump.ConfigureAwait(false);
+                // TryWindowsPostExitDrain already consumed outputDrainGrace and closed transport when it returns false.
+            }
+            else
+            {
+                if (await WaitForCompletionAsync(pump, outputDrainGrace, cancellationToken).ConfigureAwait(false))
+                    return await pump.ConfigureAwait(false);
 
-            if (await WaitForCompletionAsync(pump, outputDrainGrace, cancellationToken).ConfigureAwait(false))
-                return await pump.ConfigureAwait(false);
-
-            closeOutputTransport();
+                closeOutputTransport();
+            }
         }
 
         if (await WaitForCompletionAsync(pump, outputReaderCloseTimeout, cancellationToken).ConfigureAwait(false))

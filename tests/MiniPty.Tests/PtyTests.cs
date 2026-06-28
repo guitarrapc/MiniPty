@@ -318,13 +318,19 @@ public sealed class PtyTests
         await using var session = Pty.Start(Spawn(powershell,
             ["-NoLogo", "-NoProfile", "-Command", "Write-Output 'pty-drain-latency'"]));
 
+        var options = new PtyCompleteOptions
+        {
+            DecodeOutput = true,
+            OutputDrainGrace = TimeSpan.FromSeconds(3),
+        };
+
         var elapsed = Stopwatch.StartNew();
-        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
+        var result = await session.CompleteAsync(options);
         elapsed.Stop();
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
         await Assert.That(result.Contains("pty-drain-latency")).IsTrue();
-        await Assert.That(elapsed.Elapsed).IsLessThan(TimeSpan.FromMilliseconds(800));
+        await Assert.That(elapsed.Elapsed).IsLessThan(TimeSpan.FromSeconds(2));
     }
 
     /// <summary>
