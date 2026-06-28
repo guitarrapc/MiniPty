@@ -15,13 +15,30 @@ var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
 try
 {
     Array.Clear(buffer, 0, ChunkSize);
-    using var stdout = Console.OpenStandardOutput();
+    if (OperatingSystem.IsWindows())
+        buffer.AsSpan(0, ChunkSize).Fill((byte)'A');
+
     var remaining = byteCount;
-    while (remaining > 0)
+    if (OperatingSystem.IsWindows())
     {
-        var write = Math.Min(remaining, ChunkSize);
-        stdout.Write(buffer.AsSpan(0, write));
-        remaining -= write;
+        while (remaining > 0)
+        {
+            var write = Math.Min(remaining, ChunkSize);
+            WriteWindowsConsole(buffer.AsSpan(0, write));
+            remaining -= write;
+        }
+    }
+    else
+    {
+        using var stdout = Console.OpenStandardOutput();
+        while (remaining > 0)
+        {
+            var write = Math.Min(remaining, ChunkSize);
+            stdout.Write(buffer.AsSpan(0, write));
+            remaining -= write;
+        }
+
+        stdout.Flush();
     }
 
     return 0;
@@ -29,6 +46,25 @@ try
 finally
 {
     ArrayPool<byte>.Shared.Return(buffer);
+}
+
+static void WriteWindowsConsole(ReadOnlySpan<byte> data)
+{
+    // ConPTY children must use console APIs; WriteFile on stdout is not wired to the pseudo console.
+    // WriteConsole rejects U+0000, so this benchmark uses printable 'A' bytes on Windows.
+    Span<char> chars = stackalloc char[256];
+    var offset = 0;
+    while (offset < data.Length)
+    {
+        var chunk = Math.Min(data.Length - offset, chars.Length);
+        for (var i = 0; i < chunk; i++)
+            chars[i] = (char)data[offset + i];
+
+        Console.Out.Write(chars[..chunk]);
+        offset += chunk;
+    }
+
+    Console.Out.Flush();
 }
 
 static bool TryParseBytesArg(string[] args, out int byteCount)

@@ -96,3 +96,4 @@ MiniPty does not fall back to pipe redirect when PTY creation fails.
 - **Output drain after child exit needs bounded waits on one-shot paths.** `OutputDrainGrace` and `OutputReaderCloseTimeout` prevent hung readers without dropping ordinary slow flushes. Persistent `ReadOutputAsync` does not use those timeouts.
 - **Cancel semantics differ by use case.** Waiting cancellation does not kill; one-shot completion defaults to killing when canceled.
 - **Do not queue `CompleteAsync` behind active output reads.** Fail fast with `InvalidOperationException` so read, wait, and completion cannot deadlock inside hidden session queues.
+- **Defer ConPTY transport close on one-shot transport pumps.** `CompleteAsync` and `PtyCapture.RunAsync` must wait for child exit with `closeTransportOnExit: false` while the transport pump is still reading; closing on exit truncates bulk stdout before `OutputDrainGrace` / `AwaitPumpAsync` can drain it.
