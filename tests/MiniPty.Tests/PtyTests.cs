@@ -328,51 +328,25 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// Post-exit quiet detection must not truncate output that resumes after a short gap.
+    /// Post-exit quiet detection must not truncate output across representative gap classes.
     /// </summary>
     [Test]
-    public async Task PtyCompleteAsyncRetainsIntermittentStdoutOnWindows()
+    [Arguments(50, "__GAP_HEAD__", "__GAP_TAIL__")]
+    [Arguments(100, "__THRESHOLD_HEAD__", "__THRESHOLD_TAIL__")]
+    [Arguments(150, "__LONG_GAP_HEAD__", "__LONG_GAP_TAIL__")]
+    public async Task PtyCompleteAsyncRetainsIntermittentStdoutAcrossGapClassesOnWindows(
+        int gapMilliseconds,
+        string headMarker,
+        string tailMarker)
     {
-        if (!TryStartWindowsIntermittentStdout(50, ["__GAP_HEAD__", "__GAP_TAIL__"], out var startInfo))
+        if (!TryStartWindowsIntermittentStdout(gapMilliseconds, [headMarker, tailMarker], out var startInfo))
             return;
 
         await using var session = Pty.Start(startInfo);
         var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
-        await AssertContainsAllMarkers(result, "__GAP_HEAD__", "__GAP_TAIL__");
-    }
-
-    /// <summary>
-    /// Gaps longer than the internal post-exit stall threshold must not truncate while the child is still producing output.
-    /// </summary>
-    [Test]
-    public async Task PtyCompleteAsyncRetainsLongGapStdoutOnWindows()
-    {
-        if (!TryStartWindowsIntermittentStdout(150, ["__LONG_GAP_HEAD__", "__LONG_GAP_TAIL__"], out var startInfo))
-            return;
-
-        await using var session = Pty.Start(startInfo);
-        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
-
-        await Assert.That(result.ExitCode).IsEqualTo(0);
-        await AssertContainsAllMarkers(result, "__LONG_GAP_HEAD__", "__LONG_GAP_TAIL__");
-    }
-
-    /// <summary>
-    /// Boundary case: a gap at the 100ms stall threshold must still preserve output.
-    /// </summary>
-    [Test]
-    public async Task PtyCompleteAsyncRetainsThresholdGapStdoutOnWindows()
-    {
-        if (!TryStartWindowsIntermittentStdout(100, ["__THRESHOLD_HEAD__", "__THRESHOLD_TAIL__"], out var startInfo))
-            return;
-
-        await using var session = Pty.Start(startInfo);
-        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true });
-
-        await Assert.That(result.ExitCode).IsEqualTo(0);
-        await AssertContainsAllMarkers(result, "__THRESHOLD_HEAD__", "__THRESHOLD_TAIL__");
+        await AssertContainsAllMarkers(result, headMarker, tailMarker);
     }
 
     /// <summary>
@@ -394,12 +368,19 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// Capture shares transport-pump drain orchestration with <see cref="PtySession.CompleteAsync"/>.
+    /// Capture shares transport-pump drain orchestration with <see cref="PtySession.CompleteAsync"/>
+    /// and must retain output across representative gap classes.
     /// </summary>
     [Test]
-    public async Task PtyCaptureRetainsIntermittentStdoutOnWindows()
+    [Arguments(50, "__CAP_GAP_HEAD__", "__CAP_GAP_TAIL__")]
+    [Arguments(100, "__CAP_THRESHOLD_HEAD__", "__CAP_THRESHOLD_TAIL__")]
+    [Arguments(150, "__CAP_LONG_HEAD__", "__CAP_LONG_TAIL__")]
+    public async Task PtyCaptureRetainsIntermittentStdoutAcrossGapClassesOnWindows(
+        int gapMilliseconds,
+        string headMarker,
+        string tailMarker)
     {
-        if (!TryStartWindowsIntermittentStdout(50, ["__CAP_GAP_HEAD__", "__CAP_GAP_TAIL__"], out var startInfo))
+        if (!TryStartWindowsIntermittentStdout(gapMilliseconds, [headMarker, tailMarker], out var startInfo))
             return;
 
         var result = await PtyCapture.RunAsync(
@@ -407,41 +388,7 @@ public sealed class PtyTests
             new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = true } });
 
         await Assert.That(result.ExitCode).IsEqualTo(0);
-        await AssertContainsAllMarkers(result, "__CAP_GAP_HEAD__", "__CAP_GAP_TAIL__");
-    }
-
-    /// <summary>
-    /// Capture must retain output across gaps longer than the internal post-exit stall threshold.
-    /// </summary>
-    [Test]
-    public async Task PtyCaptureRetainsLongGapStdoutOnWindows()
-    {
-        if (!TryStartWindowsIntermittentStdout(150, ["__CAP_LONG_HEAD__", "__CAP_LONG_TAIL__"], out var startInfo))
-            return;
-
-        var result = await PtyCapture.RunAsync(
-            startInfo,
-            new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = true } });
-
-        await Assert.That(result.ExitCode).IsEqualTo(0);
-        await AssertContainsAllMarkers(result, "__CAP_LONG_HEAD__", "__CAP_LONG_TAIL__");
-    }
-
-    /// <summary>
-    /// Capture boundary case: a gap at the 100ms stall threshold must still preserve output.
-    /// </summary>
-    [Test]
-    public async Task PtyCaptureRetainsThresholdGapStdoutOnWindows()
-    {
-        if (!TryStartWindowsIntermittentStdout(100, ["__CAP_THRESHOLD_HEAD__", "__CAP_THRESHOLD_TAIL__"], out var startInfo))
-            return;
-
-        var result = await PtyCapture.RunAsync(
-            startInfo,
-            new PtyCaptureOptions { Completion = new PtyCompleteOptions { DecodeOutput = true } });
-
-        await Assert.That(result.ExitCode).IsEqualTo(0);
-        await AssertContainsAllMarkers(result, "__CAP_THRESHOLD_HEAD__", "__CAP_THRESHOLD_TAIL__");
+        await AssertContainsAllMarkers(result, headMarker, tailMarker);
     }
 
     [Test]
