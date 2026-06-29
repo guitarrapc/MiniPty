@@ -3,7 +3,7 @@ namespace MiniPty.Internal;
 /// <summary>
 /// macOS-only transport pump scheduling via
 /// <see cref="ThreadPool.UnsafeQueueUserWorkItem(System.Threading.IThreadPoolWorkItem, bool)"/>
-/// with <c>preferLocal: true</c>. Callers on other platforms should keep <see cref="Task.Run(Func{Task}, CancellationToken)"/>.
+/// with <c>preferLocal: true</c>. Callers on other platforms should keep using <see cref="Task.Run{TResult}(Func{TResult}, CancellationToken)"/>.
 /// </summary>
 internal static class PtyTransportPumpTask
 {
@@ -47,9 +47,9 @@ internal static class PtyTransportPumpTask
             {
                 _tcs.SetResult(_work(_cancellationToken));
             }
-            catch (OperationCanceledException ex) when (ex.CancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException ex) when (ex.CancellationToken == _cancellationToken)
             {
-                _tcs.TrySetCanceled(ex.CancellationToken);
+                _tcs.TrySetCanceled(_cancellationToken);
             }
             catch (Exception ex)
             {

@@ -5,7 +5,7 @@ using MiniPty.Internal;
 namespace MiniPty.Benchmarks;
 
 /// <summary>
-/// Isolates transport pump scheduling cost: <see cref="Task.Run(Func{Task}, CancellationToken)"/>
+/// Isolates transport pump scheduling cost: <see cref="Task.Run{TResult}(Func{TResult}, CancellationToken)"/>
 /// vs macOS <see cref="PtyTransportPumpTask.Run{T}"/>.
 /// Run on macOS to compare against integration echo benchmarks.
 /// </summary>
