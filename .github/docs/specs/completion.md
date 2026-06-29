@@ -16,7 +16,7 @@ This API is intended for one-shot command execution. It is not a high-level long
 | `Input` | null | Stdin text. Null leaves stdin open; `""` signals EOF with no bytes. |
 | `SendEofAfterInput` | true | Calls `SendEof` after writing `Input`. Ignored when `Input` is null. |
 | `ExitTimeout` | null | Maximum wait for child exit. Null waits until exit or cancellation. |
-| `OutputDrainGrace` | 1 second | Maximum post-exit drain budget before forcing transport close. On Windows ConPTY, one-shot paths may close earlier when output has been quiet for an internal stall period; this is drain timing only, not command completion. |
+| `OutputDrainGrace` | 1 second | Maximum post-exit drain budget before forcing transport close. On Windows ConPTY and Unix PTY masters, one-shot paths may close earlier when transport reads have been quiet for an internal stall period; this is drain timing only, not command completion. |
 | `OutputReaderCloseTimeout` | 5 seconds | Time to wait for the reader after transport close. |
 | `DecodeOutput` | true | When true, pump decodes bytes so `GetText()` returns a zero-alloc slice. When false, only `Output` is stored and `GetText()` decodes on demand. |
 | `KillOnCancellation` | true | `CompleteAsync` only: cancellation kills the child when true. |

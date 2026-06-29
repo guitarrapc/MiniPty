@@ -17,22 +17,28 @@ internal static partial class UnixPtyBackend
         var arguments = startInfo.Arguments as string[] ?? startInfo.Arguments.ToArray();
         var environment = PtyEnvironment.BuildUnix(startInfo);
         var exec = UnixExecPayload.Create(startInfo.FileName, arguments, startInfo.WorkingDirectory, environment);
+        var pid = 0;
+        var master = 0;
+        unsafe
+        {
+            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid);
+            if (spawnError != 0)
+            {
+                exec.Dispose();
+                throw new IOException($"PTY spawn failed (errno {spawnError})");
+            }
+        }
+
         try
         {
-            var pid = 0;
-            var master = 0;
-            unsafe
-            {
-                var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid);
-                if (spawnError != 0)
-                    throw new IOException($"PTY spawn failed (errno {spawnError})");
-            }
-
-            return new UnixPtyBackendInstance(master, pid, size);
+            return new UnixPtyBackendInstance(master, pid, size, exec);
         }
-        finally
+        catch
         {
             exec.Dispose();
+            if (master >= 0)
+                UnixInterop.close(master);
+            throw;
         }
     }
 
@@ -102,6 +108,7 @@ internal static partial class UnixPtyBackend
     {
         private readonly int _master;
         private readonly int _pid;
+        private readonly UnixExecPayload? _execHold;
         private readonly InputTrackingWriteStream _inputStream;
         private bool _eofSent;
         private bool _eofPending;
@@ -114,10 +121,11 @@ internal static partial class UnixPtyBackend
         private bool _disposed;
         private PtySize _size;
 
-        public UnixPtyBackendInstance(int master, int pid, PtySize size)
+        public UnixPtyBackendInstance(int master, int pid, PtySize size, UnixExecPayload execHold)
         {
             _master = master;
             _pid = pid;
+            _execHold = execHold;
             _size = size;
             _inputStream = new InputTrackingWriteStream(new PtyFdWriteStream(master), OnInputWritten);
             Input = _inputStream;
@@ -272,6 +280,7 @@ internal static partial class UnixPtyBackend
             }
 
             CloseTransport();
+            _execHold?.Dispose();
         }
 
         private void TryReapChild()

@@ -21,12 +21,11 @@ internal static class PtyOutputDrain
 
         if (!transportAlreadyClosed)
         {
-            if (outputTransport is PtyHandleReadStream windowsTransport
-                && OperatingSystem.IsWindows())
+            if (outputTransport is PtyHandleReadStream or PtyFdReadStream)
             {
-                if (TryWindowsPostExitDrain(pump, windowsTransport, closeOutputTransport, outputDrainGrace, cancellationToken))
+                if (TryPostExitQuietDrain(pump, outputTransport, closeOutputTransport, outputDrainGrace, cancellationToken))
                     return await pump.ConfigureAwait(false);
-                // TryWindowsPostExitDrain already consumed outputDrainGrace and closed transport when it returns false.
+                // Quiet drain consumed grace and closed transport when it returns false.
             }
             else
             {
@@ -48,13 +47,9 @@ internal static class PtyOutputDrain
             : throw new InvalidOperationException("PTY output pump did not complete.");
     }
 
-    /// <summary>
-    /// Post-exit drain for Windows ConPTY transport pumps: close when output has been quiet long enough,
-    /// bounded by <paramref name="outputDrainGrace"/>. Does not claim command completion; only unblocks EOF.
-    /// </summary>
-    private static bool TryWindowsPostExitDrain<T>(
+    private static bool TryPostExitQuietDrain<T>(
         Task<T> pump,
-        PtyHandleReadStream transport,
+        Stream transport,
         Action closeOutputTransport,
         TimeSpan outputDrainGrace,
         CancellationToken cancellationToken)
@@ -69,13 +64,13 @@ internal static class PtyOutputDrain
             if (pump.IsCompleted)
                 return true;
 
-            if (ShouldCloseAfterQuietPeriod(exitObservedAt, transport.LastTransportReadTick64))
+            if (ShouldCloseAfterQuietPeriod(exitObservedAt, ReadLastTransportReadTick64(transport)))
             {
                 RunMicroWindowQuietCheck(pump, cancellationToken);
                 if (pump.IsCompleted)
                     return true;
 
-                if (ShouldCloseAfterQuietPeriod(exitObservedAt, transport.LastTransportReadTick64))
+                if (ShouldCloseAfterQuietPeriod(exitObservedAt, ReadLastTransportReadTick64(transport)))
                 {
                     closeOutputTransport();
                     transportClosed = true;
@@ -96,6 +91,14 @@ internal static class PtyOutputDrain
 
         return false;
     }
+
+    private static long ReadLastTransportReadTick64(Stream transport) =>
+        transport switch
+        {
+            PtyHandleReadStream windows => windows.LastTransportReadTick64,
+            PtyFdReadStream unix => unix.LastTransportReadTick64,
+            _ => 0
+        };
 
     /// <summary>
     /// F3 stall condition: exit observed for at least <see cref="PostExitStallBeforeCloseMs"/> and the last

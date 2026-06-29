@@ -126,7 +126,7 @@ parent: keep master fd for PTY input/output
 
 **Fork child hygiene:** After `forkpty`, the child inherits the parent's fd table and signal dispositions. Before `chdir` / `execve`, the native shim resets all signal handlers to `SIG_DFL` (Linux and FreeBSD) while signals are still blocked in the child, then scrubs inherited descriptors `>= 3` on Linux (`close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` closes them when available; otherwise a bounded `fcntl(F_SETFD, FD_CLOEXEC)` scan marks them close-on-exec). The fallback scan bound is computed in the **parent** via `sysconf(_SC_OPEN_MAX)` before `forkpty`; the child uses only async-signal-safe syscalls (`fcntl`, `syscall`, `sigaction`, `chdir`, `execve`). Work avoids malloc and runs only in the short-lived fork child; the parent managed path is unchanged. FreeBSD fd close is tracked as follow-up work.
 
-**`forkpty()` safety:** Build executable path, `argv`, `envp`, and optional `cwd` as unmanaged UTF-8 C strings in the **parent** before `forkpty()`. The child path stays inside the native shim for `chdir`, path lookup, `execve`, and `_exit` after the fork boundary—no managed allocation, no `RuntimeInformation`, no string marshalling. The parent frees the payload after `forkpty()`; the child retains a copy-on-write mapping until `execve` replaces the address space.
+**`forkpty()` safety:** Build executable path, `argv`, `envp`, and optional `cwd` as unmanaged UTF-8 C strings in the **parent** before `forkpty()`. The child path stays inside the native shim for `chdir`, path lookup, `execve`, and `_exit` after the fork boundary—no managed allocation, no `RuntimeInformation`, no string marshalling. The managed parent holds the payload until session/backend disposal; the fork child calls `chdir(cwd)` on its copy-on-write mapping (no child-side `strdup`). `execve` replaces the child address space.
 
 The native boundary uses `LibraryImport` with `byte* file`, `byte** argv`, and `byte** envp`—not `string[]` marshalling—so NativeAOT does not depend on runtime array marshalling for the exec boundary.
 
@@ -176,6 +176,17 @@ minipty_spawn_helper:
 | Spawn errors to managed | `minipty_fork_pty_exec` returns positive errno; `IOException` uses that value |
 
 Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux or macOS.
+
+### One-shot transport pump scheduling
+
+`CompleteAsync` and `PtyCapture.RunAsync` start a background transport read immediately after spawn. Do **not** busy-wait on the caller thread for the pump to enter its read loop — that starves the thread pool under parallel CI and can throw cancellation before `KillOnCancellation` runs.
+
+| Platform | Scheduling |
+|---|---|
+| macOS | `ThreadPool.UnsafeQueueUserWorkItem(..., preferLocal: true)` so the blocking read starts promptly (node-pty attaches its reader synchronously at spawn) |
+| Other | `Task.Run` |
+
+Post-exit quiet drain on ConPTY and Unix PTY masters may close the transport when reads have been quiet long enough, bounded by `OutputDrainGrace` — drain timing only, not command completion. See [lifecycle.md](../specs/lifecycle.md) and [completion.md](../specs/completion.md).
 
 ### Parent I/O (all Unix)
 

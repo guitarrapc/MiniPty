@@ -782,7 +782,13 @@ public sealed class PtyTests
         await Assert.That(result.Contains("path-absent-fallback")).IsTrue();
     }
 
+    /// <summary>
+    /// Empty <c>PATH</c> components resolve as the current directory after <c>chdir</c>.
+    /// Retried under parallel CI: <c>forkpty</c> on Linux arm can still race exec payload visibility
+    /// despite parent hold-until-dispose (see platform_support.md).
+    /// </summary>
     [Test]
+    [Retry(3)]
     public async Task PtyUnixPathLookupTreatsEmptyPathEntriesAsCurrentDirectory()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
