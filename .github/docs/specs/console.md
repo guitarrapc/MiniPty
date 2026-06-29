@@ -130,10 +130,12 @@ Implementation differences (for example `termios` vs Windows Console VT APIs, `S
 Typical interactive host flow:
 
 1. `await using var session = Pty.Start(...)`
-2. `await using var consoleInput = PtyConsoleInput.Attach(session)` (or `using` on sync dispose)
+2. `using var consoleInput = PtyConsoleInput.Attach(session)`
 3. Start embedder `ReadOutputAsync` loop: for each chunk, record and write bytes to host `stdout`
 4. Wait for session end (`WaitForExitAsync` or application exit condition)
-5. Dispose console input, then dispose session
+5. On scope exit, `using` disposes `consoleInput` before `await using` disposes `session` (reverse declaration order)
+
+`Attach` returns **`IDisposable`** only in v1; do not use `await using` on the console handle unless a future API adds `IAsyncDisposable`.
 
 Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only. Use case 4 (editor terminal backend) uses **MiniPty** core without **MiniPty.Console**.
 
