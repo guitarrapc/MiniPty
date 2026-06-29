@@ -1,17 +1,17 @@
 {
-  "baselineCommit": "281283901ed3e3072d72131d4f86c4dd09723578",
-  "description": "Post Windows ConPTY one-shot stall drain (100ms quiet + OutputDrainGrace ceiling). Allocated bytes from BenchmarkDotNet MemoryDiagnoser ShortRun job (1 KB = 1024 B). win-x64 run on 2026-06-29.",
+  "baselineCommit": "721d74a1ba20b713805ea934805ee0c8aa6a24c1",
+  "description": "Post Milestone 3.5 close and Windows ConPTY one-shot drain (#28, #29). Allocated bytes from BenchmarkDotNet MemoryDiagnoser SimpleJob (1 KB = 1024 B, ceiling). win-x64 run on 2026-06-29.",
   "benchmarks": {
     "Session_Exit0_Bytes": 3840,
     "Session_Echo_Bytes": 4004,
-    "Capture_Echo_Bytes": 5192,
-    "Session_32KiB_Bytes": 42639,
-    "Capture_32KiB_Bytes": 48824,
-    "Session_32KiB_StreamBytes": 6656,
-    "Session_32KiB_OutputStreamBytes": 4188,
+    "Capture_Echo_Bytes": 5202,
+    "Session_32KiB_Bytes": 42978,
+    "Capture_32KiB_Bytes": 48774,
+    "Session_32KiB_StreamBytes": 6708,
+    "Session_32KiB_OutputStreamBytes": 4189,
     "Session_Echo_Text": 4332,
     "Capture_Echo_Text": 6697,
-    "Capture_32KiB_Text": 129567,
-    "Capture_32KiB_DisplayPlain": 196680
+    "Capture_32KiB_Text": 129915,
+    "Capture_32KiB_DisplayPlain": 197018
   }
 }

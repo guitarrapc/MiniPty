@@ -6,7 +6,7 @@ This document is a working plan, not an implemented API contract. After each imp
 
 ## Summary
 
-MiniPty already creates real pseudo-terminals and exposes raw `Input` / `Output` streams. The missing layer is not PTY creation itself; it is the supported, documented lifecycle for long-lived bidirectional sessions.
+MiniPty already creates real pseudo-terminals and exposes raw `Input` / `Output` streams. Core transport milestones (spawn options, `ReadOutputAsync`, lifecycle hardening, capture alignment) are implemented. Remaining plan work focuses on samples, optional parity features, and a future console-attach package.
 
 The recommended direction is:
 
@@ -26,13 +26,13 @@ MiniPty currently provides:
 - Cross-platform PTY spawn: Windows ConPTY; Unix `forkpty` / native shim.
 - Raw `Input` and `Output` streams on `PtySession`.
 - `WriteInputAsync`, `SendEof`, `Resize`, `WaitForExitAsync`, `Kill`, and disposal.
+- `ReadOutputAsync` for persistent bytes-only output streaming with lifecycle contracts.
 - `CompleteAsync` for one-shot input, wait, output pump, drain, and result materialization.
-- `MiniPty.Capture` for timestamped one-shot observation.
+- `MiniPty.Capture` for timestamped one-shot observation (transport pump; parity with one-shot completion).
 - Display helpers for host-readable text from PTY output.
+- Spawn environment overlay and Unix `TERM` / terminal sanitize.
 
-Current public messaging treats these capabilities as one-shot oriented. Long-lived interactive sessions, ongoing bidirectional input, and Vim/less/REPL-style usage are documented as out of scope.
-
-The practical reality is slightly different: low-level streams already allow manual bidirectional operation, but MiniPty does not yet provide a first-class, tested, lifecycle-safe persistent session API.
+Human local-console attachment (Vim, less, htop on the host terminal) and terminal emulation remain out of scope. The next plan milestone is an interactive sample that proves persistent transport without a console adapter.
 
 ## node-pty Comparison
 
@@ -411,15 +411,15 @@ Latency (`Mean`) remained within +10% on all integration benchmarks in the same 
 **Definition of done:**
 
 - [x] `lifecycle.md` and `platform_support.md` updated: Windows write-then-EOF contract, limitations for raw/TUI.
-- [x] Representative Windows tests (`sort`, existing stdin+EOF paths) assert **ExitCode 0** on x64 (arm64 CI pending).
+- [x] Representative Windows tests (`sort`, existing stdin+EOF paths) assert **ExitCode 0** on x64 and arm64 CI.
 - [x] Full test suite green (61/61 local).
 - [x] **Benchmark gate:** `PtyIntegrationBenchmarks` allocation ≤ baseline at M3.1 start (`fd589fe`, ShortRun; 11/11 pass).
 
 **Lessons learned:** ConPTY input pipe close after a write is delivered as `STATUS_CONTROL_C_EXIT`, not EOF. Legacy console EOF for pipe-style readers (`sort`) is Ctrl+Z submitted with CR (`0x1A`, `0x0D`); the input pipe must stay open until the child exits naturally. When input lacks a trailing line terminator, an extra CR is written before Ctrl+Z + CR (mirror Unix EOT newline awareness). Track stream-EOF vs pipe-close with an explicit `StreamEofSignaled` invariant (`_eofSignaled &&` bytes written)—not a sentinel in `_eofDeferPollsRemaining`. Pack stdin tail into `_inputTailByte` with `InputTailUnset` so newline-aware EOF does not add instance fields.
 
-### Milestone 3.5: Capture Alignment (in progress; was Milestone 2.5)
+### Milestone 3.5: Capture Alignment **(implemented)**
 
-**Status: in progress.** Prerequisites satisfied (M3, M3.1). Phase 0 measured gap and design decisions recorded below.
+**Status: implemented.** Prerequisites satisfied (M3, M3.1). PR1–PR3 delivered; gate **C** closed. Post-close Windows ConPTY one-shot drain work (#28, #29) refreshed the integration benchmark baseline (see [Benchmark baseline refresh](#benchmark-baseline-refresh-post-35)).
 
 **Placement rationale:** Originally scheduled immediately after Milestone 2. An integration attempt showed that Capture-on-`ReadOutputAsync` conflicts with Milestone 2 transport semantics and benchmark baselines unless core backpressure is weakened. Lifecycle ordering (stdin, read, exit, drain) also needs Milestone 3 hardening before Capture can migrate safely.
 
@@ -614,11 +614,32 @@ Capture dedupe removes the merge duplicate but does **not** close gate **C**: `B
 
 **Rejected:** Producer `await`/`TaskCompletionSource` per handoff (Session ~80 KB, Capture ~195 KB on fast-consumer paths). `Task.FromResult(ReadTransport)` on the transport pump (deadlocks orchestration — input must run concurrently with the pump).
 
-### Follow-up: Windows `ReadOutputAsync` allocation (cross-OS gap)
+#### Definition of done
+
+- [x] PR1–PR3 landed; gate **C** closed (2026-06-26).
+- [x] `PtyCapture.RunAsync` on transport pump; `ReadSessionAsync` removed.
+- [x] Strict handoff `BoundedOutputBuffer`; no managed ring on fast-consumer paths.
+- [x] Full test suite green on Windows and Unix CI.
+- [x] Integration benchmark baseline refreshed after Windows ConPTY one-shot drain (#28, #29).
+
+### Benchmark baseline refresh (post-3.5)
+
+Windows ConPTY one-shot stdout truncation (#28) and stall-aware drain (#29) changed one-shot completion orchestration. `BenchmarkDotNet.Artifacts/baselines/integration.json` was refreshed at commit `721d74a` (2026-06-29, win-x64 SimpleJob, allocation ceiling).
+
+| Benchmark | Prior baseline (`2812839`) | Current baseline (`721d74a`) | Notes |
+|---|---:|---:|---|
+| `Session_32KiB_Bytes` | 42,639 B | 42,978 B | Post-exit quiet polling + drain grace on one-shot path |
+| `Capture_32KiB_Bytes` | 48,824 B | 48,774 B | Transport pump unchanged vs PR3 close |
+| `Session_32KiB_StreamBytes` | 6,656 B | 6,708 B | Within measurement noise |
+| `Capture_32KiB_DisplayPlain` | 196,680 B | 197,018 B | Within measurement noise |
+
+Allocation gate for future PRs: `scripts/compare-benchmark-allocations.ps1` vs `integration.json` (≤ baseline `Allocated`).
+
+### Follow-up: Windows `ReadOutputAsync` allocation (implemented)
 
 Gate C closed the managed-ring / handoff regression on Windows. Windows drain polling and `ReadOutputAsync` producer coalescing are implemented (see [core_session.md](../specs/core_session.md)). Cross-OS benchmark fairness for bulk stdout is implemented via `MiniPty.Benchmarks.Child` (see [platform_support.md](../specs/platform_support.md) → Verification).
 
-### Milestone 4: Interactive Sample
+### Milestone 4: Interactive Sample **(next)**
 
 Goal: prove the core API can drive a long-lived process without a console adapter.
 
@@ -675,11 +696,12 @@ TUI programs such as Vim, htop, less, and top should be later smoke tests. They 
 
 As milestones land, update:
 
-- [spec.md](../spec.md): move long-lived sessions from out of scope into implemented scope and add any new spec documents to the document map.
-- [core_session.md](../specs/core_session.md): document `PtyStartInfo.Environment`, `TerminalName`, output streaming, and persistent session contracts.
-- [lifecycle.md](../specs/lifecycle.md): document persistent cancellation, read, drain, EOF, and disposal semantics.
-- [references/pty_crossplatform.md](../references/pty_crossplatform.md): document environment passing, ConPTY readiness decisions, and Unix `execve` details if implemented.
-- [README.md](../../../README.md): update features and not-supported sections after the core persistent API is tested.
+- [x] [spec.md](../spec.md): long-lived sessions in implemented scope; capture alignment no longer listed as future work.
+- [x] [core_session.md](../specs/core_session.md): `PtyStartInfo.Environment`, `TerminalName`, output streaming, persistent session contracts.
+- [x] [lifecycle.md](../specs/lifecycle.md): persistent cancellation, read, drain, EOF, and disposal semantics.
+- [x] [references/pty_crossplatform.md](../references/pty_crossplatform.md): environment passing, ConPTY readiness, Unix `execve` details.
+- [x] [README.md](../../../README.md): features and not-supported sections updated for persistent API.
+- [ ] Interactive sample and README cross-link when Milestone 4 lands.
 
 ## Open Questions
 

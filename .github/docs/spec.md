@@ -37,7 +37,7 @@ Timestamped chunks are **not** part of the core API. Consumers that need to obse
 - Capture tuning such as max chunk size or chunk timestamp modes
 - Full terminal emulation, TUI replay, or faithful screen-buffer rendering
 
-Future work for capture alignment, local console attachment, and optional node-pty parity features is tracked separately in [plans/plan_minipty_next.md](plans/plan_minipty_next.md). Planning documents are not implemented API contracts.
+Future work for local console attachment (`MiniPty.Console`), interactive samples, and optional node-pty parity features is tracked separately in [plans/plan_minipty_next.md](plans/plan_minipty_next.md). Planning documents are not implemented API contracts.
 
 ## Related Documents
 
