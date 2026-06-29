@@ -118,19 +118,12 @@ internal sealed class WindowsHostTerminal : IHostTerminal
 
     private unsafe int ReadInputCancelable(Span<byte> buffer, CancellationToken cancellationToken)
     {
-        var registration = cancellationToken.Register(static state =>
+        using var registration = cancellationToken.UnsafeRegister(static state =>
         {
             ((WindowsHostTerminal)state!).CancelPendingRead();
         }, this);
 
-        try
-        {
-            return ReadInputCore(buffer);
-        }
-        finally
-        {
-            registration.Dispose();
-        }
+        return ReadInputCore(buffer);
     }
 
     private unsafe int ReadInputCore(Span<byte> buffer)
