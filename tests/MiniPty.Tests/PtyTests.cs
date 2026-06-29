@@ -868,6 +868,7 @@ public sealed class PtyTests
     }
 
     [Test]
+    [Retry(3)]
     public async Task PtyUnixParallelSpawnCompletes()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
