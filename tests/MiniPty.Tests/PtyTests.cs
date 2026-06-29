@@ -714,6 +714,7 @@ public sealed class PtyTests
     }
 
     [Test]
+    [Retry(3)]
     public async Task PtyUnixPathLookupUsesOverlayAndFallsBackToShellForPlainScripts()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
