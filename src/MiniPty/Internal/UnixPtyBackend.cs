@@ -29,7 +29,17 @@ internal static partial class UnixPtyBackend
             }
         }
 
-        return new UnixPtyBackendInstance(master, pid, size, exec);
+        try
+        {
+            return new UnixPtyBackendInstance(master, pid, size, exec);
+        }
+        catch
+        {
+            exec.Dispose();
+            if (master >= 0)
+                UnixInterop.close(master);
+            throw;
+        }
     }
 
     private static unsafe int ForkPtyExec(

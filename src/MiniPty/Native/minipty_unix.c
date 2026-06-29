@@ -151,8 +151,16 @@ static int spawn_pty_child_forkpty(
 
     if (pid == 0) {
         minipty_prepare_fork_child(inherited_fd_scan_limit);
-        if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
-            _exit(126);
+        if (cwd != NULL && cwd[0] != '\0') {
+            char *cwd_owned = strdup(cwd);
+            if (cwd_owned == NULL)
+                _exit(126);
+            if (chdir(cwd_owned) != 0) {
+                free(cwd_owned);
+                _exit(126);
+            }
+            free(cwd_owned);
+        }
         minipty_execvpe(file, argv, child_envp);
         _exit(127);
     }
