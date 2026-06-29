@@ -177,6 +177,17 @@ minipty_spawn_helper:
 
 Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux or macOS.
 
+### One-shot transport pump scheduling
+
+`CompleteAsync` and `PtyCapture.RunAsync` start a background transport read immediately after spawn. Do **not** busy-wait on the caller thread for the pump to enter its read loop — that starves the thread pool under parallel CI and can throw cancellation before `KillOnCancellation` runs.
+
+| Platform | Scheduling |
+|---|---|
+| macOS | `ThreadPool.UnsafeQueueUserWorkItem(..., preferLocal: true)` so the blocking read starts promptly (node-pty attaches its reader synchronously at spawn) |
+| Other | `Task.Run` |
+
+Post-exit quiet drain on ConPTY and Unix PTY masters may close the transport when reads have been quiet long enough, bounded by `OutputDrainGrace` — drain timing only, not command completion. See [lifecycle.md](../specs/lifecycle.md) and [completion.md](../specs/completion.md).
+
 ### Parent I/O (all Unix)
 
 1. `forkpty()` returns the PTY master fd and child pid to the parent.
