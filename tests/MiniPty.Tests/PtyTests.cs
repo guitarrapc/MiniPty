@@ -713,6 +713,7 @@ public sealed class PtyTests
         }
     }
 
+    // Retried under parallel CI due to occasional Unix exec/path overlay visibility races.
     [Test]
     [Retry(3)]
     public async Task PtyUnixPathLookupUsesOverlayAndFallsBackToShellForPlainScripts()
@@ -868,6 +869,7 @@ public sealed class PtyTests
         }
     }
 
+    // Retried under parallel CI due to occasional spawn/exec timing flakiness.
     [Test]
     [Retry(3)]
     public async Task PtyUnixParallelSpawnCompletes()

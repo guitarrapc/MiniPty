@@ -52,16 +52,39 @@ internal sealed class PtyConsoleAttach : IDisposable
             ready.Wait();
 
             if (initFailure is not null)
-                throw new InvalidOperationException("Failed to configure the host terminal.", initFailure);
+                ThrowInitFailure(initFailure);
         }
         else
         {
-            _terminal = HostTerminal.Create();
-            SyncSize();
-            _inputTask = Task.Run(InputPumpAsync);
+            try
+            {
+                _terminal = HostTerminal.Create();
+                SyncSize();
+                _inputTask = Task.Run(InputPumpAsync);
+            }
+            catch
+            {
+                CleanupInitFailure();
+                throw;
+            }
         }
 
         _resizeTask = Task.Run(ResizePollAsync);
+    }
+
+    private void ThrowInitFailure(Exception inner)
+    {
+        CleanupInitFailure();
+        throw new InvalidOperationException("Failed to configure the host terminal.", inner);
+    }
+
+    private void CleanupInitFailure()
+    {
+        if (_terminal is not null)
+            _terminal.Dispose();
+
+        ArrayPool<byte>.Shared.Return(_inputBuffer);
+        _cts.Dispose();
     }
 
     internal static void Register(PtySession session)
