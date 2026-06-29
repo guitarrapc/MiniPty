@@ -1,3 +1,7 @@
-Milestones 1–3.5 (spawn options, persistent output streaming, lifecycle hardening, Windows stdin EOF, capture alignment) are implemented. See [specs/core_session.md](specs/core_session.md), [specs/lifecycle.md](specs/lifecycle.md), and [specs/capture.md](specs/capture.md).
+Milestones 1–4 (through Interactive sample) are implemented. See [specs/core_session.md](specs/core_session.md), [specs/lifecycle.md](specs/lifecycle.md), [samples/Interactive.cs](../../samples/Interactive.cs).
 
-The next planned work is **Milestone 4: Interactive Sample** — a cross-platform sample that drives a long-lived shell or REPL with `ReadOutputAsync`, multiple commands over time, resize, and clean exit. See [plans/plan_minipty_next.md](plans/plan_minipty_next.md).
+**Next:** Milestone 5 — **MiniPty.Console** (use case 3: host input attach for interactive programs). Specification: [specs/console.md](specs/console.md). Implementation not started.
+
+scenetake interactive recording integration is planned in the scenetake repo; API gaps feed back here.
+
+Editor terminal backend (use case 4) is a **separate plan**, not Milestone 5.

@@ -42,6 +42,12 @@ Exactly **one** active output consumer is allowed per session. The first started
 
 `ReadOutputAsync` and `WaitForExitAsync` **may run concurrently** without deadlock, data loss, or premature transport close. Duplicate `WaitForExitAsync` calls are allowed.
 
+### Host input adapters
+
+Packages such as **MiniPty.Console** ([Console](console.md)) forward host keyboard bytes to `WriteInputAsync`. They **must not** start a second PTY output consumer.
+
+Interactive hosts (use case 3) keep a single embedder-owned `ReadOutputAsync` reader for recording and host display while Console handles host terminal modes and stdin forwarding.
+
 ## EOF
 
 `SendEof()` is platform-specific:

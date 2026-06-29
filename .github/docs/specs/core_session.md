@@ -51,6 +51,21 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 | `HasExited` / `ExitCode?` | Polls exit state. `ExitCode` is null until the child has exited. |
 | `Dispose` / `DisposeAsync` | Kills the child if still running, then releases handles. |
 
+## Embedder Patterns
+
+MiniPty core is the PTY transport for multiple embedder shapes ([spec.md](../spec.md)). The core API is unchanged; patterns differ by who reads output and who writes input.
+
+| Use case | Output consumer (exactly one) | Input source | Packages |
+|---|---|---|---|
+| **1 — General transport** | Embedder (`ReadOutputAsync` or raw `Output`) | Embedder (`WriteInputAsync`) | **MiniPty** |
+| **2 — One-shot record** | `PtyCapture.RunAsync` (internal transport pump) | `PtyCompleteOptions` / capture options | **MiniPty.Capture** |
+| **3 — Interactive host** | Embedder `ReadOutputAsync` (record + write host `stdout`) | **MiniPty.Console** host keyboard + optional embedder writes | **MiniPty** + **MiniPty.Console** |
+| **4 — Editor terminal** | Frontend integration (`ReadOutputAsync`) | Frontend key events → `WriteInputAsync` | **MiniPty** |
+
+**Use case 3** does not add a second PTY output reader. [Console](console.md) configures the host terminal and forwards host stdin bytes; the embedder keeps the single `ReadOutputAsync` enumeration for PTY → host display and recording.
+
+**Use case 4** does not use **MiniPty.Console** (no host console attach). Optional node-pty parity features for editors are tracked outside the Console specification.
+
 ## Backpressure
 
 A PTY has backpressure. If the child writes output and nothing reads PTY output, the child may block when the terminal buffer fills. Callers must use `ReadOutputAsync`, `CompleteAsync`, `PtyCapture.RunAsync`, or continuously read `Output` themselves.

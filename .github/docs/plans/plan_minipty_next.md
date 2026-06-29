@@ -6,16 +6,18 @@ This document is a working plan, not an implemented API contract. After each imp
 
 ## Summary
 
-MiniPty already creates real pseudo-terminals and exposes raw `Input` / `Output` streams. Core transport milestones (spawn options, `ReadOutputAsync`, lifecycle hardening, capture alignment) are implemented. Remaining plan work focuses on samples, optional parity features, and a future console-attach package.
+MiniPty already creates real pseudo-terminals and exposes raw `Input` / `Output` streams. Core transport milestones (spawn options, `ReadOutputAsync`, lifecycle hardening, capture alignment, Interactive sample) are implemented.
+
+**Next plan work:** **MiniPty.Console** (use case 3 — host input attach; spec in [console.md](../specs/console.md)). Editor terminal backend parity (use case 4) is a **separate plan**.
 
 The recommended direction is:
 
 | Package | Responsibility |
 |---|---|
 | **MiniPty** | Core PTY transport: spawn, persistent read/write, resize, exit, kill, lifecycle, one-shot convenience |
-| **MiniPty.Capture** | One-shot timestamped output capture and observation helpers |
-| **MiniPty.Console** | Optional future package: attach a `PtySession` to the current console with raw mode and resize tracking |
-| **Samples / future hosting helpers** | WebSocket, xterm.js, ASP.NET Core, or other frontend integration examples |
+| **MiniPty.Capture** | One-shot timestamped output capture (use case 2) |
+| **MiniPty.Console** | Host terminal **input** attach for interactive human operation (use case 3); spec written, not yet implemented |
+| **Editor / frontend integrators** | Use case 4: **MiniPty** core only; xterm.js etc. remain external |
 
 Do not split persistent PTY support into a package such as `MiniPty.Persistent`. Persistence is a property of PTY sessions themselves: `Pty.Start` already creates a long-lived child attached to a PTY. The core package should become a PTY transport library, with `CompleteAsync` remaining as a convenience API for one-shot use.
 
@@ -32,7 +34,9 @@ MiniPty currently provides:
 - Display helpers for host-readable text from PTY output.
 - Spawn environment overlay and Unix `TERM` / terminal sanitize.
 
-Human local-console attachment (Vim, less, htop on the host terminal) and terminal emulation remain out of scope. The next plan milestone is an interactive sample that proves persistent transport without a console adapter.
+Human local-console **input** for vim-style operation is **MiniPty.Console** (use case 3; [console.md](../specs/console.md)). PTY output display and recording stay embedder responsibilities. Terminal emulation and in-editor terminals (use case 4) remain out of core scope.
+
+The next plan milestone is **Milestone 5: MiniPty.Console**.
 
 ## node-pty Comparison
 
@@ -639,41 +643,61 @@ Allocation gate for future PRs: `scripts/compare-benchmark-allocations.ps1` vs `
 
 Gate C closed the managed-ring / handoff regression on Windows. Windows drain polling and `ReadOutputAsync` producer coalescing are implemented (see [core_session.md](../specs/core_session.md)). Cross-OS benchmark fairness for bulk stdout is implemented via `MiniPty.Benchmarks.Child` (see [platform_support.md](../specs/platform_support.md) → Verification).
 
-### Milestone 4: Interactive Sample **(next)**
+### Milestone 4: Interactive Sample **(implemented)**
 
 Goal: prove the core API can drive a long-lived process without a console adapter.
 
-- Add a sample that starts a shell or REPL.
-- Pump output asynchronously.
-- Write multiple commands over time.
-- Resize the PTY.
-- Exit cleanly.
+- [x] Add `samples/Interactive.cs` — `ReadOutputAsync`, marker-driven writes, mid-session `Resize`, natural exit.
+- [x] CI NativeAOT loop and README Samples row.
 
-This sample should not require raw console mode. It demonstrates persistent transport, not full human terminal attachment.
+This sample does not use host raw mode. It demonstrates persistent **transport** (use case 1), not human host attach (use case 3).
 
-### Milestone 5: Optional node-pty Parity Features
+### Milestone 5: `MiniPty.Console` **(next — use case 3)**
 
-Goal: close targeted feature gaps only if needed by consumers.
+**Goal:** host terminal input attach for interactive programs (vim, etc.). Enables scenetake-style interactive recording; **scenetake integration is out of this repo** (feedback-driven API gaps only).
 
-- Flow control (`pause` / `resume`, bounded buffering, or XON/XOFF handling).
-- Unix `uid` / `gid`.
-- Unix pixel size in winsize.
-- Unix `openpty` without spawn.
-- Windows ConPTY `clear()` behavior.
-- Windows ConPTY cursor inheritance option.
+**Specification:** [specs/console.md](../specs/console.md) (specified; not yet implemented).
 
-These should remain optional until a real consumer needs them.
+**Scope:**
 
-### Milestone 6: `MiniPty.Console`
+- New NuGet **MiniPty.Console** depending on **MiniPty** only; NativeAOT-friendly.
+- `PtyConsoleInput.Attach(PtySession)` → `IDisposable` (v1 single API).
+- Host TUI passthrough terminal modes (stdin + stdout); restore on dispose.
+- Raw host stdin bytes → `WriteInputAsync`; Ctrl+C/D/Z byte forwarding; paste pass-through.
+- Host resize → `PtySession.Resize` (initial sync + while attached).
+- Fail `Attach` when host is not a TTY; forbid duplicate attach per session.
+- **Does not** read PTY output (embedder keeps sole `ReadOutputAsync`).
 
-Goal: local human operation of programs such as shells, Vim, htop, and less.
+**Out of scope (this milestone):**
 
-- Create a separate package only after the core persistent API is stable.
-- Attach console stdin/stdout to a `PtySession`.
-- Enable and restore raw/VT modes.
-- Forward resize events or poll size changes.
-- Define Ctrl+C, Ctrl+D, Ctrl+Z, paste, and special-key behavior.
-- Add smoke samples, not broad terminal-emulator claims.
+- Cast / timestamp recording (scenetake).
+- PTY output display on host (embedder writes `stdout` after `ReadOutputAsync`).
+- Terminal emulator, editor integration (use case 4).
+- Public options API on `Attach` (v1 fixed behavior).
+
+**Definition of done:**
+
+- [ ] `MiniPty.Console` package implemented per [console.md](../specs/console.md).
+- [ ] Tests: TTY guard, duplicate attach, dispose restores terminal (where testable), resize smoke.
+- [ ] Manual smoke on host TTY (vim or minimal TUI).
+- [ ] README / spec.md updated when implemented.
+
+### Deferred: Editor Terminal Backend (use case 4 — separate plan)
+
+Not part of Milestone 5. Track in a **separate plan** when VS Code / xterm.js backend work starts.
+
+Candidate **MiniPty core** parity items (formerly “Milestone 5 node-pty”):
+
+- Flow control (`pause` / `resume`, XON/XOFF).
+- Windows ConPTY `clear()`.
+- `PtyExitStatus` / signal reporting; `Kill(signal)` on Unix.
+- Unix pixel winsize; `uid` / `gid`; `openpty` without spawn; ConPTY cursor inheritance.
+
+**MiniPty.Console** is not used for use case 4.
+
+### ~~Milestone 5: Optional node-pty Parity Features~~ / ~~Milestone 6: `MiniPty.Console`~~
+
+Superseded by the use-case split above (M5 = Console, editor parity = separate plan).
 
 ## Testing Strategy
 
@@ -701,7 +725,9 @@ As milestones land, update:
 - [x] [lifecycle.md](../specs/lifecycle.md): persistent cancellation, read, drain, EOF, and disposal semantics.
 - [x] [references/pty_crossplatform.md](../references/pty_crossplatform.md): environment passing, ConPTY readiness, Unix `execve` details.
 - [x] [README.md](../../../README.md): features and not-supported sections updated for persistent API.
-- [ ] Interactive sample and README cross-link when Milestone 4 lands.
+- [x] Interactive sample and README cross-link when Milestone 4 lands.
+- [x] [console.md](../specs/console.md) drafted for Milestone 5 (use case 3).
+- [ ] `MiniPty.Console` implementation and README when Milestone 5 lands.
 
 ## Open Questions
 
@@ -711,7 +737,8 @@ As milestones land, update:
 - Is Unix `uid` / `gid` worth supporting in a minimal AOT-friendly library?
 - Does Windows ConPTY require a public ready state or only internal write/resize deferral?
 - Should flow control be explicit (`Pause` / `Resume`) or expressed through bounded async streams/channels?
-- Should `MiniPty.Console` be a package, a sample, or both at first?
+- ~~Should `MiniPty.Console` be a package, a sample, or both at first?~~ — resolved: separate **MiniPty.Console** NuGet; spec in [console.md](../specs/console.md).
+- Editor terminal backend (use case 4) parity items deferred to a **separate plan** (not Milestone 5).
 
 ## Guiding Principle
 
