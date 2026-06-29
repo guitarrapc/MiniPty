@@ -40,46 +40,63 @@ static int RunInteractiveShell()
 {
     using var session = Pty.Start(CreateShellStartInfo());
 
+    // Status on stderr before raw host stdout (Unix OPOST off) and before the PTY output pump.
     Console.Error.WriteLine($"Starting PTY shell (pid {session.ProcessId})...");
     Console.Error.WriteLine("Keyboard input is forwarded to the child; PTY output is written to this terminal.");
     Console.Error.WriteLine("Exit the shell (for example type exit) to end the sample.");
+    Console.Error.WriteLine("Attaching host terminal...");
 
     var pumpTask = PumpOutputToHostAsync(session);
 
-    using var attachCts = new CancellationTokenSource();
-    using var consoleInput = PtyConsoleInput.Attach(session);
-
-    Console.Error.WriteLine($"Attached at {session.Size.Columns}x{session.Size.Rows}.");
-
-    var exitTask = session.WaitForExitAsync(attachCts.Token);
-    _ = exitTask.ContinueWith(
-        static (_, state) => ((CancellationTokenSource)state!).Cancel(),
-        attachCts,
-        CancellationToken.None,
-        TaskContinuationOptions.ExecuteSynchronously,
-        TaskScheduler.Default);
-
-    if (OperatingSystem.IsWindows())
+    int exitCode;
+    using (var attachCts = new CancellationTokenSource())
+    using (var consoleInput = PtyConsoleInput.Attach(session))
     {
-        try
+        var exitTask = session.WaitForExitAsync(attachCts.Token);
+        _ = exitTask.ContinueWith(
+            static (_, state) => ((CancellationTokenSource)state!).Cancel(),
+            attachCts,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        if (OperatingSystem.IsWindows())
         {
-            while (!attachCts.IsCancellationRequested)
-                consoleInput.PumpInputOnce(attachCts.Token);
+            try
+            {
+                while (!attachCts.IsCancellationRequested)
+                    consoleInput.PumpInputOnce(attachCts.Token);
+            }
+            catch (OperationCanceledException) when (attachCts.IsCancellationRequested)
+            {
+            }
         }
-        catch (OperationCanceledException) when (attachCts.IsCancellationRequested)
+        else
         {
+            exitTask.GetAwaiter().GetResult();
         }
-    }
-    else
-    {
-        exitTask.GetAwaiter().GetResult();
+
+        exitCode = exitTask.IsCompletedSuccessfully ? exitTask.Result : session.ExitCode ?? -1;
+        pumpTask.GetAwaiter().GetResult();
     }
 
-    var exitCode = exitTask.IsCompletedSuccessfully ? exitTask.Result : session.ExitCode ?? -1;
-    pumpTask.GetAwaiter().GetResult();
+    // PtyConsoleInput disposed: host termios restored. Avoid stderr/stdout interleaving while attached.
+    if (!OperatingSystem.IsWindows())
+        ResetUnixHostCursorColumn();
 
     Console.Error.WriteLine($"Shell exited with code {exitCode}.");
     return 0;
+}
+
+static void ResetUnixHostCursorColumn()
+{
+#pragma warning disable CA2000 // Host standard output is process-owned and must not be disposed.
+    var stdout = Console.OpenStandardOutput();
+#pragma warning restore CA2000
+
+    // Raw host stdout does not map LF to CR+LF; reset the column before the parent shell redraws.
+    stdout.Write("\r\n"u8);
+    stdout.Flush();
 }
 
 static async Task PumpOutputToHostAsync(PtySession session)
