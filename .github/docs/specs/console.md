@@ -4,7 +4,7 @@ Planned user-facing contract for the **MiniPty.Console** NuGet package.
 
 This package serves **use case 3** in [spec.md](../spec.md): a human operates an interactive program (for example vim) on the **host terminal** while an embedder records or observes the PTY byte stream through **MiniPty** core APIs.
 
-**Status: specified, not yet implemented.**
+**Status: implemented** (Milestone 5).
 
 ## Motivation
 
@@ -150,7 +150,8 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 
 ## Lessons Learned
 
-_(Empty until implementation. Record terminal restoration failures, resize detection quirks, and CI non-TTY pitfalls here.)_
+- Benchmark allocation comparison must use the benchmark class default `SimpleJob` only; adding `--job short` runs a second job and the compare script prefers `ShortRun`, which reports higher allocations on spawn-heavy benchmarks without any code change.
+- CI test hosts are usually non-TTY; `Attach` guard tests rely on `Console.IsInputRedirected` / `IsOutputRedirected`, while duplicate-attach and resize smoke tests skip when redirected.
 
 ## Related Documents
 

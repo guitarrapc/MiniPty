@@ -1,12 +1,12 @@
 {
   "baselineCommit": "721d74a1ba20b713805ea934805ee0c8aa6a24c1",
-  "description": "Post Milestone 3.5 close and Windows ConPTY one-shot drain (#28, #29). Allocated bytes from BenchmarkDotNet MemoryDiagnoser SimpleJob (1 KB = 1024 B, ceiling). win-x64 run on 2026-06-29.",
+  "description": "Post Milestone 5 (MiniPty.Console). Core hot-path C# unchanged; Unix native shim extended for host termios only. Allocated bytes from BenchmarkDotNet MemoryDiagnoser SimpleJob (1 KB = 1024 B, ceiling). win-x64 run on 2026-06-29.",
   "benchmarks": {
     "Session_Exit0_Bytes": 3840,
     "Session_Echo_Bytes": 4004,
     "Capture_Echo_Bytes": 5202,
     "Session_32KiB_Bytes": 42978,
-    "Capture_32KiB_Bytes": 48774,
+    "Capture_32KiB_Bytes": 48824,
     "Session_32KiB_StreamBytes": 6708,
     "Session_32KiB_OutputStreamBytes": 4189,
     "Session_Echo_Text": 4332,

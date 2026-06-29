@@ -32,11 +32,11 @@ Ubuntu 24.04, .NET 10
 - One-shot run with optional stdin and drained output (`CompleteAsync`)
 - Resize the terminal after spawn (`PtySession.Resize`)
 - Per-read timestamps for observation or recording (**MiniPty.Capture**, `PtyCapture.RunAsync`)
+- Host terminal input attach for interactive programs (**MiniPty.Console**, `PtyConsoleInput.Attach`)
 - Plain or colored host output from PTY bytes (`PtyOutput.ToDisplayText`)
 
 **Not supported**
 
-- Full local-console attachment for programs such as vim, less, and htop
 - Remote shells (`ssh`) or tunneling a PTY over the network
 - Full terminal emulation, TUI replay, or faithfully preserving `\r` overwrite lines
 - Falling back to pipe redirect when PTY creation fails—if you need a PTY, MiniPty either gives you one or throws
@@ -62,6 +62,9 @@ dotnet add package MiniPty
 
 # Timestamped PTY output observation (per-read chunks)
 dotnet add package MiniPty.Capture
+
+# Host terminal input attach for interactive sessions (vim, etc.)
+dotnet add package MiniPty.Console
 ```
 
 **MiniPty** start a session with `Pty.Start`, then either call `ReadOutputAsync` for persistent bytes-only output streaming or call `CompleteAsync` for a one-shot run. Disposing the session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that.
@@ -137,6 +140,26 @@ foreach (var textChunk in result.GetTextChunks())
 
 // Or plain text for logging:
 Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));
+```
+
+**MiniPty.Console** attaches the host terminal to a running session for interactive programs (vim, etc.). It forwards raw keyboard bytes to the PTY and syncs host resize events. It does **not** read PTY output — the embedder remains the sole output consumer via `ReadOutputAsync` and writes bytes to host `stdout`.
+
+```csharp
+using MiniPty;
+using MiniPty.Console;
+
+await using var session = Pty.Start(new PtyStartInfo
+{
+    FileName = "/bin/bash",
+    Arguments = ["-i"],
+});
+
+using var consoleInput = PtyConsoleInput.Attach(session);
+
+await foreach (var chunk in session.ReadOutputAsync())
+    await Console.OpenStandardOutput().WriteAsync(chunk.Data);
+
+await session.WaitForExitAsync();
 ```
 
 ## Samples

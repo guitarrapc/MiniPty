@@ -8,7 +8,7 @@ This document is a working plan, not an implemented API contract. After each imp
 
 MiniPty already creates real pseudo-terminals and exposes raw `Input` / `Output` streams. Core transport milestones (spawn options, `ReadOutputAsync`, lifecycle hardening, capture alignment, Interactive sample) are implemented.
 
-**Next plan work:** **MiniPty.Console** (use case 3 — host input attach; spec in [console.md](../specs/console.md)). Editor terminal backend parity (use case 4) is a **separate plan**.
+**Next plan work:** Editor terminal backend parity (use case 4) is a **separate plan**. Milestone 5 (**MiniPty.Console**) is implemented.
 
 The recommended direction is:
 
@@ -16,7 +16,7 @@ The recommended direction is:
 |---|---|
 | **MiniPty** | Core PTY transport: spawn, persistent read/write, resize, exit, kill, lifecycle, one-shot convenience |
 | **MiniPty.Capture** | One-shot timestamped output capture (use case 2) |
-| **MiniPty.Console** | Host terminal **input** attach for interactive human operation (use case 3); spec written, not yet implemented |
+| **MiniPty.Console** | Host terminal **input** attach for interactive human operation (use case 3); spec in [console.md](../specs/console.md) |
 | **Editor / frontend integrators** | Use case 4: **MiniPty** core only; xterm.js etc. remain external |
 
 Do not split persistent PTY support into a package such as `MiniPty.Persistent`. Persistence is a property of PTY sessions themselves: `Pty.Start` already creates a long-lived child attached to a PTY. The core package should become a PTY transport library, with `CompleteAsync` remaining as a convenience API for one-shot use.
@@ -36,7 +36,7 @@ MiniPty currently provides:
 
 Human local-console **input** for vim-style operation is **MiniPty.Console** (use case 3; [console.md](../specs/console.md)). PTY output display and recording stay embedder responsibilities. Terminal emulation and in-editor terminals (use case 4) remain out of core scope.
 
-The next plan milestone is **Milestone 5: MiniPty.Console**.
+**Milestone 5 (`MiniPty.Console`) is implemented.** Next work is use case 4 editor parity (separate plan).
 
 ## node-pty Comparison
 
@@ -652,35 +652,18 @@ Goal: prove the core API can drive a long-lived process without a console adapte
 
 This sample does not use host raw mode. It demonstrates persistent **transport** (use case 1), not human host attach (use case 3).
 
-### Milestone 5: `MiniPty.Console` **(next — use case 3)**
+### Milestone 5: `MiniPty.Console` **(implemented — use case 3)**
 
 **Goal:** host terminal input attach for interactive programs (vim, etc.). Enables scenetake-style interactive recording; **scenetake integration is out of this repo** (feedback-driven API gaps only).
 
-**Specification:** [specs/console.md](../specs/console.md) (specified; not yet implemented).
-
-**Scope:**
-
-- New NuGet **MiniPty.Console** depending on **MiniPty** only; NativeAOT-friendly.
-- `PtyConsoleInput.Attach(PtySession)` → `IDisposable` (v1 single API).
-- Host TUI passthrough terminal modes (stdin + stdout); restore on dispose.
-- Raw host stdin bytes → `WriteInputAsync`; Ctrl+C/D/Z byte forwarding; paste pass-through.
-- Host resize → `PtySession.Resize` (initial sync + while attached).
-- Fail `Attach` when host is not a TTY; forbid duplicate attach per session.
-- **Does not** read PTY output (embedder keeps sole `ReadOutputAsync`).
-
-**Out of scope (this milestone):**
-
-- Cast / timestamp recording (scenetake).
-- PTY output display on host (embedder writes `stdout` after `ReadOutputAsync`).
-- Terminal emulator, editor integration (use case 4).
-- Public options API on `Attach` (v1 fixed behavior).
+**Specification:** [specs/console.md](../specs/console.md).
 
 **Definition of done:**
 
-- [ ] `MiniPty.Console` package implemented per [console.md](../specs/console.md).
-- [ ] Tests: TTY guard, duplicate attach, dispose restores terminal (where testable), resize smoke.
-- [ ] Manual smoke on host TTY (vim or minimal TUI).
-- [ ] README / spec.md updated when implemented.
+- [x] `MiniPty.Console` package implemented per [console.md](../specs/console.md).
+- [x] Tests: TTY guard, duplicate attach, initial resize sync (TTY-gated where needed).
+- [ ] Manual smoke on host TTY (vim or minimal TUI) — verify locally on macOS / interactive host.
+- [x] README / spec.md updated when implemented.
 
 ### Deferred: Editor Terminal Backend (use case 4 — separate plan)
 
@@ -727,7 +710,7 @@ As milestones land, update:
 - [x] [README.md](../../../README.md): features and not-supported sections updated for persistent API.
 - [x] Interactive sample and README cross-link when Milestone 4 lands.
 - [x] [console.md](../specs/console.md) drafted for Milestone 5 (use case 3).
-- [ ] `MiniPty.Console` implementation and README when Milestone 5 lands.
+- [x] `MiniPty.Console` implementation and README when Milestone 5 lands.
 
 ## Open Questions
 

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -573,5 +574,84 @@ int minipty_try_read(int fd, void *buf, unsigned int count, int *bytes_read, int
 
     *bytes_read = (int)n;
     *is_eof = 0;
+    return 0;
+}
+
+#define MINIPTY_CONSOLE_TERMIOS_BLOB 128
+
+typedef struct minipty_console_termios_blob {
+    unsigned char bytes[MINIPTY_CONSOLE_TERMIOS_BLOB];
+    int length;
+} minipty_console_termios_blob;
+
+int minipty_console_isatty(int fd)
+{
+    return isatty(fd);
+}
+
+int minipty_console_termios_save(int fd, minipty_console_termios_blob *out)
+{
+    struct termios term;
+
+    if (out == NULL || tcgetattr(fd, &term) != 0)
+        return -1;
+
+    if (sizeof(term) > (size_t)MINIPTY_CONSOLE_TERMIOS_BLOB)
+        return -1;
+
+    memcpy(out->bytes, &term, sizeof(term));
+    out->length = (int)sizeof(term);
+    return 0;
+}
+
+int minipty_console_termios_restore(int fd, const minipty_console_termios_blob *snap)
+{
+    struct termios term;
+
+    if (snap == NULL || snap->length <= 0 || snap->length > (int)sizeof(struct termios))
+        return -1;
+
+    memcpy(&term, snap->bytes, (size_t)snap->length);
+    return tcsetattr(fd, TCSANOW, &term);
+}
+
+int minipty_console_termios_set_raw_input(int fd)
+{
+    struct termios term;
+
+    if (tcgetattr(fd, &term) != 0)
+        return -1;
+
+    term.c_lflag &= (tcflag_t)~(ICANON | ECHO | ISIG | IEXTEN);
+    term.c_iflag &= (tcflag_t)~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    term.c_cflag |= (tcflag_t)CS8;
+    term.c_cc[VMIN] = 1;
+    term.c_cc[VTIME] = 0;
+    return tcsetattr(fd, TCSANOW, &term);
+}
+
+int minipty_console_termios_set_raw_output(int fd)
+{
+    struct termios term;
+
+    if (tcgetattr(fd, &term) != 0)
+        return -1;
+
+    term.c_oflag &= (tcflag_t)~OPOST;
+    return tcsetattr(fd, TCSANOW, &term);
+}
+
+int minipty_console_get_winsize(int fd, unsigned short *rows, unsigned short *cols)
+{
+    struct winsize ws;
+
+    if (rows == NULL || cols == NULL)
+        return -1;
+
+    if (ioctl(fd, TIOCGWINSZ, &ws) != 0)
+        return -1;
+
+    *rows = ws.ws_row;
+    *cols = ws.ws_col;
     return 0;
 }
