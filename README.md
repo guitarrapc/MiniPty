@@ -145,12 +145,14 @@ Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));
 |--------|-------|
 | [Capture.cs](samples/Capture.cs) | Minimal `MiniPty.Capture` smoke |
 | [Session.cs](samples/Session.cs) | `Pty.Start`, background `Output` reads, `WriteInputAsync` / `SendEof`, `CompleteAsync`, `Resize` |
+| [Interactive.cs](samples/Interactive.cs) | `ReadOutputAsync` persistent loop, marker-driven writes, mid-session `Resize`, natural child exit |
 | [Observe.cs](samples/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
 
 Run a sample locally (JIT):
 
 ```bash
 dotnet samples/Session.cs
+dotnet samples/Interactive.cs
 dotnet samples/Observe.cs
 dotnet samples/Capture.cs
 ```

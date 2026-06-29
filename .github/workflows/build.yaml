@@ -58,7 +58,7 @@ jobs:
       - name: Publish and run samples (NativeAOT)
         shell: bash
         run: |
-          for sample in Capture Session Observe; do
+          for sample in Capture Session Observe Interactive; do
             out="$RUNNER_TEMP/minipty-${sample}-aot"
             dotnet publish "samples/${sample}.cs" -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
             exe="$out/${sample}"
