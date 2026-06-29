@@ -49,6 +49,8 @@ These are verification choices, not API requirements, but they document pitfalls
 | Windows | Input pipe close after bytes were written yields `STATUS_CONTROL_C_EXIT` for direct stdin readers (`sort`, `more`). | `SendEof` writes Ctrl+Z + CR and keeps the pipe open until exit; tests assert ExitCode 0 for `sort`. |
 | Windows | `pwsh` is optional on runners. | Prefer built-in Windows PowerShell unless pwsh-only behavior is needed. |
 | Linux (CI) | GitHub-hosted runners (including `ubuntu-24.04-arm`) may mount `/tmp` with `noexec`. Shebang execution of scripts under `/tmp` can fail with exit **127** even when `sh script` would work. | Integration tests that spawn executable fixtures use a directory under the test output (`AppContext.BaseDirectory`), not `Path.GetTempPath()`. PATH-overlay tests for plain scripts exercise the `ENOEXEC` → `sh` fallback, not shebang exec. |
+| Linux / FreeBSD (`forkpty`) | Managed `file`/`argv`/`envp`/`cwd` UTF-8 blocks must stay allocated until the child has exec'd or failed; immediate free after `forkpty` races the child under parallel CI. | Native `forkpty` path keeps the exec payload alive on the backend until session disposal. |
+| macOS (CI) | Burst parallel `PtyCapture`/`CompleteAsync` under full-suite load can finish fast children before a transport pump blocks on the PTY master. | One-shot completion waits for transport read-loop entry before `WaitForExit`; post-exit drain may close the master after a quiet period (same bounded grace as Windows). |
 
 ## Lessons Learned
 

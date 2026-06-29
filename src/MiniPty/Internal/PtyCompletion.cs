@@ -32,6 +32,7 @@ internal static class PtyCompletion
 
         using var orchestration = session.EnterCompletionOrchestration();
         var pumpTask = pump(session.OutputTransport, cancellationToken);
+        WaitForTransportReadLoop(session.OutputTransport, pumpTask, cancellationToken);
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
         // Defer CloseTransport on child exit so ConPTY bulk stdout is not truncated; post-exit drain
         // may close the transport early on Windows when output has been quiet long enough.
@@ -105,6 +106,23 @@ internal static class PtyCompletion
         catch (TimeoutException)
         {
             throw new TimeoutException("PTY child did not exit within the configured exit timeout.");
+        }
+    }
+
+    /// <summary>
+    /// Yields the current time slice until a transport pump has entered its blocking read loop.
+    /// Fast children can close the PTY slave while a thread-pool pump is still queued.
+    /// Uses <see cref="Thread.Sleep(int)"/> with zero to cooperatively schedule; busy-waiting is forbidden.
+    /// </summary>
+    private static void WaitForTransportReadLoop(Stream transport, Task pumpTask, CancellationToken cancellationToken)
+    {
+        if (!PtyTransportRead.IsTransport(transport))
+            return;
+
+        while (!PtyTransportRead.IsReadLoopEntered(transport) && !pumpTask.IsCompleted)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Thread.Sleep(0);
         }
     }
 }

@@ -146,7 +146,7 @@ static void minipty_execve_path(const char *dir, size_t dir_len, const char *fil
     char path[PATH_MAX];
 
     if (dir_len == 0) {
-        minipty_execve_compat(file, argv, envp);
+        minipty_execve_path(".", 1, file, argv, envp);
         return;
     }
 

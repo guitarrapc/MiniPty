@@ -9,11 +9,17 @@ internal sealed class PtyHandleReadStream : Stream
     private readonly SafeFileHandle handle;
     private PtySession? session;
     private int rawHoldActive;
+    private int transportReadLoopEntered;
     private long lastTransportReadTick64;
 
     public PtyHandleReadStream(SafeFileHandle handle) => this.handle = handle;
 
     internal void BindOutputGate(PtySession outputSession) => session = outputSession;
+
+    /// <summary>Whether a transport pump has entered its blocking read loop.</summary>
+    internal bool TransportReadLoopEntered => Volatile.Read(ref transportReadLoopEntered) != 0;
+
+    internal void MarkTransportReadLoopEntered() => Volatile.Write(ref transportReadLoopEntered, 1);
 
     /// <summary>Tick count of the last successful <see cref="ReadTransport"/> (0 when none yet).</summary>
     internal long LastTransportReadTick64 => Volatile.Read(ref lastTransportReadTick64);
@@ -285,11 +291,17 @@ internal sealed class PtyFdReadStream : Stream
     private readonly int fd;
     private PtySession? session;
     private int rawHoldActive;
+    private int transportReadLoopEntered;
     private long lastTransportReadTick64;
 
     public PtyFdReadStream(int fd) => this.fd = fd;
 
     internal void BindOutputGate(PtySession outputSession) => session = outputSession;
+
+    /// <summary>Whether a transport pump has entered its blocking read loop.</summary>
+    internal bool TransportReadLoopEntered => Volatile.Read(ref transportReadLoopEntered) != 0;
+
+    internal void MarkTransportReadLoopEntered() => Volatile.Write(ref transportReadLoopEntered, 1);
 
     /// <summary>Tick count of the last successful <see cref="ReadTransport"/> (0 when none yet).</summary>
     internal long LastTransportReadTick64 => Volatile.Read(ref lastTransportReadTick64);
