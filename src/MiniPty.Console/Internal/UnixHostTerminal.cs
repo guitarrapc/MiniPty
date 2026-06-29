@@ -23,12 +23,39 @@ internal sealed class UnixHostTerminal : IHostTerminal
         _stdoutSnapshot = (ConsoleUnixInterop.TermiosBlob*)NativeMemory.Alloc(
             (nuint)sizeof(ConsoleUnixInterop.TermiosBlob));
 
-        if (ConsoleUnixInterop.minipty_console_termios_save(ConsoleUnixInterop.StdinFileno, _stdinSnapshot) != 0
-            || ConsoleUnixInterop.minipty_console_termios_save(ConsoleUnixInterop.StdoutFileno, _stdoutSnapshot) != 0
-            || ConsoleUnixInterop.minipty_console_termios_set_raw_input(ConsoleUnixInterop.StdinFileno) != 0
-            || ConsoleUnixInterop.minipty_console_termios_set_raw_output(ConsoleUnixInterop.StdoutFileno) != 0)
+        var stdinSaved = false;
+        var stdoutSaved = false;
+        var stdinRaw = false;
+        try
         {
-            throw new InvalidOperationException("Failed to configure the host terminal.");
+            if (ConsoleUnixInterop.minipty_console_termios_save(ConsoleUnixInterop.StdinFileno, _stdinSnapshot) != 0)
+                throw new InvalidOperationException("Failed to configure the host terminal.");
+            stdinSaved = true;
+
+            if (ConsoleUnixInterop.minipty_console_termios_save(ConsoleUnixInterop.StdoutFileno, _stdoutSnapshot) != 0)
+                throw new InvalidOperationException("Failed to configure the host terminal.");
+            stdoutSaved = true;
+
+            if (ConsoleUnixInterop.minipty_console_termios_set_raw_input(ConsoleUnixInterop.StdinFileno) != 0)
+                throw new InvalidOperationException("Failed to configure the host terminal.");
+            stdinRaw = true;
+
+            if (ConsoleUnixInterop.minipty_console_termios_set_raw_output(ConsoleUnixInterop.StdoutFileno) != 0)
+                throw new InvalidOperationException("Failed to configure the host terminal.");
+        }
+        catch
+        {
+            if (stdinRaw && stdinSaved)
+                ConsoleUnixInterop.minipty_console_termios_restore(ConsoleUnixInterop.StdinFileno, _stdinSnapshot);
+
+            if (stdoutSaved)
+                ConsoleUnixInterop.minipty_console_termios_restore(ConsoleUnixInterop.StdoutFileno, _stdoutSnapshot);
+
+            NativeMemory.Free(_stdinSnapshot);
+            NativeMemory.Free(_stdoutSnapshot);
+            _stdinSnapshot = null;
+            _stdoutSnapshot = null;
+            throw;
         }
 
         if (TryGetSize(out var columns, out var rows))

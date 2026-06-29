@@ -88,8 +88,6 @@ internal sealed class PtyConsoleAttach : IDisposable
                 {
                     if (cancellationToken.IsCancellationRequested)
                         break;
-
-                    await Task.Yield();
                     continue;
                 }
 

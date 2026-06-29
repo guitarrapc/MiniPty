@@ -35,6 +35,21 @@ public sealed class PtyConsoleTests
     }
 
     [Test]
+    public async Task Attach_AfterDispose_CanAttachAgain()
+    {
+        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
+            return;
+
+        await using var session = Pty.Start(InteractiveSizeStartInfo());
+        using (PtyConsoleInput.Attach(session))
+        {
+        }
+
+        using var second = PtyConsoleInput.Attach(session);
+        await Assert.That(second).IsNotNull();
+    }
+
+    [Test]
     public async Task Attach_SyncsInitialSize()
     {
         if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)

@@ -6,6 +6,8 @@ internal static partial class ConsoleWindowsInterop
 {
     internal const int StdInputHandle = -10;
     internal const int StdOutputHandle = -11;
+    internal const uint WaitObject0 = 0x00000000;
+    internal const uint WaitTimeout = 0x00000102;
 
     internal const uint EnableEchoInput = 0x0004;
     internal const uint EnableLineInput = 0x0002;
@@ -111,4 +113,7 @@ internal static partial class ConsoleWindowsInterop
         InputRecord* lpBuffer,
         uint nLength,
         out uint lpNumberOfEventsRead);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 }

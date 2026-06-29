@@ -625,8 +625,8 @@ int minipty_console_termios_set_raw_input(int fd)
     term.c_lflag &= (tcflag_t)~(ICANON | ECHO | ISIG | IEXTEN);
     term.c_iflag &= (tcflag_t)~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
     term.c_cflag |= (tcflag_t)CS8;
-    term.c_cc[VMIN] = 1;
-    term.c_cc[VTIME] = 0;
+    term.c_cc[VMIN] = 0;
+    term.c_cc[VTIME] = 1;
     return tcsetattr(fd, TCSANOW, &term);
 }
 

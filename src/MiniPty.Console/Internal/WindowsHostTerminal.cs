@@ -1,5 +1,3 @@
-using System.Buffers;
-
 namespace MiniPty.Console.Internal;
 
 internal sealed class WindowsHostTerminal : IHostTerminal
@@ -39,12 +37,15 @@ internal sealed class WindowsHostTerminal : IHostTerminal
 
         uint stdoutMode = _stdoutModeSnapshot;
         stdoutMode |= ConsoleWindowsInterop.EnableVirtualTerminalProcessing;
-        stdoutMode &= ~(ConsoleWindowsInterop.EnableProcessedOutput
-            | ConsoleWindowsInterop.EnableWrapAtEolOutput);
 
-        if (!ConsoleWindowsInterop.SetConsoleMode(_stdin, stdinMode)
-            || !ConsoleWindowsInterop.SetConsoleMode(_stdout, stdoutMode))
+        if (!ConsoleWindowsInterop.SetConsoleMode(_stdin, stdinMode))
         {
+            throw new InvalidOperationException("Failed to configure the host terminal.");
+        }
+
+        if (!ConsoleWindowsInterop.SetConsoleMode(_stdout, stdoutMode))
+        {
+            ConsoleWindowsInterop.SetConsoleMode(_stdin, _stdinModeSnapshot);
             throw new InvalidOperationException("Failed to configure the host terminal.");
         }
 
@@ -72,6 +73,13 @@ internal sealed class WindowsHostTerminal : IHostTerminal
     public unsafe int ReadInput(Span<byte> buffer)
     {
         if (buffer.IsEmpty)
+            return 0;
+
+        var wait = ConsoleWindowsInterop.WaitForSingleObject(_stdin, 100);
+        if (wait == ConsoleWindowsInterop.WaitTimeout)
+            return 0;
+
+        if (wait != ConsoleWindowsInterop.WaitObject0)
             return 0;
 
         ConsoleWindowsInterop.InputRecord record;
