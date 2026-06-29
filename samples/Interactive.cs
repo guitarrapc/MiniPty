@@ -139,7 +139,26 @@ static async Task WaitForMarkerAsync(
 static bool ContainsMarker(StringBuilder output, object outputLock, string marker)
 {
     lock (outputLock)
-        return output.ToString().Contains(marker, StringComparison.Ordinal);
+    {
+        var maxStart = output.Length - marker.Length;
+        if (maxStart < 0)
+            return false;
+
+        for (var i = 0; i <= maxStart; i++)
+        {
+            var j = 0;
+            for (; j < marker.Length; j++)
+            {
+                if (output[i + j] != marker[j])
+                    break;
+            }
+
+            if (j == marker.Length)
+                return true;
+        }
+
+        return false;
+    }
 }
 
 static string GetOutputText(StringBuilder output, object outputLock)
