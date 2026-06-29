@@ -72,6 +72,108 @@ public sealed class PtyConsoleTests
         });
     }
 
+    [Test]
+    public async Task PumpInputOnce_AfterDispose_Throws()
+    {
+        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
+            return;
+
+        await using var session = Pty.Start(InteractiveSizeStartInfo());
+        var handle = PtyConsoleInput.Attach(session);
+        handle.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+        {
+            handle.PumpInputOnce();
+            return Task.CompletedTask;
+        });
+    }
+
+    [Test]
+    public async Task PumpInputUntil_AfterDispose_Throws()
+    {
+        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
+            return;
+
+        await using var session = Pty.Start(InteractiveSizeStartInfo());
+        var handle = PtyConsoleInput.Attach(session);
+        handle.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+        {
+            handle.PumpInputUntil();
+            return Task.CompletedTask;
+        });
+    }
+
+    [Test]
+    public async Task PumpInputOnce_OnUnix_IsNoOp()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
+            return;
+
+        await using var session = Pty.Start(InteractiveSizeStartInfo());
+        using var handle = PtyConsoleInput.Attach(session);
+        handle.PumpInputOnce();
+    }
+
+    [Test]
+    public async Task PumpInputUntil_OnUnix_ReturnsWhenTokenCanceled()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
+            return;
+
+        await using var session = Pty.Start(InteractiveSizeStartInfo());
+        using var handle = PtyConsoleInput.Attach(session);
+        using var cts = new CancellationTokenSource();
+
+        var waitTask = Task.Run(() => handle.PumpInputUntil(cts.Token), CancellationToken.None);
+        await Task.Delay(50);
+        cts.Cancel();
+        await waitTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Test]
+    public async Task PumpInputUntil_OnWindows_RequiresCancelableToken()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
+            return;
+
+        await using var session = Pty.Start(InteractiveSizeStartInfo());
+        using var handle = PtyConsoleInput.Attach(session);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        {
+            handle.PumpInputUntil(CancellationToken.None);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Test]
+    public async Task PumpInputOnce_WhenCalledFromWrongThread_Throws()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
+            return;
+
+        await using var session = Pty.Start(InteractiveSizeStartInfo());
+        using var handle = PtyConsoleInput.Attach(session);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Task.Run(() => handle.PumpInputOnce()));
+    }
+
     private static PtyStartInfo Exit0StartInfo()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))

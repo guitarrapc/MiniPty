@@ -154,13 +154,25 @@ await using var session = Pty.Start(new PtyStartInfo
     Arguments = ["-i"],
 });
 
+using var attachCts = new CancellationTokenSource();
+var pumpTask = PumpOutputAsync(session);
 using var consoleInput = PtyConsoleInput.Attach(session);
 
-await foreach (var chunk in session.ReadOutputAsync())
-    await Console.OpenStandardOutput().WriteAsync(chunk.Data);
+var exitTask = session.WaitForExitAsync(attachCts.Token);
+_ = exitTask.ContinueWith(_ => attachCts.Cancel(), attachCts);
 
-await session.WaitForExitAsync();
+consoleInput.PumpInputUntil(attachCts.Token);
+await exitTask;
+await pumpTask;
+
+static async Task PumpOutputAsync(PtySession session)
+{
+    await foreach (var chunk in session.ReadOutputAsync())
+        await Console.OpenStandardOutput().WriteAsync(chunk.Data);
+}
 ```
+
+On Unix, write status messages to **stderr before** `Attach` and emit `\r\n` on **stdout after** dispose if the parent shell prompt drifts (see [ConsoleAttach.cs](samples/ConsoleAttach.cs)).
 
 ## Samples
 

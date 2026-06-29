@@ -60,21 +60,7 @@ static int RunInteractiveShell()
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
 
-        if (OperatingSystem.IsWindows())
-        {
-            try
-            {
-                while (!attachCts.IsCancellationRequested)
-                    consoleInput.PumpInputOnce(attachCts.Token);
-            }
-            catch (OperationCanceledException) when (attachCts.IsCancellationRequested)
-            {
-            }
-        }
-        else
-        {
-            exitTask.GetAwaiter().GetResult();
-        }
+        consoleInput.PumpInputUntil(attachCts.Token);
 
         exitCode = exitTask.IsCompletedSuccessfully ? exitTask.Result : session.ExitCode ?? -1;
         pumpTask.GetAwaiter().GetResult();

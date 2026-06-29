@@ -6,6 +6,7 @@ namespace MiniPty.Console;
 public sealed class PtyConsoleInputHandle : IDisposable
 {
     private readonly Internal.PtyConsoleAttach _attach;
+    private int _disposed;
 
     internal PtyConsoleInputHandle(Internal.PtyConsoleAttach attach) => _attach = attach;
 
@@ -18,9 +19,32 @@ public sealed class PtyConsoleInputHandle : IDisposable
     /// <para>On Unix, input is forwarded by a background pump started by <see cref="PtyConsoleInput.Attach"/>;
     /// this method is a no-op.</para>
     /// </remarks>
-    public void PumpInputOnce(CancellationToken cancellationToken = default) =>
+    public void PumpInputOnce(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         _attach.PumpInputOnce(cancellationToken);
+    }
+
+    /// <summary>
+    /// Blocks until <paramref name="cancellationToken"/> is canceled.
+    /// </summary>
+    /// <remarks>
+    /// <para>On Windows, repeatedly calls <see cref="PumpInputOnce"/> on the attach thread.</para>
+    /// <para>On Unix, waits for cancellation while the background input pump runs.</para>
+    /// <para>Typical embedders link this token to <see cref="PtySession.WaitForExitAsync"/> completion.</para>
+    /// </remarks>
+    public void PumpInputUntil(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        _attach.PumpInputUntil(cancellationToken);
+    }
 
     /// <inheritdoc />
-    public void Dispose() => _attach.Dispose();
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        _attach.Dispose();
+    }
 }

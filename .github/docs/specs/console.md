@@ -39,12 +39,18 @@ PTY output **display** on the host and **timestamped recording** stay embedder r
 v1 exposes one public attach API:
 
 ```csharp
-IDisposable PtyConsoleInput.Attach(PtySession session) // returns PtyConsoleInputHandle
+PtyConsoleInputHandle PtyConsoleInput.Attach(PtySession session)
 ```
 
-`PtyConsoleInputHandle` also exposes `PumpInputOnce(CancellationToken)` for the Windows caller-thread input loop.
+`PtyConsoleInputHandle` implements **`IDisposable`** and also exposes:
 
-- No options type, callbacks, or `CancellationToken` parameters in v1.
+| Method | Role |
+|---|---|
+| `PumpInputUntil(CancellationToken)` | Preferred: block until the token is canceled (see Input pump). |
+| `PumpInputOnce(CancellationToken)` | Windows: read and forward one host input chunk on the attach thread. Unix: no-op. |
+
+- No options type or callbacks in v1.
+- `PumpInputOnce` / `PumpInputUntil` accept an optional `CancellationToken` for cooperative cancel (for example when the child exits).
 - Stopping host attach and restoring the terminal is **`Dispose`** on the returned handle.
 
 ## Attach Contract
@@ -74,8 +80,8 @@ After `Attach`, host stdin bytes are forwarded to `PtySession` input.
 
 | Platform | Input pump |
 |---|---|
-| Unix | Background thread reads host stdin and writes to the PTY. |
-| Windows | The thread that called `Attach` must call `PtyConsoleInputHandle.PumpInputOnce` in a loop (typically until the session exits). Physical keyboard input is delivered to `ReadFile` on that thread only. |
+| Unix | Background thread reads host stdin and writes to the PTY. `PumpInputUntil` waits for cancellation while that thread runs. |
+| Windows | The thread that called `Attach` must call `PumpInputOnce` or `PumpInputUntil`. Physical keyboard input is delivered to `ReadFile` on that thread only. Calling `PumpInputOnce` from another thread throws `InvalidOperationException`. |
 
 - No UTF-8 decoding, `Console.ReadKey`, or line buffering in **MiniPty.Console**.
 - Arrow keys, function keys, and paste appear as the host terminal delivers them (often escape sequences as bytes).
@@ -128,7 +134,9 @@ Host key chords are forwarded as bytes to the PTY. **MiniPty.Console** does not 
 
 ## Platform
 
-Public attach, input, resize, control-character, dispose, and failure behavior are **the same on all supported platforms** (Windows, Linux, macOS, FreeBSD).
+Public attach, resize, control-character, dispose, and failure behavior are **the same on all supported platforms** (Windows, Linux, macOS, FreeBSD).
+
+Input pumping is **started differently** per OS (see Input pump); embedders should call `PumpInputUntil` linked to session exit on every platform.
 
 Implementation differences (for example `termios` vs Windows Console VT APIs, `SIGWINCH` vs console size polling) belong in implementation notes and **Lessons Learned**, not in separate public contracts per OS.
 
@@ -137,12 +145,15 @@ Implementation differences (for example `termios` vs Windows Console VT APIs, `S
 Typical interactive host flow:
 
 1. `await using var session = Pty.Start(...)`
-2. `using var consoleInput = PtyConsoleInput.Attach(session)`
-3. Start embedder `ReadOutputAsync` loop: for each chunk, record and write bytes to host `stdout`
-4. Wait for session end (`WaitForExitAsync` or application exit condition)
-5. On scope exit, `using` disposes `consoleInput` before `await using` disposes `session` (reverse declaration order)
+2. Write status to **stderr before** `Attach` (Unix: avoid interleaving stderr with raw host stdout)
+3. Start embedder `ReadOutputAsync` pump **before** `Attach` (avoids a full ConPTY pipe during child startup on Windows)
+4. `using var consoleInput = PtyConsoleInput.Attach(session)`
+5. Link a `CancellationTokenSource` to `WaitForExitAsync` completion; call `consoleInput.PumpInputUntil(token)`
+6. Await the output pump and exit task
+7. On scope exit, `using` disposes `consoleInput` before `await using` disposes `session` (reverse declaration order)
+8. Unix only (optional): after dispose, write `\r\n` to host stdout so the parent shell prompt starts at column 0
 
-`Attach` returns **`IDisposable`** only in v1; do not use `await using` on the console handle unless a future API adds `IAsyncDisposable`.
+`Attach` returns **`PtyConsoleInputHandle`** (`IDisposable`); do not use `await using` unless a future API adds `IAsyncDisposable`.
 
 Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only. Use case 4 (editor terminal backend) uses **MiniPty** core without **MiniPty.Console**.
 
@@ -152,6 +163,8 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 |---|---|
 | Host not a TTY | `Attach` throws (for example `InvalidOperationException`). |
 | Second attach on same session | `InvalidOperationException`. |
+| `PumpInputOnce` on wrong thread (Windows) | `InvalidOperationException`. |
+| `PumpInputUntil` without a cancelable token (Windows) | `InvalidOperationException`. |
 | Session disposed while attached | In-flight Console operations fail per core disposal rules; `Dispose` on the console handle remains safe. |
 | Unsupported OS | Same as core: `Pty.Start` fails with `PlatformNotSupportedException` before attach matters. |
 
@@ -163,6 +176,7 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 - On Windows Terminal and other VT-aware hosts, physical keyboard input is delivered as UTF-8 bytes via `ReadFile` after enabling `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin. `AttachThreadInput` does not deliver VT `ReadFile` input to a background thread; `PumpInputOnce` must run on the thread that called `Attach`.
 - NativeAOT `LibraryImport` must name console APIs with their wide entry points (`PeekConsoleInputW`, `ReadConsoleInputW`, `WriteConsoleInputW`); undecorated names are not exported from `kernel32.dll`.
 - Start the embedder `ReadOutputAsync` pump before `PtyConsoleInput.Attach` so the child cannot block on a full ConPTY output pipe during startup.
+- On Unix, host stdout with `OPOST` off does not map `\n` to `\r\n`; embedders should not write status to stderr after `Attach`, and may emit `\r\n` on stdout after dispose to realign the parent shell prompt.
 
 ## Related Documents
 

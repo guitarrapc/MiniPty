@@ -53,6 +53,20 @@ public sealed class WindowsConsoleInputEncoderTests
     }
 
     [Test]
+    public async Task EncodeKeyEvent_BufferTooSmall_ReturnsZero()
+    {
+        var record = new ConsoleWindowsInterop.KeyEventRecord
+        {
+            KeyDown = true,
+            VirtualKeyCode = ConsoleWindowsInterop.VkUp,
+        };
+
+        Span<byte> buffer = stackalloc byte[2];
+        var written = WindowsConsoleInputEncoder.EncodeKeyEvent(record, buffer);
+        await Assert.That(written).IsEqualTo(0);
+    }
+
+    [Test]
     public async Task EncodeKeyEvent_UnknownNonUnicodeKey_ReturnsZero()
     {
         var record = new ConsoleWindowsInterop.KeyEventRecord

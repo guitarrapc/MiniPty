@@ -7,8 +7,8 @@ namespace MiniPty.Console;
 /// </summary>
 /// <remarks>
 /// Does not read PTY output. Embedders remain the sole output consumer via <see cref="PtySession.ReadOutputAsync"/>.
-/// On Windows, the embedder must call <see cref="PtyConsoleInputHandle.PumpInputOnce"/> from the attach thread
-/// (typically in a loop until the session exits).
+/// On Windows, the embedder must call <see cref="PtyConsoleInputHandle.PumpInputUntil"/> or
+/// <see cref="PtyConsoleInputHandle.PumpInputOnce"/> from the attach thread.
 /// </remarks>
 public static class PtyConsoleInput
 {

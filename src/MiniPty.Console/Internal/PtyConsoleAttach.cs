@@ -53,12 +53,39 @@ internal sealed class PtyConsoleAttach : IDisposable
         }
     }
 
+    internal void PumpInputUntil(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, typeof(PtyConsoleInputHandle));
+
+        if (OperatingSystem.IsWindows())
+        {
+            if (!cancellationToken.CanBeCanceled)
+            {
+                throw new InvalidOperationException(
+                    "PumpInputUntil requires a cancelable token on Windows.");
+            }
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                PumpInputOnce(cancellationToken);
+            }
+
+            return;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!cancellationToken.CanBeCanceled)
+            return;
+
+        cancellationToken.WaitHandle.WaitOne();
+    }
+
     internal void PumpInputOnce(CancellationToken cancellationToken)
     {
         if (!OperatingSystem.IsWindows())
             return;
 
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ObjectDisposedException.ThrowIf(_disposed != 0, typeof(PtyConsoleInputHandle));
 
         if (ConsoleWindowsInterop.GetCurrentThreadId() != _attachThreadId)
         {
@@ -66,28 +93,50 @@ internal sealed class PtyConsoleAttach : IDisposable
                 "On Windows, PtyConsoleInputHandle.PumpInputOnce must be called from the thread that invoked Attach.");
         }
 
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
-        var token = linked.Token;
-
-        int read;
-        try
+        CancellationToken token;
+        CancellationTokenSource? linked = null;
+        if (cancellationToken.CanBeCanceled)
         {
-            read = _terminal.ReadInput(_inputBuffer, token);
+            linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
+            token = linked.Token;
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        else
         {
-            return;
+            token = _cts.Token;
         }
-
-        if (read <= 0)
-            return;
 
         try
         {
-            _session.Input.Write(_inputBuffer, 0, read);
+            int read;
+            try
+            {
+                read = _terminal.ReadInput(_inputBuffer, token);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (read <= 0)
+            {
+                if (token.IsCancellationRequested)
+                    return;
+
+                Thread.Sleep(1);
+                return;
+            }
+
+            try
+            {
+                _session.Input.Write(_inputBuffer, 0, read);
+            }
+            catch (ObjectDisposedException)
+            {
+            }
         }
-        catch (ObjectDisposedException)
+        finally
         {
+            linked?.Dispose();
         }
     }
 
@@ -136,45 +185,39 @@ internal sealed class PtyConsoleAttach : IDisposable
     {
         var cancellationToken = _cts.Token;
 
-        try
+        while (!cancellationToken.IsCancellationRequested)
         {
-            while (!cancellationToken.IsCancellationRequested)
+            int read;
+            try
             {
-                int read;
-                try
-                {
-                    read = _terminal.ReadInput(_inputBuffer, cancellationToken);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    break;
-                }
-
-                if (read <= 0)
-                {
-                    if (cancellationToken.IsCancellationRequested)
-                        break;
-
-                    await Task.Delay(10, cancellationToken).ConfigureAwait(false);
-                    continue;
-                }
-
-                try
-                {
-                    _session.Input.Write(_inputBuffer, 0, read);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (ObjectDisposedException)
-                {
-                    break;
-                }
+                read = _terminal.ReadInput(_inputBuffer, cancellationToken);
             }
-        }
-        finally
-        {
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (read <= 0)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    break;
+
+                await Task.Delay(10, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            try
+            {
+                _session.Input.Write(_inputBuffer, 0, read);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
         }
     }
 
