@@ -13,7 +13,11 @@ internal static class PtyBytePump
         CancellationToken cancellationToken)
     {
         if (PtyTransportRead.IsTransport(stream))
+        {
+            if (OperatingSystem.IsMacOS())
+                return PtyTransportPumpTask.Run(ct => ReadAllTransport(stream, encoding, decodeOutput, ct), cancellationToken);
             return Task.Run(() => ReadAllTransport(stream, encoding, decodeOutput, cancellationToken), cancellationToken);
+        }
 
         return ReadAllCoreAsync(stream, encoding, decodeOutput, cancellationToken);
     }

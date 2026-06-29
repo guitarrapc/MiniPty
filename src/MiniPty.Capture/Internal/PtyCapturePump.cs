@@ -22,6 +22,13 @@ internal static class PtyCapturePump
     {
         if (PtyTransportRead.IsTransport(stream))
         {
+            if (OperatingSystem.IsMacOS())
+            {
+                return PtyTransportPumpTask.Run(
+                    ct => ReadTransport(stream, originTimestamp, timeProvider, encoding, decodeOutput, ct),
+                    cancellationToken);
+            }
+
             return Task.Run(
                 () => ReadTransport(stream, originTimestamp, timeProvider, encoding, decodeOutput, cancellationToken),
                 cancellationToken);
