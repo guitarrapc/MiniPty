@@ -11,14 +11,8 @@ public sealed class PtyConsoleInputHandle : IDisposable
     internal PtyConsoleInputHandle(Internal.PtyConsoleAttach attach) => _attach = attach;
 
     /// <summary>
-    /// Reads host input once and forwards it to the PTY.
+    /// Reserved no-op in v1. Input is forwarded by the background pump started by <see cref="PtyConsoleInput.Attach"/>.
     /// </summary>
-    /// <remarks>
-    /// <para>On Windows, call from the same thread that invoked <see cref="PtyConsoleInput.Attach"/>.
-    /// The call blocks until input arrives or <paramref name="cancellationToken"/> is canceled.</para>
-    /// <para>On Unix, input is forwarded by a background pump started by <see cref="PtyConsoleInput.Attach"/>;
-    /// this method is a no-op.</para>
-    /// </remarks>
     public void PumpInputOnce(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
@@ -29,9 +23,8 @@ public sealed class PtyConsoleInputHandle : IDisposable
     /// Blocks until <paramref name="cancellationToken"/> is canceled.
     /// </summary>
     /// <remarks>
-    /// <para>On Windows, repeatedly calls <see cref="PumpInputOnce"/> on the attach thread.</para>
-    /// <para>On Unix, waits for cancellation while the background input pump runs.</para>
-    /// <para>Typical embedders link this token to <see cref="PtySession.WaitForExitAsync"/> completion.</para>
+    /// A background input pump runs while attached. Typical embedders link this token to
+    /// <see cref="PtySession.WaitForExitAsync"/> completion.
     /// </remarks>
     public void PumpInputUntil(CancellationToken cancellationToken = default)
     {

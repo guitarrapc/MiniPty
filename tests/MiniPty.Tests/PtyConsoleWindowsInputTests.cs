@@ -40,7 +40,7 @@ public sealed class PtyConsoleWindowsInputTests
                 WindowsConsoleInputInjector.InjectUnicodeKeyDown('Q');
             }, cts.Token);
 
-            PumpUntilText(consoleInput, output, outputLock, "Q", EchoMarker, cts.Token);
+            await WaitForTextAsync(output, outputLock, "Q", EchoMarker, cts.Token);
 
             cts.Cancel();
             try
@@ -157,7 +157,7 @@ public sealed class PtyConsoleWindowsInputTests
                 WindowsConsoleInputInjector.InjectUtf8Byte((byte)'Q');
             }, cts.Token);
 
-            PumpUntilText(consoleInput, output, outputLock, "Q", EchoMarker, cts.Token);
+            await WaitForTextAsync(output, outputLock, "Q", EchoMarker, cts.Token);
 
             cts.Cancel();
             try
@@ -177,18 +177,16 @@ public sealed class PtyConsoleWindowsInputTests
         }
     }
 
-    private static void PumpUntilText(
-        PtyConsoleInputHandle consoleInput,
+    private static async Task WaitForTextAsync(
         StringBuilder output,
         object outputLock,
         string firstText,
         string secondText,
         CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        while (true)
         {
-            consoleInput.PumpInputOnce(cancellationToken);
-
+            cancellationToken.ThrowIfCancellationRequested();
             lock (outputLock)
             {
                 var text = output.ToString();
@@ -198,9 +196,9 @@ public sealed class PtyConsoleWindowsInputTests
                     return;
                 }
             }
-        }
 
-        cancellationToken.ThrowIfCancellationRequested();
+            await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static async Task PumpOutputAsync(

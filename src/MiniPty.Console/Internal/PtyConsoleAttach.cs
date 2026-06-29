@@ -10,29 +10,54 @@ internal sealed class PtyConsoleAttach : IDisposable
     private static readonly object Sentinel = new();
 
     private readonly PtySession _session;
-    private readonly IHostTerminal _terminal;
-    private readonly uint _attachThreadId;
     private readonly CancellationTokenSource _cts = new();
-    private readonly Task? _inputTask;
     private readonly Task _resizeTask;
     private readonly byte[] _inputBuffer = ArrayPool<byte>.Shared.Rent(4096);
+    private readonly Task? _inputTask;
+    private readonly Thread? _windowsInputThread;
+
+    private IHostTerminal _terminal = null!;
     private int _disposed;
 
     internal PtyConsoleAttach(PtySession session)
     {
         _session = session;
-        _attachThreadId = OperatingSystem.IsWindows()
-            ? ConsoleWindowsInterop.GetCurrentThreadId()
-            : 0;
-        _terminal = HostTerminal.Create();
-        SyncSize();
 
         if (OperatingSystem.IsWindows())
         {
-            _inputTask = null;
+            using var ready = new ManualResetEventSlim(initialState: false);
+            Exception? initFailure = null;
+
+            _windowsInputThread = new Thread(() =>
+            {
+                try
+                {
+                    _terminal = HostTerminal.Create();
+                    SyncSize();
+                    ready.Set();
+                    RunInputPumpSync();
+                }
+                catch (Exception ex)
+                {
+                    initFailure = ex;
+                    ready.Set();
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "MiniPty.Console.Input",
+            };
+
+            _windowsInputThread.Start();
+            ready.Wait();
+
+            if (initFailure is not null)
+                throw new InvalidOperationException("Failed to configure the host terminal.", initFailure);
         }
         else
         {
+            _terminal = HostTerminal.Create();
+            SyncSize();
             _inputTask = Task.Run(InputPumpAsync);
         }
 
@@ -57,22 +82,6 @@ internal sealed class PtyConsoleAttach : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, typeof(PtyConsoleInputHandle));
 
-        if (OperatingSystem.IsWindows())
-        {
-            if (!cancellationToken.CanBeCanceled)
-            {
-                throw new InvalidOperationException(
-                    "PumpInputUntil requires a cancelable token on Windows.");
-            }
-
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                PumpInputOnce(cancellationToken);
-            }
-
-            return;
-        }
-
         cancellationToken.ThrowIfCancellationRequested();
         if (!cancellationToken.CanBeCanceled)
             return;
@@ -82,62 +91,7 @@ internal sealed class PtyConsoleAttach : IDisposable
 
     internal void PumpInputOnce(CancellationToken cancellationToken)
     {
-        if (!OperatingSystem.IsWindows())
-            return;
-
         ObjectDisposedException.ThrowIf(_disposed != 0, typeof(PtyConsoleInputHandle));
-
-        if (ConsoleWindowsInterop.GetCurrentThreadId() != _attachThreadId)
-        {
-            throw new InvalidOperationException(
-                "On Windows, PtyConsoleInputHandle.PumpInputOnce must be called from the thread that invoked Attach.");
-        }
-
-        CancellationToken token;
-        CancellationTokenSource? linked = null;
-        if (cancellationToken.CanBeCanceled)
-        {
-            linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
-            token = linked.Token;
-        }
-        else
-        {
-            token = _cts.Token;
-        }
-
-        try
-        {
-            int read;
-            try
-            {
-                read = _terminal.ReadInput(_inputBuffer, token);
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested)
-            {
-                return;
-            }
-
-            if (read <= 0)
-            {
-                if (token.IsCancellationRequested)
-                    return;
-
-                Thread.Sleep(1);
-                return;
-            }
-
-            try
-            {
-                _session.Input.Write(_inputBuffer, 0, read);
-            }
-            catch (ObjectDisposedException)
-            {
-            }
-        }
-        finally
-        {
-            linked?.Dispose();
-        }
     }
 
     public void Dispose()
@@ -152,10 +106,12 @@ internal sealed class PtyConsoleAttach : IDisposable
 
         try
         {
-            if (_inputTask is not null)
-                Task.WhenAll(_inputTask, _resizeTask).GetAwaiter().GetResult();
-            else
-                _resizeTask.GetAwaiter().GetResult();
+            if (_windowsInputThread is not null)
+                _windowsInputThread.Join();
+            else if (_inputTask is not null)
+                _inputTask.GetAwaiter().GetResult();
+
+            _resizeTask.GetAwaiter().GetResult();
         }
         catch (OperationCanceledException)
         {
@@ -179,6 +135,42 @@ internal sealed class PtyConsoleAttach : IDisposable
     {
         if (_terminal.TryGetSize(out var columns, out var rows) && columns > 0 && rows > 0)
             _session.Resize(new PtySize(columns, rows));
+    }
+
+    private void RunInputPumpSync()
+    {
+        var cancellationToken = _cts.Token;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            int read;
+            try
+            {
+                read = _terminal.ReadInput(_inputBuffer, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (read <= 0)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    break;
+
+                Thread.Sleep(1);
+                continue;
+            }
+
+            try
+            {
+                _session.Input.Write(_inputBuffer, 0, read);
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
+        }
     }
 
     private async Task InputPumpAsync()

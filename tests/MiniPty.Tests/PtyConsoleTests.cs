@@ -107,11 +107,8 @@ public sealed class PtyConsoleTests
     }
 
     [Test]
-    public async Task PumpInputOnce_OnUnix_IsNoOp()
+    public async Task PumpInputOnce_IsNoOp()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return;
-
         if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
             return;
 
@@ -121,11 +118,8 @@ public sealed class PtyConsoleTests
     }
 
     [Test]
-    public async Task PumpInputUntil_OnUnix_ReturnsWhenTokenCanceled()
+    public async Task PumpInputUntil_ReturnsWhenTokenCanceled()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return;
-
         if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
             return;
 
@@ -137,41 +131,6 @@ public sealed class PtyConsoleTests
         await Task.Delay(50);
         cts.Cancel();
         await waitTask.WaitAsync(TimeSpan.FromSeconds(5));
-    }
-
-    [Test]
-    public async Task PumpInputUntil_OnWindows_RequiresCancelableToken()
-    {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return;
-
-        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
-            return;
-
-        await using var session = Pty.Start(InteractiveSizeStartInfo());
-        using var handle = PtyConsoleInput.Attach(session);
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-        {
-            handle.PumpInputUntil(CancellationToken.None);
-            return Task.CompletedTask;
-        });
-    }
-
-    [Test]
-    public async Task PumpInputOnce_WhenCalledFromWrongThread_Throws()
-    {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return;
-
-        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
-            return;
-
-        await using var session = Pty.Start(InteractiveSizeStartInfo());
-        using var handle = PtyConsoleInput.Attach(session);
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            Task.Run(() => handle.PumpInputOnce()));
     }
 
     private static PtyStartInfo Exit0StartInfo()

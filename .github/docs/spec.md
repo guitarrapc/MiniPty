@@ -1,6 +1,6 @@
 # MiniPty Specification
 
-User-facing specification entry point for **MiniPty**, **MiniPty.Capture**, and **MiniPty.Console** NuGet packages. Detailed contracts are split by behavior area under [specs/](specs/). OS-level implementation notes live in [references/pty_crossplatform.md](references/pty_crossplatform.md).
+User-facing specification entry point for **MiniPty**, **MiniPty.Capture**, and **MiniPty.Console** NuGet packages. Detailed contracts are split by behavior area under [specs/](specs/). OS-level implementation notes live in [references/](references/) (for example [pty_crossplatform.md](references/pty_crossplatform.md), [windows_console_input.md](references/windows_console_input.md)).
 
 ## Motivation
 
@@ -68,5 +68,6 @@ Planning notes for Console implementation and deferred editor parity are in [pla
 - [specs/lifecycle.md](specs/lifecycle.md) — cancellation, EOF, drain, disposal, failure behavior
 - [specs/platform_support.md](specs/platform_support.md) — public platform support and verification constraints
 - [references/pty_crossplatform.md](references/pty_crossplatform.md) — ConPTY, `forkpty`, EOF staging, interop details
+- [references/windows_console_input.md](references/windows_console_input.md) — Windows host stdin path for **MiniPty.Console**
 - [README.md](../../README.md) — quick-start examples
 - [scenetake spec_pty.md](https://github.com/guitarrapc/scenetake/blob/main/.github/docs/spec_pty.md) — `pty: true` YAML and cast integration (use case 2 today)
