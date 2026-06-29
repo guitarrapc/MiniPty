@@ -82,7 +82,7 @@ internal sealed class UnixHostTerminal : IHostTerminal
         return columns > 0 && rows > 0;
     }
 
-    public unsafe int ReadInput(Span<byte> buffer)
+    public unsafe int ReadInput(Span<byte> buffer, CancellationToken cancellationToken = default)
     {
         if (buffer.IsEmpty)
             return 0;

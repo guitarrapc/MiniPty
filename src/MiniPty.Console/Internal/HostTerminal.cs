@@ -9,7 +9,7 @@ internal interface IHostTerminal : IDisposable
 
     /// <summary>Blocks until at least one input byte is available, then writes into <paramref name="buffer"/>.</summary>
     /// <returns>Bytes written to <paramref name="buffer"/>, or zero when interrupted.</returns>
-    int ReadInput(Span<byte> buffer);
+    int ReadInput(Span<byte> buffer, CancellationToken cancellationToken = default);
 
     /// <summary>Non-blocking check for a host resize. Returns true when size changed since the last call.</summary>
     bool TryPollResize(out int columns, out int rows);

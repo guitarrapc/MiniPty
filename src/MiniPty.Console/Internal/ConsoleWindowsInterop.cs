@@ -6,13 +6,14 @@ internal static partial class ConsoleWindowsInterop
 {
     internal const int StdInputHandle = -10;
     internal const int StdOutputHandle = -11;
-    internal const uint WaitObject0 = 0x00000000;
-    internal const uint WaitTimeout = 0x00000102;
 
     internal const uint EnableEchoInput = 0x0004;
     internal const uint EnableLineInput = 0x0002;
     internal const uint EnableProcessedInput = 0x0001;
     internal const uint EnableWindowInput = 0x0008;
+    internal const uint EnableVirtualTerminalInput = 0x0200;
+
+    internal const int ErrorOperationAborted = 995;
 
     internal const uint EnableProcessedOutput = 0x0001;
     internal const uint EnableWrapAtEolOutput = 0x0002;
@@ -106,7 +107,7 @@ internal static partial class ConsoleWindowsInterop
         IntPtr hConsoleOutput,
         out ConsoleScreenBufferInfo lpConsoleScreenBufferInfo);
 
-    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [LibraryImport("kernel32.dll", EntryPoint = "ReadConsoleInputW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static unsafe partial bool ReadConsoleInput(
         IntPtr hConsoleInput,
@@ -114,6 +115,52 @@ internal static partial class ConsoleWindowsInterop
         uint nLength,
         out uint lpNumberOfEventsRead);
 
+    [LibraryImport("kernel32.dll", EntryPoint = "PeekConsoleInputW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool PeekConsoleInput(
+        IntPtr hConsoleInput,
+        InputRecord* lpBuffer,
+        uint nLength,
+        out uint lpNumberOfEventsRead);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "WriteConsoleInputW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool WriteConsoleInput(
+        IntPtr hConsoleInput,
+        InputRecord* lpBuffer,
+        uint nLength,
+        out uint lpNumberOfEventsWritten);
+
+    [LibraryImport("kernel32.dll")]
+    internal static partial uint GetCurrentThreadId();
+
     [LibraryImport("kernel32.dll", SetLastError = true)]
-    internal static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool AllocConsole();
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool FreeConsole();
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool ReadFile(
+        IntPtr hFile,
+        byte* lpBuffer,
+        uint nNumberOfBytesToRead,
+        out uint lpNumberOfBytesRead,
+        IntPtr lpOverlapped);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool WriteFile(
+        IntPtr hFile,
+        byte* lpBuffer,
+        uint nNumberOfBytesToWrite,
+        out uint lpNumberOfBytesWritten,
+        IntPtr lpOverlapped);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool CancelIoEx(IntPtr hFile, IntPtr lpOverlapped);
 }

@@ -39,8 +39,10 @@ PTY output **display** on the host and **timestamped recording** stay embedder r
 v1 exposes one public attach API:
 
 ```csharp
-IDisposable PtyConsoleInput.Attach(PtySession session)
+IDisposable PtyConsoleInput.Attach(PtySession session) // returns PtyConsoleInputHandle
 ```
+
+`PtyConsoleInputHandle` also exposes `PumpInputOnce(CancellationToken)` for the Windows caller-thread input loop.
 
 - No options type, callbacks, or `CancellationToken` parameters in v1.
 - Stopping host attach and restoring the terminal is **`Dispose`** on the returned handle.
@@ -68,7 +70,12 @@ This package does **not** read from `PtySession` output APIs. Configuring host s
 
 ### Input pump
 
-After `Attach`, a background input loop reads **raw bytes** from host stdin and forwards them with `PtySession.WriteInputAsync(ReadOnlyMemory<byte>)`.
+After `Attach`, host stdin bytes are forwarded to `PtySession` input.
+
+| Platform | Input pump |
+|---|---|
+| Unix | Background thread reads host stdin and writes to the PTY. |
+| Windows | The thread that called `Attach` must call `PtyConsoleInputHandle.PumpInputOnce` in a loop (typically until the session exits). Physical keyboard input is delivered to `ReadFile` on that thread only. |
 
 - No UTF-8 decoding, `Console.ReadKey`, or line buffering in **MiniPty.Console**.
 - Arrow keys, function keys, and paste appear as the host terminal delivers them (often escape sequences as bytes).
@@ -152,6 +159,10 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 
 - Benchmark allocation comparison must use the benchmark class default `SimpleJob` only; adding `--job short` runs a second job and the compare script prefers `ShortRun`, which reports higher allocations on spawn-heavy benchmarks without any code change.
 - CI test hosts are usually non-TTY; `Attach` guard tests rely on `Console.IsInputRedirected` / `IsOutputRedirected`, while duplicate-attach and resize smoke tests skip when redirected.
+- On Windows, `WaitForSingleObject` on the console input handle does not signal key events; host input polling must use `PeekConsoleInput` before `ReadConsoleInput`.
+- On Windows Terminal and other VT-aware hosts, physical keyboard input is delivered as UTF-8 bytes via `ReadFile` after enabling `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin. `AttachThreadInput` does not deliver VT `ReadFile` input to a background thread; `PumpInputOnce` must run on the thread that called `Attach`.
+- NativeAOT `LibraryImport` must name console APIs with their wide entry points (`PeekConsoleInputW`, `ReadConsoleInputW`, `WriteConsoleInputW`); undecorated names are not exported from `kernel32.dll`.
+- Start the embedder `ReadOutputAsync` pump before `PtyConsoleInput.Attach` so the child cannot block on a full ConPTY output pipe during startup.
 
 ## Related Documents
 

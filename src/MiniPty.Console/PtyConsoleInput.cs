@@ -7,6 +7,8 @@ namespace MiniPty.Console;
 /// </summary>
 /// <remarks>
 /// Does not read PTY output. Embedders remain the sole output consumer via <see cref="PtySession.ReadOutputAsync"/>.
+/// On Windows, the embedder must call <see cref="PtyConsoleInputHandle.PumpInputOnce"/> from the attach thread
+/// (typically in a loop until the session exits).
 /// </remarks>
 public static class PtyConsoleInput
 {
@@ -18,7 +20,7 @@ public static class PtyConsoleInput
     /// <exception cref="ArgumentNullException"><paramref name="session"/> is null.</exception>
     /// <exception cref="InvalidOperationException">Host stdin or stdout is not a terminal, or a console attach is already active.</exception>
     /// <exception cref="ObjectDisposedException"><paramref name="session"/> is disposed.</exception>
-    public static IDisposable Attach(PtySession session)
+    public static PtyConsoleInputHandle Attach(PtySession session)
     {
         ArgumentNullException.ThrowIfNull(session);
 
@@ -31,7 +33,7 @@ public static class PtyConsoleInput
         PtyConsoleAttach.Register(session);
         try
         {
-            return new PtyConsoleAttach(session);
+            return new PtyConsoleInputHandle(new PtyConsoleAttach(session));
         }
         catch
         {
