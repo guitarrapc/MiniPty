@@ -608,10 +608,10 @@ int minipty_console_termios_restore(int fd, const minipty_console_termios_blob *
 {
     struct termios term;
 
-    if (snap == NULL || snap->length <= 0 || snap->length > (int)sizeof(struct termios))
+    if (snap == NULL || snap->length != (int)sizeof(struct termios))
         return -1;
 
-    memcpy(&term, snap->bytes, (size_t)snap->length);
+    memcpy(&term, snap->bytes, sizeof(term));
     return tcsetattr(fd, TCSANOW, &term);
 }
 

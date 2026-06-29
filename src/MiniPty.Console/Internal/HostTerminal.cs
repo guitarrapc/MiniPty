@@ -7,8 +7,8 @@ internal interface IHostTerminal : IDisposable
 {
     bool TryGetSize(out int columns, out int rows);
 
-    /// <summary>Blocks until at least one input byte is available, then writes into <paramref name="buffer"/>.</summary>
-    /// <returns>Bytes written to <paramref name="buffer"/>, or zero when interrupted.</returns>
+    /// <summary>Reads host stdin bytes into <paramref name="buffer"/>.</summary>
+    /// <returns>Bytes written to <paramref name="buffer"/>; may return 0 when interrupted, canceled, or when no bytes were available.</returns>
     int ReadInput(Span<byte> buffer, CancellationToken cancellationToken = default);
 
     /// <summary>Non-blocking check for a host resize. Returns true when size changed since the last call.</summary>

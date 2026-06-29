@@ -146,10 +146,11 @@ internal sealed class WindowsHostTerminal : IHostTerminal
         {
             if (!ConsoleWindowsInterop.ReadFile(_stdin, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
             {
-                if (Marshal.GetLastPInvokeError() == ConsoleWindowsInterop.ErrorOperationAborted)
+                var error = Marshal.GetLastPInvokeError();
+                if (error == ConsoleWindowsInterop.ErrorOperationAborted)
                     return 0;
 
-                return 0;
+                throw new IOException($"ReadFile failed (Win32 {error})");
             }
 
             return read > 0 ? (int)read : 0;

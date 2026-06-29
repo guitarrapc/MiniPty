@@ -34,7 +34,7 @@ internal static class WindowsConsoleInputEncoder
     {
         Span<char> chars = stackalloc char[1];
         chars[0] = (char)unicodeChar;
-        return Encoding.UTF8.GetBytes(chars, destination);
+        return Encoding.UTF8.TryGetBytes(chars, destination, out var written) ? written : 0;
     }
 
     private static int WriteSequence(Span<byte> destination, ReadOnlySpan<byte> sequence)

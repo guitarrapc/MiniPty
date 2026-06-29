@@ -167,8 +167,9 @@ await pumpTask;
 
 static async Task PumpOutputAsync(PtySession session)
 {
+    var stdout = Console.OpenStandardOutput();
     await foreach (var chunk in session.ReadOutputAsync())
-        await Console.OpenStandardOutput().WriteAsync(chunk.Data);
+        await stdout.WriteAsync(chunk.Data);
 }
 ```
 

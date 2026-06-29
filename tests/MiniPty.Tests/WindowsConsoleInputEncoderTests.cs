@@ -67,6 +67,20 @@ public sealed class WindowsConsoleInputEncoderTests
     }
 
     [Test]
+    public async Task EncodeKeyEvent_UnicodeChar_BufferTooSmall_ReturnsZero()
+    {
+        var record = new ConsoleWindowsInterop.KeyEventRecord
+        {
+            KeyDown = true,
+            UnicodeChar = 'é',
+        };
+
+        Span<byte> buffer = stackalloc byte[1];
+        var written = WindowsConsoleInputEncoder.EncodeKeyEvent(record, buffer);
+        await Assert.That(written).IsEqualTo(0);
+    }
+
+    [Test]
     public async Task EncodeKeyEvent_UnknownNonUnicodeKey_ReturnsZero()
     {
         var record = new ConsoleWindowsInterop.KeyEventRecord

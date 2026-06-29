@@ -152,6 +152,10 @@ internal sealed class PtyConsoleAttach : IDisposable
             {
                 break;
             }
+            catch (IOException)
+            {
+                break;
+            }
 
             if (read <= 0)
             {
@@ -170,6 +174,10 @@ internal sealed class PtyConsoleAttach : IDisposable
             {
                 break;
             }
+            catch (IOException)
+            {
+                break;
+            }
         }
     }
 
@@ -185,6 +193,10 @@ internal sealed class PtyConsoleAttach : IDisposable
                 read = _terminal.ReadInput(_inputBuffer, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (IOException)
             {
                 break;
             }
@@ -207,6 +219,10 @@ internal sealed class PtyConsoleAttach : IDisposable
                 break;
             }
             catch (ObjectDisposedException)
+            {
+                break;
+            }
+            catch (IOException)
             {
                 break;
             }

@@ -97,7 +97,7 @@ internal sealed class UnixHostTerminal : IHostTerminal
             while (read < 0 && Marshal.GetLastPInvokeError() == ConsoleUnixInterop.EINTR);
 
             if (read < 0)
-                return 0;
+                throw new IOException($"read failed (errno {Marshal.GetLastPInvokeError()})");
 
             return read;
         }
