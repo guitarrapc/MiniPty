@@ -9,6 +9,7 @@ internal static class PtyTransportPumpTask
 {
     internal static Task<T> Run<T>(Func<CancellationToken, T> work, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(work);
         if (cancellationToken.IsCancellationRequested)
             return Task.FromCanceled<T>(cancellationToken);
 
