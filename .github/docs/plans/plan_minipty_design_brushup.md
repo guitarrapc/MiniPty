@@ -203,6 +203,8 @@ Lesson learned:
 
 ### Phase 3: Thin backend execution boundary
 
+Status: Completed.
+
 Scope:
 
 - Keep the runtime backend concept, but make it as small and focused as possible
@@ -224,6 +226,18 @@ Acceptance criteria:
 - the backend boundary stays minimal and understandable
 - existing `IPtyBackend` usage is not expanded into a broader abstraction hierarchy
 - no allocation increase in output/read, write, wait, and resize behavior benchmarks
+
+Implemented outcome:
+
+- No production code or public API changes were required.
+- `IPtyBackend` remains an internal runtime session boundary, not a launch abstraction.
+- Platform launch remains owned by the static `WindowsPtyBackend.Start` and `UnixPtyBackend.Start` functions.
+- The current `IPtyBackend` members are retained because they map directly to `PtySession` public APIs or allocation-sensitive internal orchestration.
+- No new interfaces, factories, launcher abstractions, or split backend contracts were introduced.
+
+Lesson learned:
+
+- The existing backend boundary is already thin enough for MiniPty's data-oriented design. Splitting it would add abstraction surface without reducing platform branching or allocation-sensitive lifecycle complexity.
 
 ### Phase 4: Lifecycle cleanup and docs
 
