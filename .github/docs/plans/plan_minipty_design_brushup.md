@@ -166,6 +166,8 @@ Lesson learned:
 
 ### Phase 2: Isolate backend selection
 
+Status: Completed.
+
 Scope:
 
 - Extract platform/backend selection logic from [src/MiniPty/Pty.cs](../../src/MiniPty/Pty.cs)
@@ -186,6 +188,18 @@ Acceptance criteria:
 - no new public API is introduced
 - the resulting code is simpler than or equal in complexity to the current direct branch
 - no allocation increase versus baseline in startup-related benchmarks
+
+Implemented outcome:
+
+- No production code or public API changes were required.
+- The existing [src/MiniPty/Pty.cs](../../src/MiniPty/Pty.cs) entry point remains the right boundary for null validation, supported-OS validation, backend family selection, and `PtySession` wrapping.
+- `Pty.IsSupported` continues to define the supported OS set: Windows, Linux, macOS, and FreeBSD.
+- `Pty.Start` continues to map Windows to `WindowsPtyBackend` and the remaining supported OSes to `UnixPtyBackend` after the support check.
+- No selector helper was introduced because it would add indirection without reducing duplication or clarifying the startup path.
+
+Lesson learned:
+
+- In this case, isolating backend selection means preserving the small direct branch. The direct `RuntimeInformation` check is clearer and no less allocation-friendly than an internal helper.
 
 ### Phase 3: Thin backend execution boundary
 
