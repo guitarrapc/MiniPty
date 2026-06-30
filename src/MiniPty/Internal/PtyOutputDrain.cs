@@ -127,13 +127,13 @@ internal static class PtyOutputDrain
             if (pump.IsCompleted)
                 return;
 
-            Thread.Sleep(0);
+            PtySleep.Sleep(0);
         }
     }
 
     /// <summary>
-    /// Bounded 10ms poll (plan P1). Uses thread sleep instead of timer-based delays to avoid per-poll
-    /// allocations; one-shot completion tolerates briefly holding a pool thread during post-exit drain.
+    /// Bounded poll loop that uses a Windows waitable timer when available to keep short post-exit
+    /// delays precise without introducing a separate delay task or allocation churn.
     /// </summary>
     private static void PollSleep(int milliseconds, CancellationToken cancellationToken)
     {
@@ -143,7 +143,7 @@ internal static class PtyOutputDrain
             cancellationToken.ThrowIfCancellationRequested();
             var remaining = (int)Math.Min(milliseconds, pollDeadline - Environment.TickCount64);
             if (remaining > 0)
-                Thread.Sleep(remaining);
+                PtySleep.Sleep(remaining);
         }
     }
 

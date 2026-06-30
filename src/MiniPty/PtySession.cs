@@ -597,7 +597,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                                 var coalesceDeadline = Environment.TickCount64 + CoalesceMicroWindowMs;
                                 while (read <= 0 && Environment.TickCount64 < coalesceDeadline)
                                 {
-                                    Thread.Sleep(0);
+                                    PtySleep.Sleep(0);
                                     read = _session.TryReadOutputTransportIfReady(bytes.Span.Slice(offset), out readEof);
                                 }
                             }
@@ -697,7 +697,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                         _producerCancellation.Token.ThrowIfCancellationRequested();
                         var remaining = (int)Math.Min(10, pollDeadline - Environment.TickCount64);
                         if (remaining > 0)
-                            Thread.Sleep(remaining);
+                            PtySleep.Sleep(remaining);
                     }
                 }
             }
