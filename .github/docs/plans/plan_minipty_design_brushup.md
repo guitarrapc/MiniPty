@@ -118,13 +118,25 @@ It should not need to decide how the PTY is launched, and it should not host pla
 
 ### Phase 1: Clarify launch input normalization boundaries
 
+Status: Completed.
+
 Scope:
 
 - Audit the current launch normalization responsibilities around [src/MiniPty/PtyStartInfo.cs](../../src/MiniPty/PtyStartInfo.cs), `PtyEnvironment`, and the platform backends
 - Keep `PtyStartInfo.ClampedSize` and `PtyEnvironment` in place unless moving them is simpler and allocation-neutral
 - Add an internal launch model only if the audit finds a real duplication or unclear boundary that cannot be fixed with smaller local changes
 - If such a model is needed, make it borrow-only and allocation-neutral; do not copy arguments, environment, or strings for design cleanliness
+- Start with test hardening for `PtyEnvironment` rather than introducing new launch models or splitting environment construction into separate types
+- Keep `PtyEnvironment` as the single child-environment construction unit; do not split validation, sanitize, overlay, TERM defaulting, or materialization into separate files or types
 - Keep behavior unchanged
+
+Initial test-hardening scope:
+
+- Add tests to the existing `PtyEnvironmentTests` file instead of creating new platform-specific test files
+- Cover Unix sanitize and `TERM` default behavior by equivalence class, not by one broad smoke test or one test per sanitized key
+- Include only overlay cases that affect Unix `TERM` priority in this first pass
+- Include a minimal Windows contrast test showing that `TerminalName` does not create `TERM` on Windows
+- Leave broader overlay semantics and Windows case-insensitive behavior for later focused tests unless an existing gap blocks this phase
 
 Files likely affected:
 
@@ -138,7 +150,19 @@ Acceptance criteria:
 - behavior is identical
 - environment and size preparation boundaries are easier to reason about
 - no new internal launch model is added unless it has a concrete simplification benefit
+- `PtyEnvironmentTests` covers the first-pass Unix sanitize / `TERM` equivalence classes and the minimal Windows `TerminalName` contrast
 - no additional steady-state allocations in start and session hot paths
+
+Implemented outcome:
+
+- No production code or public API changes were required.
+- `PtyEnvironment` remains the single child-environment construction unit.
+- Existing tests were extended to pin Unix stale-terminal sanitize behavior, Unix `TERM` priority cases, and the Windows `TerminalName` contrast.
+- Startup/completion allocation stayed flat in `Session_Exit0_Bytes` (`3.8 KB` before and after).
+
+Lesson learned:
+
+- The existing normalization boundaries were already sufficient for Phase 1. A new internal launch model would not reduce duplication or clarify enough behavior to justify the extra structure.
 
 ### Phase 2: Isolate backend selection
 
