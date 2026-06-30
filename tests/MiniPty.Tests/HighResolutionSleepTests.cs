@@ -13,6 +13,16 @@ public sealed class HighResolutionSleepTests
     }
 
     [Test]
+    public async Task ConcurrentSleepsComplete()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var tasks = Enumerable.Range(0, 8).Select(_ => Task.Run(() => PtySleep.Sleep(5))).ToArray();
+        await Task.WhenAll(tasks);
+    }
+
+    [Test]
     public async Task SleepWaitsForRequestedDuration()
     {
         if (!OperatingSystem.IsWindows())

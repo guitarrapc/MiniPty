@@ -16,6 +16,7 @@ internal static partial class PtySleep
     private const uint Infinite = 0xFFFFFFFF;
 
     private static readonly Lazy<SafeWaitHandle?> _timer = new(CreateWaitableTimer);
+    private static readonly Lock _timerLock = new();
 
     internal static void Sleep(int milliseconds)
     {
@@ -38,17 +39,22 @@ internal static partial class PtySleep
             return;
         }
 
-        var dueTime = -(long)(milliseconds * 10_000.0);
-        if (!SetWaitableTimer(timer, in dueTime, 0, 0, 0, false))
+        var dueTime = -(milliseconds * 10_000L);
+        var waited = false;
+        lock (_timerLock)
         {
-            Thread.Sleep(milliseconds);
-            return;
+            if (!SetWaitableTimer(timer, in dueTime, 0, 0, 0, false))
+            {
+                Thread.Sleep(milliseconds);
+                return;
+            }
+
+            waited = WaitForSingleObject(timer, Infinite) == 0;
         }
 
-        if (WaitForSingleObject(timer, Infinite) != 0)
+        if (!waited)
         {
             Thread.Sleep(milliseconds);
-            return;
         }
     }
 
