@@ -21,13 +21,28 @@ Use case 3 recording and cast format remain **scenetake** (or other embedder) re
 
 ## Package Responsibilities
 
-| Package | Responsibility |
-|---|---|
-| **MiniPty** | Spawn a child in a PTY; expose `Input` / `Output` streams; persistent bytes-only output streaming; lifecycle operations; one-shot completion |
-| **MiniPty.Capture** | One-shot `PtyCapture.RunAsync` observation with per-read timestamps, merged output, decoded text, and exit code (use case 2) |
-| **MiniPty.Console** | Host terminal input attach for use case 3: TUI host modes, keyboard bytes → PTY, resize sync; **does not** read PTY output |
+| Package | Purpose | Depends on |
+|---|---|---|
+| **MiniPty** | Core PTY transport: spawn, streams, lifecycle | — |
+| **MiniPty.Capture** | One-shot run with per-read timestamps (`PtyCapture.RunAsync`) | MiniPty |
+| **MiniPty.Console** | Host keyboard → PTY input (`PtyConsoleInput.Attach`) | MiniPty |
 
-Timestamped chunks are **not** part of the core API. Consumers that need to observe PTY output over time take a dependency on **MiniPty.Capture** (one-shot) or implement their own `ReadOutputAsync` loop (interactive).
+```mermaid
+flowchart TB
+    M["MiniPty"]
+    C["MiniPty.Capture"]
+    O["MiniPty.Console"]
+    C --> M
+    O --> M
+```
+
+| You need… | Packages |
+|---|---|
+| General PTY I/O, `ReadOutputAsync`, `CompleteAsync`, editor backend | **MiniPty** |
+| One-shot command with timestamped output chunks | **MiniPty** + **MiniPty.Capture** |
+| Human types on the host terminal (vim, etc.) | **MiniPty** + **MiniPty.Console** (+ your `ReadOutputAsync` for display/record) |
+
+**MiniPty.Capture** and **MiniPty.Console** are optional add-ons. Both depend on core only; Console does not read PTY output.
 
 ## Implemented Scope
 
@@ -38,7 +53,7 @@ Timestamped chunks are **not** part of the core API. Consumers that need to obse
 | Run a one-shot command with optional stdin and drained output | [Completion](specs/completion.md) |
 | Observe one-shot output with per-read timestamps | [Capture](specs/capture.md) |
 | Convert PTY text into host-readable output | [Display text](specs/display_text.md) |
-| Understand cancellation, EOF, drain, and disposal behavior | [Lifecycle](specs/lifecycle.md) |
+| Understand architecture, session flow, cancellation, EOF, drain, and disposal | [Lifecycle](specs/lifecycle.md) |
 | Understand supported OS targets and public platform guarantees | [Platform support](specs/platform_support.md) |
 | Persistent transport sample (`ReadOutputAsync` command loop) | [samples/Interactive.cs](../../samples/Interactive.cs) |
 | Attach host terminal input to an existing `PtySession` (use case 3) | [Console](specs/console.md) |
@@ -65,7 +80,7 @@ Planning notes for Console implementation and deferred editor parity are in [pla
 - [specs/capture.md](specs/capture.md) — `MiniPty.Capture` timestamped observation
 - [specs/console.md](specs/console.md) — `MiniPty.Console` host input attach
 - [specs/display_text.md](specs/display_text.md) — `PtyOutput.ToDisplayText`
-- [specs/lifecycle.md](specs/lifecycle.md) — cancellation, EOF, drain, disposal, failure behavior
+- [specs/lifecycle.md](specs/lifecycle.md) — mental model, session flow, cancellation, EOF, drain, disposal, failure behavior
 - [specs/platform_support.md](specs/platform_support.md) — public platform support and verification constraints
 - [references/pty_crossplatform.md](references/pty_crossplatform.md) — ConPTY, `forkpty`, EOF staging, interop details
 - [references/windows_console_input.md](references/windows_console_input.md) — Windows host stdin path for **MiniPty.Console**

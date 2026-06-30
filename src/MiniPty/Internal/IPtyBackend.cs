@@ -1,5 +1,10 @@
 ﻿namespace MiniPty.Internal;
 
+/// <summary>
+/// Thin internal runtime contract for an active PTY child. Platform backends implement this after
+/// <c>WindowsPtyBackend.Start</c> or <c>UnixPtyBackend.Start</c>; <see cref="PtySession"/> is the sole
+/// public coordinator. Not a launch plugin point—keep members mapped to session operations only.
+/// </summary>
 internal interface IPtyBackend : IDisposable
 {
     public Stream Input { get; }

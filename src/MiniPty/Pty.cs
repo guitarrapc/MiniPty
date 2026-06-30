@@ -8,6 +8,12 @@ namespace MiniPty;
 /// </summary>
 /// <remarks>
 /// <para>
+/// <see cref="Start"/> validates the request, selects the platform backend (ConPTY on Windows, Unix PTY
+/// elsewhere), spawns the child, and returns a <see cref="PtySession"/>. It does not wait for exit.
+/// Launch options are declarative <see cref="PtyStartInfo"/> data; live I/O and teardown belong to
+/// <see cref="PtySession"/>.
+/// </para>
+/// <para>
 /// Use <see cref="Start"/> to create a <see cref="PtySession"/>, then read <see cref="PtySession.Output"/>,
 /// write <see cref="PtySession.Input"/>, and wait with <see cref="PtySession.WaitForExitAsync"/> or
 /// <see cref="PtySession.CompleteAsync"/>.

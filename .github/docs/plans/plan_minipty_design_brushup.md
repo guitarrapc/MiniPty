@@ -241,6 +241,8 @@ Lesson learned:
 
 ### Phase 4: Lifecycle cleanup and docs
 
+Status: Completed.
+
 Scope:
 
 - Document the responsibility split in the implementation comments and relevant docs
@@ -258,6 +260,17 @@ Acceptance criteria:
 - the mental model is clear for maintainers
 - no accidental API expansion
 - no performance or allocation regression introduced by lifecycle cleanup changes
+
+Implemented outcome:
+
+- No production API or behavior changes.
+- [specs/lifecycle.md](../specs/lifecycle.md) now documents the launch/runtime responsibility split and adds mermaid architecture and session-flow diagrams.
+- [spec.md](../spec.md) and [README.md](../../README.md) link to the lifecycle mental model.
+- [PtySession.cs](../../src/MiniPty/PtySession.cs), [Pty.cs](../../src/MiniPty/Pty.cs), and [IPtyBackend.cs](../../src/MiniPty/Internal/IPtyBackend.cs) XML remarks state the boundary between launch options, platform spawn, and live session coordination.
+
+Lesson learned:
+
+- Behavioral contracts were already captured in lifecycle tables; the missing piece was a contributor-facing flow view. Diagrams belong in the spec; boundary comments belong on the types that enforce them.
 
 ## Validation Plan
 

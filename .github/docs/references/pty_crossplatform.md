@@ -33,7 +33,7 @@ Do not parse escape sequences inside the PTY backend. Terminal rendering (ANSI �
 
 ## Session Lifecycle
 
-Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps the same session with a timestamp pump and `CompleteAsync`.
+Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps the same session with a timestamp pump and `CompleteAsync`. For responsibility split and session-state flow diagrams, see [lifecycle.md](../specs/lifecycle.md) → Mental Model and Session Flow.
 
 | API | Behavior |
 |---|---|

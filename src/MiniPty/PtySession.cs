@@ -10,6 +10,13 @@ namespace MiniPty;
 /// </summary>
 /// <remarks>
 /// <para>
+/// <see cref="PtySession"/> coordinates the <em>runtime</em> PTY lifecycle only: output consumption,
+/// stdin writes, resize, exit waiting, kill, and disposal. Launch options come from
+/// <see cref="PtyStartInfo"/>; <see cref="Pty.Start"/> selects the platform backend and constructs this
+/// object after spawn. Platform spawn and handle ownership live in <c>WindowsPtyBackend</c> /
+/// <c>UnixPtyBackend</c> behind <see cref="IPtyBackend"/>.
+/// </para>
+/// <para>
 /// PTY output is a byte stream with terminal semantics. If the child writes output and nothing reads
 /// <see cref="Output"/>, the child may block when the terminal buffer fills. Use <see cref="CompleteAsync"/>,
 /// continuously read <see cref="Output"/>, or the <c>MiniPty.Capture</c> package for timestamped observation.
