@@ -28,6 +28,8 @@ This is a working plan, not an API contract. The goal is to improve internal str
 - If a design cleanup introduces measurable allocation growth, that change is rejected or reworked.
 - Prefer static dispatch, plain data structs/records, and localized helpers over abstraction layers that add runtime overhead.
 - Do not add backend plugin points or polymorphic extension seams for future-proofing.
+- Do not add new internal models just to make the design look cleaner; add one only when it removes duplication or clarifies a real boundary without allocation cost.
+- Do not move existing normalization responsibilities away from well-scoped helpers unless the new location is clearly simpler and allocation-neutral.
 
 ## Current State
 
@@ -57,18 +59,18 @@ This object should remain a simple, declarative description of the request:
 
 It should not contain launch orchestration logic.
 
-### 2. Introduce a small internal launch model
+### 2. Clarify launch normalization boundaries
 
-Introduce an internal, data-only launch model that represents the normalized request after input validation and platform-specific preparation.
+Clarify where launch request normalization belongs before adding any new type.
 
-Suggested shape:
+Current responsibility boundaries should be preserved unless there is a concrete reason to change them:
 
-- `PtyLaunchRequest` or `PtyLaunchPlan` as an internal record-like type
-- holds the normalized values needed to launch the child
-- is produced from `PtyStartInfo`
-- is passed into a backend selector or launcher
+- [src/MiniPty/PtyStartInfo.cs](../../src/MiniPty/PtyStartInfo.cs) remains the public request shape.
+- `PtyStartInfo.ClampedSize` remains the size normalization point unless moving it demonstrably simplifies the startup path.
+- `PtyEnvironment` remains the environment normalization point.
+- Platform backends remain responsible for platform launch preparation.
 
-This is the main place to separate “what to start” from “how to start it”.
+Only introduce an internal launch model if the existing boundaries cannot express the responsibility split cleanly. If introduced, it must be a borrow-only, allocation-neutral internal shape, preferably a `readonly struct` that references existing data instead of copying it.
 
 ### 3. Separate backend selection from backend execution
 
@@ -114,24 +116,28 @@ It should not need to decide how the PTY is launched, and it should not host pla
 
 ## Implementation Plan
 
-### Phase 1: Normalize launch inputs
+### Phase 1: Clarify launch input normalization boundaries
 
 Scope:
 
-- Add an internal normalized launch model derived from [src/MiniPty/PtyStartInfo.cs](../../src/MiniPty/PtyStartInfo.cs)
-- Move environment and size normalization logic into that model where it belongs
+- Audit the current launch normalization responsibilities around [src/MiniPty/PtyStartInfo.cs](../../src/MiniPty/PtyStartInfo.cs), `PtyEnvironment`, and the platform backends
+- Keep `PtyStartInfo.ClampedSize` and `PtyEnvironment` in place unless moving them is simpler and allocation-neutral
+- Add an internal launch model only if the audit finds a real duplication or unclear boundary that cannot be fixed with smaller local changes
+- If such a model is needed, make it borrow-only and allocation-neutral; do not copy arguments, environment, or strings for design cleanliness
 - Keep behavior unchanged
 
 Files likely affected:
 
 - [src/MiniPty/PtyStartInfo.cs](../../src/MiniPty/PtyStartInfo.cs)
 - [src/MiniPty/Pty.cs](../../src/MiniPty/Pty.cs)
+- [src/MiniPty/Internal/PtyEnvironment.cs](../../src/MiniPty/Internal/PtyEnvironment.cs)
 
 Acceptance criteria:
 
 - public API remains unchanged
 - behavior is identical
-- environment and size preparation is easier to reason about
+- environment and size preparation boundaries are easier to reason about
+- no new internal launch model is added unless it has a concrete simplification benefit
 - no additional steady-state allocations in start and session hot paths
 
 ### Phase 2: Isolate backend selection
@@ -142,6 +148,7 @@ Scope:
 - Introduce a small internal selector helper that returns the chosen execution strategy
 - Keep the control flow simple and explicit
 - Keep selection logic static and branch-based; do not introduce public or multi-layer runtime polymorphism
+- Skip this phase if the extracted helper is more complex than the current direct `RuntimeInformation` branching
 
 Files likely affected:
 
@@ -153,6 +160,7 @@ Acceptance criteria:
 - startup orchestration is easier to follow
 - platform branching is localized
 - no new public API is introduced
+- the resulting code is simpler than or equal in complexity to the current direct branch
 - no allocation increase versus baseline in startup-related benchmarks
 
 ### Phase 3: Thin backend execution boundary
@@ -163,6 +171,7 @@ Scope:
 - Ensure platform launch code is owned by the platform modules and not mixed with session orchestration
 - Prefer plain data + focused functions over an extensible abstraction hierarchy
 - Keep runtime backend boundary minimal; avoid additional interface layers unless proven necessary
+- Do not add new interfaces; keep, shrink, or clarify the existing backend boundary only
 
 Files likely affected:
 
@@ -175,6 +184,7 @@ Acceptance criteria:
 - the startup path is easy to inspect
 - OS-specific code remains isolated
 - the backend boundary stays minimal and understandable
+- existing `IPtyBackend` usage is not expanded into a broader abstraction hierarchy
 - no allocation increase in output/read, write, wait, and resize behavior benchmarks
 
 ### Phase 4: Lifecycle cleanup and docs
