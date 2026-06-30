@@ -15,12 +15,14 @@ internal static partial class PtySleep
     private const uint TimerAllAccess = 0x1F0003;
     private const uint Infinite = 0xFFFFFFFF;
 
-    private static readonly Lazy<SafeWaitHandle?> _timer = new(CreateWaitableTimer);
-    private static readonly Lock _timerLock = new();
-
     internal static void Sleep(int milliseconds)
     {
-        if (milliseconds <= 0)
+        if (milliseconds < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(milliseconds));
+        }
+
+        if (milliseconds == 0)
         {
             Thread.Sleep(0);
             return;
@@ -32,7 +34,7 @@ internal static partial class PtySleep
             return;
         }
 
-        var timer = _timer.Value;
+        using var timer = CreateWaitableTimer();
         if (timer is null || timer.IsInvalid)
         {
             Thread.Sleep(milliseconds);
@@ -40,19 +42,13 @@ internal static partial class PtySleep
         }
 
         var dueTime = -(milliseconds * 10_000L);
-        var waited = false;
-        lock (_timerLock)
+        if (!SetWaitableTimer(timer, in dueTime, 0, 0, 0, false))
         {
-            if (!SetWaitableTimer(timer, in dueTime, 0, 0, 0, false))
-            {
-                Thread.Sleep(milliseconds);
-                return;
-            }
-
-            waited = WaitForSingleObject(timer, Infinite) == 0;
+            Thread.Sleep(milliseconds);
+            return;
         }
 
-        if (!waited)
+        if (WaitForSingleObject(timer, Infinite) != 0)
         {
             Thread.Sleep(milliseconds);
         }

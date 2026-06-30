@@ -13,6 +13,12 @@ public sealed class HighResolutionSleepTests
     }
 
     [Test]
+    public async Task NegativeMillisecondsThrows()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Task.Run(() => PtySleep.Sleep(-1)));
+    }
+
+    [Test]
     public async Task ConcurrentSleepsComplete()
     {
         if (!OperatingSystem.IsWindows())
