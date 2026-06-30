@@ -2,6 +2,75 @@
 
 Implemented lifecycle, cancellation, EOF, drain, and failure behavior for MiniPty.
 
+## Mental Model
+
+MiniPty splits **what to start**, **how to start it on this OS**, and **how to manage the live session**. Public callers interact with the first and third layers only.
+
+```mermaid
+flowchart TB
+    subgraph launch["Launch (synchronous, no wait)"]
+        SI["PtyStartInfo<br/>declarative options"]
+        PS["Pty.Start<br/>validate OS, select backend, wrap session"]
+        SI --> PS
+    end
+
+    subgraph platform["Platform execution (internal)"]
+        WB["WindowsPtyBackend.Start"]
+        UB["UnixPtyBackend.Start"]
+        PS --> WB
+        PS --> UB
+        WB --> BE["IPtyBackend<br/>PTY handles + child process"]
+        UB --> BE
+    end
+
+    subgraph runtime["Runtime session (PtySession)"]
+        BE --> SESS["PtySession<br/>I/O, resize, exit, drain, dispose"]
+    end
+```
+
+| Layer | Type | Responsibility |
+|---|---|---|
+| `PtyStartInfo` | Public data | Executable, arguments, cwd, size, environment overlay, Unix `TERM` name. No orchestration logic. |
+| `Pty.Start` | Public entry | Null and OS support checks; Windows vs Unix backend selection; returns `PtySession`. Does not wait for exit. |
+| `WindowsPtyBackend` / `UnixPtyBackend` | Internal | ConPTY or Unix PTY spawn, handle ownership, platform EOF and resize. |
+| `IPtyBackend` | Internal contract | Thin runtime boundary: streams, process id, exit poll/wait, kill, transport close. Not a launch or plugin abstraction. |
+| `PtySession` | Public session | Live PTY lifecycle only: output consumers, stdin writes, `SendEof`, resize, `WaitForExitAsync`, `CompleteAsync`, kill, dispose. Does not decide how the child was spawned. |
+
+Normalization stays localized: `PtyStartInfo.ClampedSize` for dimensions, `PtyEnvironment` for child environment materialization, backends for platform launch preparation.
+
+## Session Flow
+
+A typical session moves from spawn through active I/O to teardown. Exact EOF, drain, and cancellation details are platform- and API-specific (tables below).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Spawned: Pty.Start
+    Spawned --> Active: child running
+
+    state Active {
+        [*] --> Idle
+        Idle --> Reading: ReadOutputAsync / Output / CompleteAsync
+        Reading --> Idle: reader ends or cancels
+        Idle --> Writing: WriteInputAsync / SendEof
+        Writing --> Idle
+        Idle --> Waiting: WaitForExitAsync
+        Waiting --> Idle: exit or cancel wait
+        Idle --> Resizing: Resize
+        Resizing --> Idle
+    }
+
+    Active --> Exited: child exits or Kill
+    Exited --> Draining: output reader still active
+    Draining --> Closed: transport EOF / drain complete
+    Closed --> Disposed: Dispose / DisposeAsync
+    Active --> Disposed: Dispose while running\n(kills child first)
+    Disposed --> [*]
+```
+
+Persistent embedders usually keep **one** output consumer active for the whole `Active` phase (`ReadOutputAsync` or raw `Output`). One-shot callers use `CompleteAsync` or `PtyCapture.RunAsync` instead. See [Output consumer exclusivity](#output-consumer-exclusivity).
+
+`Dispose` / `DisposeAsync` may run from any state. If the child is still running, disposal kills it before releasing handles.
+
 ## Cancellation
 
 | API | On cancellation |

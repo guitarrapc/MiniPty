@@ -1,4 +1,4 @@
-using MiniPty.Internal;
+﻿using MiniPty.Internal;
 
 namespace MiniPty.Tests;
 
@@ -116,19 +116,61 @@ public sealed class PtyEnvironmentTests
             BaseStartInfo() with { Environment = new Dictionary<string, string?>() },
             new Dictionary<string, string>
             {
+                ["TMUX_PANE"] = "%1",
+                ["STY"] = "screen",
+                ["WINDOW"] = "1",
+                ["WINDOWID"] = "12345",
+                ["TERMCAP"] = "termcap",
                 ["COLUMNS"] = "999",
                 ["LINES"] = "888",
                 ["TMUX"] = "tmux",
+                ["MINIPTY_CWD"] = "/tmp/stale",
                 ["PATH"] = "/bin",
+                ["MINIPTY_TEST_KEEP_ENV"] = "keep-me",
             });
 
         await Assert.That(result).IsNotNull();
+        await Assert.That(ContainsKey(result!, "TMUX_PANE")).IsFalse();
+        await Assert.That(ContainsKey(result!, "STY")).IsFalse();
+        await Assert.That(ContainsKey(result!, "WINDOW")).IsFalse();
+        await Assert.That(ContainsKey(result!, "WINDOWID")).IsFalse();
+        await Assert.That(ContainsKey(result!, "TERMCAP")).IsFalse();
         await Assert.That(ContainsKey(result!, "COLUMNS")).IsFalse();
         await Assert.That(ContainsKey(result!, "LINES")).IsFalse();
         await Assert.That(ContainsKey(result!, "TMUX")).IsFalse();
         await Assert.That(ContainsKey(result!, "MINIPTY_CWD")).IsFalse();
         await Assert.That(TryGetValue(result!, "PATH", out var path)).IsTrue();
         await Assert.That(path).IsEqualTo("/bin");
+        await Assert.That(TryGetValue(result!, "MINIPTY_TEST_KEEP_ENV", out var keepValue)).IsTrue();
+        await Assert.That(keepValue).IsEqualTo("keep-me");
+    }
+
+    [Test]
+    public async Task BuildUnix_OverlayTermWinsWhenTerminalNameIsAbsent()
+    {
+        var result = PtyEnvironment.BuildUnix(
+            BaseStartInfo() with { Environment = new Dictionary<string, string?> { ["TERM"] = "overlay-term" } },
+            new Dictionary<string, string> { ["PATH"] = "/bin", ["TERM"] = "parent-term" });
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(TryGetValue(result!, "TERM", out var term)).IsTrue();
+        await Assert.That(term).IsEqualTo("overlay-term");
+    }
+
+    [Test]
+    public async Task BuildUnix_TerminalNameWinsOverOverlayTerm()
+    {
+        var result = PtyEnvironment.BuildUnix(
+            BaseStartInfo() with
+            {
+                TerminalName = "terminal-name-term",
+                Environment = new Dictionary<string, string?> { ["TERM"] = "overlay-term" }
+            },
+            new Dictionary<string, string> { ["PATH"] = "/bin", ["TERM"] = "parent-term" });
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(TryGetValue(result!, "TERM", out var term)).IsTrue();
+        await Assert.That(term).IsEqualTo("terminal-name-term");
     }
 
     [Test]
@@ -170,6 +212,21 @@ public sealed class PtyEnvironmentTests
         await Assert.That(result).IsNotNull();
         await Assert.That(TryGetValueIgnoreCase(result!, key, out var value)).IsTrue();
         await Assert.That(value).IsEqualTo("child-value");
+    }
+
+    [Test]
+    public async Task BuildWindows_TerminalNameDoesNotCreateTerm()
+    {
+        var result = PtyEnvironment.BuildWindows(
+            BaseStartInfo() with
+            {
+                TerminalName = "xterm-test",
+                Environment = new Dictionary<string, string?>()
+            },
+            new Dictionary<string, string> { ["PATH"] = "C:\\Windows" });
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(ContainsKey(result!, "TERM")).IsFalse();
     }
 
     [Test]
