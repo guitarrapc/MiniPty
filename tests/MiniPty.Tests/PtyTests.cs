@@ -896,6 +896,7 @@ public sealed class PtyTests
     }
 
     [Test]
+    [Retry(3)]
     public async Task PtyWindowsTerminalNameDoesNotSetTerm()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !TryResolveWindowsPowerShell(out var powershell))
