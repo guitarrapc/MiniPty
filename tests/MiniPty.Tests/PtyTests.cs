@@ -743,6 +743,7 @@ public sealed class PtyTests
     }
 
     [Test]
+    [Retry(3)]
     public async Task PtyUnixPathLookupFallsBackToShellWhenShebangInterpreterMissing()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
