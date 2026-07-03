@@ -11,4 +11,16 @@ public sealed class PtyConsoleAttachOptions
     /// <see cref="Pty.Start"/> — useful when the embedder records at a fixed cast geometry.
     /// </summary>
     public bool SyncHostSize { get; init; } = true;
+
+    /// <summary>
+    /// Optional observer for host keyboard bytes forwarded to the PTY.
+    /// When <see langword="null"/> (default), the input pump adds no observation overhead beyond a null check.
+    /// </summary>
+    public IPtyConsoleInputObserver? InputObserver { get; init; }
+
+    /// <summary>
+    /// Clock used for <see cref="IPtyConsoleInputObserver.OnForwardedInput"/> elapsed times.
+    /// </summary>
+    /// <value>Default is <see cref="TimeProvider.System"/>.</value>
+    public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 }

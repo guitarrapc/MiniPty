@@ -11,6 +11,9 @@ internal sealed class PtyConsoleAttach : IDisposable
 
     private readonly PtySession _session;
     private readonly bool _syncHostSize;
+    private readonly IPtyConsoleInputObserver? _inputObserver;
+    private readonly TimeProvider _timeProvider;
+    private readonly long _attachTimestamp;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _resizeTask;
     private readonly byte[] _inputBuffer = ArrayPool<byte>.Shared.Rent(4096);
@@ -24,6 +27,9 @@ internal sealed class PtyConsoleAttach : IDisposable
     {
         _session = session;
         _syncHostSize = options.SyncHostSize;
+        _inputObserver = options.InputObserver;
+        _timeProvider = options.TimeProvider;
+        _attachTimestamp = _timeProvider.GetTimestamp();
 
         if (OperatingSystem.IsWindows())
         {
@@ -198,7 +204,12 @@ internal sealed class PtyConsoleAttach : IDisposable
 
             try
             {
-                _session.Input.Write(_inputBuffer, 0, read);
+                PtyConsoleInputForward.Forward(
+                    _session.Input,
+                    _inputBuffer.AsSpan(0, read),
+                    _inputObserver,
+                    _timeProvider,
+                    _attachTimestamp);
             }
             catch (ObjectDisposedException)
             {
@@ -242,7 +253,12 @@ internal sealed class PtyConsoleAttach : IDisposable
 
             try
             {
-                _session.Input.Write(_inputBuffer, 0, read);
+                PtyConsoleInputForward.Forward(
+                    _session.Input,
+                    _inputBuffer.AsSpan(0, read),
+                    _inputObserver,
+                    _timeProvider,
+                    _attachTimestamp);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

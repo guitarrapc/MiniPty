@@ -11,7 +11,8 @@ public sealed class PtyConsoleInputHandle : IDisposable
     internal PtyConsoleInputHandle(Internal.PtyConsoleAttach attach) => _attach = attach;
 
     /// <summary>
-    /// Reserved no-op in v1. Input is forwarded by the background pump started by <see cref="PtyConsoleInput.Attach"/>.
+    /// Reserved no-op in v1. Input is forwarded by the background pump started by
+    /// <see cref="PtyConsoleInput.Attach(MiniPty.PtySession, PtyConsoleAttachOptions)"/>.
     /// </summary>
     public void PumpInputOnce(CancellationToken cancellationToken = default)
     {
