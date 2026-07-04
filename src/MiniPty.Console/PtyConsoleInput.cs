@@ -11,6 +11,8 @@ namespace MiniPty.Console;
 /// </remarks>
 public static class PtyConsoleInput
 {
+    private static readonly PtyConsoleAttachOptions DefaultOptions = new();
+
     /// <summary>
     /// Configures the host terminal, forwards raw stdin bytes to the PTY, and syncs host resize events.
     /// </summary>
@@ -20,7 +22,7 @@ public static class PtyConsoleInput
     /// <exception cref="InvalidOperationException">Host stdin or stdout is not a terminal, or a console attach is already active.</exception>
     /// <exception cref="ObjectDisposedException"><paramref name="session"/> is disposed.</exception>
     public static PtyConsoleInputHandle Attach(PtySession session) =>
-        Attach(session, new PtyConsoleAttachOptions());
+        Attach(session, DefaultOptions);
 
     /// <summary>
     /// Configures the host terminal, forwards raw stdin bytes to the PTY, and optionally syncs host resize events.
