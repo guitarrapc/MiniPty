@@ -12,8 +12,6 @@ internal static partial class UnixPtyBackend
     // macOS posix_spawn children can still be running short -c scripts when the first wait poll ends.
     // Sending EOT before they finish leaves /bin/sh waiting on stdin and never exiting.
     private const int MacOsEofAttachDeferPolls = 4;
-    private const int MacOsDrainPollMs = 10;
-    private const int MacOsDrainMaxPolls = 100;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
@@ -434,7 +432,7 @@ internal static partial class UnixPtyBackend
 
         /// <summary>
         /// Waits until prior master writes reach the slave, or the slave opens, so staged EOT is not lost to attach races.
-        /// macOS <c>tcdrain</c> can block forever when the slave never reads; poll the output queue and child exit instead.
+        /// macOS <c>tcdrain</c> can block forever when the slave never reads; rely on attach defer and exit checks instead.
         /// </summary>
         private void DrainMasterOutputBeforeEot()
         {
@@ -445,10 +443,7 @@ internal static partial class UnixPtyBackend
                 return;
 
             if (OperatingSystem.IsMacOS())
-            {
-                PollDrainMasterOutputBeforeEot();
                 return;
-            }
 
             while (UnixInterop.tcdrain(_master) != 0)
             {
@@ -456,31 +451,6 @@ internal static partial class UnixPtyBackend
                     continue;
                 return;
             }
-        }
-
-        private void PollDrainMasterOutputBeforeEot()
-        {
-            for (var i = 0; i < MacOsDrainMaxPolls; i++)
-            {
-                if (TryRefreshExitState())
-                    return;
-
-                if (!TryPeekPendingOutput(out var pending) || pending == 0)
-                    return;
-
-                Thread.Sleep(MacOsDrainPollMs);
-            }
-        }
-
-        private unsafe bool TryPeekPendingOutput(out int pending)
-        {
-            pending = 0;
-            int count;
-            if (UnixInterop.minipty_peek_pending_output_bytes(_master, &count) != 0)
-                return false;
-
-            pending = count;
-            return true;
         }
 
         /// Polls for child exit for up to <paramref name="timeoutMs"/> without allocating a delay task.

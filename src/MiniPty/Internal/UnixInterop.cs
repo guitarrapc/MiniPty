@@ -34,8 +34,5 @@ internal static partial class UnixInterop
     internal static unsafe partial int minipty_peek_readable_bytes(int fd, int* bytes_available);
 
     [LibraryImport("minipty_unix", SetLastError = true)]
-    internal static unsafe partial int minipty_peek_pending_output_bytes(int fd, int* bytes_pending);
-
-    [LibraryImport("minipty_unix", SetLastError = true)]
     internal static unsafe partial int minipty_try_read(int fd, byte* buf, uint count, int* bytes_read, int* is_eof);
 }
