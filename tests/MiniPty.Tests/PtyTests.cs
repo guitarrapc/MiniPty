@@ -1269,8 +1269,10 @@ public sealed class PtyTests
         if (!OperatingSystem.IsMacOS())
             return;
 
-        const string marker = "pty-macos-sh-eof";
-        await using var session = Pty.Start(UnixShell($"printf '{marker}\\n'"));
+        // posix_spawn + sh -c can still be running when the first wait poll ends; empty SendEof must
+        // not deliver EOT early enough to leave /bin/sh waiting on stdin. Use a script that exits
+        // without writing to stdout — printf would block until the master reads the PTY output.
+        await using var session = Pty.Start(UnixShell("exit 0"));
         session.SendEof();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var exitCode = await session.WaitForExitAsync(cts.Token);
