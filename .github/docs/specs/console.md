@@ -36,7 +36,7 @@ PTY output **display** on the host and **timestamped recording** stay embedder r
 
 ## Entry Point
 
-v1 exposes one public attach API:
+v1 exposes attach via two overloads:
 
 ```csharp
 PtyConsoleInputHandle PtyConsoleInput.Attach(PtySession session)
@@ -49,7 +49,7 @@ PtyConsoleInputHandle PtyConsoleInput.Attach(PtySession session, PtyConsoleAttac
 |---|---|---|
 | `SyncHostSize` | `true` | When `true`, apply host terminal size on attach and poll for resize while attached. When `false`, skip initial sync and resize polling so the PTY keeps the size from `Pty.Start` (useful when recording at a fixed geometry). |
 | `InputObserver` | `null` | Optional `IPtyConsoleInputObserver` for timestamped host→PTY input bytes. `null` adds no observation overhead beyond a null check in the input pump. |
-| `TimeProvider` | `TimeProvider.System` | Clock for observer elapsed times (elapsed since attach). |
+| `TimeProvider` | `TimeProvider.System` | Clock for observer elapsed times (elapsed since attach). Required only when `InputObserver` is set. |
 
 `PtyConsoleInputHandle` implements **`IDisposable`** and also exposes:
 

@@ -28,15 +28,24 @@ internal sealed class PtyConsoleAttach : IDisposable
         _session = session;
         _syncHostSize = options.SyncHostSize;
         _inputObserver = options.InputObserver;
-        _timeProvider = options.TimeProvider;
-        try
+        if (_inputObserver is not null)
         {
-            _attachTimestamp = _timeProvider.GetTimestamp();
+            _timeProvider = options.TimeProvider
+                ?? throw new ArgumentNullException(nameof(options.TimeProvider));
+            try
+            {
+                _attachTimestamp = _timeProvider.GetTimestamp();
+            }
+            catch
+            {
+                CleanupInitFailure();
+                throw;
+            }
         }
-        catch
+        else
         {
-            CleanupInitFailure();
-            throw;
+            _timeProvider = TimeProvider.System;
+            _attachTimestamp = 0;
         }
 
         if (OperatingSystem.IsWindows())

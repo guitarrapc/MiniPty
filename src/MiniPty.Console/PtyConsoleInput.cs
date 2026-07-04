@@ -32,7 +32,8 @@ public static class PtyConsoleInput
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(options.TimeProvider);
+        if (options.InputObserver is not null)
+            ArgumentNullException.ThrowIfNull(options.TimeProvider);
 
         if (!HostTerminal.IsInteractiveHost())
         {

@@ -1263,6 +1263,21 @@ public sealed class PtyTests
         await Assert.That(exitCode).IsEqualTo(0);
     }
 
+    [Test]
+    public async Task PtyMacOsShScriptEmptySendEofCompletes()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return;
+
+        const string marker = "pty-macos-sh-eof";
+        await using var session = Pty.Start(UnixShell($"printf '{marker}\\n'"));
+        session.SendEof();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var exitCode = await session.WaitForExitAsync(cts.Token);
+
+        await Assert.That(exitCode).IsEqualTo(0);
+    }
+
     private static PtyStartInfo Spawn(string fileName, IReadOnlyList<string> arguments) =>
         new() { FileName = fileName, Arguments = arguments, Size = new(40, 8) };
 
