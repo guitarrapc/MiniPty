@@ -29,7 +29,15 @@ internal sealed class PtyConsoleAttach : IDisposable
         _syncHostSize = options.SyncHostSize;
         _inputObserver = options.InputObserver;
         _timeProvider = options.TimeProvider;
-        _attachTimestamp = _timeProvider.GetTimestamp();
+        try
+        {
+            _attachTimestamp = _timeProvider.GetTimestamp();
+        }
+        catch
+        {
+            CleanupInitFailure();
+            throw;
+        }
 
         if (OperatingSystem.IsWindows())
         {

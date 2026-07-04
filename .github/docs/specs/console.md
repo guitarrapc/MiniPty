@@ -47,7 +47,7 @@ PtyConsoleInputHandle PtyConsoleInput.Attach(PtySession session, PtyConsoleAttac
 
 | Property | Default | Role |
 |---|---|---|
-| `SyncHostSize` | `true` | Apply host terminal size on attach and poll for resize while attached. Set `false` when the embedder records at a fixed PTY geometry. |
+| `SyncHostSize` | `true` | When `true`, apply host terminal size on attach and poll for resize while attached. When `false`, skip initial sync and resize polling so the PTY keeps the size from `Pty.Start` (useful when recording at a fixed geometry). |
 | `InputObserver` | `null` | Optional `IPtyConsoleInputObserver` for timestamped host→PTY input bytes. `null` adds no observation overhead beyond a null check in the input pump. |
 | `TimeProvider` | `TimeProvider.System` | Clock for observer elapsed times (elapsed since attach). |
 

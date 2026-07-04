@@ -8,8 +8,8 @@ public sealed class PtyConsoleInputForwardTests
     [Test]
     public async Task Forward_ToPtyInput_DoesNotThrow()
     {
-        await using var session = Pty.Start(Exit0StartInfo());
-        var payload = "abc"u8.ToArray();
+        await using var session = Pty.Start(StdinBlockingStartInfo());
+        var payload = "abc"u8;
 
         PtyConsoleInputForward.Forward(
             session.Input,
@@ -18,7 +18,7 @@ public sealed class PtyConsoleInputForwardTests
             TimeProvider.System,
             TimeProvider.System.GetTimestamp());
 
-        session.SendEof();
+        session.Kill();
         await session.WaitForExitAsync();
     }
 
@@ -76,15 +76,15 @@ public sealed class PtyConsoleInputForwardTests
         await Assert.That(stream.ToArray().SequenceEqual([(byte)'z'])).IsTrue();
     }
 
-    private static PtyStartInfo Exit0StartInfo()
+    private static PtyStartInfo StdinBlockingStartInfo()
     {
         if (OperatingSystem.IsWindows())
         {
             var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-            return new PtyStartInfo { FileName = cmd, Arguments = ["/c", "exit 0"] };
+            return new PtyStartInfo { FileName = cmd, Arguments = ["/c", "set /p DUMMY="] };
         }
 
-        return new PtyStartInfo { FileName = "/bin/sh", Arguments = ["-c", "exit 0"] };
+        return new PtyStartInfo { FileName = "/bin/sh", Arguments = ["-c", "IFS= read -r _"] };
     }
 
     private sealed class OrderRecordingObserver(Stream target) : IPtyConsoleInputObserver
