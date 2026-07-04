@@ -11,6 +11,8 @@ namespace MiniPty.Console;
 /// </remarks>
 public static class PtyConsoleInput
 {
+    private static readonly PtyConsoleAttachOptions DefaultOptions = new();
+
     /// <summary>
     /// Configures the host terminal, forwards raw stdin bytes to the PTY, and syncs host resize events.
     /// </summary>
@@ -19,9 +21,21 @@ public static class PtyConsoleInput
     /// <exception cref="ArgumentNullException"><paramref name="session"/> is null.</exception>
     /// <exception cref="InvalidOperationException">Host stdin or stdout is not a terminal, or a console attach is already active.</exception>
     /// <exception cref="ObjectDisposedException"><paramref name="session"/> is disposed.</exception>
-    public static PtyConsoleInputHandle Attach(PtySession session)
+    public static PtyConsoleInputHandle Attach(PtySession session) =>
+        Attach(session, DefaultOptions);
+
+    /// <summary>
+    /// Configures the host terminal, forwards raw stdin bytes to the PTY, and optionally syncs host resize events.
+    /// </summary>
+    /// <param name="session">A running session from <see cref="Pty.Start"/>.</param>
+    /// <param name="options">Attach behavior. Set <see cref="PtyConsoleAttachOptions.SyncHostSize"/> to <see langword="false"/> when the PTY must keep a fixed recording geometry.</param>
+    /// <returns>A handle that stops the input pump and restores the host terminal on <see cref="IDisposable.Dispose"/>.</returns>
+    public static PtyConsoleInputHandle Attach(PtySession session, PtyConsoleAttachOptions options)
     {
         ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.InputObserver is not null)
+            ArgumentNullException.ThrowIfNull(options.TimeProvider);
 
         if (!HostTerminal.IsInteractiveHost())
         {
@@ -32,7 +46,7 @@ public static class PtyConsoleInput
         PtyConsoleAttach.Register(session);
         try
         {
-            return new PtyConsoleInputHandle(new PtyConsoleAttach(session));
+            return new PtyConsoleInputHandle(new PtyConsoleAttach(session, options));
         }
         catch
         {

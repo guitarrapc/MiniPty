@@ -10,6 +10,7 @@
     <PackageReference Include="BenchmarkDotNet" />
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Capture\MiniPty.Capture.csproj" />
+    <ProjectReference Include="..\..\src\MiniPty.Console\MiniPty.Console.csproj" />
     <ProjectReference Include="..\MiniPty.Benchmarks.Child\MiniPty.Benchmarks.Child.csproj">
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
     </ProjectReference>

@@ -9,6 +9,9 @@ internal static partial class UnixPtyBackend
     private const int WaitPollMs = 100;
     private const int ReapPollMs = 10;
     private const int ReapDeadlineMs = 1_000;
+    // macOS posix_spawn children can still be running short -c scripts when the first wait poll ends.
+    // Sending EOT before they finish leaves /bin/sh waiting on stdin and never exiting.
+    private const int MacOsEofAttachDeferPolls = 4;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
@@ -112,6 +115,7 @@ internal static partial class UnixPtyBackend
         private readonly InputTrackingWriteStream _inputStream;
         private bool _eofSent;
         private bool _eofPending;
+        private int _eofAttachPollsRemaining;
         private bool _eotLineSubmitSent;
         private bool _inputWritten;
         private bool _inputEndsWithNewline;
@@ -178,6 +182,8 @@ internal static partial class UnixPtyBackend
 
             // Defer EOT until the wait loop gives the child time to attach (same attach race as ConPTY).
             _eofPending = true;
+            if (OperatingSystem.IsMacOS())
+                _eofAttachPollsRemaining = MacOsEofAttachDeferPolls;
         }
 
         public void Kill()
@@ -331,8 +337,16 @@ internal static partial class UnixPtyBackend
 
         private void SendEotIfPending()
         {
-            if (_eofPending)
-                WriteEotToMaster();
+            if (!_eofPending)
+                return;
+
+            if (_eofAttachPollsRemaining > 0)
+            {
+                _eofAttachPollsRemaining--;
+                return;
+            }
+
+            WriteEotToMaster();
         }
 
         private void OnInputWritten(ReadOnlySpan<byte> buffer)
@@ -346,6 +360,12 @@ internal static partial class UnixPtyBackend
         {
             if (_eofSent || _exited || _masterClosed)
                 return;
+
+            if (TryRefreshExitState())
+            {
+                CompleteEotSignaling();
+                return;
+            }
 
             DrainMasterOutputBeforeEot();
 
@@ -411,11 +431,18 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>
-        /// Blocks until prior master writes reach the slave, or the slave opens, so staged EOT is not lost to attach races.
+        /// Waits until prior master writes reach the slave, or the slave opens, so staged EOT is not lost to attach races.
+        /// macOS <c>tcdrain</c> can block forever when the slave never reads; rely on attach defer and exit checks instead.
         /// </summary>
         private void DrainMasterOutputBeforeEot()
         {
             if (!_inputWritten)
+                return;
+
+            if (TryRefreshExitState())
+                return;
+
+            if (OperatingSystem.IsMacOS())
                 return;
 
             while (UnixInterop.tcdrain(_master) != 0)

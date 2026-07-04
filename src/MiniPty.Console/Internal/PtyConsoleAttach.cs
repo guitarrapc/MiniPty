@@ -10,6 +10,10 @@ internal sealed class PtyConsoleAttach : IDisposable
     private static readonly object Sentinel = new();
 
     private readonly PtySession _session;
+    private readonly bool _syncHostSize;
+    private readonly IPtyConsoleInputObserver? _inputObserver;
+    private readonly TimeProvider _timeProvider;
+    private readonly long _attachTimestamp;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _resizeTask;
     private readonly byte[] _inputBuffer = ArrayPool<byte>.Shared.Rent(4096);
@@ -19,9 +23,30 @@ internal sealed class PtyConsoleAttach : IDisposable
     private IHostTerminal _terminal = null!;
     private int _disposed;
 
-    internal PtyConsoleAttach(PtySession session)
+    internal PtyConsoleAttach(PtySession session, PtyConsoleAttachOptions options)
     {
         _session = session;
+        _syncHostSize = options.SyncHostSize;
+        _inputObserver = options.InputObserver;
+        if (_inputObserver is not null)
+        {
+            _timeProvider = options.TimeProvider
+                ?? throw new ArgumentNullException(nameof(options.TimeProvider));
+            try
+            {
+                _attachTimestamp = _timeProvider.GetTimestamp();
+            }
+            catch
+            {
+                CleanupInitFailure();
+                throw;
+            }
+        }
+        else
+        {
+            _timeProvider = TimeProvider.System;
+            _attachTimestamp = 0;
+        }
 
         if (OperatingSystem.IsWindows())
         {
@@ -33,7 +58,8 @@ internal sealed class PtyConsoleAttach : IDisposable
                 try
                 {
                     _terminal = HostTerminal.Create();
-                    SyncSize();
+                    if (_syncHostSize)
+                        SyncSize();
                     ready.Set();
                     RunInputPumpSync();
                 }
@@ -59,7 +85,8 @@ internal sealed class PtyConsoleAttach : IDisposable
             try
             {
                 _terminal = HostTerminal.Create();
-                SyncSize();
+                if (_syncHostSize)
+                    SyncSize();
                 _inputTask = Task.Run(InputPumpAsync);
             }
             catch
@@ -69,7 +96,10 @@ internal sealed class PtyConsoleAttach : IDisposable
             }
         }
 
-        _resizeTask = Task.Run(ResizePollAsync);
+        if (_syncHostSize)
+            _resizeTask = Task.Run(ResizePollAsync);
+        else
+            _resizeTask = Task.CompletedTask;
     }
 
     private void ThrowInitFailure(Exception inner)
@@ -191,7 +221,12 @@ internal sealed class PtyConsoleAttach : IDisposable
 
             try
             {
-                _session.Input.Write(_inputBuffer, 0, read);
+                PtyConsoleInputForward.Forward(
+                    _session.Input,
+                    _inputBuffer.AsSpan(0, read),
+                    _inputObserver,
+                    _timeProvider,
+                    _attachTimestamp);
             }
             catch (ObjectDisposedException)
             {
@@ -235,7 +270,12 @@ internal sealed class PtyConsoleAttach : IDisposable
 
             try
             {
-                _session.Input.Write(_inputBuffer, 0, read);
+                PtyConsoleInputForward.Forward(
+                    _session.Input,
+                    _inputBuffer.AsSpan(0, read),
+                    _inputObserver,
+                    _timeProvider,
+                    _attachTimestamp);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

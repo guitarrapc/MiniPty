@@ -36,11 +36,20 @@ PTY output **display** on the host and **timestamped recording** stay embedder r
 
 ## Entry Point
 
-v1 exposes one public attach API:
+v1 exposes attach via two overloads:
 
 ```csharp
 PtyConsoleInputHandle PtyConsoleInput.Attach(PtySession session)
+PtyConsoleInputHandle PtyConsoleInput.Attach(PtySession session, PtyConsoleAttachOptions options)
 ```
+
+`PtyConsoleAttachOptions`:
+
+| Property | Default | Role |
+|---|---|---|
+| `SyncHostSize` | `true` | When `true`, apply host terminal size on attach and poll for resize while attached. When `false`, skip initial sync and resize polling so the PTY keeps the size from `Pty.Start` (useful when recording at a fixed geometry). |
+| `InputObserver` | `null` | Optional `IPtyConsoleInputObserver` for timestamped host→PTY input bytes. `null` adds no observation overhead beyond a null check in the input pump. |
+| `TimeProvider` | `TimeProvider.System` | Clock for observer elapsed times (elapsed since attach). Required only when `InputObserver` is set. |
 
 `PtyConsoleInputHandle` implements **`IDisposable`** and also exposes:
 
@@ -49,9 +58,26 @@ PtyConsoleInputHandle PtyConsoleInput.Attach(PtySession session)
 | `PumpInputUntil(CancellationToken)` | Preferred: block until the token is canceled (see Input pump). |
 | `PumpInputOnce(CancellationToken)` | No-op in v1 (reserved). |
 
-- No options type or callbacks in v1.
+- No callbacks beyond optional `IPtyConsoleInputObserver` on `PtyConsoleAttachOptions` (see Input observer).
 - `PumpInputOnce` / `PumpInputUntil` accept an optional `CancellationToken` for cooperative cancel (for example when the child exits).
 - Stopping host attach and restoring the terminal is **`Dispose`** on the returned handle.
+
+### Input observer
+
+When `PtyConsoleAttachOptions.InputObserver` is set, **MiniPty.Console** calls `OnForwardedInput` **immediately before** each host stdin read is written to `PtySession.Input`.
+
+| Item | Contract |
+|---|---|
+| Payload | Raw bytes (same slice forwarded to the PTY; no UTF-8 decoding) |
+| `elapsed` | `TimeProvider.GetElapsedTime(attachTimestamp)` — elapsed since attach started |
+| Thread | Same thread as the input pump (on Windows, the dedicated input thread) |
+| Overhead when `null` | No observer invocation; input pump performs a null check only |
+
+**MiniPty.Console** does not record cast files, normalize typing, or interpret keys. Embedders (for example scenetake) correlate observer timestamps with PTY output chunks.
+
+Observers may receive passwords and other sensitive keystrokes. Embedders must handle observed bytes accordingly.
+
+This package does **not** observe bytes written through embedder `WriteInputAsync` while attached — only host keyboard input forwarded by the Console input pump.
 
 ## Attach Contract
 
@@ -185,6 +211,7 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 - Start the embedder `ReadOutputAsync` pump before `PtyConsoleInput.Attach` so the child cannot block on a full ConPTY output pipe during startup.
 - On Unix, host stdout with `OPOST` off does not map `\n` to `\r\n`; embedders should not write status to stderr after `Attach`, and may emit `\r\n` on stdout after dispose to realign the parent shell prompt.
 - Resize polling on a separate task is acceptable on Windows; console handles are process-wide.
+- Optional `IPtyConsoleInputObserver` uses a null check on the input pump hot path; when unset, forwarding matches direct `PtySession.Input.Write` allocation behavior (verified by `PtyConsoleInputForwardBenchmarks`).
 
 ## Related Documents
 

@@ -1263,6 +1263,23 @@ public sealed class PtyTests
         await Assert.That(exitCode).IsEqualTo(0);
     }
 
+    [Test]
+    public async Task PtyMacOsShScriptEmptySendEofCompletes()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return;
+
+        // posix_spawn + sh -c can still be running when the first wait poll ends; empty SendEof must
+        // not deliver EOT early enough to leave /bin/sh waiting on stdin. Use a script that exits
+        // without writing to stdout — printf would block until the master reads the PTY output.
+        await using var session = Pty.Start(UnixShell("exit 0"));
+        session.SendEof();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var exitCode = await session.WaitForExitAsync(cts.Token);
+
+        await Assert.That(exitCode).IsEqualTo(0);
+    }
+
     private static PtyStartInfo Spawn(string fileName, IReadOnlyList<string> arguments) =>
         new() { FileName = fileName, Arguments = arguments, Size = new(40, 8) };
 
