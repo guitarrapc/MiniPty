@@ -2,7 +2,7 @@ namespace MiniPty.Console;
 
 /// <summary>
 /// Observes host keyboard bytes forwarded to the PTY during an active
-/// <see cref="PtyConsoleInput.Attach(MiniPty.PtySession)"/> session.
+/// <see cref="PtyConsoleInput.Attach(MiniPty.PtySession, PtyConsoleAttachOptions)"/> session.
 /// </summary>
 /// <remarks>
 /// Implementations receive the same raw bytes written to <see cref="PtySession.Input"/>.

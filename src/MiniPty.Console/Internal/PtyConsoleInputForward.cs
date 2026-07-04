@@ -14,7 +14,16 @@ internal static class PtyConsoleInputForward
     {
         var o = observer;
         if (o is not null)
-            o.OnForwardedInput(timeProvider.GetElapsedTime(attachTimestamp), data);
+        {
+            try
+            {
+                o.OnForwardedInput(timeProvider.GetElapsedTime(attachTimestamp), data);
+            }
+            catch (Exception)
+            {
+                // Observation must not break input forwarding or attach disposal.
+            }
+        }
 
         ptyInput.Write(data);
     }
