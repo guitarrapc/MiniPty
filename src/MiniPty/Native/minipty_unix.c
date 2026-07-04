@@ -526,6 +526,23 @@ int minipty_peek_readable_bytes(int fd, int *bytes_available)
     return 0;
 }
 
+int minipty_peek_pending_output_bytes(int fd, int *bytes_pending)
+{
+    int nbytes = 0;
+
+    if (bytes_pending == NULL)
+        return -1;
+
+    if (ioctl(fd, TIOCOUTQ, &nbytes) != 0)
+        return -1;
+
+    if (nbytes < 0)
+        nbytes = 0;
+
+    *bytes_pending = nbytes;
+    return 0;
+}
+
 int minipty_try_read(int fd, void *buf, unsigned int count, int *bytes_read, int *is_eof)
 {
     int flags;

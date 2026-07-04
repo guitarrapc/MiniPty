@@ -28,6 +28,7 @@ int minipty_fork_pty_exec(
 
 int minipty_set_winsize(int master, unsigned short rows, unsigned short cols);
 int minipty_peek_readable_bytes(int fd, int *bytes_available);
+int minipty_peek_pending_output_bytes(int fd, int *bytes_pending);
 int minipty_try_read(int fd, void *buf, unsigned int count, int *bytes_read, int *is_eof);
 
 #endif

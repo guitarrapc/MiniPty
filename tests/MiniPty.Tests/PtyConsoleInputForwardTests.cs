@@ -8,8 +8,8 @@ public sealed class PtyConsoleInputForwardTests
     [Test]
     public async Task Forward_ToPtyInput_DoesNotThrow()
     {
-        await using var session = Pty.Start(StdinBlockingStartInfo());
-        var payload = "abc"u8;
+        await using var session = Pty.Start(StdinConsumerStartInfo());
+        var payload = "abc\n"u8;
 
         PtyConsoleInputForward.Forward(
             session.Input,
@@ -18,7 +18,7 @@ public sealed class PtyConsoleInputForwardTests
             TimeProvider.System,
             TimeProvider.System.GetTimestamp());
 
-        session.Kill();
+        session.SendEof();
         await session.WaitForExitAsync();
     }
 
@@ -76,7 +76,7 @@ public sealed class PtyConsoleInputForwardTests
         await Assert.That(stream.ToArray().SequenceEqual([(byte)'z'])).IsTrue();
     }
 
-    private static PtyStartInfo StdinBlockingStartInfo()
+    private static PtyStartInfo StdinConsumerStartInfo()
     {
         if (OperatingSystem.IsWindows())
         {
@@ -84,7 +84,8 @@ public sealed class PtyConsoleInputForwardTests
             return new PtyStartInfo { FileName = cmd, Arguments = ["/c", "set /p DUMMY="] };
         }
 
-        return new PtyStartInfo { FileName = "/bin/sh", Arguments = ["-c", "IFS= read -r _"] };
+        // Run cat directly so stdin EOF is meaningful; a login shell can ignore EOT while a -c script is still running on macOS.
+        return new PtyStartInfo { FileName = "cat", Arguments = [] };
     }
 
     private sealed class OrderRecordingObserver(Stream target) : IPtyConsoleInputObserver
