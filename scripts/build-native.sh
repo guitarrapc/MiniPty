@@ -25,7 +25,7 @@ build_static_archive() {
     base="$(basename "$src")"
     cp "$src" "$work/$base"
     local obj="$work/${base%.c}.o"
-    cc -c -fPIC -O2 -o "$obj" "$work/$base"
+    cc -c -fPIC -O2 -I"$native_dir" -o "$obj" "$work/$base"
     objs+=("$obj")
   done
 

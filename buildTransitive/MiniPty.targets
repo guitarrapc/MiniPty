@@ -9,16 +9,16 @@
     <NativeLibrary Include="-lutil" />
   </ItemGroup>
 
-  <!-- Drop the shared shim from publish output when it is linked statically. -->
+  <!-- Drop shared shim and the link-time archive from publish output. -->
   <Target Name="_MiniPtyExcludeUnixSharedNativeFromPublish"
-          BeforeTargets="AssignTargetPaths"
+          BeforeTargets="GetCopyToPublishDirectoryItems"
           Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
     <ItemGroup>
-      <None Remove="@(None)" Condition="'%(None.Link)' == 'libminipty_unix.so' or '%(None.Link)' == 'libminipty_unix.dylib'" />
+      <None Remove="@(None)" Condition="'%(None.Link)' == 'libminipty_unix.so' or '%(None.Link)' == 'libminipty_unix.dylib' or '%(None.Link)' == 'libminipty_unix.a'" />
       <ContentWithTargetPath Remove="@(ContentWithTargetPath)"
-                             Condition="'%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.so' or '%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.dylib'" />
+                             Condition="'%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.so' or '%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.dylib' or '%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.a'" />
       <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
-                             Condition="'%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.so' or '%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.dylib'" />
+                             Condition="'%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.so' or '%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.dylib' or '%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.a'" />
     </ItemGroup>
   </Target>
 </Project>
