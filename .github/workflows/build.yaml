@@ -55,6 +55,11 @@ jobs:
       - name: Test
         shell: bash
         run: dotnet test -c Release
+      - name: Build libminipty_unix
+        if: ${{ !startsWith(matrix.rid, 'win') }}
+        shell: bash
+        run: bash scripts/build-native.sh "${{ matrix.rid }}"
+
       - name: Publish and run samples (NativeAOT)
         shell: bash
         run: |
@@ -66,6 +71,9 @@ jobs:
               exe="$out/${sample}.exe"
             fi
             test -f "$exe"
+            if [[ "${{ matrix.rid }}" == linux-* ]]; then
+              test ! -f "$out/libminipty_unix.so"
+            fi
             "$exe"
           done
 

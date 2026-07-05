@@ -1,0 +1,24 @@
+<Project>
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' and $(RuntimeIdentifier.StartsWith('linux'))">
+    <MiniPtyStaticUnixNative>true</MiniPtyStaticUnixNative>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
+    <DirectPInvoke Include="minipty_unix" />
+    <NativeLibrary Include="$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\libminipty_unix.a" />
+    <NativeLibrary Include="-lutil" />
+  </ItemGroup>
+
+  <!-- Drop the shared shim from publish output when it is linked statically. -->
+  <Target Name="_MiniPtyExcludeUnixSharedNativeFromPublish"
+          BeforeTargets="AssignTargetPaths"
+          Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
+    <ItemGroup>
+      <None Remove="@(None)" Condition="'%(None.Link)' == 'libminipty_unix.so'" />
+      <ContentWithTargetPath Remove="@(ContentWithTargetPath)"
+                             Condition="'%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.so'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+                             Condition="'%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.so'" />
+    </ItemGroup>
+  </Target>
+</Project>

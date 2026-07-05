@@ -12,9 +12,31 @@ out_dir="$root/runtimes/$rid/native"
 
 mkdir -p "$out_dir"
 
+build_linux_static_archive() {
+  local out="$1"
+  shift
+  local src
+  local work
+  local objs=()
+
+  work="$(mktemp -d)"
+  for src in "$@"; do
+    local base
+    base="$(basename "$src")"
+    cp "$src" "$work/$base"
+    local obj="$work/${base%.c}.o"
+    cc -c -fPIC -O2 -o "$obj" "$work/$base"
+    objs+=("$obj")
+  done
+
+  ar rcs "$out" "${objs[@]}"
+  rm -rf "$work"
+}
+
 case "$rid" in
   linux-*)
     cc -shared -fPIC -O2 -lutil -o "$out_dir/libminipty_unix.so" "${sources[@]}"
+    build_linux_static_archive "$out_dir/libminipty_unix.a" "${sources[@]}"
     ;;
   osx-*)
     cc -shared -fPIC -O2 -lutil -o "$out_dir/libminipty_unix.dylib" "${sources[@]}"
