@@ -12,8 +12,10 @@ required=(
   "linux-arm64/native/libminipty_unix.so"
   "linux-arm64/native/libminipty_unix.a"
   "osx-x64/native/libminipty_unix.dylib"
+  "osx-x64/native/libminipty_unix.a"
   "osx-x64/native/minipty_spawn_helper"
   "osx-arm64/native/libminipty_unix.dylib"
+  "osx-arm64/native/libminipty_unix.a"
   "osx-arm64/native/minipty_spawn_helper"
 )
 

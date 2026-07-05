@@ -74,6 +74,10 @@ jobs:
             if [[ "${{ matrix.rid }}" == linux-* ]]; then
               test ! -f "$out/libminipty_unix.so"
             fi
+            if [[ "${{ matrix.rid }}" == osx-* ]]; then
+              test ! -f "$out/libminipty_unix.dylib"
+              test -f "$out/minipty_spawn_helper"
+            fi
             "$exe"
           done
 

@@ -1,5 +1,5 @@
 <Project>
-  <PropertyGroup Condition="'$(PublishAot)' == 'true' and $(RuntimeIdentifier.StartsWith('linux'))">
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' and ($(RuntimeIdentifier.StartsWith('linux')) or $(RuntimeIdentifier.StartsWith('osx')))">
     <MiniPtyStaticUnixNative>true</MiniPtyStaticUnixNative>
   </PropertyGroup>
 
@@ -14,11 +14,11 @@
           BeforeTargets="AssignTargetPaths"
           Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
     <ItemGroup>
-      <None Remove="@(None)" Condition="'%(None.Link)' == 'libminipty_unix.so'" />
+      <None Remove="@(None)" Condition="'%(None.Link)' == 'libminipty_unix.so' or '%(None.Link)' == 'libminipty_unix.dylib'" />
       <ContentWithTargetPath Remove="@(ContentWithTargetPath)"
-                             Condition="'%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.so'" />
+                             Condition="'%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.so' or '%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.dylib'" />
       <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
-                             Condition="'%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.so'" />
+                             Condition="'%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.so' or '%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.dylib'" />
     </ItemGroup>
   </Target>
 </Project>
