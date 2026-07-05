@@ -10,6 +10,12 @@
     <NativeLibrary Include="-lutil" />
   </ItemGroup>
 
+  <Target Name="_MiniPtyValidateStaticArchive"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(MiniPtyStaticUnixNative)' == 'true' and !Exists('$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\libminipty_unix.a')">
+    <Error Text="MiniPty: missing runtimes/$(RuntimeIdentifier)/native/libminipty_unix.a. Ensure the package contains the static archive, or build it when building from source." />
+  </Target>
+
   <!-- Drop shared shim and the link-time archive from publish output. -->
   <Target Name="_MiniPtyExcludeUnixSharedNativeFromPublish"
           AfterTargets="ComputeResolvedFilesToPublishList"

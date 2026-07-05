@@ -20,6 +20,7 @@ build_static_archive() {
   local objs=()
 
   work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
   for src in "$@"; do
     local base
     base="$(basename "$src")"
@@ -30,7 +31,6 @@ build_static_archive() {
   done
 
   ar rcs "$out" "${objs[@]}"
-  rm -rf "$work"
 }
 
 case "$rid" in
