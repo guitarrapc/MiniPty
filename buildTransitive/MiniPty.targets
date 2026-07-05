@@ -1,0 +1,56 @@
+<Project>
+  <PropertyGroup>
+    <_MiniPtyStaticUnixRid>false</_MiniPtyStaticUnixRid>
+    <_MiniPtyStaticUnixRid Condition="'$(RuntimeIdentifier)' == 'linux-x64' or '$(RuntimeIdentifier)' == 'linux-arm64' or '$(RuntimeIdentifier)' == 'osx-x64' or '$(RuntimeIdentifier)' == 'osx-arm64'">true</_MiniPtyStaticUnixRid>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' and '$(_MiniPtyStaticUnixRid)' == 'true'">
+    <MiniPtyStaticUnixNative>true</MiniPtyStaticUnixNative>
+    <MiniPtyBuildUnixNative>false</MiniPtyBuildUnixNative>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
+    <DirectPInvoke Include="minipty_unix" />
+    <NativeLibrary Include="$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\libminipty_unix.a" />
+    <LinkerArg Include="-lutil" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(MiniPtyStaticUnixNative)' == 'true' and $(RuntimeIdentifier.StartsWith('osx'))">
+    <None Include="$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\minipty_spawn_helper"
+          Link="minipty_spawn_helper"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\minipty_spawn_helper')" />
+  </ItemGroup>
+
+  <Target Name="_MiniPtyValidateStaticArchive"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(MiniPtyStaticUnixNative)' == 'true' and !Exists('$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\libminipty_unix.a')">
+    <Error Text="MiniPty: missing runtimes/$(RuntimeIdentifier)/native/libminipty_unix.a. Ensure the package contains the static archive; when building from source, run: bash scripts/build-native.sh $(RuntimeIdentifier)" />
+  </Target>
+
+  <Target Name="_MiniPtyValidateSpawnHelper"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(MiniPtyStaticUnixNative)' == 'true' and $(RuntimeIdentifier.StartsWith('osx')) and !Exists('$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\minipty_spawn_helper')">
+    <Error Text="MiniPty: missing runtimes/$(RuntimeIdentifier)/native/minipty_spawn_helper (required on macOS). When building from source, run: bash scripts/build-native.sh $(RuntimeIdentifier)" />
+  </Target>
+
+  <!-- Drop shared shim and the link-time archive from publish output. -->
+  <Target Name="_MiniPtyExcludeUnixSharedNativeFromPublish"
+          AfterTargets="ComputeResolvedFilesToPublishList"
+          BeforeTargets="CopyFilesToPublishDirectory"
+          Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
+    <ItemGroup>
+      <None Remove="@(None)"
+            Condition="$([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.so')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.dylib')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.a'))" />
+      <Content Remove="@(Content)"
+               Condition="$([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.so')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.dylib')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.a'))" />
+      <ContentWithTargetPath Remove="@(ContentWithTargetPath)"
+                             Condition="$([System.String]::Copy('%(TargetPath)').EndsWith('libminipty_unix.so')) or $([System.String]::Copy('%(TargetPath)').EndsWith('libminipty_unix.dylib')) or $([System.String]::Copy('%(TargetPath)').EndsWith('libminipty_unix.a'))" />
+      <_ResolvedCopyLocalPublishAssets Remove="@(_ResolvedCopyLocalPublishAssets)"
+                                       Condition="$([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.so')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.dylib')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.a'))" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+                             Condition="$([System.String]::Copy('%(RelativePath)').EndsWith('libminipty_unix.so')) or $([System.String]::Copy('%(RelativePath)').EndsWith('libminipty_unix.dylib')) or $([System.String]::Copy('%(RelativePath)').EndsWith('libminipty_unix.a'))" />
+    </ItemGroup>
+  </Target>
+</Project>

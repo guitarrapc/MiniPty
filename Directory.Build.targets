@@ -1,0 +1,4 @@
+<Project>
+  <Import Project="$(MSBuildThisFileDirectory)buildTransitive\MiniPty.targets"
+          Condition="Exists('$(MSBuildThisFileDirectory)buildTransitive\MiniPty.targets')" />
+</Project>

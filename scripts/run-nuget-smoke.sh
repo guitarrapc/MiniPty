@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:?Usage: run-nuget-smoke.sh <package-version> <nupkg-directory>}"
-feed_dir="${2:?Usage: run-nuget-smoke.sh <package-version> <nupkg-directory>}"
+version="${1:?Usage: run-nuget-smoke.sh <package-version> <nupkg-directory> [runtime-identifier]}"
+feed_dir="${2:?Usage: run-nuget-smoke.sh <package-version> <nupkg-directory> [runtime-identifier]}"
+rid="${3:-}"
 version="${version#v}"
 
 to_dotnet_path() {
@@ -63,3 +64,25 @@ cat > "$tmp/NuGetSmoke.csproj" <<EOF
 EOF
 
 dotnet run --project "$tmp/NuGetSmoke.csproj" -c Release --configfile "$tmp/nuget.config"
+
+if [[ -n "$rid" ]]; then
+  out="$tmp/aot-publish"
+  dotnet publish "$tmp/NuGetSmoke.csproj" -c Release -r "$rid" \
+    --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None \
+    -o "$out" --configfile "$tmp/nuget.config"
+  exe="$out/NuGetSmoke"
+  if [[ "$rid" == win-* ]]; then
+    exe="$out/NuGetSmoke.exe"
+  fi
+  test -f "$exe"
+  if [[ "$rid" == linux-* ]]; then
+    test ! -f "$out/libminipty_unix.so"
+    test ! -f "$out/libminipty_unix.a"
+  fi
+  if [[ "$rid" == osx-* ]]; then
+    test ! -f "$out/libminipty_unix.dylib"
+    test ! -f "$out/libminipty_unix.a"
+    test -f "$out/minipty_spawn_helper"
+  fi
+  "$exe"
+fi

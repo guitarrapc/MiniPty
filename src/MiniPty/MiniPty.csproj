@@ -9,6 +9,7 @@
     <MiniPtyPackUnixNative Condition="'$(MiniPtyPackUnixNative)' == ''">false</MiniPtyPackUnixNative>
     <_MiniPtyRuntimesRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\runtimes'))</_MiniPtyRuntimesRoot>
     <MiniPtyBuildUnixNative Condition="'$(MiniPtyPackUnixNative)' == 'true'">false</MiniPtyBuildUnixNative>
+    <MiniPtyBuildUnixNative Condition="'$(MiniPtyStaticUnixNative)' == 'true'">false</MiniPtyBuildUnixNative>
     <MiniPtyBuildUnixNative Condition="'$(MiniPtyBuildUnixNative)' == '' and ($([MSBuild]::IsOSPlatform('Linux')) Or $([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD')))">true</MiniPtyBuildUnixNative>
     <MiniPtyUnixNativeLibraryName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libminipty_unix.dylib</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLibraryName Condition="'$(MiniPtyUnixNativeLibraryName)' == ''">libminipty_unix.so</MiniPtyUnixNativeLibraryName>
@@ -33,6 +34,7 @@
 
   <ItemGroup Condition="'$(MiniPtyPackUnixNative)' == 'true'">
     <None Include="$(_MiniPtyRuntimesRoot)\**\*.so;
+                  $(_MiniPtyRuntimesRoot)\**\*.a;
                   $(_MiniPtyRuntimesRoot)\**\*.dylib"
           Pack="true"
           PackagePath="runtimes/%(RecursiveDir)%(Filename)%(Extension)" />
@@ -43,6 +45,12 @@
     <None Include="$(_MiniPtyRuntimesRoot)\osx-x64\native\minipty_spawn_helper"
           Pack="true"
           PackagePath="runtimes/osx-x64/native" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\..\buildTransitive\MiniPty.targets"
+          Pack="true"
+          PackagePath="buildTransitive/" />
   </ItemGroup>
 
   <Target Name="BuildMiniPtyUnixNative" BeforeTargets="AssignTargetPaths"
@@ -56,7 +64,7 @@
       <None Include="$(_MiniPtyUnixNativeOutput)">
         <Link>$(MiniPtyUnixNativeLibraryName)</Link>
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <CopyToPublishDirectory Condition="'$(MiniPtyStaticUnixNative)' != 'true'">PreserveNewest</CopyToPublishDirectory>
       </None>
       <FileWrites Include="$(_MiniPtySpawnHelperOutput)" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
       <None Include="$(_MiniPtySpawnHelperOutput)" Condition="$([MSBuild]::IsOSPlatform('OSX'))">

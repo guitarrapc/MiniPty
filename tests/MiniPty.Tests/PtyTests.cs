@@ -1041,10 +1041,11 @@ public sealed class PtyTests
             if (!TryResolveWindowsPowerShell(out var powershell))
                 return;
 
+            // Block on stdin until after Resize so a fast runner cannot query size before ConPTY applies it.
             await using var session = Pty.Start(
-                Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "$s = $Host.UI.RawUI.WindowSize; Start-Sleep -Milliseconds 200; Write-Output (\"{0} {1}\" -f $s.Width, $s.Height); exit 0"]));
+                Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null; $s = $Host.UI.RawUI.WindowSize; Write-Output (\"{0} {1}\" -f $s.Width, $s.Height); exit 0"]));
             session.Resize(new(100, 30));
-            var result = await session.CompleteAsync();
+            var result = await session.CompleteAsync(new PtyCompleteOptions { Input = "go\r\n" });
 
             await Assert.That(result.ExitCode).IsEqualTo(0);
             await Assert.That(result.Contains("100 30")).IsTrue();

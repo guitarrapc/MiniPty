@@ -55,6 +55,11 @@ jobs:
       - name: Test
         shell: bash
         run: dotnet test -c Release
+      - name: Build libminipty_unix
+        if: ${{ !startsWith(matrix.rid, 'win') }}
+        shell: bash
+        run: bash scripts/build-native.sh "${{ matrix.rid }}"
+
       - name: Publish and run samples (NativeAOT)
         shell: bash
         run: |
@@ -66,6 +71,15 @@ jobs:
               exe="$out/${sample}.exe"
             fi
             test -f "$exe"
+            if [[ "${{ matrix.rid }}" == linux-* ]]; then
+              test ! -f "$out/libminipty_unix.so"
+              test ! -f "$out/libminipty_unix.a"
+            fi
+            if [[ "${{ matrix.rid }}" == osx-* ]]; then
+              test ! -f "$out/libminipty_unix.dylib"
+              test ! -f "$out/libminipty_unix.a"
+              test -f "$out/minipty_spawn_helper"
+            fi
             "$exe"
           done
 
@@ -145,11 +159,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
+            rid: linux-x64
           - os: ubuntu-24.04-arm
+            rid: linux-arm64
           - os: windows-2025
+            rid: win-x64
           - os: windows-11-arm
+            rid: win-arm64
           - os: macos-26
+            rid: osx-arm64
           - os: macos-26-intel
+            rid: osx-x64
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
@@ -172,7 +192,7 @@ jobs:
           path: ./publish
       - name: Run NuGet smoke sample
         shell: bash
-        run: bash scripts/run-nuget-smoke.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish
+        run: bash scripts/run-nuget-smoke.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}"
 
   build-complete:
     needs: [build, nuget-smoke]
