@@ -7,13 +7,27 @@
   <ItemGroup Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
     <DirectPInvoke Include="minipty_unix" />
     <NativeLibrary Include="$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\libminipty_unix.a" />
-    <NativeLibrary Include="-lutil" />
+    <LinkerArg Include="-lutil" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(MiniPtyStaticUnixNative)' == 'true' and $(RuntimeIdentifier.StartsWith('osx'))">
+    <None Include="$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\minipty_spawn_helper"
+          Link="minipty_spawn_helper"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\minipty_spawn_helper')" />
   </ItemGroup>
 
   <Target Name="_MiniPtyValidateStaticArchive"
           BeforeTargets="PrepareForBuild"
           Condition="'$(MiniPtyStaticUnixNative)' == 'true' and !Exists('$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\libminipty_unix.a')">
     <Error Text="MiniPty: missing runtimes/$(RuntimeIdentifier)/native/libminipty_unix.a. Ensure the package contains the static archive, or build it when building from source." />
+  </Target>
+
+  <Target Name="_MiniPtyValidateSpawnHelper"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(MiniPtyStaticUnixNative)' == 'true' and $(RuntimeIdentifier.StartsWith('osx')) and !Exists('$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\minipty_spawn_helper')">
+    <Error Text="MiniPty: missing runtimes/$(RuntimeIdentifier)/native/minipty_spawn_helper (required on macOS)." />
   </Target>
 
   <!-- Drop shared shim and the link-time archive from publish output. -->

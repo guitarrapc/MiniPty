@@ -20,7 +20,7 @@ build_static_archive() {
   local objs=()
 
   work="$(mktemp -d)"
-  trap 'rm -rf "$work"' RETURN
+  trap 'rm -rf "$work"; trap - RETURN' RETURN
   for src in "$@"; do
     local base
     base="$(basename "$src")"
