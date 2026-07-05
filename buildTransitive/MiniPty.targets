@@ -1,5 +1,10 @@
 <Project>
-  <PropertyGroup Condition="'$(PublishAot)' == 'true' and ($(RuntimeIdentifier.StartsWith('linux')) or $(RuntimeIdentifier.StartsWith('osx')))">
+  <PropertyGroup>
+    <_MiniPtyStaticUnixRid>false</_MiniPtyStaticUnixRid>
+    <_MiniPtyStaticUnixRid Condition="'$(RuntimeIdentifier)' == 'linux-x64' or '$(RuntimeIdentifier)' == 'linux-arm64' or '$(RuntimeIdentifier)' == 'osx-x64' or '$(RuntimeIdentifier)' == 'osx-arm64'">true</_MiniPtyStaticUnixRid>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' and '$(_MiniPtyStaticUnixRid)' == 'true'">
     <MiniPtyStaticUnixNative>true</MiniPtyStaticUnixNative>
     <MiniPtyBuildUnixNative>false</MiniPtyBuildUnixNative>
   </PropertyGroup>
@@ -21,13 +26,13 @@
   <Target Name="_MiniPtyValidateStaticArchive"
           BeforeTargets="PrepareForBuild"
           Condition="'$(MiniPtyStaticUnixNative)' == 'true' and !Exists('$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\libminipty_unix.a')">
-    <Error Text="MiniPty: missing runtimes/$(RuntimeIdentifier)/native/libminipty_unix.a. Ensure the package contains the static archive, or build it when building from source." />
+    <Error Text="MiniPty: missing runtimes/$(RuntimeIdentifier)/native/libminipty_unix.a. Ensure the package contains the static archive; when building from source, run: bash scripts/build-native.sh $(RuntimeIdentifier)" />
   </Target>
 
   <Target Name="_MiniPtyValidateSpawnHelper"
           BeforeTargets="PrepareForBuild"
           Condition="'$(MiniPtyStaticUnixNative)' == 'true' and $(RuntimeIdentifier.StartsWith('osx')) and !Exists('$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\minipty_spawn_helper')">
-    <Error Text="MiniPty: missing runtimes/$(RuntimeIdentifier)/native/minipty_spawn_helper (required on macOS)." />
+    <Error Text="MiniPty: missing runtimes/$(RuntimeIdentifier)/native/minipty_spawn_helper (required on macOS). When building from source, run: bash scripts/build-native.sh $(RuntimeIdentifier)" />
   </Target>
 
   <!-- Drop shared shim and the link-time archive from publish output. -->
