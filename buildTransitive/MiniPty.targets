@@ -1,6 +1,7 @@
 <Project>
   <PropertyGroup Condition="'$(PublishAot)' == 'true' and ($(RuntimeIdentifier.StartsWith('linux')) or $(RuntimeIdentifier.StartsWith('osx')))">
     <MiniPtyStaticUnixNative>true</MiniPtyStaticUnixNative>
+    <MiniPtyBuildUnixNative>false</MiniPtyBuildUnixNative>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
@@ -11,14 +12,20 @@
 
   <!-- Drop shared shim and the link-time archive from publish output. -->
   <Target Name="_MiniPtyExcludeUnixSharedNativeFromPublish"
-          BeforeTargets="GetCopyToPublishDirectoryItems"
+          AfterTargets="ComputeResolvedFilesToPublishList"
+          BeforeTargets="CopyFilesToPublishDirectory"
           Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
     <ItemGroup>
-      <None Remove="@(None)" Condition="'%(None.Link)' == 'libminipty_unix.so' or '%(None.Link)' == 'libminipty_unix.dylib' or '%(None.Link)' == 'libminipty_unix.a'" />
+      <None Remove="@(None)"
+            Condition="$([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.so')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.dylib')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.a'))" />
+      <Content Remove="@(Content)"
+               Condition="$([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.so')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.dylib')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.a'))" />
       <ContentWithTargetPath Remove="@(ContentWithTargetPath)"
-                             Condition="'%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.so' or '%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.dylib' or '%(ContentWithTargetPath.TargetPath)' == 'libminipty_unix.a'" />
+                             Condition="$([System.String]::Copy('%(TargetPath)').EndsWith('libminipty_unix.so')) or $([System.String]::Copy('%(TargetPath)').EndsWith('libminipty_unix.dylib')) or $([System.String]::Copy('%(TargetPath)').EndsWith('libminipty_unix.a'))" />
+      <_ResolvedCopyLocalPublishAssets Remove="@(_ResolvedCopyLocalPublishAssets)"
+                                       Condition="$([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.so')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.dylib')) or $([System.String]::Copy('%(Filename)%(Extension)').Equals('libminipty_unix.a'))" />
       <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
-                             Condition="'%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.so' or '%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.dylib' or '%(ResolvedFileToPublish.RelativePath)' == 'libminipty_unix.a'" />
+                             Condition="$([System.String]::Copy('%(RelativePath)').EndsWith('libminipty_unix.so')) or $([System.String]::Copy('%(RelativePath)').EndsWith('libminipty_unix.dylib')) or $([System.String]::Copy('%(RelativePath)').EndsWith('libminipty_unix.a'))" />
     </ItemGroup>
   </Target>
 </Project>
