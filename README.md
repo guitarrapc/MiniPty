@@ -71,7 +71,7 @@ dotnet add package MiniPty.Console
 - **Persistent stream**: `ReadOutputAsync` + `WriteInputAsync` + `WaitForExitAsync`
 - **One-shot run**: `CompleteAsync`
 
-Disposing a session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that.
+Disposing a session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that. Try `dotnet samples/README_MiniPty.cs` to run this sample.
 
 ```csharp
 using System.Diagnostics;
@@ -135,7 +135,7 @@ static PtyStartInfo CreateTimedOutputStartInfo()
 
 MiniPty is not a sandbox. Processes run with the parent process permissions unless the host application isolates them with OS users, containers, or another security boundary.
 
-**MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`. Try `dotnet samples/README_Capture.cs` to run this sample.
+**MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`. Try `dotnet samples/README_MiniPty.Capture.cs` to run this sample.
 
 ```csharp
 using System.Runtime.InteropServices;
@@ -175,7 +175,7 @@ static PtyStartInfo CreateCaptureStartInfo()
 }
 ```
 
-**MiniPty.Console** attaches the host terminal to a running session for interactive programs (vim, etc.). It forwards raw keyboard bytes to the PTY and syncs host resize events. It does **not** read PTY output — the embedder remains the sole output consumer via `ReadOutputAsync` and writes bytes to host `stdout`. Try `dotnet samples/README_Console.cs` to run this sample.
+**MiniPty.Console** attaches the host terminal to a running session for interactive programs (vim, etc.). It forwards raw keyboard bytes to the PTY and syncs host resize events. It does **not** read PTY output — the embedder remains the sole output consumer via `ReadOutputAsync` and writes bytes to host `stdout`. Try `dotnet samples/README_MiniPty.Console.cs` to run this sample.
 
 ```csharp
 using System.Runtime.InteropServices;
