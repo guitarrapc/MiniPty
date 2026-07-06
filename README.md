@@ -67,69 +67,82 @@ dotnet add package MiniPty.Capture
 dotnet add package MiniPty.Console
 ```
 
-**MiniPty** start a session with `Pty.Start`, then either call `ReadOutputAsync` for persistent bytes-only output streaming or call `CompleteAsync` for a one-shot run. Disposing the session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that.
+**MiniPty** start a session with `Pty.Start`, then choose one pattern:
+- **Persistent stream**: `ReadOutputAsync` + `WriteInputAsync` + `WaitForExitAsync`
+- **One-shot run**: `CompleteAsync`
+
+Disposing a session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that.
 
 ```csharp
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using MiniPty;
 
-// Disposing a pty session kills the child process if it is still running. Use `WaitForExitAsync` to wait for the child to exit without killing it.
-await using var session = Pty.Start(new PtyStartInfo
-{
-    FileName = "/bin/bash",
-    Arguments = ["-lc", "stty size && echo hello"],
-    Size = new PtySize(120, 30),
-    TerminalName = "xterm-256color",
-    Environment = new Dictionary<string, string?>
-    {
-        ["NO_COLOR"] = null,
-        ["MINIPTY_SAMPLE"] = "true",
-    },
-});
+Console.Error.WriteLine("=== 1) Stream mode: chunks arrive over time ===");
+await RunStreamModeAsync();
 
-var outputTask = Task.Run(async () =>
+Console.Error.WriteLine();
+Console.Error.WriteLine("=== 2) One-shot mode: one completion result ===");
+await RunCompleteModeAsync();
+
+static async Task RunStreamModeAsync()
 {
-    var stdout = Console.OpenStandardOutput();
+    await using var session = Pty.Start(CreateTimedOutputStartInfo());
+    var sw = Stopwatch.StartNew();
+    var chunks = 0;
     await foreach (var chunk in session.ReadOutputAsync())
-        await stdout.WriteAsync(chunk.Data);
-});
+        Console.WriteLine($"+{sw.Elapsed.TotalSeconds,4:F1}s chunk#{++chunks} ({chunk.Data.Length} bytes)");
 
-await session.WriteInputAsync("echo ok\n");
-session.SendEof();
-var exitCode = await session.WaitForExitAsync();
-await outputTask;
-Console.WriteLine($"Exit code: {exitCode}");
+    Console.WriteLine($"stream exit={await session.WaitForExitAsync()}, chunks={chunks}");
+}
 
-// Use `CompleteAsync` to drain output without timestamps:
-var result = await session.CompleteAsync(new PtyCompleteOptions
+static async Task RunCompleteModeAsync()
 {
-    Input = "echo ok\n",
-});
-Console.WriteLine(result.GetTextString());
-Console.WriteLine(result.ExitCode);
+    await using var session = Pty.Start(CreateTimedOutputStartInfo());
+    var result = await session.CompleteAsync();
+    Console.WriteLine($"complete exit={result.ExitCode}, bytes={result.Output.Length}");
+    Console.WriteLine(PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText).TrimEnd());
+}
 
-// For host-readable logs, transform control sequences first:
-Console.WriteLine(PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText));
+static PtyStartInfo CreateTimedOutputStartInfo()
+{
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        return new PtyStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+            Arguments = ["/c", "echo alpha & timeout /t 1 /nobreak >nul & echo beta & timeout /t 1 /nobreak >nul & echo gamma"],
+            Size = new PtySize(120, 30),
+        };
+    }
 
-// Raw bytes: result.Output, or skip pump decoding with DecodeOutput = false
-Console.WriteLine(result.Output.Length);
+    return new PtyStartInfo
+    {
+        FileName = "/bin/sh",
+        Arguments = ["-c", "printf 'alpha\\n'; sleep 1; printf 'beta\\n'; sleep 1; printf 'gamma\\n'"],
+        Size = new PtySize(120, 30),
+        TerminalName = "xterm-256color",
+        Environment = new Dictionary<string, string?>
+        {
+            ["NO_COLOR"] = null,
+            ["MINIPTY_SAMPLE"] = "true",
+        },
+    };
+}
 ```
 
 `PtyStartInfo.Environment` overlays the parent environment. A null value removes a variable; an empty string sets an empty variable on platforms that preserve empty environment values. On Unix, `TerminalName` sets `TERM`; if no `TERM` remains, MiniPty defaults it to `xterm-256color`. On Windows, `TerminalName` is currently ignored and `TERM` is only passed when explicitly set in `Environment`.
 
 MiniPty is not a sandbox. Processes run with the parent process permissions unless the host application isolates them with OS users, containers, or another security boundary.
 
-**MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`.
+**MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`. Try `dotnet samples/README_Capture.cs` to run this sample.
 
 ```csharp
+using System.Runtime.InteropServices;
 using MiniPty;
 using MiniPty.Capture;
 
-var result = await PtyCapture.RunAsync(new PtyStartInfo
-{
-    FileName = "/bin/bash",
-    Arguments = ["-lc", "printf '\\e[31mred\\e[0m\\n'"],
-    Size = new PtySize(120, 30),
-});
+var result = await PtyCapture.RunAsync(CreateCaptureStartInfo());
 
 // Chunk timestamps are measured from session start (immediately after `Pty.Start`).
 foreach (var chunk in result.Chunks)
@@ -140,36 +153,113 @@ foreach (var textChunk in result.GetTextChunks())
 
 // Or plain text for logging:
 Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));
+
+static PtyStartInfo CreateCaptureStartInfo()
+{
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        return new PtyStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+            Arguments = ["/c", "echo capture-sample"],
+            Size = new PtySize(120, 30),
+        };
+    }
+
+    return new PtyStartInfo
+    {
+        FileName = "/bin/sh",
+        Arguments = ["-c", "printf '\\e[31mcapture-sample\\e[0m\\n'"],
+        Size = new PtySize(120, 30),
+    };
+}
 ```
 
-**MiniPty.Console** attaches the host terminal to a running session for interactive programs (vim, etc.). It forwards raw keyboard bytes to the PTY and syncs host resize events. It does **not** read PTY output — the embedder remains the sole output consumer via `ReadOutputAsync` and writes bytes to host `stdout`.
+**MiniPty.Console** attaches the host terminal to a running session for interactive programs (vim, etc.). It forwards raw keyboard bytes to the PTY and syncs host resize events. It does **not** read PTY output — the embedder remains the sole output consumer via `ReadOutputAsync` and writes bytes to host `stdout`. Try `dotnet samples/README_Console.cs` to run this sample.
 
 ```csharp
+using System.Runtime.InteropServices;
 using MiniPty;
 using MiniPty.Console;
 
-await using var session = Pty.Start(new PtyStartInfo
+if (Console.IsInputRedirected || Console.IsOutputRedirected)
 {
-    FileName = "/bin/bash",
-    Arguments = ["-i"],
-});
+    Console.Error.WriteLine("Run this sample from an interactive terminal (TTY).");
+    return;
+}
+
+await using var session = Pty.Start(CreateShellStartInfo());
+Console.Error.WriteLine($"[MiniPty] child pid={session.ProcessId}, size={session.Size.Columns}x{session.Size.Rows}");
+Console.Error.WriteLine("[MiniPty] Try: type `echo hello`, resize the window, then `exit`.");
 
 using var attachCts = new CancellationTokenSource();
-var pumpTask = PumpOutputAsync(session);
+var outputStats = new OutputStats();
+var pumpTask = PumpOutputAsync(session, outputStats);
 using var consoleInput = PtyConsoleInput.Attach(session);
 
 var exitTask = session.WaitForExitAsync(attachCts.Token);
-_ = exitTask.ContinueWith(_ => attachCts.Cancel(), attachCts);
+_ = exitTask.ContinueWith(
+    static (_, state) => ((CancellationTokenSource)state!).Cancel(),
+    attachCts,
+    CancellationToken.None,
+    TaskContinuationOptions.ExecuteSynchronously,
+    TaskScheduler.Default);
 
 consoleInput.PumpInputUntil(attachCts.Token);
-await exitTask;
+var exitCode = await exitTask;
 await pumpTask;
+ResetHostCursorColumnIfNeeded();
+Console.Error.WriteLine($"[MiniPty] shell exit={exitCode}, chunks={outputStats.Chunks}, bytes={outputStats.Bytes}");
 
-static async Task PumpOutputAsync(PtySession session)
+static async Task PumpOutputAsync(PtySession session, OutputStats stats)
 {
     var stdout = Console.OpenStandardOutput();
     await foreach (var chunk in session.ReadOutputAsync())
+    {
+        stats.Chunks++;
+        stats.Bytes += chunk.Data.Length;
         await stdout.WriteAsync(chunk.Data);
+        await stdout.FlushAsync(CancellationToken.None);
+    }
+}
+
+static void ResetHostCursorColumnIfNeeded()
+{
+    if (OperatingSystem.IsWindows())
+        return;
+
+    var stdout = Console.OpenStandardOutput();
+    stdout.Write("\r\n"u8);
+    stdout.Flush();
+}
+
+static PtyStartInfo CreateShellStartInfo()
+{
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+        if (!File.Exists(cmd))
+            throw new InvalidOperationException("cmd.exe is required.");
+
+        return new PtyStartInfo
+        {
+            FileName = cmd,
+            Size = new PtySize(80, 24),
+        };
+    }
+
+    return new PtyStartInfo
+    {
+        FileName = File.Exists("/bin/bash") ? "/bin/bash" : "/bin/sh",
+        Arguments = ["-i"],
+        Size = new PtySize(80, 24),
+    };
+}
+
+sealed class OutputStats
+{
+    public int Chunks;
+    public int Bytes;
 }
 ```
 
