@@ -76,6 +76,7 @@ Persistent embedders usually keep **one** output consumer active for the whole `
 | API | On cancellation |
 |---|---|
 | `WaitForExitAsync` | Waiting stops with `OperationCanceledException`; the child continues running. |
+| `WaitForExitStatusAsync` | Same as `WaitForExitAsync`; the child continues running. |
 | `ReadOutputAsync` | Output enumeration stops with `OperationCanceledException`; the child continues running. |
 | `CompleteAsync` | When `KillOnCancellation` is true, the child is killed and `OperationCanceledException` is thrown. |
 | `PtyCapture.RunAsync` | Same as `CompleteAsync`; it uses completion options. |
@@ -146,6 +147,7 @@ Windows may defer stdin EOF until the wait loop has given the child time to atta
 | `Dispose` / `DisposeAsync` while child running | Kills the child, then releases handles. |
 | `Dispose` while operations are in flight | All in-flight `ReadOutputAsync`, `WaitForExitAsync`, and `WriteInputAsync` operations fail immediately with `ObjectDisposedException`. |
 | `Kill()` | Terminates the child but does not release handles. Call `Dispose` afterward. |
+| `Kill(PtySignal)` | Unix: delivers the mapped native signal via `kill(2)`; catchable signals may be handled or ignored, so exit is not guaranteed. Windows: validates the enum, then terminates unconditionally (node-pty parity). Drain-after-kill behavior is unchanged. |
 
 ## Failure Behavior
 

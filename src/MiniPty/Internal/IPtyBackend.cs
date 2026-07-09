@@ -12,10 +12,16 @@ internal interface IPtyBackend : IDisposable
     public int ProcessId { get; }
     public bool HasExited { get; }
     public int ExitCode { get; }
+    /// <summary>
+    /// Raw OS signal that terminated the child, observed after exit. Null on normal exit, before
+    /// exit, when the wait status was lost (ECHILD), and always on Windows.
+    /// </summary>
+    public int? ExitSignal { get; }
     public PtySize Size { get; }
     public void Resize(int columns, int rows);
     public void SendEof();
     public void Kill();
+    public void Kill(PtySignal signal);
     public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true);
     /// <summary>
     /// Blocks until the child exits or <paramref name="cancellationToken"/> is canceled; allocation-free path for <see cref="PtySession.ReadOutputAsync"/> exit observation.

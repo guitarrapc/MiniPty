@@ -46,10 +46,21 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 | `SendEof()` | Signals end of stdin using platform-specific behavior. See [Lifecycle](lifecycle.md). |
 | `Resize(PtySize)` | Resizes the terminal after spawn. |
 | `WaitForExitAsync` | Waits for child exit. Cancellation stops waiting only; the child keeps running. |
+| `WaitForExitStatusAsync` | Same wait/cancellation semantics as `WaitForExitAsync`; returns `PtyExitStatus` (exit code plus Unix termination signal). |
 | `CompleteAsync` | Convenience API for one-shot input, wait, drain, and result materialization. See [Completion](completion.md). |
 | `Kill()` | Terminates the child process without releasing handles. |
+| `Kill(PtySignal)` | Sends a signal on Unix (`kill(2)`; the child may handle or ignore catchable signals). On Windows the signal is advisory and the child is terminated (node-pty parity). Undefined enum values throw `ArgumentOutOfRangeException` on both platforms. |
 | `HasExited` / `ExitCode?` | Polls exit state. `ExitCode` is null until the child has exited. |
+| `ExitStatus?` | `PtyExitStatus` after exit; null before. |
 | `Dispose` / `DisposeAsync` | Kills the child if still running, then releases handles. |
+
+## Exit Status
+
+`PtyExitStatus` reports `ExitCode` and `Signal`:
+
+- `ExitCode` always equals `PtySession.ExitCode`. On Unix a signal-terminated child keeps MiniPty's existing `128 + signal` mapping (for example 143 for SIGTERM) — deliberately not node-pty's 0-on-signal, so a killed child never reads as success and there is one exit-code story across the library.
+- `Signal` is the raw OS signal number (`waitpid` `WTERMSIG`), null on normal exit and when the wait status was lost (ECHILD reap-lost path). Windows never reports a signal.
+- `PtySignal` members are logical identifiers mapped to native numbers per platform (SIGUSR1/SIGUSR2 numbering differs between Linux and macOS/FreeBSD); reporting uses raw OS numbers.
 
 ## Embedder Patterns
 
@@ -60,11 +71,11 @@ MiniPty core is the PTY transport for multiple embedder shapes ([spec.md](../spe
 | **1 — General transport** | Embedder (`ReadOutputAsync` or raw `Output`) | Embedder (`WriteInputAsync`) | **MiniPty** |
 | **2 — One-shot record** | `PtyCapture.RunAsync` (internal transport pump) | `PtyCompleteOptions` / capture options | **MiniPty.Capture** |
 | **3 — Interactive host** | Embedder `ReadOutputAsync` (record + write host `stdout`) | **MiniPty.Console** host keyboard + optional embedder writes | **MiniPty** + **MiniPty.Console** |
-| **4 — Editor terminal** | Frontend integration (`ReadOutputAsync`) | Frontend key events → `WriteInputAsync` | **MiniPty** |
+| **4 — Editor terminal** | **MiniPty.Terminal** `PtyTerminal` (owns `ReadOutputAsync`) | Frontend key events → bridge → `WriteInputAsync` | **MiniPty** + **MiniPty.Terminal** |
 
 **Use case 3** does not add a second PTY output reader. [Console](console.md) configures the host terminal and forwards host stdin bytes; the embedder keeps the single `ReadOutputAsync` enumeration for PTY → host display and recording.
 
-**Use case 4** does not use **MiniPty.Console** (no host console attach). Optional node-pty parity features for editors are tracked outside the Console specification.
+**Use case 4** does not use **MiniPty.Console** (no host console attach). The push facade, flow control, and WebSocket bridge live in [Terminal](terminal.md).
 
 ## Backpressure
 
@@ -80,6 +91,7 @@ Only one active `ReadOutputAsync` reader is allowed per session. A concurrent re
 
 ## Lessons Learned
 
+- The textbook glibc `WIFSIGNALED` macro relies on a signed-char cast that a direct C# transcription loses, misclassifying the stopped marker `0x7f` as signaled. Unreachable under WNOHANG-only polling, but load-bearing once the termination signal became public API; the managed decode uses the explicit `(status & 0x7f) != 0 && (status & 0x7f) != 0x7f` form. The exited/signaled wait-status layout is identical on Linux, macOS, and FreeBSD, so decoding stays managed with no native shim involvement.
 - Environment overlay is safer for MiniPty than node-pty-style replacement because Windows child startup is fragile when inherited variables such as `SystemRoot` are accidentally omitted.
 - Unix terminal-size variables such as `COLUMNS` and `LINES` can make a fresh PTY behave like the parent terminal. Sanitizing them before overlay avoids stale child-visible terminal state.
 - Windows does not preserve empty environment variables as child-visible empty values. MiniPty keeps the API distinction so Unix can express empty values, but Windows children observe them like missing variables.

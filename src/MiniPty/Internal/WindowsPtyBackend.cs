@@ -305,6 +305,9 @@ internal static class WindowsPtyBackend
             }
         }
 
+        // Windows has no signal concept for exit reporting; ConPTY children always report null.
+        public int? ExitSignal => null;
+
         public PtySize Size => _size;
 
         public void Resize(int columns, int rows)
@@ -343,6 +346,19 @@ internal static class WindowsPtyBackend
                 return;
 
             KillCore();
+        }
+
+        public void Kill(PtySignal signal)
+        {
+            // node-pty semantics: the signal is advisory on Windows and the child is terminated.
+            // Validate the enum the same way the Unix backend does so misuse throws on both platforms.
+            _ = signal switch
+            {
+                PtySignal.Hangup or PtySignal.Interrupt or PtySignal.Quit or PtySignal.Kill
+                    or PtySignal.User1 or PtySignal.User2 or PtySignal.Terminate => 0,
+                _ => throw new ArgumentOutOfRangeException(nameof(signal)),
+            };
+            Kill();
         }
 
         private void KillCore()

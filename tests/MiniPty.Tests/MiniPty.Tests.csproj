@@ -11,6 +11,7 @@
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Capture\MiniPty.Capture.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Console\MiniPty.Console.csproj" />
+    <ProjectReference Include="..\..\src\MiniPty.Terminal\MiniPty.Terminal.csproj" />
   </ItemGroup>
 
 </Project>

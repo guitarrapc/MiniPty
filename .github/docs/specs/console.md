@@ -30,7 +30,7 @@ PTY output **display** on the host and **timestamped recording** stay embedder r
 | N2 | Writing PTY output to the host display (embedder writes `stdout` after reading the PTY) |
 | N3 | Cast / timestamped recording / `MiniPty.Capture` orchestration |
 | N4 | Terminal emulation (screen buffer, ANSI parsing, scrollback) |
-| N5 | In-editor terminal integration (VS Code / xterm.js backend — separate plan) |
+| N5 | In-editor terminal integration (VS Code / xterm.js backend — **MiniPty.Terminal**, [terminal.md](terminal.md)) |
 | N6 | Spawning the child (`Pty.Start` remains **MiniPty** core) |
 | N7 | Generating or interpreting bracketed-paste sequences |
 
@@ -186,7 +186,7 @@ Typical interactive host flow:
 
 `Attach` returns **`PtyConsoleInputHandle`** (`IDisposable`); do not use `await using` unless a future API adds `IAsyncDisposable`.
 
-Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only. Use case 4 (editor terminal backend) uses **MiniPty** core without **MiniPty.Console**.
+Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only. Use case 4 (editor terminal backend) uses **MiniPty.Terminal** ([terminal.md](terminal.md)) without **MiniPty.Console**.
 
 ## Failure Behavior
 
