@@ -108,9 +108,11 @@ public sealed class PtyWebSocketBridgeTests
         await Task.Delay(300, cts.Token);
         await Assert.That(client.BinaryByteCount).IsEqualTo(stalledAt);
 
-        // Ack everything received so far: delivery must resume and the session must complete.
+        // Grant all available credit rather than acknowledging the client-side count. The server
+        // can have completed a SendAsync whose frame the client has not yet scheduled to receive;
+        // using the observed count can leave that in-flight delta above the low watermark.
         client.AckEverythingFromNowOn();
-        await client.SendAckAsync(stalledAt, cts.Token);
+        await client.SendAckAsync(long.MaxValue, cts.Token);
 
         await clientTask;
         var status = await bridgeTask.WaitAsync(cts.Token);
