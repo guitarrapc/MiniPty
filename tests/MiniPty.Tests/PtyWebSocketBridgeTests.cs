@@ -289,9 +289,13 @@ public sealed class PtyWebSocketBridgeTests
         var (serverSocket, clientSocket) = CreateSocketPair();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
-        var bridgeTask = PtyWebSocketBridge.RunAsync(EchoInputThenExitChild(), serverSocket, cancellationToken: cts.Token);
+        var bridgeTask = PtyWebSocketBridge.RunAsync(ReadyThenEchoInputChild(), serverSocket, cancellationToken: cts.Token);
         var client = new BridgeTestClient(clientSocket);
         var clientTask = client.RunToCloseAsync(ackEverything: true, cts.Token);
+
+        // Ensure the child is attached and the output pump is live before making this a fast-exit
+        // session. The behavior under test is fragmented control-message reassembly, not startup.
+        await client.WaitForBinaryTextAsync("BRIDGE_READY", cts.Token);
 
         // Split one resize message across two text frames; a broken accumulation path would parse
         // half a JSON document and fail the session with PolicyViolation.
@@ -378,6 +382,7 @@ public sealed class PtyWebSocketBridgeTests
         private readonly WebSocket _socket;
         private readonly StringBuilder _binaryText = new();
         private readonly SemaphoreSlim _sendLock = new(1, 1);
+        private readonly SemaphoreSlim _binarySignal = new(0);
         private long _binaryByteCount;
         private int _messageCount;
         private volatile bool _ackEverything;
@@ -402,6 +407,20 @@ public sealed class PtyWebSocketBridgeTests
         public WebSocketCloseStatus? CloseStatus { get; private set; }
 
         public void AckEverythingFromNowOn() => _ackEverything = true;
+
+        public async Task WaitForBinaryTextAsync(string expected, CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                lock (_binaryText)
+                {
+                    if (_binaryText.ToString().Contains(expected, StringComparison.Ordinal))
+                        return;
+                }
+
+                await _binarySignal.WaitAsync(cancellationToken);
+            }
+        }
 
         public Task SendAckAsync(long bytes, CancellationToken cancellationToken) =>
             SendAsync(Encoding.UTF8.GetBytes($"{{\"type\":\"ack\",\"bytes\":{bytes}}}"), WebSocketMessageType.Text, cancellationToken);
@@ -458,6 +477,7 @@ public sealed class PtyWebSocketBridgeTests
                     {
                         _binaryText.Append(Encoding.UTF8.GetString(payload));
                     }
+                    _binarySignal.Release();
 
                     if (_ackEverything && payload.Length > 0)
                         await SendAckAsync(payload.Length, cancellationToken);
@@ -681,6 +701,11 @@ public sealed class PtyWebSocketBridgeTests
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(WindowsComSpec(), ["/v:on", "/c", "set /p LINE= & echo GOT:!LINE!"])
             : Spawn("sh", ["-c", "IFS= read -r line; printf 'GOT:%s\\n' \"$line\""]);
+
+    private static PtyStartInfo ReadyThenEchoInputChild() =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? Spawn(WindowsComSpec(), ["/v:on", "/c", "echo BRIDGE_READY & set /p LINE= & echo GOT:!LINE!"])
+            : Spawn("sh", ["-c", "printf 'BRIDGE_READY\\n'; IFS= read -r line; printf 'GOT:%s\\n' \"$line\""]);
 
     private static PtyStartInfo StdinBlockingChild() =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
