@@ -4,7 +4,7 @@ Implemented user-facing contract for the **MiniPty.Terminal** NuGet package.
 
 This package serves **use case 4** in [spec.md](../spec.md): MiniPty as the backend PTY (node-pty–equivalent role) behind a frontend terminal such as xterm.js in a browser or an editor-integrated terminal.
 
-**Status: implemented** (editor backend plan; see [plan_editor_backend.md](../plans/plan_editor_backend.md)).
+**Status: implemented.**
 
 ## Motivation
 
@@ -27,7 +27,7 @@ Bridging to a browser needs one more layer. The WebSocket protocol has no backpr
 | N1 | Terminal emulation (screen buffer, ANSI parsing, scrollback) — the frontend renders |
 | N2 | Output recording / timestamping ([Capture](capture.md)) |
 | N3 | Host console attach ([Console](console.md); use case 3) |
-| N4 | Remote shells (`ssh`), authentication, or multi-user session management |
+| N4 | Remote shell protocols (`ssh`), user identity/authentication, or multi-user session management. Per-session bridge bearer authentication is included. |
 | N6 | HTTP serving — the embedder accepts the WebSocket (Kestrel, `HttpListener`, …) and hands it to the bridge |
 | N7 | Native Windows ConPTY buffer clear. `PtyTerminal.Clear()` is a safe compatibility no-op because the in-box API exposes no clear operation. |
 
@@ -212,7 +212,6 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 - [spec.md](../spec.md) — four use cases and package map
 - [core_session.md](core_session.md) — `ReadOutputAsync` strict handoff, chunk lifetime, backpressure
 - [lifecycle.md](lifecycle.md) — exit, kill, disposal semantics the facade builds on
-- [plans/plan_editor_backend.md](../plans/plan_editor_backend.md) — implementation plan and decision record
 - [samples/WebTerminal.cs](../../../samples/WebTerminal.cs) — browser demo with the client-side protocol
 - [samples/VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs) — stdio-framed helper entry point
 - [samples/VsCodePersistentBridge.cs](../../../samples/VsCodePersistentBridge.cs) — authenticated loopback service and reconnect E2E smoke

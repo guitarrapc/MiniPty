@@ -1,6 +1,6 @@
 # Terminal Parity Plan (VS Code–like Editor Backend)
 
-Follow-up to the implemented [editor backend plan](plan_editor_backend.md). Goal: close the remaining gaps between **MiniPty.Terminal** (+ core spawn surface) and **node-pty** so a VS Code–like editor can use MiniPty as a drop-in backend without surprises.
+Follow-up to the implemented [Terminal backend specification](../specs/terminal.md). Goal: close the remaining gaps between **MiniPty.Terminal** (+ core spawn surface) and **node-pty** so a VS Code–like editor can use MiniPty as a drop-in backend without surprises.
 
 **Status:** implemented (2026-07-14), including authenticated bridge-managed reconnect and expiry.
 
@@ -80,7 +80,7 @@ public int NodePtyExitCode => Signal is null ? ExitCode : 0;
 
 - Tests: signal-killed child → `ExitCode == 128 + n`, `NodePtyExitCode == 0`, `Signal == n`.
 - Bridge test: exit message `exitCode` is 0 when `signal` is present.
-- [plan_editor_backend.md](plan_editor_backend.md) lesson about deliberate `128 + signal` is updated to note the Terminal-layer projection.
+- [core_session.md](../specs/core_session.md) documents the deliberate `128 + signal` core value and Terminal-layer node-pty projection.
 
 ### Estimate
 
@@ -289,7 +289,7 @@ flowchart LR
 - [specs/terminal.md](../specs/terminal.md) — protocol, VS Code mapping, non-goals
 - [specs/core_session.md](../specs/core_session.md) — `NodePtyExitCode`, resize pixel fields if added
 - [spec.md](../spec.md) — Planned scope table
-- [plan_editor_backend.md](plan_editor_backend.md) — link here from Deferred / future
+- [specs/terminal.md](../specs/terminal.md) — implemented Terminal contract and durable decisions
 
 ## Resolved questions
 
@@ -299,7 +299,6 @@ flowchart LR
 
 ## Related documents
 
-- [plan_editor_backend.md](plan_editor_backend.md) — implemented use case 4 baseline
 - [specs/terminal.md](../specs/terminal.md) — Terminal package contract
 - [node-pty IPty typings](https://github.com/microsoft/node-pty/blob/main/typings/node-pty.d.ts)
 - [VS Code TerminalProcess](https://github.com/microsoft/vscode/blob/main/src/vs/platform/terminal/node/terminalProcess.ts)
