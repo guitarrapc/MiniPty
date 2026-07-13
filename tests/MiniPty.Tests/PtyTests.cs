@@ -1074,20 +1074,20 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-            using var session = Pty.Start(Spawn(cmd, ["/c", "ping -n 8 127.0.0.1 >nul"]));
+            using var session = Pty.Start(Spawn(cmd, ["/c", "set /p DUMMY="]));
 
             await Assert.ThrowsAsync<OperationCanceledException>(() =>
                 session.CompleteAsync(new PtyCompleteOptions { KillOnCancellation = true }, cts.Token));
-            await Task.Delay(200);
+            await WaitUntilExited(session);
             await Assert.That(session.HasExited).IsTrue();
             return;
         }
 
-        using var unixSession = Pty.Start(Spawn("sleep", ["8"]));
+        using var unixSession = Pty.Start(Spawn("sh", ["-c", "IFS= read -r _"]));
 
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
             unixSession.CompleteAsync(new PtyCompleteOptions { KillOnCancellation = true }, cts.Token));
-        await Task.Delay(200);
+        await WaitUntilExited(unixSession);
         await Assert.That(unixSession.HasExited).IsTrue();
     }
 
