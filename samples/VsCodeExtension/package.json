@@ -1,0 +1,45 @@
+{
+  "name": "minipty-vscode-sample",
+  "displayName": "MiniPty VS Code Sample",
+  "description": "Minimal VS Code Pseudoterminal backed by the MiniPty NativeAOT helper.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "minipty-sample",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:minipty.openTerminal"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "minipty.openTerminal",
+        "title": "MiniPty: Open Terminal"
+      }
+    ],
+    "configuration": {
+      "title": "MiniPty Sample",
+      "properties": {
+        "minipty.helperPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to the published VsCodeTerminalHelper executable. MINIPTY_VSCODE_HELPER is used when this is empty."
+        },
+        "minipty.helperArguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Optional command and arguments passed to VsCodeTerminalHelper instead of its default shell."
+        }
+      }
+    }
+  }
+}

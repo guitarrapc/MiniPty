@@ -150,7 +150,7 @@ Each session has one fixed `ReplayBufferSize` allocation. Output continues while
 
 `PtyStdioBridge.RunAsync` provides the same raw data, resize, ACK, and exit semantics over readable/writable streams. Each frame is a one-byte type (`1` output, `2` input, `3` control), a little-endian unsigned 32-bit payload length, then the payload. This fixed header lets a VS Code extension host a NativeAOT helper without HTTP, WebSocket, JSON-wrapped data, or base64.
 
-Control payloads are the same UTF-8 JSON used by the WebSocket bridge. Output is fully delivered before the exit control frame, and ACK watermarks apply identically. See [VS Code Pseudoterminal reference](../references/vscode_pseudoterminal.md) and [VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs).
+Control payloads are the same UTF-8 JSON used by the WebSocket bridge. Output is fully delivered before the exit control frame, and ACK watermarks apply identically. See [VS Code Pseudoterminal reference](../references/vscode_pseudoterminal.md), [VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs), and the runnable [VsCodeExtension sample](../../../samples/VsCodeExtension).
 
 ## VS Code integration pattern
 

@@ -2,6 +2,8 @@
 
 A VS Code extension cannot load MiniPty directly, so it spawns the NativeAOT-capable [VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs) and implements `vscode.Pseudoterminal` over its stdin/stdout.
 
+The runnable [VsCodeExtension sample](../../../samples/VsCodeExtension) implements this mapping without npm dependencies. It opens a real VS Code integrated terminal and is the manual integration check for input, output, UTF-8 streaming, resize, flow-control acknowledgement, and ordered exit.
+
 ## Frame mapping
 
 Each frame is `[type: u8][length: u32 little-endian][payload]`.
@@ -17,6 +19,8 @@ The extension must parse stdout incrementally because a stream read can split ei
 Map `handleInput` to type 2 and `setDimensions` to `{"type":"resize","cols":...,"rows":...}`. Count type-1 bytes handed to `onDidWrite` and periodically send `{"type":"ack","bytes":...}`. On the exit control, flush the decoder and pending writes before firing `onDidClose(exitCode)`. Signal exits already carry the node-pty-compatible `exitCode: 0` plus `signal`.
 
 The helper's stdout is protocol-only. Route logs and diagnostics to stderr.
+
+The stdio extension sample is deliberately one-shot. Closing it closes the helper input and therefore the owned PTY. It validates the editor backend path but not persistent reconnect.
 
 ## Persistent reconnect option
 
