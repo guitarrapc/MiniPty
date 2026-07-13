@@ -1302,16 +1302,21 @@ public sealed class PtyTests
             ["/c", $"echo {marker} & ping -n 20 127.0.0.1 >nul"])
             : UnixShell($"printf '{marker}'; sleep 20"));
 
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using var output = new MemoryStream();
-        var readTask = Task.Run(async () =>
-        {
-            await foreach (var chunk in session.ReadOutputAsync())
-                await output.WriteAsync(chunk.Data);
-        });
+        await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
 
-        await Task.Delay(300);
+        // Synchronize on actual child output instead of a fixed delay. Under loaded CI the reader
+        // and fork/exec may not run within an arbitrary timeout, allowing Kill to win before printf.
+        while (output.GetBuffer().AsSpan(0, checked((int)output.Length)).IndexOf("lifecycle-kill-drain"u8) < 0)
+        {
+            await Assert.That(await reader.MoveNextAsync()).IsTrue();
+            output.Write(reader.Current.Data.Span);
+        }
+
         session.Kill();
-        await readTask;
+        while (await reader.MoveNextAsync())
+            output.Write(reader.Current.Data.Span);
 
         var text = Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
         await Assert.That(text).Contains(marker);
