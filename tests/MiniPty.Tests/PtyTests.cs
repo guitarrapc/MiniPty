@@ -1299,8 +1299,8 @@ public sealed class PtyTests
 
         await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-            ["/c", $"echo {marker} & ping -n 20 127.0.0.1 >nul"])
-            : UnixShell($"printf '{marker}'; sleep 20"));
+            ["/c", $"echo {marker} & set /p DUMMY="])
+            : UnixShell($"printf '{marker}'; IFS= read -r _"));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using var output = new MemoryStream();
