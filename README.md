@@ -351,7 +351,8 @@ including authentication failures, replay from an acknowledged offset, detached 
 backpressure, and concurrent-connection rejection.
 
 Also publish and run the VS Code helper with NativeAOT. This selects the correct runtime identifier
-for both Apple Silicon and Intel Macs and uses the same publish flags as CI:
+for both Apple Silicon and Intel Macs and uses the same publish flags as CI. Build the Unix native
+artifacts first (`runtimes/` is not checked in):
 
 ```bash
 case "$(uname -m)" in
@@ -359,6 +360,21 @@ case "$(uname -m)" in
   x86_64) rid=osx-x64 ;;
   *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
+
+bash scripts/build-native.sh "$rid"
+
+# Homebrew-installed .NET SDK: NativeAOT's final clang link does not read LDFLAGS/CPPFLAGS.
+# Point LIBRARY_PATH at Homebrew's OpenSSL/Brotli/zlib so -lssl/-lbrotli* resolve. The Microsoft
+# SDK from dotnet.microsoft.com does not need this on macOS.
+if command -v brew >/dev/null 2>&1; then
+  export LIBRARY_PATH="$(
+    brew --prefix openssl@3 2>/dev/null
+  )/lib:$(
+    brew --prefix brotli 2>/dev/null
+  )/lib:$(
+    brew --prefix zlib 2>/dev/null
+  )/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+fi
 
 out="$(mktemp -d)/minipty-vscode-helper"
 dotnet publish samples/VsCodeTerminalHelper.cs \
