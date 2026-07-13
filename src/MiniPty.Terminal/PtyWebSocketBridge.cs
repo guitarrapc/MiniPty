@@ -168,7 +168,15 @@ public static class PtyWebSocketBridge
                     }
                 }
 
-                await terminal.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    await terminal.DisposeAsync().ConfigureAwait(false);
+                }
+                catch when (cancellationToken.IsCancellationRequested)
+                {
+                    // Caller cancellation is the public outcome. A canceled output drain can
+                    // surface a secondary teardown fault after the terminal was killed.
+                }
             }
         }
 
