@@ -64,7 +64,7 @@ public sealed class PtyTerminalTests
         var pausedOnFirstChunk = 0;
         var firstHandlerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var firstHandlerRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var terminal = PtyTerminal.Start(BulkOutputChild(), new PtyTerminalOptions
+        var terminal = PtyTerminal.Start(PauseFlowTestChild(), new PtyTerminalOptions
         {
             Output = async (data, ct) =>
             {
@@ -79,7 +79,7 @@ public sealed class PtyTerminalTests
 
         await using (terminal)
         {
-            using var startCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var startCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             await firstHandlerEntered.Task.WaitAsync(startCts.Token);
             terminal.Pause();
             firstHandlerRelease.TrySetResult();
@@ -305,6 +305,12 @@ public sealed class PtyTerminalTests
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(WindowsComSpec(), ["/c", "set /p DUMMY="])
             : Spawn("sh", ["-c", "IFS= read -r _"]);
+
+    /// <summary>Child that emits one line immediately, then sustained bulk output (256 KiB) and exits 0.</summary>
+    private static PtyStartInfo PauseFlowTestChild() =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? Spawn(WindowsComSpec(), ["/c", "echo PAUSE_FLOW_START & for /l %i in (1,1,2048) do @echo 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"])
+            : Spawn("sh", ["-c", "printf 'PAUSE_FLOW_START\\n'; i=0; while [ $i -lt 2048 ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
 
     /// <summary>Child that emits sustained bulk output (256 KiB) then exits 0.</summary>
     private static PtyStartInfo BulkOutputChild() =>

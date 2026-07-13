@@ -562,7 +562,7 @@ int minipty_get_active_process_name(int master, char *buffer, int buffer_length)
                 leader_stat_buffer[leader_stat_length] = '\0';
                 leader_comm_end = strrchr(leader_stat_buffer, ')');
                 if (leader_comm_end != NULL)
-                    (void)sscanf(leader_comm_end + 1, " %c %*ld %ld", &leader_state, &leader_group);
+                    (void)sscanf(leader_comm_end + 1, " %c %*d %ld", &leader_state, &leader_group);
             }
         }
         if (leader_state == 'Z' || (pid_t)leader_group != foreground) {
@@ -595,7 +595,7 @@ int minipty_get_active_process_name(int master, char *buffer, int buffer_length)
                     continue;
                 stat_buffer[stat_length] = '\0';
                 comm_end = strrchr(stat_buffer, ')');
-                if (comm_end == NULL || sscanf(comm_end + 1, " %c %*ld %ld", &state, &group) != 2)
+                if (comm_end == NULL || sscanf(comm_end + 1, " %c %*d %ld", &state, &group) != 2)
                     continue;
                 if ((pid_t)group == foreground && state != 'Z') {
                     process = (pid_t)candidate;

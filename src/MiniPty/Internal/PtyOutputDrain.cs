@@ -102,7 +102,8 @@ internal static class PtyOutputDrain
 
     /// <summary>
     /// F3 stall condition: exit observed for at least <see cref="PostExitStallBeforeCloseMs"/> and the last
-    /// successful transport read was at least that long ago. A tick of 0 means no read yet and is not quiet.
+    /// successful transport read was at least that long ago. Pre-exit reads do not count toward post-exit
+    /// quiet; a tick of 0 means no read yet and is not quiet.
     /// </summary>
     private static bool ShouldCloseAfterQuietPeriod(long exitObservedAt, long lastReadTick)
     {
@@ -113,7 +114,8 @@ internal static class PtyOutputDrain
         if (lastReadTick == 0)
             return false;
 
-        return now - lastReadTick >= PostExitStallBeforeCloseMs;
+        var lastActivity = Math.Max(lastReadTick, exitObservedAt);
+        return now - lastActivity >= PostExitStallBeforeCloseMs;
     }
 
     private static void RunMicroWindowQuietCheck<T>(

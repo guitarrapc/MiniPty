@@ -760,7 +760,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                     }
 
                     var now = Environment.TickCount64;
-                    if (now - _lastProduceProgressTicks >= PostExitStallBeforeCloseMs
+                    var lastProgress = Math.Max(_lastProduceProgressTicks, exitObservedAt);
+                    if (now - lastProgress >= PostExitStallBeforeCloseMs
                         && now - exitObservedAt >= PostExitStallBeforeCloseMs)
                     {
                         _session.CloseOutputTransport();
@@ -813,7 +814,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 _handoff = data;
                 _consumerWaiting = false;
                 if (_dataWaitArmed)
+                {
+                    _dataWaitArmed = false;
                     _dataWaitState.SetResult(true);
+                }
 
                 Monitor.PulseAll(_sync);
             }
@@ -856,9 +860,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             {
                 _handoff = default;
                 if (_dataWaitArmed)
+                {
+                    _dataWaitArmed = false;
                     _dataWaitState.SetResult(true);
+                }
 
-                _dataWaitArmed = false;
                 Monitor.PulseAll(_sync);
             }
         }
@@ -868,7 +874,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             lock (_sync)
             {
                 if (_dataWaitArmed)
+                {
+                    _dataWaitArmed = false;
                     _dataWaitState.SetException(new OperationCanceledException());
+                }
             }
         }
 
