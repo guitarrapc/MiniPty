@@ -1214,6 +1214,31 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyActiveProcessNameTracksPipelineAfterGroupLeaderExits()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        await using var session = Pty.Start(Spawn("sh", []));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await session.WriteInputAsync("sh -c 'exit 0' | sleep 5\n", cancellationToken: cts.Token);
+        await Task.Delay(200, cts.Token);
+
+        string? processName;
+        do
+        {
+            processName = session.ActiveProcessName;
+            if (processName == "sleep")
+                break;
+            await Task.Delay(20, cts.Token);
+        }
+        while (true);
+
+        await Assert.That(processName).IsEqualTo("sleep");
+        session.Kill(PtySignal.Kill);
+    }
+
+    [Test]
     public async Task PtyChildSeesResizedSize()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))

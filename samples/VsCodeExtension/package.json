@@ -6,7 +6,7 @@
   "private": true,
   "publisher": "minipty-sample",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.101.0"
   },
   "categories": [
     "Other"
