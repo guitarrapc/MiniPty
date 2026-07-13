@@ -13,6 +13,8 @@ internal sealed class BridgeMessage
     public string? Type { get; set; }
     public int? Cols { get; set; }
     public int? Rows { get; set; }
+    public int? PixelWidth { get; set; }
+    public int? PixelHeight { get; set; }
     public long? Bytes { get; set; }
     public int? ExitCode { get; set; }
     public int? Signal { get; set; }
@@ -56,6 +58,6 @@ internal static class BridgeJson
 
     public static byte[] SerializeExit(PtyExitStatus status) =>
         JsonSerializer.SerializeToUtf8Bytes(
-            new BridgeMessage { Type = TypeExit, ExitCode = status.ExitCode, Signal = status.Signal },
+            new BridgeMessage { Type = TypeExit, ExitCode = status.NodePtyExitCode, Signal = status.Signal },
             BridgeJsonContext.Default.BridgeMessage);
 }

@@ -2,7 +2,13 @@
 
 Follow-up to the implemented [editor backend plan](plan_editor_backend.md). Goal: close the remaining gaps between **MiniPty.Terminal** (+ core spawn surface) and **node-pty** so a VS Code–like editor can use MiniPty as a drop-in backend without surprises.
 
-**Status:** planned (not started).
+**Status:** implemented (2026-07-14), except bridge-managed reconnect remains a follow-up after the implemented `PtyTerminal.Attach` prerequisite.
+
+## Implementation result
+
+T1–T4, the Attach prerequisite in T5, T6, and T8 are implemented. T2 ships `PtyStdioBridge`, the helper sample, tests, and a VS Code integration reference. T7 ships the planned safe `PtyTerminal.Clear()` no-op because the in-box ConPTY API still has no clear operation. T9–T13 retain their planned defer/won't decisions.
+
+Lessons learned: foreground-title lookup can stay allocation-light and NativeAOT-safe by using `tcgetpgrp` plus platform process-name APIs behind the existing Unix native shim; no `ps` fallback is needed. Pixel winsize fields are 16-bit and therefore require explicit clamping. Stdio stdout must remain protocol-only because arbitrary text irrecoverably corrupts framing.
 
 Research inputs: node-pty `IPty` / `spawn` typings, VS Code `TerminalProcess` / `PtyService` (title polling, flow control, `clearBuffer`, exit handling), and the gap list in [terminal.md](../specs/terminal.md) non-goals.
 
@@ -28,7 +34,7 @@ Terminal emulation (screen buffer, ANSI parsing) stays out of scope.
 
 ## Gap inventory and priorities
 
-| ID | Priority | node-pty / VS Code | MiniPty today | Planned resolution |
+| ID | Priority | node-pty / VS Code | Baseline before this plan | Resolution |
 |---|---|---|---|---|
 | T1 | **P0** | `onExit { exitCode, signal? }` — on Unix signal exit, `exitCode` is **0** and `signal` carries `WTERMSIG` | `PtyExitStatus.ExitCode` is `128 + signal`; `Signal` is correct | **Terminal-bound node-pty exit shape** (see [T1](#t1-node-pty-exit-code-reporting-p0)) |
 | T2 | **P0** | Extension host bridges via helper process + framed I/O (documented pattern in [terminal.md](../specs/terminal.md)) | WebSocket bridge + browser sample only | **Stdio-framed bridge + minimal VS Code Pseudoterminal sample** (see [T2](#t2-stdio-bridge-and-vscode-reference-p0)) |
@@ -56,7 +62,7 @@ node-pty sets `exit_code = WEXITSTATUS` only when `WIFEXITED`; when `WIFSIGNALED
 
 MiniPty's `128 + signal` convention is correct for shell scripting and consistent with `PtySession.ExitCode`, but a VS Code–like host that maps `onDidClose.fire(exitCode)` from the bridge `exit` message will show **143** for SIGTERM instead of **0** unless we translate at the terminal boundary.
 
-### Decision (proposed)
+### Decision
 
 - **Keep** `PtyExitStatus.ExitCode` and `PtySession.ExitCode` as the shell-oriented value (`128 + signal` on Unix signal death). Do not break Capture, `CompleteAsync`, or existing tests.
 - **Add** a node-pty-compatible projection used by **MiniPty.Terminal** and documented for Pseudoterminal integrators:
@@ -88,9 +94,9 @@ Small (API surface + bridge + docs + tests). No native change.
 
 [terminal.md](../specs/terminal.md) documents the Pseudoterminal pattern but there is no shipped reference transport. VS Code extensions cannot P/Invoke; they need a **helper executable** speaking a stable framed protocol. Without it, "VS Code–like backend" remains theoretical.
 
-### Decision (proposed)
+### Decision
 
-- Add **`PtyStdioBridge`** (name TBD) in **MiniPty.Terminal**: same control messages as the WebSocket bridge (`resize`, `ack`, `exit`), length-prefixed binary frames on stdin/stdout (or stdout-only with fixed header — pick one and spec it).
+- Add **`PtyStdioBridge`** in **MiniPty.Terminal**: same control messages as the WebSocket bridge (`resize`, `ack`, `exit`), with a fixed one-byte type plus little-endian 32-bit length header on stdin/stdout.
 - Reuse `BridgeJson`, `BridgeFlowControl`, and the `PtyTerminal` pump; only framing differs.
 - Add **`samples/VsCodeTerminalHelper.cs`** (or similar): stdin/stdout bridge entry point an extension can spawn.
 - Add a minimal **`.github/docs`** integration note (not a full VS Code extension repo) showing `handleInput` → binary frame, incremental `TextDecoder`, `onDidWrite` flush before `onDidClose`, ACK counting.
@@ -117,12 +123,13 @@ Medium (new framing layer + sample + tests). Depends on T1 for exit JSON shape.
 
 VS Code polls `pty.process` on Unix every **200 ms** to update tab titles (`TerminalProcess._setupTitlePolling`). Without this, editor tabs show only the static shell name.
 
-### Decision (proposed)
+### Decision
 
 - Add **`string? ActiveProcessName { get; }`** on `PtyTerminal` (and optionally `PtySession` if useful outside Terminal).
-- Implement per OS:
-  - **Linux / FreeBSD:** `tcgetpgrp` on PTY fd → `kill(pid, 0)` + `/proc/<pid>/comm` (or `ps` fallback in tests only).
-  - **macOS:** libproc / `proc_pidpath` or node-pty-equivalent `pty.process(fd)` native helper (evaluate smallest AOT-friendly path).
+- Implement per OS behind the existing native shim:
+  - **Linux:** `tcgetpgrp` on PTY fd → `kill(pid, 0)` + `/proc/<pid>/comm`.
+  - **macOS:** `tcgetpgrp` + libproc `proc_name`.
+  - **FreeBSD:** `tcgetpgrp` + `sysctl(KERN_PROC_PID)`.
   - **Windows:** optional — VS Code uses `WindowsShellHelper` for title, not `IPty.process`; return `null` or shell file name on v1.
 - Filter kernel/spawn noise (`spawn_helper`, `kernel_task`) like node-pty.
 - No automatic polling inside the library — expose a cheap getter; the embedder polls (matches VS Code).
@@ -144,10 +151,10 @@ Medium–large (per-OS native or managed proc lookup; NativeAOT-safe).
 
 node-pty `kill()` defaults to **SIGHUP**. VS Code calls `ptyProcess.kill()` without a signal during normal teardown. MiniPty `Kill()` uses **SIGKILL** / `TerminateProcess`, which is harsher and can prevent graceful shell cleanup (history flush, job control).
 
-### Decision (proposed)
+### Decision
 
-- Add **`PtyKillOptions`** or an overload: `Kill(PtyKillMode mode = PtyKillMode.Force)` where `Graceful` maps to SIGHUP on Unix and existing terminate on Windows (node-pty has no signal on Windows).
-- **Default for `PtyTerminal`:** `Graceful` to match node-pty; keep `PtySession.Kill()` default as forceful unless we decide library-wide alignment (breaking — prefer Terminal-only default).
+- **`PtyTerminal.Kill()`:** SIGHUP on Unix and existing terminate on Windows, matching node-pty without adding another mode enum.
+- Keep **`PtySession.Kill()`** forceful to preserve the core contract; callers can continue to select `Kill(PtySignal)` explicitly.
 - Document that embedders mimicking VS Code teardown should use graceful kill first.
 
 ### Acceptance
@@ -167,7 +174,7 @@ Small–medium.
 
 VS Code **persistent terminals** survive panel close and renderer disconnect. [terminal.md](../specs/terminal.md) N5 rejects v1 reconnect because the bridge owns spawn. `Attach(PtySession)` is the prerequisite.
 
-### Decision (proposed)
+### Decision
 
 1. **`PtyTerminal.Attach(PtySession, PtyTerminalOptions)`** — same pump/handler contract as `Start`; session must have no other active output consumer.
 2. Design **`PtyBridgeOptions.Reconnect`** (or a separate `PtyWebSocketBridge.AttachAsync`) in a follow-up PR once Attach is proven.
@@ -190,9 +197,9 @@ Medium for Attach; large for full reconnect semantics.
 
 node-pty and VS Code accept optional `pixelWidth`/`pixelHeight` for fixed dimensions. Most sessions only pass cols/rows; pixel size is ignored on Windows.
 
-### Decision (proposed)
+### Decision
 
-- Extend `PtySize` or add `PtyPixelSize?` optional on `Resize`.
+- Preserve the two-field `PtySize` record and add `PtyPixelSize?` on a `Resize` overload, avoiding a positional-record breaking change.
 - Unix: set `ws_xpixel` / `ws_ypixel` in `TIOCSWINSZ`.
 - Windows: no-op (documented).
 
@@ -216,7 +223,7 @@ VS Code `clearBuffer()` calls `IPty.clear()`, which invokes `ConptyClearPseudoCo
 | Wait for public Windows API | Clean | No timeline |
 | Document "no-op on Windows" | Zero cost | Residual redraw glitches |
 
-### Decision (proposed)
+### Decision
 
 - **Defer implementation** until an embedder reports the glitch on modern Windows ConPTY (in-box, not DLL).
 - Revisit shipping a **optional** redistributable only if glitch is confirmed and API remains unavailable.
@@ -234,7 +241,7 @@ Large if DLL route; trivial for documented no-op.
 
 node-pty on Windows allows `args` as a pre-escaped CommandLine string. Some hosts build a single command line for `cmd.exe /c`.
 
-### Decision (proposed)
+### Decision
 
 - Add `PtyStartInfo.CommandLine` (Windows-only, mutually exclusive with `Arguments`) or a `PtyWindowsStartInfo` nested option.
 - Document quoting rules and link to Microsoft CommandLine docs (same as node-pty typings).
@@ -271,7 +278,7 @@ flowchart LR
 |---|---|---|
 | **Phase A** | T1, T2 | Editor can integrate via helper; exit matches node-pty / VS Code |
 | **Phase B** | T4, T3 | Tab titles and teardown behavior match VS Code expectations |
-| **Phase C** | T5 | Persistent / reconnect sessions become possible |
+| **Phase C** | T5 | Ownership transfer via Attach is available; bridge-managed persistence remains follow-up scope |
 | **Phase D** | T6, T8, T7 | Remaining node-pty options on demand |
 
 ## Documentation touchpoints (after each phase)
@@ -281,11 +288,11 @@ flowchart LR
 - [spec.md](../spec.md) — Planned scope table
 - [plan_editor_backend.md](plan_editor_backend.md) — link here from Deferred / future
 
-## Open questions
+## Resolved questions
 
-- Should `PtySession.Kill()` default change to SIGHUP library-wide (breaking) or only `PtyTerminal`?
-- Is a minimal conpty.dll optional package (`MiniPty.Windows.Conpty`) acceptable under AGENTS.md, or always rejected?
-- For T3, is managed `/proc` polling sufficient on Linux CI, or is a small native `pty.process` helper required for macOS parity?
+- `PtySession.Kill()` remains forceful; only `PtyTerminal.Kill()` defaults to SIGHUP.
+- No conpty.dll or third-party native asset is added; `PtyTerminal.Clear()` is a compatibility no-op.
+- Process-name lookup uses the existing self-contained Unix native shim on every Unix target, with no `ps` process fallback.
 
 ## Related documents
 

@@ -642,6 +642,7 @@ public sealed class PtyTests
 
         await Assert.That(status.ExitCode).IsEqualTo(143);
         await Assert.That(status.Signal).IsEqualTo(15);
+        await Assert.That(status.NodePtyExitCode).IsEqualTo(0);
         // ExitCode compatibility pin: PtyExitStatus.ExitCode always equals PtySession.ExitCode.
         await Assert.That(session.ExitCode).IsEqualTo(143);
         await Assert.That(session.ExitStatus).IsEqualTo(status);
@@ -658,6 +659,7 @@ public sealed class PtyTests
 
         await Assert.That(status.ExitCode).IsEqualTo(42);
         await Assert.That(status.Signal).IsNull();
+        await Assert.That(status.NodePtyExitCode).IsEqualTo(42);
         await Assert.That(session.ExitStatus).IsEqualTo(status);
     }
 
@@ -1131,6 +1133,84 @@ public sealed class PtyTests
 
         await Assert.That(unixSession.Size.Columns).IsEqualTo(100);
         await Assert.That(unixSession.Size.Rows).IsEqualTo(30);
+    }
+
+    [Test]
+    public async Task PtyResizeAcceptsPixelDimensions()
+    {
+        using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("set /p DUMMY=")
+            : UnixShell("IFS= read -r _"));
+
+        session.Resize(new PtySize(90, 25), new PtyPixelSize(900, 500));
+
+        await Assert.That(session.Size).IsEqualTo(new PtySize(90, 25));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            session.Resize(new PtySize(90, 25), new PtyPixelSize(-1, 500)));
+    }
+
+    [Test]
+    public async Task PtyCommandLineRejectsIncompatibleUsage()
+    {
+        var mixed = new PtyStartInfo
+        {
+            FileName = "unused",
+            Arguments = ["argument"],
+            CommandLine = "raw",
+        };
+        Assert.Throws<ArgumentException>(() => Pty.Start(mixed));
+
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Throws<PlatformNotSupportedException>(() => Pty.Start(new PtyStartInfo
+            {
+                FileName = "sh",
+                CommandLine = "-c true",
+            }));
+        }
+
+        await Task.CompletedTask;
+    }
+
+    [Test]
+    public async Task PtyWindowsCommandLineRunsPreEscapedText()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        await using var session = Pty.Start(new PtyStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+            CommandLine = "/c echo RAW_COMMAND_LINE_MARKER",
+        });
+        var result = await session.CompleteAsync();
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.Contains("RAW_COMMAND_LINE_MARKER")).IsTrue();
+    }
+
+    [Test]
+    public async Task PtyActiveProcessNameTracksUnixForegroundProcess()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        await using var session = Pty.Start(Spawn("sh", []));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await session.WriteInputAsync("sleep 5\n", cancellationToken: cts.Token);
+
+        string? processName;
+        do
+        {
+            processName = session.ActiveProcessName;
+            if (processName == "sleep")
+                break;
+            await Task.Delay(20, cts.Token);
+        }
+        while (true);
+
+        await Assert.That(processName).IsEqualTo("sleep");
+        session.Kill(PtySignal.Kill);
     }
 
     [Test]

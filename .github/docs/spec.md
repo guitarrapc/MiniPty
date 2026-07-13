@@ -26,7 +26,7 @@ Use case 3 recording and cast format remain **scenetake** (or other embedder) re
 | **MiniPty** | Core PTY transport: spawn, streams, lifecycle | — |
 | **MiniPty.Capture** | One-shot run with per-read timestamps (`PtyCapture.RunAsync`) | MiniPty |
 | **MiniPty.Console** | Host keyboard → PTY input (`PtyConsoleInput.Attach`) | MiniPty |
-| **MiniPty.Terminal** | Frontend terminal backend: push facade (`PtyTerminal`), xterm.js WebSocket bridge (`PtyWebSocketBridge`) | MiniPty |
+| **MiniPty.Terminal** | Frontend terminal backend: push facade, WebSocket bridge, and stdio helper bridge | MiniPty |
 
 ```mermaid
 flowchart TB
@@ -62,21 +62,22 @@ flowchart TB
 | Persistent transport sample (`ReadOutputAsync` command loop) | [samples/Interactive.cs](../../samples/Interactive.cs) |
 | Attach host terminal input to an existing `PtySession` (use case 3) | [Console](specs/console.md) |
 | Exit status with Unix termination signal; `Kill(PtySignal)` | [Core session](specs/core_session.md) |
-| Backend PTY for frontend terminals: push facade, flow control, xterm.js WebSocket bridge (use case 4) | [Terminal](specs/terminal.md) |
+| Backend PTY for frontend terminals: push facade, flow control, WebSocket and stdio bridges (use case 4) | [Terminal](specs/terminal.md) |
 | Browser terminal sample (xterm.js over WebSocket) | [samples/WebTerminal.cs](../../samples/WebTerminal.cs) |
+| VS Code helper sample (length-framed stdio) | [samples/VsCodeTerminalHelper.cs](../../samples/VsCodeTerminalHelper.cs) |
 
 ## Planned Scope
 
 | Goal | Plan |
 |---|---|
-| Remaining node-pty / VS Code–like editor backend parity (exit shape, stdio bridge, title, graceful kill, attach/reconnect) | [plans/plan_terminal_parity.md](plans/plan_terminal_parity.md) |
+| Bridge-managed persistent terminal reconnect | [plans/plan_terminal_parity.md](plans/plan_terminal_parity.md) follow-up from T5 |
 
 ## Out of Scope For The Current Implementation
 
 - Terminal emulation, TUI replay, or faithful screen-buffer rendering
 - Cast / asciinema recording (embedder responsibility; scenetake for example)
 - Windows ConPTY `clear()` (requires the conpty.dll signal pipe; not reachable via public Win32 API)
-- Terminal session reconnect / detach-reattach ([Terminal](specs/terminal.md) non-goal N5)
+- Bridge-managed session registry and reconnect protocol ([Terminal](specs/terminal.md) non-goal N5)
 - Remote shells (`ssh`)
 - Spilling capture to disk when memory is exhausted
 - Capture tuning such as max chunk size or chunk timestamp modes

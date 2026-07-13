@@ -48,6 +48,10 @@ public static class Pty
     public static PtySession Start(PtyStartInfo startInfo)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
+        if (startInfo.CommandLine is not null && startInfo.Arguments.Count != 0)
+            throw new ArgumentException("CommandLine and Arguments cannot both be specified.", nameof(startInfo));
+        if (startInfo.CommandLine is not null && !OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("PtyStartInfo.CommandLine is supported only on Windows.");
         if (!IsSupported)
             throw new PlatformNotSupportedException("PTY is not supported on this operating system.");
 

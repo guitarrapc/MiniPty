@@ -41,14 +41,10 @@ Contract-level lessons live in [specs/terminal.md](../specs/terminal.md), [core_
 
 - The direct C# transcription of glibc's `WIFSIGNALED` macro loses the signed-char cast and misclassifies the stopped marker `0x7f`; unreachable under WNOHANG-only polling, but it became load-bearing the moment the signal turned into public API. Use `(status & 0x7f) != 0 && (status & 0x7f) != 0x7f`.
 - SIGUSR1/SIGUSR2 numbering differs per OS (Linux 10/12, macOS/FreeBSD 30/31), which is why `Kill` takes a `PtySignal` enum mapped per platform instead of a raw int, while `PtyExitStatus.Signal` reports the raw OS number (node-pty parity).
-- `PtyExitStatus.ExitCode` deliberately keeps MiniPty's `128 + signal` semantics instead of node-pty's 0-on-signal so a killed child never reads as success and `ExitStatus.ExitCode == ExitCode` always holds.
+- `PtyExitStatus.ExitCode` deliberately keeps MiniPty's `128 + signal` semantics so `ExitStatus.ExitCode == ExitCode` always holds. The parity follow-up added `NodePtyExitCode` as the explicit Terminal/VS Code projection, avoiding a core breaking change.
 
 ## Deferred / future
 
 Prioritized follow-up for VS Code–like editor parity: [plan_terminal_parity.md](plan_terminal_parity.md).
 
-Summary:
-
-- **P0:** node-pty-shaped exit reporting at the Terminal boundary (`exitCode` 0 when `signal` present); stdio-framed bridge + Pseudoterminal reference sample.
-- **P1:** process title (`IPty.process`), graceful default kill (SIGHUP), `Attach(PtySession)` for reconnect.
-- **P2 / won't:** pixel resize, Windows CommandLine spawn, ConPTY `clear()` (pending embedder demand); uid/gid and `openpty` without spawn remain out of scope.
+The implemented follow-up provides node-pty exit projection, stdio framing, process-title polling, graceful Terminal kill, session attach, pixel resize, Windows raw command line, and a documented no-op `Clear`. Bridge-managed reconnect, uid/gid, and openpty-without-spawn remain out of scope.

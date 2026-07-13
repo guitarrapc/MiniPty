@@ -206,7 +206,7 @@ public static class PtyWebSocketBridge
 
         /// <summary>
         /// Reads the exit status directly from the session after a kill whose drain faulted.
-        /// SIGKILL / TerminateProcess complete quickly; the bounded poll covers scheduler lag.
+        /// SIGHUP / TerminateProcess normally complete quickly; the bounded poll covers scheduler lag.
         /// </summary>
         private static async Task<PtyExitStatus> WaitForKilledStatusAsync(PtyTerminal terminal, TimeSpan timeout)
         {
@@ -302,7 +302,10 @@ public static class PtyWebSocketBridge
                     {
                         try
                         {
-                            terminal.Resize(new PtySize(message.Cols.Value, message.Rows.Value));
+                            PtyPixelSize? pixelSize = message.PixelWidth is >= 0 && message.PixelHeight is >= 0
+                                ? new PtyPixelSize(message.PixelWidth.Value, message.PixelHeight.Value)
+                                : null;
+                            terminal.Resize(new PtySize(message.Cols.Value, message.Rows.Value), pixelSize);
                         }
                         catch (Exception e) when (e is InvalidOperationException or ObjectDisposedException)
                         {

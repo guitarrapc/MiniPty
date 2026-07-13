@@ -170,7 +170,32 @@ internal static partial class UnixPtyBackend
 
         public PtySize Size => _size;
 
-        public void Resize(int columns, int rows)
+        public string? ActiveProcessName
+        {
+            get
+            {
+                if (_disposed || _masterClosed || TryRefreshExitState())
+                    return null;
+
+                Span<byte> name = stackalloc byte[256];
+                int length;
+                unsafe
+                {
+                    fixed (byte* buffer = name)
+                        length = minipty_get_active_process_name(_master, buffer, name.Length);
+                }
+
+                if (length <= 0)
+                    return null;
+
+                var processName = Encoding.UTF8.GetString(name[..length]);
+                return processName is "spawn_helper" or "minipty_spawn_helper" or "kernel_task"
+                    ? null
+                    : processName;
+            }
+        }
+
+        public void Resize(int columns, int rows, int pixelWidth, int pixelHeight)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_masterClosed)
@@ -178,7 +203,12 @@ internal static partial class UnixPtyBackend
 
             columns = Math.Clamp(columns, 1, 512);
             rows = Math.Clamp(rows, 1, 512);
-            if (minipty_set_winsize(_master, (ushort)rows, (ushort)columns) != 0)
+            if (minipty_set_winsize(
+                    _master,
+                    (ushort)rows,
+                    (ushort)columns,
+                    (ushort)pixelWidth,
+                    (ushort)pixelHeight) != 0)
                 throw new IOException($"TIOCSWINSZ failed (errno {Marshal.GetLastPInvokeError()})");
 
             _size = new PtySize(columns, rows);
@@ -592,7 +622,15 @@ internal static partial class UnixPtyBackend
         int* pid_out);
 
     [LibraryImport("minipty_unix", SetLastError = true)]
-    private static partial int minipty_set_winsize(int master, ushort rows, ushort cols);
+    private static partial int minipty_set_winsize(
+        int master,
+        ushort rows,
+        ushort cols,
+        ushort pixelWidth,
+        ushort pixelHeight);
+
+    [LibraryImport("minipty_unix")]
+    private static unsafe partial int minipty_get_active_process_name(int master, byte* buffer, int bufferLength);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Winsize

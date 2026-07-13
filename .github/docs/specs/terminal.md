@@ -28,14 +28,15 @@ Bridging to a browser needs one more layer. The WebSocket protocol has no backpr
 | N2 | Output recording / timestamping ([Capture](capture.md)) |
 | N3 | Host console attach ([Console](console.md); use case 3) |
 | N4 | Remote shells (`ssh`), authentication, or multi-user session management |
-| N5 | Session reconnect / detach-reattach (v1 bridge owns the session end-to-end; requires an `Attach` overload design first) |
+| N5 | Bridge-managed persistent-session registry and reconnect protocol. `PtyTerminal.Attach` exists as the ownership-transfer prerequisite. |
 | N6 | HTTP serving — the embedder accepts the WebSocket (Kestrel, `HttpListener`, …) and hands it to the bridge |
-| N7 | Windows ConPTY `clear()` — requires the conpty.dll signal pipe node-pty ships; not reachable through the public Win32 API |
+| N7 | Native Windows ConPTY buffer clear. `PtyTerminal.Clear()` is a safe compatibility no-op because the in-box API exposes no clear operation. |
 
 ## `PtyTerminal` — push facade
 
 ```csharp
 PtyTerminal.Start(PtyStartInfo startInfo, PtyTerminalOptions options)  // options.Output is required
+PtyTerminal.Attach(PtySession session, PtyTerminalOptions options)    // transfers ownership
 ```
 
 | Member | Contract |
@@ -43,13 +44,15 @@ PtyTerminal.Start(PtyStartInfo startInfo, PtyTerminalOptions options)  // option
 | `Output` handler (options) | `ValueTask handler(ReadOnlyMemory<byte> data, CancellationToken ct)`. Data is valid **only until the returned task completes**; copy to retain. Invoked sequentially. |
 | `Completion` | `Task<PtyExitStatus>` that completes **after every output handler invocation has finished** (drain-then-exit, node-pty onData/onExit ordering). Faults with the handler exception when a handler throws (child is killed first). |
 | `Pause()` / `Resume()` | Stops/resumes output delivery. Paused delivery parks the pump; the strict-handoff producer stops reading, the OS PTY buffer fills, and the child blocks on write. No managed buffering beyond one in-flight chunk; no drops. |
-| `WriteInputAsync` / `SendEof` / `Resize` / `Kill` / `Kill(PtySignal)` | Pass-through to the owned session; callable concurrently with output delivery. |
-| `ProcessId` / `Size` / `HasExited` / `ExitStatus` | Session state. `ExitStatus` is readable independently of `Completion` — useful when the pump faulted before draining. |
+| `WriteInputAsync` / `SendEof` / `Resize` / `Kill(PtySignal)` | Pass-through to the owned session; callable concurrently with output delivery. Resize accepts optional pixel dimensions. |
+| `Kill()` | SIGHUP on Unix (node-pty default); process termination on Windows. Core `PtySession.Kill()` remains forceful. |
+| `Clear()` | Safe compatibility no-op pending a public in-box ConPTY clear API. |
+| `ProcessId` / `Size` / `ActiveProcessName` / `HasExited` / `ExitStatus` | Session state. `ActiveProcessName` is polled by the embedder (typically 200 ms on Unix); no library polling task is created. |
 | `DisposeAsync` | Stops the pump, kills the child if running, releases the PTY. |
 
 Design decisions (WHY):
 
-- **The facade owns its session.** `Start` is the only entry point and the underlying `PtySession` is not exposed. Core allows exactly one output consumer; wrapping an existing session would invite the second-reader and unread-early-output misuse modes. An `Attach(PtySession)` overload can be added later without breaking changes.
+- **The facade owns its session.** `Start` creates it; `Attach` explicitly transfers an existing session. Core still allows exactly one output consumer, so callers must attach before starting another reader and stop using the transferred session directly.
 - **The output handler is a required start option, not an event.** .NET events cannot carry async completion, so zero-copy delivery with backpressure would be impossible, and attach-after-start races would drop early output. A handler fixed at `Start` eliminates both.
 - **Exit is an awaitable `Completion` task, not an event.** It cannot be subscribed too late and composes with `await`.
 - **Slow consumers throttle the child for free.** The pump does not advance the core enumerator until the handler's task completes, which satisfies the core chunk-lifetime contract verbatim and turns a slow WebSocket send into PTY backpressure with zero copies.
@@ -74,6 +77,8 @@ Binary frames carry data; text frames carry JSON control messages. Raw PTY bytes
 | client → server | Text | `{"type":"resize","cols":120,"rows":30}` | resize the PTY |
 | client → server | Text | `{"type":"ack","bytes":131072}` | flow-control credit: client finished processing N bytes |
 | server → client | Text | `{"type":"exit","exitCode":0,"signal":15}` | child exited; always after the final output frame; `signal` omitted when null |
+
+Exit JSON always uses `PtyExitStatus.NodePtyExitCode`: signal death reports exit code 0 plus the raw signal, while the status returned from `RunAsync` retains MiniPty's shell-oriented `128 + signal` value.
 
 Unknown `type` values are ignored (forward compatibility). Malformed JSON or a control message larger than `MaxControlMessageSize` closes the socket with `PolicyViolation`, kills the child, and faults `RunAsync` with `InvalidDataException` — a broken client must not hold a shell open.
 
@@ -103,7 +108,13 @@ The client counts binary payload bytes it has fed through `term.write` callbacks
 | Cancellation | kill → dispose → `OperationCanceledException` |
 | Invalid options / null args | `ArgumentOutOfRangeException` / `ArgumentNullException` before spawn |
 
-v1 has exactly one close behavior (kill on disconnect). A keep-alive/reconnect option was rejected: with bridge-owned session creation there is no handle to reattach, so the option would leak sessions (see N5).
+The bridges still have one disconnect behavior: graceful hangup and disposal. `Attach` enables custom persistent-session owners, but a bridge-managed registry, authentication, expiry, and reconnect protocol remain outside this package (see N5).
+
+## `PtyStdioBridge` — helper-process bridge
+
+`PtyStdioBridge.RunAsync` provides the same raw data, resize, ACK, and exit semantics over readable/writable streams. Each frame is a one-byte type (`1` output, `2` input, `3` control), a little-endian unsigned 32-bit payload length, then the payload. This fixed header lets a VS Code extension host a NativeAOT helper without HTTP, WebSocket, JSON-wrapped data, or base64.
+
+Control payloads are the same UTF-8 JSON used by the WebSocket bridge. Output is fully delivered before the exit control frame, and ACK watermarks apply identically. See [VS Code Pseudoterminal reference](../references/vscode_pseudoterminal.md) and [VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs).
 
 ## VS Code integration pattern
 
@@ -126,7 +137,7 @@ Browser (xterm.js) host flow — see [samples/WebTerminal.cs](../../../samples/W
 2. `var status = await PtyWebSocketBridge.RunAsync(shellStartInfo, webSocket, ct);`
 3. Client side: `term.onData(d => ws.send(encode(d)))`, binary `onmessage` → `term.write(bytes, ackCallback)`, ACK every 2^17 processed bytes, resize on `term.onResize`.
 
-Embedders that need a custom transport (stdio framing, SignalR, …) use `PtyTerminal` directly and reimplement only the framing; pause/resume and drain-then-exit ordering come from the facade.
+Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` directly for other transports such as SignalR.
 
 ## Failure Behavior (`PtyTerminal`)
 
@@ -151,6 +162,8 @@ Embedders that need a custom transport (stdio framing, SignalR, …) use `PtyTer
 - Unacknowledged-byte accounting saturates at `long.MaxValue`. Although normal watermarks pause output long before overflow, `HighWatermark = long.MaxValue` is valid and a wrapped negative count would bypass flow control in an extremely long-lived session.
 - ConPTY line submission needs CR — sending `\n` echoes but never completes a `cmd.exe` `set /p` read. Cross-platform clients should send `\r` (xterm.js `onData` already does) and tests must not assert on LF-terminated input.
 - `cmd.exe /c "set /p LINE= & echo %LINE%"` prints the literal `%LINE%` because expansion happens at parse time; interactive-input children in tests need `/v:on` with `!LINE!`.
+- A stdio helper must reserve stdout exclusively for framed protocol bytes. Diagnostics belong on stderr; one accidental text write makes the length stream unrecoverable.
+- `PtyTerminal.Kill()` can use SIGHUP without weakening deterministic cleanup: handler faults and final disposal continue to use core's forceful kill path.
 - TerminateProcess-based `Kill` is fire-and-forget: `HasExited` can lag `Completion` by a scheduler tick; tests must poll, not assert immediately.
 - `HttpListener` on `http://localhost:<port>/` works for the sample cross-platform without URL ACLs; ephemeral binding retries random ports because `HttpListener` cannot bind port 0.
 
@@ -161,3 +174,4 @@ Embedders that need a custom transport (stdio framing, SignalR, …) use `PtyTer
 - [lifecycle.md](lifecycle.md) — exit, kill, disposal semantics the facade builds on
 - [plans/plan_editor_backend.md](../plans/plan_editor_backend.md) — implementation plan and decision record
 - [samples/WebTerminal.cs](../../../samples/WebTerminal.cs) — browser demo with the client-side protocol
+- [samples/VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs) — stdio-framed helper entry point

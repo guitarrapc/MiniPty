@@ -17,6 +17,19 @@ public sealed record PtyStartInfo
     public IReadOnlyList<string> Arguments { get; init; } = [];
 
     /// <summary>
+    /// Gets or sets a pre-escaped Windows command line appended after <see cref="FileName"/>.
+    /// </summary>
+    /// <value>
+    /// <see langword="null"/> to build the command line from <see cref="Arguments"/>. When set,
+    /// <see cref="Arguments"/> must be empty. Unsupported on Unix.
+    /// </value>
+    /// <remarks>
+    /// No quoting or escaping is applied to this value. The caller must follow the parsing rules
+    /// of the target executable, matching node-pty's Windows string-arguments overload.
+    /// </remarks>
+    public string? CommandLine { get; init; }
+
+    /// <summary>
     /// Gets or sets the working directory for the child process.
     /// </summary>
     /// <value>

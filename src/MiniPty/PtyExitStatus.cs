@@ -13,4 +13,15 @@ namespace MiniPty;
 /// Always <see langword="null"/> on Windows. The number is the OS's own value and can differ
 /// per platform for uncommon signals.
 /// </param>
-public readonly record struct PtyExitStatus(int ExitCode, int? Signal);
+public readonly record struct PtyExitStatus(int ExitCode, int? Signal)
+{
+    /// <summary>
+    /// Gets the exit code shape reported by node-pty: zero for signal termination, otherwise
+    /// <see cref="ExitCode"/>.
+    /// </summary>
+    /// <remarks>
+    /// Use this projection when forwarding an exit to VS Code or another node-pty-compatible
+    /// frontend. <see cref="ExitCode"/> remains the shell-oriented <c>128 + signal</c> value.
+    /// </remarks>
+    public int NodePtyExitCode => Signal is null ? ExitCode : 0;
+}

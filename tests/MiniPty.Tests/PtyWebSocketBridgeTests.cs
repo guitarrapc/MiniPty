@@ -10,6 +10,31 @@ namespace MiniPty.Tests;
 public sealed class PtyWebSocketBridgeTests
 {
     [Test]
+    public async Task BridgeSignalExitMessageUsesNodePtyProjection()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var bridgeTask = PtyWebSocketBridge.RunAsync(
+            Spawn("sh", ["-c", "kill -TERM $$"]),
+            serverSocket,
+            cancellationToken: cts.Token);
+        var client = new BridgeTestClient(clientSocket);
+
+        var clientTask = client.RunToCloseAsync(ackEverything: true, cts.Token);
+        var status = await bridgeTask.WaitAsync(cts.Token);
+        await clientTask.WaitAsync(cts.Token);
+        var exit = client.ExitMessage!.Value;
+
+        await Assert.That(status.ExitCode).IsEqualTo(143);
+        await Assert.That(status.Signal).IsEqualTo(15);
+        await Assert.That(exit.GetProperty("exitCode").GetInt32()).IsEqualTo(0);
+        await Assert.That(exit.GetProperty("signal").GetInt32()).IsEqualTo(15);
+    }
+
+    [Test]
     public async Task BridgeDeliversChildOutputAsBinaryFrames()
     {
         var (serverSocket, clientSocket) = CreateSocketPair();
@@ -203,7 +228,7 @@ public sealed class PtyWebSocketBridgeTests
         await Assert.That(clientSocket.CloseStatus).IsEqualTo(WebSocketCloseStatus.NormalClosure);
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            await Assert.That(status.Signal).IsEqualTo(9);
+            await Assert.That(status.Signal).IsEqualTo(1);
         }
         else
         {

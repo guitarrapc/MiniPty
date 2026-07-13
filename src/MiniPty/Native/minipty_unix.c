@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -28,10 +29,14 @@
 #elif defined(__APPLE__)
 #include <dlfcn.h>
 #include <libgen.h>
+#include <libproc.h>
 #include <spawn.h>
 #include <util.h>
 #elif defined(__FreeBSD__)
 #include <libutil.h>
+#include <sys/param.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
 #endif
 
 #if !defined(__APPLE__)
@@ -494,19 +499,83 @@ int minipty_fork_pty_exec(
     return 0;
 }
 
-int minipty_set_winsize(int master, unsigned short rows, unsigned short cols)
+int minipty_set_winsize(
+    int master,
+    unsigned short rows,
+    unsigned short cols,
+    unsigned short pixel_width,
+    unsigned short pixel_height)
 {
     struct winsize ws = {
         .ws_row = rows,
         .ws_col = cols,
-        .ws_xpixel = 0,
-        .ws_ypixel = 0,
+        .ws_xpixel = pixel_width,
+        .ws_ypixel = pixel_height,
     };
 
     if (ioctl(master, TIOCSWINSZ, &ws) != 0)
         return -1;
 
     return 0;
+}
+
+int minipty_get_active_process_name(int master, char *buffer, int buffer_length)
+{
+    pid_t foreground;
+
+    if (buffer == NULL || buffer_length <= 1)
+        return 0;
+
+    foreground = tcgetpgrp(master);
+    if (foreground <= 0 || (kill(foreground, 0) != 0 && errno != EPERM))
+        return 0;
+
+#if defined(__linux__)
+    {
+        char path[64];
+        int fd;
+        ssize_t length;
+
+        if (snprintf(path, sizeof(path), "/proc/%ld/comm", (long)foreground) >= (int)sizeof(path))
+            return 0;
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0)
+            return 0;
+        do {
+            length = read(fd, buffer, (size_t)buffer_length - 1);
+        } while (length < 0 && errno == EINTR);
+        close(fd);
+        if (length <= 0)
+            return 0;
+        while (length > 0 && (buffer[length - 1] == '\n' || buffer[length - 1] == '\r'))
+            length--;
+        buffer[length] = '\0';
+        return (int)length;
+    }
+#elif defined(__APPLE__)
+    {
+        int length = proc_name(foreground, buffer, (uint32_t)buffer_length);
+        return length > 0 ? length : 0;
+    }
+#elif defined(__FreeBSD__)
+    {
+        int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, foreground };
+        struct kinfo_proc process;
+        size_t process_size = sizeof(process);
+        size_t length;
+
+        if (sysctl(mib, 4, &process, &process_size, NULL, 0) != 0 || process_size == 0)
+            return 0;
+        length = strnlen(process.ki_comm, sizeof(process.ki_comm));
+        if (length >= (size_t)buffer_length)
+            length = (size_t)buffer_length - 1;
+        memcpy(buffer, process.ki_comm, length);
+        buffer[length] = '\0';
+        return (int)length;
+    }
+#else
+    return 0;
+#endif
 }
 
 int minipty_peek_readable_bytes(int fd, int *bytes_available)
