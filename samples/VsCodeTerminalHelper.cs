@@ -126,6 +126,25 @@ static async Task<int> RunSmokeAsync()
     if (status.ExitCode != 0 || !sawMarker || !sawExit)
         throw new InvalidDataException("VS Code helper smoke did not observe ordered output and exit frames.");
 
+    // Root the persistent manager surface in NativeAOT sample publishing as well as the stdio
+    // helper path. The null socket validates before authentication and does not attach.
+    await using var persistentManager = new PtyWebSocketSessionManager();
+    var credentials = persistentManager.CreateSession(startInfo);
+    try
+    {
+        await persistentManager.ConnectAsync(
+            credentials.SessionId,
+            credentials.AuthenticationToken,
+            0,
+            null!,
+            timeout.Token);
+        throw new InvalidOperationException("Persistent manager accepted a null WebSocket.");
+    }
+    catch (ArgumentNullException)
+    {
+    }
+    await persistentManager.TerminateAsync(credentials.SessionId, credentials.AuthenticationToken);
+
     Console.Error.WriteLine("VsCodeTerminalHelper smoke passed.");
     return 0;
 }

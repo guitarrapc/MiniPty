@@ -47,4 +47,4 @@ Contract-level lessons live in [specs/terminal.md](../specs/terminal.md), [core_
 
 Prioritized follow-up for VS Code–like editor parity: [plan_terminal_parity.md](plan_terminal_parity.md).
 
-The implemented follow-up provides node-pty exit projection, stdio framing, process-title polling, graceful Terminal kill, session attach, pixel resize, Windows raw command line, and a documented no-op `Clear`. Bridge-managed reconnect, uid/gid, and openpty-without-spawn remain out of scope.
+The implemented follow-up provides node-pty exit projection, stdio framing, process-title polling, graceful Terminal kill, session attach, authenticated/expiring bridge-managed reconnect, pixel resize, Windows raw command line, and a documented no-op `Clear`. uid/gid and openpty-without-spawn remain out of scope.

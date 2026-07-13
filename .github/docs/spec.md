@@ -65,19 +65,13 @@ flowchart TB
 | Backend PTY for frontend terminals: push facade, flow control, WebSocket and stdio bridges (use case 4) | [Terminal](specs/terminal.md) |
 | Browser terminal sample (xterm.js over WebSocket) | [samples/WebTerminal.cs](../../samples/WebTerminal.cs) |
 | VS Code helper sample (length-framed stdio) | [samples/VsCodeTerminalHelper.cs](../../samples/VsCodeTerminalHelper.cs) |
-
-## Planned Scope
-
-| Goal | Plan |
-|---|---|
-| Bridge-managed persistent terminal reconnect | [plans/plan_terminal_parity.md](plans/plan_terminal_parity.md) follow-up from T5 |
+| Authenticated, expiring WebSocket session reconnect with bounded output replay | [Terminal](specs/terminal.md) |
 
 ## Out of Scope For The Current Implementation
 
 - Terminal emulation, TUI replay, or faithful screen-buffer rendering
 - Cast / asciinema recording (embedder responsibility; scenetake for example)
 - Windows ConPTY `clear()` (requires the conpty.dll signal pipe; not reachable via public Win32 API)
-- Bridge-managed session registry and reconnect protocol ([Terminal](specs/terminal.md) non-goal N5)
 - Remote shells (`ssh`)
 - Spilling capture to disk when memory is exhausted
 - Capture tuning such as max chunk size or chunk timestamp modes

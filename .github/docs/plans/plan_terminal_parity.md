@@ -2,11 +2,11 @@
 
 Follow-up to the implemented [editor backend plan](plan_editor_backend.md). Goal: close the remaining gaps between **MiniPty.Terminal** (+ core spawn surface) and **node-pty** so a VS Code–like editor can use MiniPty as a drop-in backend without surprises.
 
-**Status:** implemented (2026-07-14), except bridge-managed reconnect remains a follow-up after the implemented `PtyTerminal.Attach` prerequisite.
+**Status:** implemented (2026-07-14), including authenticated bridge-managed reconnect and expiry.
 
 ## Implementation result
 
-T1–T4, the Attach prerequisite in T5, T6, and T8 are implemented. T2 ships `PtyStdioBridge`, the helper sample, tests, and a VS Code integration reference. T7 ships the planned safe `PtyTerminal.Clear()` no-op because the in-box ConPTY API still has no clear operation. T9–T13 retain their planned defer/won't decisions.
+T1–T8 are implemented. T2 ships `PtyStdioBridge`, the helper sample, tests, and a VS Code integration reference. T5 includes `PtyTerminal.Attach` plus `PtyWebSocketSessionManager`: bearer-token authentication, one active connection, bounded replay by absolute ACK offset, explicit termination, session limits, and detached expiry. T7 ships the planned safe `PtyTerminal.Clear()` no-op because the in-box ConPTY API still has no clear operation. T9–T13 retain their planned defer/won't decisions.
 
 Lessons learned: foreground-title lookup can stay allocation-light and NativeAOT-safe by using `tcgetpgrp` plus platform process-name APIs behind the existing Unix native shim; no `ps` fallback is needed. Pixel winsize fields are 16-bit and therefore require explicit clamping. Stdio stdout must remain protocol-only because arbitrary text irrecoverably corrupts framing.
 
@@ -172,22 +172,23 @@ Small–medium.
 
 ### Why P1
 
-VS Code **persistent terminals** survive panel close and renderer disconnect. [terminal.md](../specs/terminal.md) N5 rejects v1 reconnect because the bridge owns spawn. `Attach(PtySession)` is the prerequisite.
+VS Code **persistent terminals** survive panel close and renderer disconnect. The original [terminal.md](../specs/terminal.md) N5 rejected v1 reconnect because the bridge owned spawn; `Attach(PtySession)` was the prerequisite for the bridge-managed implementation described here.
 
 ### Decision
 
 1. **`PtyTerminal.Attach(PtySession, PtyTerminalOptions)`** — same pump/handler contract as `Start`; session must have no other active output consumer.
-2. Design **`PtyBridgeOptions.Reconnect`** (or a separate `PtyWebSocketBridge.AttachAsync`) in a follow-up PR once Attach is proven.
-3. On client disconnect: optional **keep-alive** mode (kill vs leave child running) — default remains kill for security; opt-in for editor parity.
+2. Add an opt-in **`PtyWebSocketSessionManager`** so the existing one-shot bridge keeps kill-on-disconnect semantics.
+3. Authenticate each session with an opaque id and random bearer token; allow one active connection; retain unacknowledged output by absolute byte offset; expire detached sessions and bound total sessions.
 
 ### Acceptance
 
 - Test: start session via core, attach terminal, verify output + completion.
-- Spec update for N5 removal when reconnect ships.
+- Tests: successful detach/reconnect, output before first attach, wrong/malformed/unknown token rejection, concurrent attach rejection, unavailable offset rejection, session limit, explicit authenticated termination, detached expiry, and invalid ACK rejection.
+- Spec update removes N5 and defines the replay/authentication contract.
 
 ### Estimate
 
-Medium for Attach; large for full reconnect semantics.
+Implemented: Attach plus full reconnect manager.
 
 ---
 
@@ -278,7 +279,7 @@ flowchart LR
 |---|---|---|
 | **Phase A** | T1, T2 | Editor can integrate via helper; exit matches node-pty / VS Code |
 | **Phase B** | T4, T3 | Tab titles and teardown behavior match VS Code expectations |
-| **Phase C** | T5 | Ownership transfer via Attach is available; bridge-managed persistence remains follow-up scope |
+| **Phase C** | T5 | Ownership transfer and authenticated, expiring bridge-managed reconnect are available |
 | **Phase D** | T6, T8, T7 | Remaining node-pty options on demand |
 
 ## Documentation touchpoints (after each phase)

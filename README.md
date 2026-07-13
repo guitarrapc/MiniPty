@@ -270,7 +270,7 @@ sealed class OutputStats
 
 On Unix, write status messages to **stderr before** `Attach` and emit `\r\n` on **stdout after** dispose if the parent shell prompt drifts (see [ConsoleAttach.cs](samples/ConsoleAttach.cs)).
 
-**MiniPty.Terminal** turns MiniPty into a backend PTY for frontend terminals (xterm.js, editor integrations) — the role node-pty plays behind VS Code. `PtyWebSocketBridge` serves browsers, while `PtyStdioBridge` uses length-prefixed raw frames for helper processes. `PtyTerminal` also exposes node-pty-style graceful kill, foreground process names, attach, pixel resize, and a safe `Clear` compatibility no-op. Try `dotnet samples/WebTerminal.cs` for a browser shell; [VsCodeTerminalHelper.cs](samples/VsCodeTerminalHelper.cs) is the stdio helper entry point.
+**MiniPty.Terminal** turns MiniPty into a backend PTY for frontend terminals (xterm.js, editor integrations) — the role node-pty plays behind VS Code. `PtyWebSocketBridge` serves one-shot browser sessions, while `PtyWebSocketSessionManager` adds authenticated reconnect, bounded replay, one-active-client enforcement, explicit termination, and detached-session expiry. `PtyStdioBridge` uses length-prefixed raw frames for helper processes. `PtyTerminal` also exposes node-pty-style graceful kill, foreground process names, attach, pixel resize, and a safe `Clear` compatibility no-op. Try `dotnet samples/WebTerminal.cs` for a browser shell; [VsCodeTerminalHelper.cs](samples/VsCodeTerminalHelper.cs) is the stdio helper entry point.
 
 ```csharp
 using MiniPty;

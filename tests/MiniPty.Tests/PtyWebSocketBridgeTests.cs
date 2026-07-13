@@ -550,7 +550,7 @@ public sealed class PtyWebSocketBridgeTests
         }
     }
 
-    private static (WebSocket Server, WebSocket Client) CreateSocketPair(int serverToClientCapacityChunks = 0)
+    internal static (WebSocket Server, WebSocket Client) CreateSocketPair(int serverToClientCapacityChunks = 0)
     {
         var (serverStream, clientStream) = InMemoryDuplexStream.CreatePair(serverToClientCapacityChunks);
         var server = WebSocket.CreateFromStream(serverStream, new WebSocketCreationOptions { IsServer = true });

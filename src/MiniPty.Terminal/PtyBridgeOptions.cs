@@ -1,7 +1,7 @@
 namespace MiniPty.Terminal;
 
 /// <summary>
-/// Options for <see cref="PtyWebSocketBridge.RunAsync"/>.
+/// Options for terminal WebSocket and stdio bridges, including persistent WebSocket connections.
 /// </summary>
 /// <remarks>
 /// Flow control follows the xterm.js watermark/ACK guidance: the server counts bytes sent but not

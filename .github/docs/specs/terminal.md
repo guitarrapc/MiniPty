@@ -28,7 +28,6 @@ Bridging to a browser needs one more layer. The WebSocket protocol has no backpr
 | N2 | Output recording / timestamping ([Capture](capture.md)) |
 | N3 | Host console attach ([Console](console.md); use case 3) |
 | N4 | Remote shells (`ssh`), authentication, or multi-user session management |
-| N5 | Bridge-managed persistent-session registry and reconnect protocol. `PtyTerminal.Attach` exists as the ownership-transfer prerequisite. |
 | N6 | HTTP serving — the embedder accepts the WebSocket (Kestrel, `HttpListener`, …) and hands it to the bridge |
 | N7 | Native Windows ConPTY buffer clear. `PtyTerminal.Clear()` is a safe compatibility no-op because the in-box API exposes no clear operation. |
 
@@ -108,7 +107,44 @@ The client counts binary payload bytes it has fed through `term.write` callbacks
 | Cancellation | kill → dispose → `OperationCanceledException` |
 | Invalid options / null args | `ArgumentOutOfRangeException` / `ArgumentNullException` before spawn |
 
-The bridges still have one disconnect behavior: graceful hangup and disposal. `Attach` enables custom persistent-session owners, but a bridge-managed registry, authentication, expiry, and reconnect protocol remain outside this package (see N5).
+`PtyWebSocketBridge.RunAsync` retains its one-shot behavior: disconnect hangs up and disposes its child. Persistent/reconnect behavior is opt-in through `PtyWebSocketSessionManager`, so existing bridge callers do not accidentally leave detached shells running.
+
+## Persistent WebSocket sessions
+
+`PtyWebSocketSessionManager` owns a bounded set of authenticated PTY sessions independently of individual WebSocket lifetimes:
+
+```csharp
+await using var manager = new PtyWebSocketSessionManager(options);
+var credentials = manager.CreateSession(startInfo);
+PtyExitStatus? status = await manager.ConnectAsync(
+    credentials.SessionId,
+    credentials.AuthenticationToken,
+    acknowledgedOffset,
+    webSocket,
+    cancellationToken);
+```
+
+`CreateSession` returns an opaque `Guid` and a random 256-bit bearer token. The token is returned once, compared in fixed time, zeroed when the session is destroyed, and must not be logged or placed in a URL. A host should obtain it through an authenticated control channel and pass it directly to `ConnectAsync`.
+
+Only one WebSocket may attach to a session. A client disconnect returns null from `ConnectAsync` without killing the PTY. The manager kills and removes a detached session after `DetachedSessionTimeout`; connected sessions do not expire. `MaxSessions` bounds process and memory ownership, and `TerminateAsync` provides authenticated explicit teardown. Disposing the manager terminates every remaining session.
+
+### Replay protocol
+
+Persistent output uses absolute byte offsets because a disconnect can race the final socket write. Before every raw binary output message, the server sends:
+
+```json
+{"type":"output","offset":0,"bytes":4096}
+```
+
+After the frontend has processed those bytes, it sends the absolute next offset:
+
+```json
+{"type":"ack","offset":4096}
+```
+
+The frontend persists its latest acknowledged offset and supplies it to the next `ConnectAsync`. The manager replays retained bytes from that point, avoiding both missing output and duplicate rendering. An offset outside the retained range is rejected rather than silently corrupting the terminal stream. Input and resize messages retain the normal WebSocket bridge shapes.
+
+Each session has one fixed `ReplayBufferSize` allocation. Output continues while detached until the buffer fills; it then backpressures the PTY instead of dropping bytes or growing memory without bound. `MaxOutputFrameSize` controls message size. Persistent sessions use this replay capacity rather than `PtyBridgeOptions` high/low byte watermarks.
 
 ## `PtyStdioBridge` — helper-process bridge
 
@@ -164,6 +200,9 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 - `cmd.exe /c "set /p LINE= & echo %LINE%"` prints the literal `%LINE%` because expansion happens at parse time; interactive-input children in tests need `/v:on` with `!LINE!`.
 - A stdio helper must reserve stdout exclusively for framed protocol bytes. Diagnostics belong on stderr; one accidental text write makes the length stream unrecoverable.
 - `PtyTerminal.Kill()` can use SIGHUP without weakening deterministic cleanup: handler faults and final disposal continue to use core's forceful kill path.
+- Reliable reconnect requires absolute acknowledgement state. Byte-count credit alone cannot distinguish “rendered but ACK lost” from “never received,” so the persistent protocol pairs each binary message with its stream offset.
+- Expiration teardown must force child exit, release any producer blocked on replay capacity, and await the Terminal pump before disposing core session buffers. Canceling and disposing an active output reader concurrently reproduces the core double-signal race.
+- Detach must also bound both send and receive shutdown. Cancellation alone does not reliably unblock every `ManagedWebSocket` transport wait, so persistent connections use `CloseTimeout` and abort a socket that remains wedged before making the session attachable again.
 - TerminateProcess-based `Kill` is fire-and-forget: `HasExited` can lag `Completion` by a scheduler tick; tests must poll, not assert immediately.
 - `HttpListener` on `http://localhost:<port>/` works for the sample cross-platform without URL ACLs; ephemeral binding retries random ports because `HttpListener` cannot bind port 0.
 
