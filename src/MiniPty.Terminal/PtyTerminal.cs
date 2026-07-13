@@ -62,6 +62,13 @@ public sealed class PtyTerminal : IAsyncDisposable
     public bool HasExited => _session.HasExited;
 
     /// <summary>
+    /// Gets the exit status when <see cref="HasExited"/> is <see langword="true"/>; otherwise
+    /// <see langword="null"/>. Unlike <see cref="Completion"/> this does not wait for output
+    /// delivery, so it is readable even when the pump faulted before draining.
+    /// </summary>
+    public PtyExitStatus? ExitStatus => _session.ExitStatus;
+
+    /// <summary>
     /// Gets a task that completes with the child's <see cref="PtyExitStatus"/> after the child has
     /// exited <em>and</em> every output handler invocation has completed. Faults with the handler
     /// exception when a handler throws (the child is killed first), and with
@@ -192,7 +199,11 @@ public sealed class PtyTerminal : IAsyncDisposable
             {
                 // Gate before delivery: while paused the in-flight chunk stays valid (the pump
                 // does not advance the enumerator) and the producer stops reading the transport.
-                await WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
+                // The inline null check keeps the unpaused per-chunk path free of async-method
+                // overhead; the await runs only while actually paused.
+                if (Volatile.Read(ref _pauseGate) is not null)
+                    await WaitWhilePausedAsync(cancellationToken).ConfigureAwait(false);
+
                 await _output(chunk.Data, cancellationToken).ConfigureAwait(false);
             }
 

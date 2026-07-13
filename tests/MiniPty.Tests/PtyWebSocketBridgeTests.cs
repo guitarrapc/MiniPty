@@ -213,6 +213,73 @@ public sealed class PtyWebSocketBridgeTests
     }
 
     [Test]
+    public async Task BridgeOversizeControlMessageClosesWithPolicyViolation()
+    {
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var options = new PtyBridgeOptions { MaxControlMessageSize = 64 };
+
+        var bridgeTask = PtyWebSocketBridge.RunAsync(StdinBlockingChild(), serverSocket, options, cts.Token);
+
+        // A valid-JSON control message over the cap must still violate: the bound is on size, not syntax.
+        var oversize = "{\"type\":\"ack\",\"bytes\":1,\"padding\":\"" + new string('x', 128) + "\"}";
+        await clientSocket.SendAsync(
+            Encoding.UTF8.GetBytes(oversize),
+            WebSocketMessageType.Text,
+            endOfMessage: true,
+            cts.Token);
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () => await bridgeTask.WaitAsync(cts.Token));
+    }
+
+    [Test]
+    public async Task BridgeFragmentedControlMessageIsReassembled()
+    {
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var bridgeTask = PtyWebSocketBridge.RunAsync(EchoInputThenExitChild(), serverSocket, cancellationToken: cts.Token);
+        var client = new BridgeTestClient(clientSocket);
+        var clientTask = client.RunToCloseAsync(ackEverything: true, cts.Token);
+
+        // Split one resize message across two text frames; a broken accumulation path would parse
+        // half a JSON document and fail the session with PolicyViolation.
+        var resize = Encoding.UTF8.GetBytes("{\"type\":\"resize\",\"cols\":100,\"rows\":40}");
+        await clientSocket.SendAsync(resize.AsMemory(0, 10), WebSocketMessageType.Text, endOfMessage: false, cts.Token);
+        await clientSocket.SendAsync(resize.AsMemory(10), WebSocketMessageType.Text, endOfMessage: true, cts.Token);
+        await client.SendBinaryAsync("FRAGMENTS_OK" + Enter, cts.Token);
+
+        await clientTask;
+        var status = await bridgeTask.WaitAsync(cts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(0);
+        await Assert.That(client.BinaryText).Contains("GOT:FRAGMENTS_OK");
+    }
+
+    [Test]
+    public async Task BridgeCancellationUnwedgesSendBlockedByStalledClient()
+    {
+        // Server→client direction bounded like a full TCP send buffer; the client never reads.
+        var (serverSocket, _) = CreateSocketPair(serverToClientCapacityChunks: 2);
+        using var cts = new CancellationTokenSource();
+        // Disable watermark pausing so the pump drives straight into the wedged send.
+        var options = new PtyBridgeOptions { HighWatermark = long.MaxValue / 2, LowWatermark = 1 };
+
+        var bridgeTask = PtyWebSocketBridge.RunAsync(BulkOutputChild(), serverSocket, options, cts.Token);
+
+        // Give the pump time to fill the pipe and wedge inside SendAsync, then cancel.
+        await Task.Delay(500);
+        await Assert.That(bridgeTask.IsCompleted).IsFalse();
+        await cts.CancelAsync();
+
+        // Without teardown-token sends this hangs forever. WaitAsync(TimeSpan) is deliberate: a
+        // hang surfaces as TimeoutException and fails the assertion, unlike WaitAsync(token)
+        // whose timeout would also throw an OperationCanceledException and mask the hang.
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await bridgeTask.WaitAsync(TimeSpan.FromSeconds(15)));
+        await Assert.That(bridgeTask.IsCompleted).IsTrue();
+    }
+
+    [Test]
     public async Task BridgeOptionValidationRejectsInvertedWatermarks()
     {
         var (serverSocket, _) = CreateSocketPair();
@@ -329,9 +396,9 @@ public sealed class PtyWebSocketBridgeTests
         }
     }
 
-    private static (WebSocket Server, WebSocket Client) CreateSocketPair()
+    private static (WebSocket Server, WebSocket Client) CreateSocketPair(int serverToClientCapacityChunks = 0)
     {
-        var (serverStream, clientStream) = InMemoryDuplexStream.CreatePair();
+        var (serverStream, clientStream) = InMemoryDuplexStream.CreatePair(serverToClientCapacityChunks);
         var server = WebSocket.CreateFromStream(serverStream, new WebSocketCreationOptions { IsServer = true });
         var client = WebSocket.CreateFromStream(clientStream, new WebSocketCreationOptions { IsServer = false });
         return (server, client);
@@ -353,10 +420,14 @@ public sealed class PtyWebSocketBridgeTests
             _writePipe = writePipe;
         }
 
-        public static (InMemoryDuplexStream A, InMemoryDuplexStream B) CreatePair()
+        /// <param name="aToBCapacityChunks">
+        /// When positive, bounds the A→B direction to that many written chunks so writes block like
+        /// a full TCP send buffer (for wedged-client tests). 0 keeps the direction unbounded.
+        /// </param>
+        public static (InMemoryDuplexStream A, InMemoryDuplexStream B) CreatePair(int aToBCapacityChunks = 0)
         {
-            var aToB = new BytePipe();
-            var bToA = new BytePipe();
+            var aToB = new BytePipe(aToBCapacityChunks);
+            var bToA = new BytePipe(0);
             return (new InMemoryDuplexStream(bToA, aToB), new InMemoryDuplexStream(aToB, bToA));
         }
 
@@ -382,17 +453,11 @@ public sealed class PtyWebSocketBridgeTests
         public override void Write(byte[] buffer, int offset, int count) =>
             _writePipe.Write(buffer.AsSpan(offset, count));
 
-        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
-        {
-            _writePipe.Write(buffer.Span);
-            return ValueTask.CompletedTask;
-        }
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+            _writePipe.WriteAsync(buffer, cancellationToken);
 
-        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-        {
-            _writePipe.Write(buffer.AsSpan(offset, count));
-            return Task.CompletedTask;
-        }
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            _writePipe.WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
 
         protected override void Dispose(bool disposing)
         {
@@ -407,9 +472,24 @@ public sealed class PtyWebSocketBridgeTests
         private readonly Lock _lock = new();
         private readonly Queue<byte[]> _chunks = new();
         private readonly SemaphoreSlim _signal = new(0);
+        private readonly SemaphoreSlim? _space;
         private byte[]? _current;
         private int _currentOffset;
         private bool _completed;
+
+        public BytePipe(int capacityChunks) =>
+            _space = capacityChunks > 0 ? new SemaphoreSlim(capacityChunks) : null;
+
+        public async ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+        {
+            if (data.IsEmpty)
+                return;
+
+            if (_space is not null)
+                await _space.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            Write(data.Span);
+        }
 
         public void Write(ReadOnlySpan<byte> data)
         {
@@ -455,7 +535,11 @@ public sealed class PtyWebSocketBridgeTests
                         _current.AsSpan(_currentOffset, count).CopyTo(destination.Span);
                         _currentOffset += count;
                         if (_currentOffset == _current.Length)
+                        {
                             _current = null;
+                            _space?.Release();
+                        }
+
                         return count;
                     }
 

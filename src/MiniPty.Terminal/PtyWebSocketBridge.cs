@@ -61,6 +61,10 @@ public static class PtyWebSocketBridge
         private readonly BridgeFlowControl _flowControl;
         private readonly SemaphoreSlim _sendLock = new(1, 1);
         private volatile bool _discardOutput;
+        // Bridge-lifetime token used for output sends instead of the pump token: a client that
+        // stops reading can wedge SendAsync via transport backpressure, and the pump token is not
+        // canceled until disposal. Canceling this token in every teardown path unwedges the send.
+        private CancellationToken _sendCancellation;
 
         public BridgeSession(WebSocket webSocket, PtyBridgeOptions options)
         {
@@ -71,14 +75,15 @@ public static class PtyWebSocketBridge
 
         public async Task<PtyExitStatus> RunAsync(PtyStartInfo startInfo, CancellationToken cancellationToken)
         {
-            using var receiveCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var teardownCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _sendCancellation = teardownCts.Token;
             var terminal = PtyTerminal.Start(startInfo, new PtyTerminalOptions { Output = SendOutputAsync });
             _flowControl.Attach(terminal);
 
             Task? receiveTask = null;
             try
             {
-                receiveTask = ReceiveLoopAsync(terminal, receiveCts.Token);
+                receiveTask = ReceiveLoopAsync(terminal, teardownCts.Token);
                 var first = await Task.WhenAny(terminal.Completion, receiveTask).ConfigureAwait(false);
 
                 if (first == terminal.Completion)
@@ -93,12 +98,26 @@ public static class PtyWebSocketBridge
                 }
 
                 // The receive side ended first: client close, protocol violation, socket fault, or
-                // cancellation. Stop sending, release any flow-control pause so the post-kill drain
-                // can complete, and kill the child.
+                // cancellation. Stop sending (canceling the teardown token unwedges a SendAsync
+                // blocked on a client that stopped reading), release any flow-control pause so the
+                // post-kill drain can complete, and kill the child.
                 _discardOutput = true;
                 _flowControl.Disable();
+                teardownCts.Cancel();
                 terminal.Kill();
-                var killedStatus = await terminal.Completion.ConfigureAwait(false);
+
+                PtyExitStatus killedStatus;
+                try
+                {
+                    killedStatus = await terminal.Completion.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // The pump faulted because teardown canceled its in-flight send (or the socket
+                    // died mid-send). The child was killed either way; read the status directly.
+                    killedStatus = await WaitForKilledStatusAsync(terminal, _options.CloseTimeout).ConfigureAwait(false);
+                }
+
                 // Rethrows InvalidDataException (protocol violation) or OperationCanceledException.
                 await receiveTask.ConfigureAwait(false);
                 await RespondToClientCloseAsync().ConfigureAwait(false);
@@ -108,7 +127,7 @@ public static class PtyWebSocketBridge
             {
                 _discardOutput = true;
                 _flowControl.Disable();
-                receiveCts.Cancel();
+                teardownCts.Cancel();
                 if (receiveTask is not null)
                 {
                     try
@@ -130,13 +149,16 @@ public static class PtyWebSocketBridge
             if (_discardOutput)
                 return;
 
-            await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            // The bridge-lifetime token, not the pump token: it cancels on every teardown path, so
+            // a send wedged by a client that stopped reading cannot park the pump forever.
+            var sendCancellation = _sendCancellation;
+            await _sendLock.WaitAsync(sendCancellation).ConfigureAwait(false);
             try
             {
                 if (_discardOutput)
                     return;
 
-                await _webSocket.SendAsync(data, WebSocketMessageType.Binary, endOfMessage: true, cancellationToken).ConfigureAwait(false);
+                await _webSocket.SendAsync(data, WebSocketMessageType.Binary, endOfMessage: true, sendCancellation).ConfigureAwait(false);
             }
             finally
             {
@@ -144,6 +166,25 @@ public static class PtyWebSocketBridge
             }
 
             _flowControl.OnSent(data.Length);
+        }
+
+        /// <summary>
+        /// Reads the exit status directly from the session after a kill whose drain faulted.
+        /// SIGKILL / TerminateProcess complete quickly; the bounded poll covers scheduler lag.
+        /// </summary>
+        private static async Task<PtyExitStatus> WaitForKilledStatusAsync(PtyTerminal terminal, TimeSpan timeout)
+        {
+            var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+            while (true)
+            {
+                if (terminal.ExitStatus is { } status)
+                    return status;
+
+                if (Environment.TickCount64 >= deadline)
+                    throw new TimeoutException("The child process did not report exit after being killed.");
+
+                await Task.Delay(10).ConfigureAwait(false);
+            }
         }
 
         private async Task ReceiveLoopAsync(PtyTerminal terminal, CancellationToken cancellationToken)
@@ -250,11 +291,22 @@ public static class PtyWebSocketBridge
         {
             try
             {
+                // CloseOutputAsync is a send-type operation and this runs on the receive loop while
+                // the output pump may be mid-SendAsync; a WebSocket allows one outstanding send, so
+                // the close frame must take the same send lock (bounded by the close timeout).
                 using var closeCts = new CancellationTokenSource(_options.CloseTimeout);
-                await _webSocket.CloseOutputAsync(
-                    WebSocketCloseStatus.PolicyViolation,
-                    "malformed control message",
-                    closeCts.Token).ConfigureAwait(false);
+                await _sendLock.WaitAsync(closeCts.Token).ConfigureAwait(false);
+                try
+                {
+                    await _webSocket.CloseOutputAsync(
+                        WebSocketCloseStatus.PolicyViolation,
+                        "malformed control message",
+                        closeCts.Token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _sendLock.Release();
+                }
             }
             catch
             {

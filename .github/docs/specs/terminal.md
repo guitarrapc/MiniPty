@@ -44,7 +44,7 @@ PtyTerminal.Start(PtyStartInfo startInfo, PtyTerminalOptions options)  // option
 | `Completion` | `Task<PtyExitStatus>` that completes **after every output handler invocation has finished** (drain-then-exit, node-pty onData/onExit ordering). Faults with the handler exception when a handler throws (child is killed first). |
 | `Pause()` / `Resume()` | Stops/resumes output delivery. Paused delivery parks the pump; the strict-handoff producer stops reading, the OS PTY buffer fills, and the child blocks on write. No managed buffering beyond one in-flight chunk; no drops. |
 | `WriteInputAsync` / `SendEof` / `Resize` / `Kill` / `Kill(PtySignal)` | Pass-through to the owned session; callable concurrently with output delivery. |
-| `ProcessId` / `Size` / `HasExited` | Session state. |
+| `ProcessId` / `Size` / `HasExited` / `ExitStatus` | Session state. `ExitStatus` is readable independently of `Completion` — useful when the pump faulted before draining. |
 | `DisposeAsync` | Stops the pump, kills the child if running, releases the PTY. |
 
 Design decisions (WHY):
@@ -141,6 +141,9 @@ Embedders that need a custom transport (stdio framing, SignalR, …) use `PtyTer
 ## Lessons Learned
 
 - Disposing a `PtySession` immediately after canceling an active `ReadOutputAsync` races the session's internal buffer teardown (`ManualResetValueTaskSourceCore` double-signal). The facade cancels, awaits its pump to unwind, and only then disposes the session.
+- A client that stops reading wedges `SendAsync` via transport backpressure, and a wedged send parks the pump beyond the reach of `Kill()`. Bridge sends must be cancelable by a bridge-lifetime teardown token (canceled on client close, protocol violation, and caller cancellation), with the exit status read from the session when the drain faulted. Verified red/green with a bounded in-memory pipe simulating a full TCP send buffer.
+- `Task.WaitAsync(CancellationToken)` cannot assert "does not hang" in tests: its timeout also surfaces as `OperationCanceledException`, masking a hang. Use `WaitAsync(TimeSpan)` so a hang fails as `TimeoutException`.
+- Close frames are send-type operations under the WebSocket one-outstanding-send rule; a `PolicyViolation` close issued from the receive loop must take the same send lock as the output pump (bounded by the close timeout).
 - Bridge teardown must disable flow control and release any pause **inside the same lock** that sets pauses (`BridgeFlowControl.Disable`), or an in-flight send can re-pause after the teardown resume and park the drain forever.
 - A WebSocket allows one outstanding send; the bridge serializes the output pump and the exit message with a semaphore. Test clients need the same discipline (ACK sends vs test-driven input sends).
 - ConPTY line submission needs CR — sending `\n` echoes but never completes a `cmd.exe` `set /p` read. Cross-platform clients should send `\r` (xterm.js `onData` already does) and tests must not assert on LF-terminated input.
