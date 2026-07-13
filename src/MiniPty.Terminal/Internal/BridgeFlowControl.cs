@@ -40,10 +40,10 @@ internal sealed class BridgeFlowControl
     {
         lock (_lock)
         {
-            if (_disabled)
+            if (_disabled || bytes <= 0)
                 return;
 
-            _unacknowledged += bytes;
+            _unacknowledged = AddSaturating(_unacknowledged, bytes);
             if (!_paused && _unacknowledged >= _highWatermark)
             {
                 _paused = true;
@@ -51,6 +51,10 @@ internal sealed class BridgeFlowControl
             }
         }
     }
+
+    /// <summary>Adds a positive frame length without allowing the credit counter to wrap negative.</summary>
+    internal static long AddSaturating(long current, int bytes) =>
+        current > long.MaxValue - bytes ? long.MaxValue : current + bytes;
 
     /// <summary>
     /// Permanently stops flow control and releases any pause, used during bridge teardown so the

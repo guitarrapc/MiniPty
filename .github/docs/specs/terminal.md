@@ -84,7 +84,7 @@ Server-side watermark over unacknowledged bytes; ACK credit was chosen over paus
 | Option | Default | Role |
 |---|---|---|
 | `HighWatermark` | 384 KiB | pause output delivery at/above this unACKed count (keep < 500 KB per xterm.js buffer guidance) |
-| `LowWatermark` | 128 KiB (2^17) | resume at/below; matches the recommended client ACK chunk |
+| `LowWatermark` | 128 KiB (2^17) | resume at/below; `0` requires all outstanding bytes to be ACKed; default matches the recommended client ACK chunk |
 | `ReceiveBufferSize` | 16 KiB | client input/control receive buffer |
 | `MaxControlMessageSize` | 4 KiB | control JSON bound |
 | `SendExitMessage` | `true` | emit the `exit` control message |
@@ -148,6 +148,7 @@ Embedders that need a custom transport (stdio framing, SignalR, …) use `PtyTer
 - Bridge teardown must disable flow control and release any pause **inside the same lock** that sets pauses (`BridgeFlowControl.Disable`), or an in-flight send can re-pause after the teardown resume and park the drain forever.
 - A WebSocket allows one outstanding send; the bridge serializes the output pump and the exit message with a semaphore. Test clients need the same discipline (ACK sends vs test-driven input sends).
 - Protocol tests that make the child exit immediately after input must first observe an explicit child-ready Binary frame. Otherwise PTY attachment, output-pump startup, control handling, input, and fast exit are all raced together, so missing output does not isolate the protocol behavior under test. An observed WebSocket frame is the synchronization point; a fixed delay is not.
+- Unacknowledged-byte accounting saturates at `long.MaxValue`. Although normal watermarks pause output long before overflow, `HighWatermark = long.MaxValue` is valid and a wrapped negative count would bypass flow control in an extremely long-lived session.
 - ConPTY line submission needs CR — sending `\n` echoes but never completes a `cmd.exe` `set /p` read. Cross-platform clients should send `\r` (xterm.js `onData` already does) and tests must not assert on LF-terminated input.
 - `cmd.exe /c "set /p LINE= & echo %LINE%"` prints the literal `%LINE%` because expansion happens at parse time; interactive-input children in tests need `/v:on` with `!LINE!`.
 - TerminateProcess-based `Kill` is fire-and-forget: `HasExited` can lag `Completion` by a scheduler tick; tests must poll, not assert immediately.

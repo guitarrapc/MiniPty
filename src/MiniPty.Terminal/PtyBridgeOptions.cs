@@ -20,7 +20,8 @@ public sealed record PtyBridgeOptions
 
     /// <summary>
     /// Gets the unacknowledged-byte count at or below which output delivery resumes.
-    /// Default is 128 KiB (2^17), matching the recommended client ACK chunk size.
+    /// Zero resumes only after every outstanding byte is acknowledged. Default is 128 KiB (2^17),
+    /// matching the recommended client ACK chunk size.
     /// </summary>
     public long LowWatermark { get; init; } = 131_072;
 
@@ -49,7 +50,7 @@ public sealed record PtyBridgeOptions
 
     internal void Validate()
     {
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(LowWatermark, 0);
+        ArgumentOutOfRangeException.ThrowIfLessThan(LowWatermark, 0);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(HighWatermark, LowWatermark);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(ReceiveBufferSize, 0);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(MaxControlMessageSize, 0);

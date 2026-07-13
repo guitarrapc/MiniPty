@@ -153,6 +153,14 @@ public sealed class PtyWebSocketBridgeTests
     }
 
     [Test]
+    public async Task BridgeFlowControlUnacknowledgedBytesSaturateAtLongMaxValue()
+    {
+        var saturated = BridgeFlowControl.AddSaturating(long.MaxValue - 1, 2);
+
+        await Assert.That(saturated).IsEqualTo(long.MaxValue);
+    }
+
+    [Test]
     public async Task BridgeSendsExitMessageAfterFinalOutputThenClosesNormally()
     {
         var (serverSocket, clientSocket) = CreateSocketPair();
@@ -341,6 +349,24 @@ public sealed class PtyWebSocketBridgeTests
     {
         var (serverSocket, _) = CreateSocketPair();
         var options = new PtyBridgeOptions { HighWatermark = 100, LowWatermark = 100 };
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            async () => await PtyWebSocketBridge.RunAsync(StdinBlockingChild(), serverSocket, options));
+    }
+
+    [Test]
+    public void BridgeOptionValidationAllowsZeroLowWatermark()
+    {
+        var options = new PtyBridgeOptions { HighWatermark = 1, LowWatermark = 0 };
+
+        options.Validate();
+    }
+
+    [Test]
+    public async Task BridgeOptionValidationRejectsNegativeLowWatermark()
+    {
+        var (serverSocket, _) = CreateSocketPair();
+        var options = new PtyBridgeOptions { HighWatermark = 1, LowWatermark = -1 };
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             async () => await PtyWebSocketBridge.RunAsync(StdinBlockingChild(), serverSocket, options));
