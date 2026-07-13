@@ -63,7 +63,7 @@ jobs:
       - name: Publish and run samples (NativeAOT)
         shell: bash
         run: |
-          for sample in Capture Session Observe Interactive ConsoleAttach; do
+          for sample in Capture Session Observe Interactive ConsoleAttach WebTerminal; do
             out="$RUNNER_TEMP/minipty-${sample}-aot"
             dotnet publish "samples/${sample}.cs" -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
             exe="$out/${sample}"
@@ -80,7 +80,11 @@ jobs:
               test ! -f "$out/libminipty_unix.a"
               test -f "$out/minipty_spawn_helper"
             fi
-            "$exe"
+            if [[ "$sample" == WebTerminal ]]; then
+              "$exe" --smoke
+            else
+              "$exe"
+            fi
           done
 
   build-unix-native:

@@ -38,6 +38,9 @@ dotnet pack "$root/src/MiniPty.Capture/MiniPty.Capture.csproj" -c Release -o "$o
 dotnet pack "$root/src/MiniPty.Console/MiniPty.Console.csproj" -c Release -o "$out_dir" \
   -p:Version="$version"
 
+dotnet pack "$root/src/MiniPty.Terminal/MiniPty.Terminal.csproj" -c Release -o "$out_dir" \
+  -p:Version="$version"
+
 echo "Packed to $out_dir:"
 ls -la "$out_dir"/*.nupkg
 

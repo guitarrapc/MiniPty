@@ -10,7 +10,16 @@ internal static partial class UnixInterop
     internal const int ECHILD = 10;
     internal const int EPIPE = 32;
     internal const int WaitNoHang = 1;
+    internal const int SigHup = 1;
+    internal const int SigInt = 2;
+    internal const int SigQuit = 3;
     internal const int SigKill = 9;
+    internal const int SigTerm = 15;
+    // SIGUSR1/SIGUSR2 numbering differs: Linux uses 10/12, macOS and FreeBSD use BSD 30/31.
+    internal const int SigUsr1Linux = 10;
+    internal const int SigUsr2Linux = 12;
+    internal const int SigUsr1Bsd = 30;
+    internal const int SigUsr2Bsd = 31;
 
     [LibraryImport("libc", EntryPoint = "read", SetLastError = true)]
     internal static unsafe partial int Read(int fd, byte* buf, nuint count);

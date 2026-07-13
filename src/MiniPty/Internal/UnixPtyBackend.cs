@@ -122,6 +122,7 @@ internal static partial class UnixPtyBackend
         private bool _masterClosed;
         private bool _exited;
         private int _exitCode;
+        private int _termSignal;
         private bool _disposed;
         private PtySize _size;
 
@@ -155,6 +156,15 @@ internal static partial class UnixPtyBackend
             {
                 TryRefreshExitState();
                 return _exitCode;
+            }
+        }
+
+        public int? ExitSignal
+        {
+            get
+            {
+                TryRefreshExitState();
+                return _exited && _termSignal != 0 ? _termSignal : null;
             }
         }
 
@@ -194,10 +204,33 @@ internal static partial class UnixPtyBackend
             KillCore();
         }
 
+        public void Kill(PtySignal signal)
+        {
+            // Validate before the disposed/exited guards so misuse always throws.
+            var nativeSignal = MapSignal(signal);
+            if (_disposed || TryRefreshExitState())
+                return;
+
+            // Fire-and-forget like KillCore; ESRCH after a racing exit is benign.
+            UnixInterop.kill(_pid, nativeSignal);
+        }
+
         private void KillCore()
         {
             UnixInterop.kill(_pid, UnixInterop.SigKill);
         }
+
+        private static int MapSignal(PtySignal signal) => signal switch
+        {
+            PtySignal.Hangup => UnixInterop.SigHup,
+            PtySignal.Interrupt => UnixInterop.SigInt,
+            PtySignal.Quit => UnixInterop.SigQuit,
+            PtySignal.Kill => UnixInterop.SigKill,
+            PtySignal.User1 => OperatingSystem.IsLinux() ? UnixInterop.SigUsr1Linux : UnixInterop.SigUsr1Bsd,
+            PtySignal.User2 => OperatingSystem.IsLinux() ? UnixInterop.SigUsr2Linux : UnixInterop.SigUsr2Bsd,
+            PtySignal.Terminate => UnixInterop.SigTerm,
+            _ => throw new ArgumentOutOfRangeException(nameof(signal)),
+        };
 
         public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true) =>
             WaitForExitCoreAsync(cancellationToken, killOnCancellation);
@@ -321,6 +354,7 @@ internal static partial class UnixPtyBackend
                 return false;
 
             _exitCode = MapWaitStatusToExitCode(status);
+            _termSignal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
             _exited = true;
             return true;
         }
@@ -514,9 +548,15 @@ internal static partial class UnixPtyBackend
         owned.Clear();
     }
 
+    // The exited/signaled wait-status layout (low 7 bits = signal, bits 8-15 = exit code) is
+    // identical on Linux, macOS, and FreeBSD, so decoding stays managed. WIFSIGNALED uses the
+    // explicit form excluding the stopped marker 0x7f: the textbook glibc macro relies on a
+    // signed-char cast that a direct C# transcription loses, which would misclassify a stopped
+    // status as signaled. Unreachable under WNOHANG-only polling today, but load-bearing now
+    // that the termination signal is public API.
     private static bool WIFEXITED(int status) => (status & 0x7f) == 0;
     private static int WEXITSTATUS(int status) => (status >> 8) & 0xff;
-    private static bool WIFSIGNALED(int status) => (((status & 0x7f) + 1) >> 1) > 0;
+    private static bool WIFSIGNALED(int status) => (status & 0x7f) != 0 && (status & 0x7f) != 0x7f;
     private static int WTERMSIG(int status) => status & 0x7f;
 
     private static int MapWaitStatusToExitCode(int status)

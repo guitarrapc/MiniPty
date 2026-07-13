@@ -214,10 +214,7 @@ public readonly record struct PtyExitStatus(
     string? Signal = null);
 ```
 
-Open questions:
-
-- Whether signal reporting is worth adding now or should remain future work.
-- Whether `ExitCode` should remain the simple cross-platform contract and `PtyExitStatus` be introduced only when needed.
+Resolved (editor backend plan): implemented as `PtyExitStatus(int ExitCode, int? Signal)` with `WaitForExitStatusAsync` / `ExitStatus`. The signal is the raw OS number (node-pty parity), not a string; `ExitCode` keeps the `128 + signal` contract. See [specs/core_session.md](../specs/core_session.md) and [plan_editor_backend.md](plan_editor_backend.md).
 
 ### Persistent Session Convenience
 
@@ -665,16 +662,16 @@ This sample does not use host raw mode. It demonstrates persistent **transport**
 - [ ] Manual smoke on host TTY (vim or minimal TUI) — verify locally on macOS / interactive host.
 - [x] README / spec.md updated when implemented.
 
-### Deferred: Editor Terminal Backend (use case 4 — separate plan)
+### Editor Terminal Backend (use case 4 — **implemented in a separate plan**)
 
-Not part of Milestone 5. Track in a **separate plan** when VS Code / xterm.js backend work starts.
+Implemented as **MiniPty.Terminal** plus core exit-status parity; see [plan_editor_backend.md](plan_editor_backend.md) and [specs/terminal.md](../specs/terminal.md).
 
-Candidate **MiniPty core** parity items (formerly “Milestone 5 node-pty”):
+Resolution of the candidate parity items:
 
-- Flow control (`pause` / `resume`, XON/XOFF).
-- Windows ConPTY `clear()`.
-- `PtyExitStatus` / signal reporting; `Kill(signal)` on Unix.
-- Unix pixel winsize; `uid` / `gid`; `openpty` without spawn; ConPTY cursor inheritance.
+- Flow control (`pause` / `resume`) — implemented in `PtyTerminal` (facade pump gate; no core change needed under strict handoff).
+- `PtyExitStatus` / signal reporting; `Kill(signal)` — implemented in **MiniPty** core.
+- Windows ConPTY `clear()` — rejected: requires node-pty's bundled conpty.dll signal pipe; not reachable via public Win32 API.
+- Unix pixel winsize; `uid` / `gid`; `openpty` without spawn; ConPTY cursor inheritance — deferred (no frontend demand yet).
 
 **MiniPty.Console** is not used for use case 4.
 
@@ -719,9 +716,9 @@ As milestones land, update:
 - Should backpressure limits (buffer upper bound, chunk size) become configurable start/read options?
 - Is Unix `uid` / `gid` worth supporting in a minimal AOT-friendly library?
 - Does Windows ConPTY require a public ready state or only internal write/resize deferral?
-- Should flow control be explicit (`Pause` / `Resume`) or expressed through bounded async streams/channels?
+- ~~Should flow control be explicit (`Pause` / `Resume`) or expressed through bounded async streams/channels?~~ — resolved: explicit `Pause` / `Resume` on **MiniPty.Terminal** `PtyTerminal`; core keeps strict-handoff backpressure only ([terminal.md](../specs/terminal.md)).
 - ~~Should `MiniPty.Console` be a package, a sample, or both at first?~~ — resolved: separate **MiniPty.Console** NuGet; spec in [console.md](../specs/console.md).
-- Editor terminal backend (use case 4) parity items deferred to a **separate plan** (not Milestone 5).
+- ~~Editor terminal backend (use case 4) parity items deferred to a **separate plan** (not Milestone 5).~~ — resolved: implemented; see [plan_editor_backend.md](plan_editor_backend.md).
 
 ## Guiding Principle
 

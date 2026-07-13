@@ -31,8 +31,10 @@ Ubuntu 24.04, .NET 10
 - Persistent bytes-only output streaming (`ReadOutputAsync`)
 - One-shot run with optional stdin and drained output (`CompleteAsync`)
 - Resize the terminal after spawn (`PtySession.Resize`)
+- Exit status with Unix termination signal (`WaitForExitStatusAsync`, `ExitStatus`) and signal kill (`Kill(PtySignal)`)
 - Per-read timestamps for observation or recording (**MiniPty.Capture**, `PtyCapture.RunAsync`)
 - Host terminal input attach for interactive programs (**MiniPty.Console**, `PtyConsoleInput.Attach`)
+- Backend PTY for xterm.js / editor terminals: push facade, pause/resume flow control, WebSocket bridge (**MiniPty.Terminal**, `PtyTerminal`, `PtyWebSocketBridge`)
 - Plain or colored host output from PTY bytes (`PtyOutput.ToDisplayText`)
 
 **Not supported**
@@ -65,6 +67,9 @@ dotnet add package MiniPty.Capture
 
 # Host terminal input attach for interactive sessions (vim, etc.)
 dotnet add package MiniPty.Console
+
+# Backend PTY for xterm.js / editor terminals (push events, flow control, WebSocket bridge)
+dotnet add package MiniPty.Terminal
 ```
 
 **MiniPty** start a session with `Pty.Start`, then choose one pattern:
@@ -265,6 +270,22 @@ sealed class OutputStats
 
 On Unix, write status messages to **stderr before** `Attach` and emit `\r\n` on **stdout after** dispose if the parent shell prompt drifts (see [ConsoleAttach.cs](samples/ConsoleAttach.cs)).
 
+**MiniPty.Terminal** turns MiniPty into a backend PTY for frontend terminals (xterm.js, editor integrations) — the role node-pty plays behind VS Code. `PtyWebSocketBridge.RunAsync` runs a full session over one WebSocket: binary frames carry raw PTY data, text frames carry JSON control messages (`resize` / `ack` from the client, `exit` from the server), with ACK-based watermark flow control per the xterm.js guidance. Try `dotnet samples/WebTerminal.cs` and open the printed URL for a real shell in the browser.
+
+```csharp
+using MiniPty;
+using MiniPty.Terminal;
+
+// webSocket: any System.Net.WebSockets.WebSocket (Kestrel accept, HttpListener, ...)
+var status = await PtyWebSocketBridge.RunAsync(
+    new PtyStartInfo { FileName = "/bin/bash", Arguments = ["-i"], Size = new PtySize(120, 30) },
+    webSocket,
+    cancellationToken: ct);
+Console.WriteLine($"shell exited: {status.ExitCode} (signal {status.Signal?.ToString() ?? "none"})");
+```
+
+For custom transports (stdio framing to a VS Code extension, SignalR, …), use the `PtyTerminal` facade directly: a node-pty-shaped push model with an output handler, awaitable `Completion` (exit after all output), and `Pause()` / `Resume()` flow control. See [terminal.md](.github/docs/specs/terminal.md) for the protocol and the VS Code `Pseudoterminal` bridging pattern.
+
 ## Samples
 
 | Sample | Shows |
@@ -274,6 +295,7 @@ On Unix, write status messages to **stderr before** `Attach` and emit `\r\n` on 
 | [Interactive.cs](samples/Interactive.cs) | `ReadOutputAsync` persistent loop, marker-driven writes, mid-session `Resize`, natural child exit |
 | [ConsoleAttach.cs](samples/ConsoleAttach.cs) | **MiniPty.Console** host attach: keyboard → PTY, `ReadOutputAsync` → host display (requires interactive TTY) |
 | [Observe.cs](samples/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
+| [WebTerminal.cs](samples/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner |
 
 Run a sample locally (JIT):
 
@@ -283,6 +305,7 @@ dotnet samples/Interactive.cs
 dotnet samples/ConsoleAttach.cs
 dotnet samples/Observe.cs
 dotnet samples/Capture.cs
+dotnet samples/WebTerminal.cs   # then open http://localhost:5170/
 ```
 
 NativeAOT publish (same flags as CI):

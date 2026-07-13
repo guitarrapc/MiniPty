@@ -631,6 +631,106 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyWaitForExitStatusAsyncReportsSignalOnUnix()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using var session = Pty.Start(UnixShell("kill -TERM $$"));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var status = await session.WaitForExitStatusAsync(cts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(143);
+        await Assert.That(status.Signal).IsEqualTo(15);
+        // ExitCode compatibility pin: PtyExitStatus.ExitCode always equals PtySession.ExitCode.
+        await Assert.That(session.ExitCode).IsEqualTo(143);
+        await Assert.That(session.ExitStatus).IsEqualTo(status);
+    }
+
+    [Test]
+    public async Task PtyWaitForExitStatusAsyncHasNoSignalOnNormalExit()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("exit /b 42")
+            : UnixShell("exit 42"));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var status = await session.WaitForExitStatusAsync(cts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(42);
+        await Assert.That(status.Signal).IsNull();
+        await Assert.That(session.ExitStatus).IsEqualTo(status);
+    }
+
+    [Test]
+    public async Task PtyKillWithSignalTerminatesChildAndReportsSignalOnUnix()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using (var session = Pty.Start(UnixShell("IFS= read -r _")))
+        {
+            session.Kill(PtySignal.Terminate);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var status = await session.WaitForExitStatusAsync(cts.Token);
+
+            await Assert.That(status.ExitCode).IsEqualTo(143);
+            await Assert.That(status.Signal).IsEqualTo(15);
+        }
+
+        await using (var session = Pty.Start(UnixShell("IFS= read -r _")))
+        {
+            session.Kill(PtySignal.Kill);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var status = await session.WaitForExitStatusAsync(cts.Token);
+
+            await Assert.That(status.ExitCode).IsEqualTo(137);
+            await Assert.That(status.Signal).IsEqualTo(9);
+        }
+    }
+
+    [Test]
+    public async Task PtyKillWithSignalTerminatesChildOnWindows()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using var session = Pty.Start(WindowsCommand("set /p DUMMY="));
+        session.Kill(PtySignal.Terminate);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var status = await session.WaitForExitStatusAsync(cts.Token);
+
+        // Windows terminate is advisory-signal: TerminateProcess(h, 1) and never a signal report.
+        await Assert.That(status.ExitCode).IsEqualTo(1);
+        await Assert.That(status.Signal).IsNull();
+    }
+
+    [Test]
+    public async Task PtyKillWithUndefinedSignalThrows()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("set /p DUMMY=")
+            : UnixShell("IFS= read -r _"));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => session.Kill((PtySignal)9999));
+        await Assert.That(session.HasExited).IsFalse();
+    }
+
+    [Test]
+    public async Task PtyWaitForExitStatusAsyncCancellationDoesNotKillChild()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("set /p DUMMY=")
+            : UnixShell("IFS= read -r _"));
+
+        using var cts = new CancellationTokenSource();
+        var waitTask = session.WaitForExitStatusAsync(cts.Token);
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await waitTask);
+        await Assert.That(session.HasExited).IsFalse();
+    }
+
+    [Test]
     public async Task PtyChildSeesTtyOutput()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -1199,19 +1299,24 @@ public sealed class PtyTests
 
         await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-            ["/c", $"echo {marker} & ping -n 20 127.0.0.1 >nul"])
-            : UnixShell($"printf '{marker}'; sleep 20"));
+            ["/c", $"echo {marker} & set /p DUMMY="])
+            : UnixShell($"printf '{marker}'; IFS= read -r _"));
 
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using var output = new MemoryStream();
-        var readTask = Task.Run(async () =>
-        {
-            await foreach (var chunk in session.ReadOutputAsync())
-                await output.WriteAsync(chunk.Data);
-        });
+        await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
 
-        await Task.Delay(300);
+        // Synchronize on actual child output instead of a fixed delay. Under loaded CI the reader
+        // and fork/exec may not run within an arbitrary timeout, allowing Kill to win before printf.
+        while (output.GetBuffer().AsSpan(0, checked((int)output.Length)).IndexOf("lifecycle-kill-drain"u8) < 0)
+        {
+            await Assert.That(await reader.MoveNextAsync()).IsTrue();
+            output.Write(reader.Current.Data.Span);
+        }
+
         session.Kill();
-        await readTask;
+        while (await reader.MoveNextAsync())
+            output.Write(reader.Current.Data.Span);
 
         var text = Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
         await Assert.That(text).Contains(marker);

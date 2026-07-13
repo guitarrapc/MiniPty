@@ -76,6 +76,7 @@ Persistent embedders usually keep **one** output consumer active for the whole `
 | API | On cancellation |
 |---|---|
 | `WaitForExitAsync` | Waiting stops with `OperationCanceledException`; the child continues running. |
+| `WaitForExitStatusAsync` | Same as `WaitForExitAsync`; the child continues running. |
 | `ReadOutputAsync` | Output enumeration stops with `OperationCanceledException`; the child continues running. |
 | `CompleteAsync` | When `KillOnCancellation` is true, the child is killed and `OperationCanceledException` is thrown. |
 | `PtyCapture.RunAsync` | Same as `CompleteAsync`; it uses completion options. |
@@ -146,6 +147,7 @@ Windows may defer stdin EOF until the wait loop has given the child time to atta
 | `Dispose` / `DisposeAsync` while child running | Kills the child, then releases handles. |
 | `Dispose` while operations are in flight | All in-flight `ReadOutputAsync`, `WaitForExitAsync`, and `WriteInputAsync` operations fail immediately with `ObjectDisposedException`. |
 | `Kill()` | Terminates the child but does not release handles. Call `Dispose` afterward. |
+| `Kill(PtySignal)` | Unix: delivers the mapped native signal via `kill(2)`; catchable signals may be handled or ignored, so exit is not guaranteed. Windows: validates the enum, then terminates unconditionally (node-pty parity). Drain-after-kill behavior is unchanged. |
 
 ## Failure Behavior
 
@@ -169,6 +171,7 @@ MiniPty does not fall back to pipe redirect when PTY creation fails.
 - **Unix PTY master fds cannot be half-closed.** Closing the master ends both read and write, so `SendEof()` writes EOT instead.
 - **Canonical EOT is not kernel EOF on Unix.** One EOT on a non-empty line buffer delivers buffered bytes but does not end input; a submitted line or a second EOT may be needed.
 - **Output drain after child exit needs bounded waits on one-shot paths.** `OutputDrainGrace` and `OutputReaderCloseTimeout` prevent hung readers without dropping ordinary slow flushes. Persistent `ReadOutputAsync` does not use those timeouts.
+- **Kill/drain tests need an observed-output synchronization point and a child that cannot time out naturally.** Fixed delays can expire before a loaded CI worker schedules the reader or completes `fork`/`exec`; conversely, a time-limited child can exit before a starved reader resumes, so the test never reaches `Kill()`. Have the child emit readiness and then block on stdin, observe readiness from the active output enumeration, then kill and continue that same enumeration to EOF.
 - **Cancel semantics differ by use case.** Waiting cancellation does not kill; one-shot completion defaults to killing when canceled.
 - **Do not queue `CompleteAsync` behind active output reads.** Fail fast with `InvalidOperationException` so read, wait, and completion cannot deadlock inside hidden session queues.
 - **Defer ConPTY transport close on one-shot transport pumps.** `CompleteAsync` and `PtyCapture.RunAsync` must wait for child exit with `closeTransportOnExit: false` while the transport pump is still reading; closing on exit truncates bulk stdout before `OutputDrainGrace` / `AwaitPumpAsync` can drain it.

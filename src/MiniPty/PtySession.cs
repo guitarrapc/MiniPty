@@ -183,6 +183,17 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     public int? ExitCode => _backend.HasExited ? _backend.ExitCode : null;
 
     /// <summary>
+    /// Gets the exit status (exit code plus Unix termination signal) when <see cref="HasExited"/>
+    /// is <see langword="true"/>; otherwise <see langword="null"/>.
+    /// </summary>
+    /// <value>
+    /// <see cref="PtyExitStatus.ExitCode"/> always equals <see cref="ExitCode"/>. The signal is
+    /// reported on Unix when the child was terminated by a signal; Windows never reports a signal.
+    /// </value>
+    public PtyExitStatus? ExitStatus =>
+        _backend.HasExited ? new PtyExitStatus(_backend.ExitCode, _backend.ExitSignal) : null;
+
+    /// <summary>
     /// Writes raw bytes to the PTY stdin.
     /// </summary>
     /// <param name="bytes">Bytes to write. Empty buffers are ignored.</param>
@@ -253,6 +264,23 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     }
 
     /// <summary>
+    /// Sends a signal to the child process without releasing PTY handles.
+    /// </summary>
+    /// <remarks>
+    /// On Unix the mapped native signal is delivered via <c>kill(2)</c>; the child may handle or
+    /// ignore catchable signals, so termination is not guaranteed. On Windows the signal is
+    /// advisory and the child is terminated unconditionally, matching node-pty semantics.
+    /// Call <see cref="Dispose"/> afterward to release resources.
+    /// </remarks>
+    /// <param name="signal">Signal to deliver.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="signal"/> is not a defined <see cref="PtySignal"/> value.</exception>
+    public void Kill(PtySignal signal)
+    {
+        ThrowIfDisposed();
+        _backend.Kill(signal);
+    }
+
+    /// <summary>
     /// Asynchronously waits until the child process exits.
     /// </summary>
     /// <param name="cancellationToken">
@@ -265,6 +293,22 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     {
         ThrowIfDisposed();
         return WaitForExitInternalScopedAsync(cancellationToken, killOnCancellation: false);
+    }
+
+    /// <summary>
+    /// Asynchronously waits until the child process exits and returns its <see cref="PtyExitStatus"/>.
+    /// </summary>
+    /// <param name="cancellationToken">
+    /// When canceled, waiting stops and <see cref="OperationCanceledException"/> is thrown.
+    /// The child process continues running, identical to <see cref="WaitForExitAsync"/>.
+    /// </param>
+    /// <returns>A task that completes with the child exit code and Unix termination signal.</returns>
+    /// <exception cref="OperationCanceledException">Waiting was canceled.</exception>
+    public async Task<PtyExitStatus> WaitForExitStatusAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var exitCode = await WaitForExitInternalScopedAsync(cancellationToken, killOnCancellation: false).ConfigureAwait(false);
+        return new PtyExitStatus(exitCode, _backend.ExitSignal);
     }
 
     /// <summary>

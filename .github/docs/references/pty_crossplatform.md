@@ -44,6 +44,8 @@ Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps th
 | `WaitForExitAsync(CancellationToken)` | Polls the child. Cancellation stops waiting only; the child keeps running (`OperationCanceledException`). |
 | `CompleteAsync(PtyCompleteOptions, CancellationToken)` | Optional stdin, wait for exit, drain output, return `PtyResult`. Cancellation kills the child when `KillOnCancellation` is true (default). |
 | `Kill()` | `TerminateProcess` (Windows) or `kill(SIGKILL)` (Unix). Does not release handles; call `Dispose` afterward. |
+| `Kill(PtySignal)` | **Unix:** `kill(2)` with the per-OS native number (SIGUSR1/2 differ: Linux 10/12, macOS/FreeBSD 30/31). **Windows:** signal is advisory; validates the enum then `TerminateProcess` (node-pty parity). |
+| `WaitForExitStatusAsync` / `ExitStatus` | Adds the Unix termination signal (`waitpid` `WTERMSIG`) to the exit code; decoding is fully managed (identical exited/signaled status layout on Linux/macOS/FreeBSD). Windows always reports a null signal. |
 | `PtyCompleteOptions.OutputDrainGrace` | Default 1s—post-exit drain before closing transport. |
 | `PtyCompleteOptions.OutputReaderCloseTimeout` | Default 5s—wait after transport close for the reader to finish. |
 | `Dispose()` | If the child is still running, **kills** it, then closes ConPTY/pipes/process handles. On Unix, `Dispose` also attempts a bounded `waitpid` after `SIGKILL` to avoid leaving a zombie (up to ~1s). |

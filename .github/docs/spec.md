@@ -1,6 +1,6 @@
 # MiniPty Specification
 
-User-facing specification entry point for **MiniPty**, **MiniPty.Capture**, and **MiniPty.Console** NuGet packages. Detailed contracts are split by behavior area under [specs/](specs/). OS-level implementation notes live in [references/](references/) (for example [pty_crossplatform.md](references/pty_crossplatform.md), [windows_console_input.md](references/windows_console_input.md)).
+User-facing specification entry point for **MiniPty**, **MiniPty.Capture**, **MiniPty.Console**, and **MiniPty.Terminal** NuGet packages. Detailed contracts are split by behavior area under [specs/](specs/). OS-level implementation notes live in [references/](references/) (for example [pty_crossplatform.md](references/pty_crossplatform.md), [windows_console_input.md](references/windows_console_input.md)).
 
 ## Motivation
 
@@ -15,7 +15,7 @@ MiniPty exists as a **standalone, NativeAOT-friendly** library so any .NET progr
 | **1** | PTY transport (node-pty–equivalent core) | **MiniPty** | [Core session](specs/core_session.md), [Lifecycle](specs/lifecycle.md) |
 | **2** | One-shot stdin + timestamped record | **MiniPty.Capture** | [Capture](specs/capture.md) |
 | **3** | Interactive host (vim, etc.) — human types on real terminal | **MiniPty** + **MiniPty.Console** | [Console](specs/console.md) (embedder owns `ReadOutputAsync`) |
-| **4** | In-editor terminal backend (xterm.js, etc.) | **MiniPty** only | Core embedder pattern in [Core session](specs/core_session.md); editor parity features are a **separate plan** |
+| **4** | In-editor terminal backend (xterm.js, etc.) | **MiniPty** + **MiniPty.Terminal** | [Terminal](specs/terminal.md) (push facade, WebSocket bridge, flow control) |
 
 Use case 3 recording and cast format remain **scenetake** (or other embedder) responsibilities. **MiniPty.Console** does not record output.
 
@@ -26,23 +26,27 @@ Use case 3 recording and cast format remain **scenetake** (or other embedder) re
 | **MiniPty** | Core PTY transport: spawn, streams, lifecycle | — |
 | **MiniPty.Capture** | One-shot run with per-read timestamps (`PtyCapture.RunAsync`) | MiniPty |
 | **MiniPty.Console** | Host keyboard → PTY input (`PtyConsoleInput.Attach`) | MiniPty |
+| **MiniPty.Terminal** | Frontend terminal backend: push facade (`PtyTerminal`), xterm.js WebSocket bridge (`PtyWebSocketBridge`) | MiniPty |
 
 ```mermaid
 flowchart TB
     M["MiniPty"]
     C["MiniPty.Capture"]
     O["MiniPty.Console"]
+    T["MiniPty.Terminal"]
     C --> M
     O --> M
+    T --> M
 ```
 
 | You need… | Packages |
 |---|---|
-| General PTY I/O, `ReadOutputAsync`, `CompleteAsync`, editor backend | **MiniPty** |
+| General PTY I/O, `ReadOutputAsync`, `CompleteAsync` | **MiniPty** |
 | One-shot command with timestamped output chunks | **MiniPty** + **MiniPty.Capture** |
 | Human types on the host terminal (vim, etc.) | **MiniPty** + **MiniPty.Console** (+ your `ReadOutputAsync` for display/record) |
+| Backend PTY for xterm.js / editor terminals (push events, flow control, WebSocket) | **MiniPty** + **MiniPty.Terminal** |
 
-**MiniPty.Capture** and **MiniPty.Console** are optional add-ons. Both depend on core only; Console does not read PTY output.
+**MiniPty.Capture**, **MiniPty.Console**, and **MiniPty.Terminal** are optional add-ons. All depend on core only; Console does not read PTY output; Terminal owns its session's output exclusively.
 
 ## Implemented Scope
 
@@ -57,21 +61,25 @@ flowchart TB
 | Understand supported OS targets and public platform guarantees | [Platform support](specs/platform_support.md) |
 | Persistent transport sample (`ReadOutputAsync` command loop) | [samples/Interactive.cs](../../samples/Interactive.cs) |
 | Attach host terminal input to an existing `PtySession` (use case 3) | [Console](specs/console.md) |
+| Exit status with Unix termination signal; `Kill(PtySignal)` | [Core session](specs/core_session.md) |
+| Backend PTY for frontend terminals: push facade, flow control, xterm.js WebSocket bridge (use case 4) | [Terminal](specs/terminal.md) |
+| Browser terminal sample (xterm.js over WebSocket) | [samples/WebTerminal.cs](../../samples/WebTerminal.cs) |
 
 ## Planned Scope
 
-_(No open package milestones. Editor terminal backend parity for use case 4 is tracked in a separate plan.)_
+_(No open package milestones.)_
 
 ## Out of Scope For The Current Implementation
 
 - Terminal emulation, TUI replay, or faithful screen-buffer rendering
 - Cast / asciinema recording (embedder responsibility; scenetake for example)
-- In-editor terminal integration and node-pty parity (pause, ConPTY clear, exit signal split) — separate plan for use case 4
+- Windows ConPTY `clear()` (requires the conpty.dll signal pipe; not reachable via public Win32 API)
+- Terminal session reconnect / detach-reattach ([Terminal](specs/terminal.md) non-goal N5)
 - Remote shells (`ssh`)
 - Spilling capture to disk when memory is exhausted
 - Capture tuning such as max chunk size or chunk timestamp modes
 
-Planning notes for Console implementation and deferred editor parity are in [plans/plan_minipty_next.md](plans/plan_minipty_next.md). Planning documents are not implemented API contracts unless mirrored in [specs/](specs/).
+Planning notes for Console implementation are in [plans/plan_minipty_next.md](plans/plan_minipty_next.md); the editor terminal backend (use case 4) decision record is in [plans/plan_editor_backend.md](plans/plan_editor_backend.md). Planning documents are not implemented API contracts unless mirrored in [specs/](specs/).
 
 ## Related Documents
 
@@ -79,6 +87,7 @@ Planning notes for Console implementation and deferred editor parity are in [pla
 - [specs/completion.md](specs/completion.md) — `CompleteAsync`, `PtyCompleteOptions`, `PtyResult`
 - [specs/capture.md](specs/capture.md) — `MiniPty.Capture` timestamped observation
 - [specs/console.md](specs/console.md) — `MiniPty.Console` host input attach
+- [specs/terminal.md](specs/terminal.md) — `MiniPty.Terminal` frontend terminal backend (use case 4)
 - [specs/display_text.md](specs/display_text.md) — `PtyOutput.ToDisplayText`
 - [specs/lifecycle.md](specs/lifecycle.md) — mental model, session flow, cancellation, EOF, drain, disposal, failure behavior
 - [specs/platform_support.md](specs/platform_support.md) — public platform support and verification constraints
