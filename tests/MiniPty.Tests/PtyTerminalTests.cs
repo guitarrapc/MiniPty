@@ -11,23 +11,24 @@ public sealed class PtyTerminalTests
     {
         var buffer = new MemoryStream();
         var handlerCompletedBeforeExit = true;
-        PtyTerminal terminal = null!;
+        Task<PtyExitStatus>? completionTask = null;
 
-        terminal = PtyTerminal.Start(EchoMarkerChild("TERMINAL_MARKER"), new PtyTerminalOptions
+        var terminal = PtyTerminal.Start(EchoMarkerChild("TERMINAL_MARKER"), new PtyTerminalOptions
         {
             Output = (data, _) =>
             {
-                if (terminal.Completion.IsCompleted)
+                if (completionTask?.IsCompleted == true)
                     handlerCompletedBeforeExit = false;
                 buffer.Write(data.Span);
                 return ValueTask.CompletedTask;
             },
         });
+        completionTask = terminal.Completion;
 
         await using (terminal)
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            var status = await terminal.Completion.WaitAsync(cts.Token);
+            var status = await completionTask.WaitAsync(cts.Token);
 
             await Assert.That(status.ExitCode).IsEqualTo(0);
             await Assert.That(Encoding.UTF8.GetString(buffer.ToArray())).Contains("TERMINAL_MARKER");
@@ -61,29 +62,27 @@ public sealed class PtyTerminalTests
     {
         var delivered = 0L;
         var pausedOnFirstChunk = 0;
-        var pauseEngaged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        PtyTerminal terminal = null!;
-        terminal = PtyTerminal.Start(BulkOutputChild(), new PtyTerminalOptions
+        var firstHandlerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstHandlerRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var terminal = PtyTerminal.Start(BulkOutputChild(), new PtyTerminalOptions
         {
-            Output = (data, _) =>
+            Output = async (data, ct) =>
             {
                 Interlocked.Add(ref delivered, data.Length);
-                // Pause on the first delivered chunk so fast runners cannot drain the full bulk
-                // stream before flow control engages.
                 if (Interlocked.CompareExchange(ref pausedOnFirstChunk, 1, 0) == 0)
                 {
-                    terminal.Pause();
-                    pauseEngaged.TrySetResult();
+                    firstHandlerEntered.TrySetResult();
+                    await firstHandlerRelease.Task.WaitAsync(ct);
                 }
-
-                return ValueTask.CompletedTask;
             },
         });
 
         await using (terminal)
         {
             using var startCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            await pauseEngaged.Task.WaitAsync(startCts.Token);
+            await firstHandlerEntered.Task.WaitAsync(startCts.Token);
+            terminal.Pause();
+            firstHandlerRelease.TrySetResult();
 
             // Allow at most the single in-flight chunk to land, then verify no further delivery.
             await Task.Delay(200);
