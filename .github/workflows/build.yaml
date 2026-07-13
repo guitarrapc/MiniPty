@@ -80,7 +80,11 @@ jobs:
               test ! -f "$out/libminipty_unix.a"
               test -f "$out/minipty_spawn_helper"
             fi
-            "$exe"
+            if [[ "$sample" == WebTerminal ]]; then
+              "$exe" --smoke
+            else
+              "$exe"
+            fi
           done
 
   build-unix-native:
