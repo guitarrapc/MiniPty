@@ -111,7 +111,10 @@ public sealed class PtyWebSocketBridgeTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var options = new PtyBridgeOptions { HighWatermark = 4096, LowWatermark = 1024 };
 
-        var bridgeTask = PtyWebSocketBridge.RunAsync(BulkOutputChild(), serverSocket, options, cts.Token);
+        // This needs only enough output to cross the watermark and prove an ACK resumes delivery.
+        // A 256 KiB burst creates roughly 64 serialized pause/ACK/resume round trips at this
+        // watermark, which exceeds the test budget on loaded macOS arm64 CI runners.
+        var bridgeTask = PtyWebSocketBridge.RunAsync(BulkOutputChild(lineCount: 64), serverSocket, options, cts.Token);
         var client = new BridgeTestClient(clientSocket);
         var clientTask = client.RunToCloseAsync(ackEverything: false, cts.Token);
 
@@ -765,11 +768,11 @@ public sealed class PtyWebSocketBridgeTests
             ? Spawn(WindowsComSpec(), ["/c", "set /p DUMMY="])
             : Spawn("sh", ["-c", "IFS= read -r _"]);
 
-    /// <summary>Child that emits sustained bulk output (~256 KiB) then exits 0.</summary>
-    private static PtyStartInfo BulkOutputChild() =>
+    /// <summary>Child that emits a configurable amount of bulk output (256 KiB by default) then exits 0.</summary>
+    private static PtyStartInfo BulkOutputChild(int lineCount = 2048) =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? Spawn(WindowsComSpec(), ["/c", "for /l %i in (1,1,2048) do @echo 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"])
-            : Spawn("sh", ["-c", "i=0; while [ $i -lt 2048 ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
+            ? Spawn(WindowsComSpec(), ["/c", $"for /l %i in (1,1,{lineCount}) do @echo 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"])
+            : Spawn("sh", ["-c", $"i=0; while [ $i -lt {lineCount} ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
 
     private static string WindowsComSpec() =>
         Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
