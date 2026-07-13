@@ -298,6 +298,10 @@ For custom transports (stdio framing to a VS Code extension, SignalR, …), use 
 | [WebTerminal.cs](samples/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner |
 | [VsCodeTerminalHelper.cs](samples/VsCodeTerminalHelper.cs) | **MiniPty.Terminal** stdio-framed helper for a VS Code `Pseudoterminal` |
 | [VsCodeExtension](samples/VsCodeExtension) | Dependency-free VS Code extension sample connecting `Pseudoterminal` to the NativeAOT helper |
+| [VsCodePersistentBridge.cs](samples/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |
+
+See the [VS Code extension sample instructions](samples/VsCodeExtension) for complete Windows and
+macOS reproduction steps, including NativeAOT helper publishing and authenticated reconnect.
 
 Run a sample locally (JIT):
 

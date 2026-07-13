@@ -17,9 +17,17 @@
   "main": "./extension.js",
   "contributes": {
     "commands": [
-      {
-        "command": "minipty.openTerminal",
-        "title": "MiniPty: Open Terminal"
+    {
+      "command": "minipty.openTerminal",
+      "title": "MiniPty: Open One-Shot Terminal"
+    },
+    {
+      "command": "minipty.openPersistentTerminal",
+      "title": "MiniPty: Open Persistent Terminal"
+    },
+    {
+      "command": "minipty.simulateReconnect",
+      "title": "MiniPty: Simulate Persistent Terminal Disconnect"
       }
     ],
     "configuration": {
@@ -38,6 +46,12 @@
           },
           "default": [],
           "description": "Optional command and arguments passed to VsCodeTerminalHelper instead of its default shell."
+        },
+        "minipty.bridgeUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:5171",
+          "scope": "machine",
+          "description": "Loopback URL of the independently running VsCodePersistentBridge service."
         }
       }
     }

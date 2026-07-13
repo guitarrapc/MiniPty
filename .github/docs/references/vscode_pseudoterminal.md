@@ -20,10 +20,12 @@ Map `handleInput` to type 2 and `setDimensions` to `{"type":"resize","cols":...,
 
 The helper's stdout is protocol-only. Route logs and diagnostics to stderr.
 
-The stdio extension sample is deliberately one-shot. Closing it closes the helper input and therefore the owned PTY. It validates the editor backend path but not persistent reconnect.
+The stdio extension path is deliberately one-shot. Closing it closes the helper input and therefore the owned PTY. The same sample extension also has a persistent path backed by [VsCodePersistentBridge.cs](../../../samples/VsCodePersistentBridge.cs) for real authenticated reconnect testing.
 
 ## Persistent reconnect option
 
 The stdio helper is intentionally process-owned: if the helper exits, its PTY exits too. A host that needs terminals to survive renderer or extension-client disconnects runs a long-lived .NET service with `PtyWebSocketSessionManager` instead.
 
 Create the session through an authenticated service endpoint and return its session id plus bearer token to the extension without placing the token in logs or URLs. On each WebSocket attach, the service calls `ConnectAsync` with the last absolute output offset persisted by the extension. Persistent WebSocket output is preceded by an `output` control containing `offset` and `bytes`; after `onDidWrite` accepts that binary payload, persist and ACK the next absolute offset. `ConnectAsync` returns null on detach and an exit status after final output when the child exits.
+
+The runnable service binds only to loopback, protects session creation with a separate 256-bit access token, and carries the per-session bearer token in the WebSocket subprotocol header rather than the URL. The extension's simulated-disconnect command closes only the transport; its automatic reconnect reuses the same session credentials and last ACK offset. This is an integration sample, not a TLS-enabled multi-user remote-shell service.

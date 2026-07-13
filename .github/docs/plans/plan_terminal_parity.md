@@ -185,6 +185,7 @@ VS Code **persistent terminals** survive panel close and renderer disconnect. Th
 
 - Test: start session via core, attach terminal, verify output + completion.
 - Tests: successful detach/reconnect, output before first attach, wrong/malformed/unknown token rejection, concurrent attach rejection, unavailable offset rejection, session limit, explicit authenticated termination, detached expiry, and invalid ACK rejection.
+- NativeAOT service E2E: reject invalid management/session tokens, detach after acknowledged output, reconnect to the same shell from the absolute offset, verify preserved process state, and drain the exit control before close.
 - Spec update removes N5 and defines the replay/authentication contract.
 
 ### Estimate

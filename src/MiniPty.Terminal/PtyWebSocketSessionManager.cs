@@ -453,8 +453,12 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
                 {
                     var status = await sendTask.ConfigureAwait(false);
                     await SendExitAndCloseAsync(status, cancellationToken).ConfigureAwait(false);
-                    lifetimeCts.Cancel();
+                    // Do not cancel an in-flight ReceiveAsync after sending the close frame.
+                    // ManagedWebSocket treats receive cancellation as an abort, which can discard
+                    // the already-sent final output/exit frames. The bounded waiter aborts only if
+                    // the peer does not complete the close handshake.
                     await IgnoreConnectionEndAsync(receiveTask).ConfigureAwait(false);
+                    lifetimeCts.Cancel();
                     return status;
                 }
                 catch

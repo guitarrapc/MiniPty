@@ -150,7 +150,7 @@ Each session has one fixed `ReplayBufferSize` allocation. Output continues while
 
 `PtyStdioBridge.RunAsync` provides the same raw data, resize, ACK, and exit semantics over readable/writable streams. Each frame is a one-byte type (`1` output, `2` input, `3` control), a little-endian unsigned 32-bit payload length, then the payload. This fixed header lets a VS Code extension host a NativeAOT helper without HTTP, WebSocket, JSON-wrapped data, or base64.
 
-Control payloads are the same UTF-8 JSON used by the WebSocket bridge. Output is fully delivered before the exit control frame, and ACK watermarks apply identically. See [VS Code Pseudoterminal reference](../references/vscode_pseudoterminal.md), [VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs), and the runnable [VsCodeExtension sample](../../../samples/VsCodeExtension).
+Control payloads are the same UTF-8 JSON used by the WebSocket bridge. Output is fully delivered before the exit control frame, and ACK watermarks apply identically. See [VS Code Pseudoterminal reference](../references/vscode_pseudoterminal.md), [VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs), the runnable [VsCodeExtension sample](../../../samples/VsCodeExtension), and its long-lived [persistent bridge service](../../../samples/VsCodePersistentBridge.cs).
 
 ## VS Code integration pattern
 
@@ -203,6 +203,7 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 - Reliable reconnect requires absolute acknowledgement state. Byte-count credit alone cannot distinguish “rendered but ACK lost” from “never received,” so the persistent protocol pairs each binary message with its stream offset.
 - Expiration teardown must force child exit, release any producer blocked on replay capacity, and await the Terminal pump before disposing core session buffers. Canceling and disposing an active output reader concurrently reproduces the core double-signal race.
 - Detach must also bound both send and receive shutdown. Cancellation alone does not reliably unblock every `ManagedWebSocket` transport wait, so persistent connections use `CloseTimeout` and abort a socket that remains wedged before making the session attachable again.
+- After sending final output, the exit control, and a WebSocket close frame, do not cancel an already-running `ReceiveAsync` to stop the receive loop. `ManagedWebSocket` can turn that cancellation into an abort and discard the frames already queued to the peer, especially under NativeAOT timing. Wait for the peer's close reply within `CloseTimeout`; abort only after that bounded wait expires.
 - TerminateProcess-based `Kill` is fire-and-forget: `HasExited` can lag `Completion` by a scheduler tick; tests must poll, not assert immediately.
 - `HttpListener` on `http://localhost:<port>/` works for the sample cross-platform without URL ACLs; ephemeral binding retries random ports because `HttpListener` cannot bind port 0.
 
@@ -214,3 +215,5 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 - [plans/plan_editor_backend.md](../plans/plan_editor_backend.md) — implementation plan and decision record
 - [samples/WebTerminal.cs](../../../samples/WebTerminal.cs) — browser demo with the client-side protocol
 - [samples/VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs) — stdio-framed helper entry point
+- [samples/VsCodePersistentBridge.cs](../../../samples/VsCodePersistentBridge.cs) — authenticated loopback service and reconnect E2E smoke
+- [samples/VsCodeExtension](../../../samples/VsCodeExtension) — runnable one-shot and persistent VS Code `Pseudoterminal` clients
