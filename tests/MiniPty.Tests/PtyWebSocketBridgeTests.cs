@@ -183,10 +183,14 @@ public sealed class PtyWebSocketBridgeTests
         await Task.Delay(300, cts.Token);
         await clientSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", cts.Token);
 
+        // PTY output that the server sent before observing our close remains ordered ahead of its
+        // close response. Drain those frames instead of assuming the next frame is the response.
+        var closeTask = ReceiveCloseAsync(clientSocket, cts.Token);
         var status = await bridgeTask.WaitAsync(cts.Token);
-        var close = await clientSocket.ReceiveAsync(new byte[128].AsMemory(), cts.Token);
+        var close = await closeTask;
 
         await Assert.That(close.MessageType).IsEqualTo(WebSocketMessageType.Close);
+        await Assert.That(clientSocket.CloseStatus).IsEqualTo(WebSocketCloseStatus.NormalClosure);
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             await Assert.That(status.Signal).IsEqualTo(9);
@@ -195,6 +199,19 @@ public sealed class PtyWebSocketBridgeTests
         {
             await Assert.That(status.ExitCode).IsEqualTo(1);
             await Assert.That(status.Signal).IsNull();
+        }
+    }
+
+    private static async Task<ValueWebSocketReceiveResult> ReceiveCloseAsync(
+        WebSocket socket,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new byte[1024];
+        while (true)
+        {
+            var result = await socket.ReceiveAsync(buffer.AsMemory(), cancellationToken);
+            if (result.MessageType == WebSocketMessageType.Close)
+                return result;
         }
     }
 
