@@ -67,7 +67,9 @@ flowchart TB
 
 ## Planned Scope
 
-_(No open package milestones.)_
+| Goal | Plan |
+|---|---|
+| Remaining node-pty / VS Code–like editor backend parity (exit shape, stdio bridge, title, graceful kill, attach/reconnect) | [plans/plan_terminal_parity.md](plans/plan_terminal_parity.md) |
 
 ## Out of Scope For The Current Implementation
 

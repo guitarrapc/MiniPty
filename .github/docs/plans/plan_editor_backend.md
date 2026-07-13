@@ -45,6 +45,10 @@ Contract-level lessons live in [specs/terminal.md](../specs/terminal.md), [core_
 
 ## Deferred / future
 
-- `Attach(PtySession)` facade overload → prerequisite for bridge reconnect/detach options.
-- Process title tracking, pixel-size resize, uid/gid, `openpty` without spawn — revisit on demand.
-- ConPTY `clear()` — only viable by shipping conpty.dll (third-party dependency; against AGENTS.md) or if Windows exposes a public API.
+Prioritized follow-up for VS Code–like editor parity: [plan_terminal_parity.md](plan_terminal_parity.md).
+
+Summary:
+
+- **P0:** node-pty-shaped exit reporting at the Terminal boundary (`exitCode` 0 when `signal` present); stdio-framed bridge + Pseudoterminal reference sample.
+- **P1:** process title (`IPty.process`), graceful default kill (SIGHUP), `Attach(PtySession)` for reconnect.
+- **P2 / won't:** pixel resize, Windows CommandLine spawn, ConPTY `clear()` (pending embedder demand); uid/gid and `openpty` without spawn remain out of scope.
