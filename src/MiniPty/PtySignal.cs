@@ -6,8 +6,8 @@ namespace MiniPty;
 /// <remarks>
 /// Members are logical identifiers, not raw OS numbers: on Unix each member is mapped to the
 /// platform's native signal number internally (SIGUSR1/SIGUSR2 numbering differs between Linux
-/// and macOS/FreeBSD). On Windows the signal is advisory; any value terminates the child,
-/// matching node-pty semantics.
+/// and macOS/FreeBSD). Only defined members are accepted. On Windows the selected signal is
+/// advisory; every defined member terminates the child, matching node-pty semantics.
 /// </remarks>
 public enum PtySignal
 {

@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using MiniPty.Terminal;
+using MiniPty.Terminal.Internal;
 
 namespace MiniPty.Tests;
 
@@ -119,6 +120,37 @@ public sealed class PtyWebSocketBridgeTests
     }
 
     [Test]
+    public async Task BridgeFlowControlAppliesPauseRequestedBeforeAttach()
+    {
+        var delivered = 0L;
+        var flowControl = new BridgeFlowControl(highWatermark: 1, lowWatermark: 0);
+        flowControl.OnSent(1);
+
+        await using var terminal = PtyTerminal.Start(EchoInputThenExitChild(), new PtyTerminalOptions
+        {
+            Output = (data, _) =>
+            {
+                Interlocked.Add(ref delivered, data.Length);
+                return ValueTask.CompletedTask;
+            },
+        });
+        flowControl.Attach(terminal);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await terminal.WriteInputAsync("FLOW_CONTROL" + Enter, cancellationToken: cts.Token);
+        await Task.Delay(200, cts.Token);
+
+        await Assert.That(Interlocked.Read(ref delivered)).IsEqualTo(0);
+        await Assert.That(terminal.Completion.IsCompleted).IsFalse();
+
+        flowControl.OnAcknowledged(1);
+        var status = await terminal.Completion.WaitAsync(cts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(0);
+        await Assert.That(Interlocked.Read(ref delivered)).IsGreaterThan(0);
+    }
+
+    [Test]
     public async Task BridgeSendsExitMessageAfterFinalOutputThenClosesNormally()
     {
         var (serverSocket, clientSocket) = CreateSocketPair();
@@ -152,7 +184,9 @@ public sealed class PtyWebSocketBridgeTests
         await clientSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", cts.Token);
 
         var status = await bridgeTask.WaitAsync(cts.Token);
+        var close = await clientSocket.ReceiveAsync(new byte[128].AsMemory(), cts.Token);
 
+        await Assert.That(close.MessageType).IsEqualTo(WebSocketMessageType.Close);
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             await Assert.That(status.Signal).IsEqualTo(9);
@@ -287,6 +321,33 @@ public sealed class PtyWebSocketBridgeTests
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             async () => await PtyWebSocketBridge.RunAsync(StdinBlockingChild(), serverSocket, options));
+    }
+
+    [Test]
+    public async Task BoundedBytePipeCompletionUnblocksWaitingWriter()
+    {
+        var pipe = new BytePipe(capacityChunks: 1);
+        await pipe.WriteAsync(new byte[] { 1 }, CancellationToken.None);
+        var blockedWrite = pipe.WriteAsync(new byte[] { 2 }, CancellationToken.None).AsTask();
+
+        await Task.Delay(50);
+        await Assert.That(blockedWrite.IsCompleted).IsFalse();
+
+        pipe.Complete();
+        await blockedWrite.WaitAsync(TimeSpan.FromSeconds(1));
+    }
+
+    [Test]
+    public async Task BoundedBytePipeCompletionWithAvailableCapacityDoesNotOverRelease()
+    {
+        var pipe = new BytePipe(capacityChunks: 2);
+        await pipe.WriteAsync(new byte[] { 1 }, CancellationToken.None);
+
+        pipe.Complete();
+
+        var buffer = new byte[1];
+        await Assert.That(await pipe.ReadAsync(buffer, CancellationToken.None)).IsEqualTo(1);
+        await Assert.That(await pipe.ReadAsync(buffer, CancellationToken.None)).IsEqualTo(0);
     }
 
     // ---- test doubles and helpers ----
@@ -477,16 +538,13 @@ public sealed class PtyWebSocketBridgeTests
         private readonly Queue<byte[]> _chunks = new();
         private readonly SemaphoreSlim _signal = new(0);
         private readonly SemaphoreSlim? _space;
-        private readonly int _capacityChunks;
+        private readonly CancellationTokenSource _completionCts = new();
         private byte[]? _current;
         private int _currentOffset;
         private bool _completed;
 
-        public BytePipe(int capacityChunks)
-        {
-            _capacityChunks = capacityChunks;
+        public BytePipe(int capacityChunks) =>
             _space = capacityChunks > 0 ? new SemaphoreSlim(capacityChunks) : null;
-        }
 
         public async ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
@@ -495,9 +553,33 @@ public sealed class PtyWebSocketBridgeTests
 
             if (_space is not null)
             {
-                await _space.WaitAsync(cancellationToken).ConfigureAwait(false);
-                if (_completed)
+                using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    _completionCts.Token);
+                try
+                {
+                    await _space.WaitAsync(waitCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (
+                    _completionCts.IsCancellationRequested &&
+                    !cancellationToken.IsCancellationRequested)
+                {
                     return;
+                }
+
+                lock (_lock)
+                {
+                    if (_completed)
+                    {
+                        _space.Release();
+                        return;
+                    }
+
+                    _chunks.Enqueue(data.ToArray());
+                }
+
+                _signal.Release();
+                return;
             }
 
             Write(data.Span);
@@ -522,15 +604,14 @@ public sealed class PtyWebSocketBridgeTests
         {
             lock (_lock)
             {
+                if (_completed)
+                    return;
+
                 _completed = true;
             }
 
+            _completionCts.Cancel();
             _signal.Release();
-            if (_space is not null)
-            {
-                for (var i = 0; i < _capacityChunks; i++)
-                    _space.Release();
-            }
         }
 
         public async ValueTask<int> ReadAsync(Memory<byte> destination, CancellationToken cancellationToken)

@@ -84,10 +84,16 @@ public static class PtyWebSocketBridge
             try
             {
                 receiveTask = ReceiveLoopAsync(terminal, teardownCts.Token);
-                var cancellationTask = WaitForCancellationAsync(cancellationToken);
-                var first = await Task.WhenAny(terminal.Completion, receiveTask, cancellationTask).ConfigureAwait(false);
+                var cancellationSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var cancellationRegistration = cancellationToken.UnsafeRegister(
+                    static state => ((TaskCompletionSource)state!).TrySetResult(),
+                    cancellationSignal);
+                var first = await Task.WhenAny(
+                    terminal.Completion,
+                    receiveTask,
+                    cancellationSignal.Task).ConfigureAwait(false);
 
-                if (first == terminal.Completion)
+                if (first == terminal.Completion && !cancellationToken.IsCancellationRequested)
                 {
                     // Child exited (or the output pump faulted; the await rethrows in that case).
                     // Completion resolves only after the final output frame was sent, so the exit
@@ -105,8 +111,12 @@ public static class PtyWebSocketBridge
                 _discardOutput = true;
                 _flowControl.Disable();
                 teardownCts.Cancel();
-                AbortWebSocket();
+                var canceledByCaller = cancellationToken.IsCancellationRequested;
+                if (canceledByCaller)
+                    AbortWebSocket();
                 terminal.Kill();
+                if (canceledByCaller)
+                    cancellationToken.ThrowIfCancellationRequested();
 
                 PtyExitStatus killedStatus;
                 try
@@ -135,7 +145,6 @@ public static class PtyWebSocketBridge
                     AbortWebSocket();
                 }
                 await RespondToClientCloseAsync().ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested();
                 return killedStatus;
             }
             finally
@@ -143,7 +152,6 @@ public static class PtyWebSocketBridge
                 _discardOutput = true;
                 _flowControl.Disable();
                 teardownCts.Cancel();
-                AbortWebSocket();
                 if (receiveTask is not null)
                 {
                     try
@@ -423,16 +431,6 @@ public static class PtyWebSocketBridge
             {
                 // Best-effort abort; teardown continues via canceled tokens and disposal.
             }
-        }
-
-        private static Task WaitForCancellationAsync(CancellationToken cancellationToken)
-        {
-            if (cancellationToken.IsCancellationRequested)
-                return Task.CompletedTask;
-
-            var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            cancellationToken.Register(static state => ((TaskCompletionSource)state!).TrySetResult(), completed);
-            return completed.Task;
         }
     }
 }

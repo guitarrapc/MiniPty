@@ -23,8 +23,18 @@ internal sealed class BridgeFlowControl
         _lowWatermark = lowWatermark;
     }
 
-    /// <summary>Set once right after the terminal starts; the output handler needs flow control first.</summary>
-    public void Attach(PtyTerminal terminal) => _terminal = terminal;
+    /// <summary>
+    /// Attaches the terminal and applies a pause that was requested before attachment.
+    /// </summary>
+    public void Attach(PtyTerminal terminal)
+    {
+        lock (_lock)
+        {
+            _terminal = terminal;
+            if (_paused && !_disabled)
+                terminal.Pause();
+        }
+    }
 
     public void OnSent(int bytes)
     {
