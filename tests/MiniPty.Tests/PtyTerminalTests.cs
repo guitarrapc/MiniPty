@@ -60,36 +60,46 @@ public sealed class PtyTerminalTests
     public async Task PtyTerminalPauseStopsDeliveryAndResumeRecovers()
     {
         var delivered = 0L;
-        await using var terminal = PtyTerminal.Start(BulkOutputChild(), new PtyTerminalOptions
+        var pausedOnFirstChunk = 0;
+        var pauseEngaged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        PtyTerminal terminal = null!;
+        terminal = PtyTerminal.Start(BulkOutputChild(), new PtyTerminalOptions
         {
             Output = (data, _) =>
             {
                 Interlocked.Add(ref delivered, data.Length);
+                // Pause on the first delivered chunk so fast runners cannot drain the full bulk
+                // stream before flow control engages.
+                if (Interlocked.CompareExchange(ref pausedOnFirstChunk, 1, 0) == 0)
+                {
+                    terminal.Pause();
+                    pauseEngaged.TrySetResult();
+                }
+
                 return ValueTask.CompletedTask;
             },
         });
 
-        // Wait for first delivery so the pump is known to be running.
-        using var startCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        while (Interlocked.Read(ref delivered) == 0)
+        await using (terminal)
         {
-            startCts.Token.ThrowIfCancellationRequested();
-            await Task.Delay(10, startCts.Token);
+            using var startCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await pauseEngaged.Task.WaitAsync(startCts.Token);
+
+            // Allow at most the single in-flight chunk to land, then verify no further delivery.
+            await Task.Delay(200);
+            var afterPause = Interlocked.Read(ref delivered);
+            await Task.Delay(300);
+            await Assert.That(Interlocked.Read(ref delivered)).IsEqualTo(afterPause);
+            await Assert.That(afterPause).IsGreaterThan(0);
+            await Assert.That(terminal.HasExited).IsFalse();
+
+            terminal.Resume();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var status = await terminal.Completion.WaitAsync(cts.Token);
+
+            await Assert.That(status.ExitCode).IsEqualTo(0);
+            await Assert.That(Interlocked.Read(ref delivered)).IsGreaterThan(afterPause);
         }
-
-        terminal.Pause();
-        // Allow at most the single in-flight chunk to land, then verify no further delivery.
-        await Task.Delay(200);
-        var afterPause = Interlocked.Read(ref delivered);
-        await Task.Delay(300);
-        await Assert.That(Interlocked.Read(ref delivered)).IsEqualTo(afterPause);
-
-        terminal.Resume();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var status = await terminal.Completion.WaitAsync(cts.Token);
-
-        await Assert.That(status.ExitCode).IsEqualTo(0);
-        await Assert.That(Interlocked.Read(ref delivered)).IsGreaterThan(afterPause);
     }
 
     [Test]

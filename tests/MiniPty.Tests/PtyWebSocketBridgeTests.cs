@@ -462,7 +462,11 @@ public sealed class PtyWebSocketBridgeTests
         protected override void Dispose(bool disposing)
         {
             if (disposing)
+            {
                 _writePipe.Complete();
+                _readPipe.Complete();
+            }
+
             base.Dispose(disposing);
         }
     }
@@ -473,12 +477,16 @@ public sealed class PtyWebSocketBridgeTests
         private readonly Queue<byte[]> _chunks = new();
         private readonly SemaphoreSlim _signal = new(0);
         private readonly SemaphoreSlim? _space;
+        private readonly int _capacityChunks;
         private byte[]? _current;
         private int _currentOffset;
         private bool _completed;
 
-        public BytePipe(int capacityChunks) =>
+        public BytePipe(int capacityChunks)
+        {
+            _capacityChunks = capacityChunks;
             _space = capacityChunks > 0 ? new SemaphoreSlim(capacityChunks) : null;
+        }
 
         public async ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
@@ -486,7 +494,11 @@ public sealed class PtyWebSocketBridgeTests
                 return;
 
             if (_space is not null)
+            {
                 await _space.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (_completed)
+                    return;
+            }
 
             Write(data.Span);
         }
@@ -514,6 +526,11 @@ public sealed class PtyWebSocketBridgeTests
             }
 
             _signal.Release();
+            if (_space is not null)
+            {
+                for (var i = 0; i < _capacityChunks; i++)
+                    _space.Release();
+            }
         }
 
         public async ValueTask<int> ReadAsync(Memory<byte> destination, CancellationToken cancellationToken)

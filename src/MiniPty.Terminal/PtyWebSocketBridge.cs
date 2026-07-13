@@ -84,7 +84,8 @@ public static class PtyWebSocketBridge
             try
             {
                 receiveTask = ReceiveLoopAsync(terminal, teardownCts.Token);
-                var first = await Task.WhenAny(terminal.Completion, receiveTask).ConfigureAwait(false);
+                var cancellationTask = WaitForCancellationAsync(cancellationToken);
+                var first = await Task.WhenAny(terminal.Completion, receiveTask, cancellationTask).ConfigureAwait(false);
 
                 if (first == terminal.Completion)
                 {
@@ -104,12 +105,18 @@ public static class PtyWebSocketBridge
                 _discardOutput = true;
                 _flowControl.Disable();
                 teardownCts.Cancel();
+                AbortWebSocket();
                 terminal.Kill();
 
                 PtyExitStatus killedStatus;
                 try
                 {
-                    killedStatus = await terminal.Completion.ConfigureAwait(false);
+                    killedStatus = await terminal.Completion.WaitAsync(_options.CloseTimeout, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    AbortWebSocket();
+                    killedStatus = await WaitForKilledStatusAsync(terminal, _options.CloseTimeout).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -119,8 +126,16 @@ public static class PtyWebSocketBridge
                 }
 
                 // Rethrows InvalidDataException (protocol violation) or OperationCanceledException.
-                await receiveTask.ConfigureAwait(false);
+                try
+                {
+                    await receiveTask.WaitAsync(_options.CloseTimeout, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    AbortWebSocket();
+                }
                 await RespondToClientCloseAsync().ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
                 return killedStatus;
             }
             finally
@@ -128,11 +143,16 @@ public static class PtyWebSocketBridge
                 _discardOutput = true;
                 _flowControl.Disable();
                 teardownCts.Cancel();
+                AbortWebSocket();
                 if (receiveTask is not null)
                 {
                     try
                     {
-                        await receiveTask.ConfigureAwait(false);
+                        await receiveTask.WaitAsync(_options.CloseTimeout, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        AbortWebSocket();
                     }
                     catch
                     {
@@ -380,12 +400,39 @@ public static class PtyWebSocketBridge
             }
             catch (TimeoutException)
             {
-                _webSocket.Abort();
+                AbortWebSocket();
             }
             catch
             {
                 // Close-handshake races are benign once the exit path owns the outcome.
             }
+        }
+
+        /// <summary>
+        /// Breaks a send or receive blocked on transport backpressure. ManagedWebSocket may not
+        /// observe cancellation while waiting on the underlying stream.
+        /// </summary>
+        private void AbortWebSocket()
+        {
+            try
+            {
+                if (_webSocket.State is WebSocketState.Open or WebSocketState.CloseReceived or WebSocketState.CloseSent)
+                    _webSocket.Abort();
+            }
+            catch
+            {
+                // Best-effort abort; teardown continues via canceled tokens and disposal.
+            }
+        }
+
+        private static Task WaitForCancellationAsync(CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return Task.CompletedTask;
+
+            var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            cancellationToken.Register(static state => ((TaskCompletionSource)state!).TrySetResult(), completed);
+            return completed.Task;
         }
     }
 }
