@@ -62,6 +62,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     public PtySize Size => _backend.Size;
 
     /// <summary>
+    /// Gets the foreground process name associated with the PTY, or <see langword="null"/> when
+    /// unavailable. On Unix this is intended for inexpensive editor title polling; Windows
+    /// currently returns <see langword="null"/>.
+    /// </summary>
+    public string? ActiveProcessName => _backend.ActiveProcessName;
+
+    /// <summary>
     /// Gets the write-only stream connected to the child's standard input (PTY master input).
     /// </summary>
     /// <remarks>Writes are raw bytes; no line-ending translation is performed.</remarks>
@@ -245,9 +252,27 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed.</exception>
     /// <exception cref="IOException">Unix: <c>TIOCSWINSZ</c> failed.</exception>
     public void Resize(PtySize size)
+        => Resize(size, null);
+
+    /// <summary>
+    /// Resizes the pseudo-terminal and optionally reports its pixel dimensions on Unix.
+    /// </summary>
+    /// <param name="size">New width and height in character cells.</param>
+    /// <param name="pixelSize">Optional width and height in pixels. Ignored on Windows.</param>
+    /// <exception cref="ArgumentOutOfRangeException">A pixel dimension is negative.</exception>
+    public void Resize(PtySize size, PtyPixelSize? pixelSize)
     {
         ThrowIfDisposed();
-        _backend.Resize(size.Columns, size.Rows);
+        if (pixelSize is { Width: < 0 })
+            throw new ArgumentOutOfRangeException(nameof(pixelSize), "Pixel width must not be negative.");
+        if (pixelSize is { Height: < 0 })
+            throw new ArgumentOutOfRangeException(nameof(pixelSize), "Pixel height must not be negative.");
+
+        _backend.Resize(
+            size.Columns,
+            size.Rows,
+            Math.Min(pixelSize?.Width ?? 0, ushort.MaxValue),
+            Math.Min(pixelSize?.Height ?? 0, ushort.MaxValue));
     }
 
     /// <summary>
@@ -616,7 +641,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 : ObserveExitForOutputDrainAsync();
 
             void MarkProduceProgress() => _lastProduceProgressTicks = Environment.TickCount64;
-            MarkProduceProgress();
             try
             {
                 using var bytes = PtyReadBuffer.RentBytes();
@@ -728,18 +752,28 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 var exitObservedAt = Environment.TickCount64;
                 while (!_producerCancellation.IsCancellationRequested)
                 {
+                    var canCloseAfterQuiet = false;
                     lock (_sync)
                     {
                         if (_completed || _disposed)
                             return;
+
+                        // A fast child exit can beat the terminal pump's first ReadOutputAsync call.
+                        // Closing ConPTY before a consumer attaches would discard output still in the transport.
+                        if (_handoff.IsEmpty && _consumerWaiting)
+                            canCloseAfterQuiet = true;
                     }
 
-                    var now = Environment.TickCount64;
-                    if (now - _lastProduceProgressTicks >= PostExitStallBeforeCloseMs
-                        && now - exitObservedAt >= PostExitStallBeforeCloseMs)
+                    if (canCloseAfterQuiet)
                     {
-                        _session.CloseOutputTransport();
-                        return;
+                        var now = Environment.TickCount64;
+                        var lastProgress = Math.Max(_lastProduceProgressTicks, exitObservedAt);
+                        if (now - lastProgress >= PostExitStallBeforeCloseMs
+                            && now - exitObservedAt >= PostExitStallBeforeCloseMs)
+                        {
+                            _session.CloseOutputTransport();
+                            return;
+                        }
                     }
 
                     var pollDeadline = Environment.TickCount64 + 10;
@@ -788,7 +822,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 _handoff = data;
                 _consumerWaiting = false;
                 if (_dataWaitArmed)
+                {
+                    _dataWaitArmed = false;
                     _dataWaitState.SetResult(true);
+                }
 
                 Monitor.PulseAll(_sync);
             }
@@ -831,9 +868,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             {
                 _handoff = default;
                 if (_dataWaitArmed)
+                {
+                    _dataWaitArmed = false;
                     _dataWaitState.SetResult(true);
+                }
 
-                _dataWaitArmed = false;
                 Monitor.PulseAll(_sync);
             }
         }
@@ -843,7 +882,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             lock (_sync)
             {
                 if (_dataWaitArmed)
+                {
+                    _dataWaitArmed = false;
                     _dataWaitState.SetException(new OperationCanceledException());
+                }
             }
         }
 

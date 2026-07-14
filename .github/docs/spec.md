@@ -26,7 +26,7 @@ Use case 3 recording and cast format remain **scenetake** (or other embedder) re
 | **MiniPty** | Core PTY transport: spawn, streams, lifecycle | — |
 | **MiniPty.Capture** | One-shot run with per-read timestamps (`PtyCapture.RunAsync`) | MiniPty |
 | **MiniPty.Console** | Host keyboard → PTY input (`PtyConsoleInput.Attach`) | MiniPty |
-| **MiniPty.Terminal** | Frontend terminal backend: push facade (`PtyTerminal`), xterm.js WebSocket bridge (`PtyWebSocketBridge`) | MiniPty |
+| **MiniPty.Terminal** | Frontend terminal backend: push facade, WebSocket bridge, and stdio helper bridge | MiniPty |
 
 ```mermaid
 flowchart TB
@@ -62,24 +62,24 @@ flowchart TB
 | Persistent transport sample (`ReadOutputAsync` command loop) | [samples/Interactive.cs](../../samples/Interactive.cs) |
 | Attach host terminal input to an existing `PtySession` (use case 3) | [Console](specs/console.md) |
 | Exit status with Unix termination signal; `Kill(PtySignal)` | [Core session](specs/core_session.md) |
-| Backend PTY for frontend terminals: push facade, flow control, xterm.js WebSocket bridge (use case 4) | [Terminal](specs/terminal.md) |
+| Backend PTY for frontend terminals: push facade, flow control, WebSocket and stdio bridges (use case 4) | [Terminal](specs/terminal.md) |
 | Browser terminal sample (xterm.js over WebSocket) | [samples/WebTerminal.cs](../../samples/WebTerminal.cs) |
-
-## Planned Scope
-
-_(No open package milestones.)_
+| VS Code helper sample (length-framed stdio) | [samples/VsCodeTerminalHelper.cs](../../samples/VsCodeTerminalHelper.cs) |
+| Authenticated, expiring WebSocket session reconnect with bounded output replay | [Terminal](specs/terminal.md) |
+| Real VS Code `Pseudoterminal` and persistent reconnect E2E samples | [samples/VsCodeExtension](../../samples/VsCodeExtension), [samples/VsCodePersistentBridge.cs](../../samples/VsCodePersistentBridge.cs) |
 
 ## Out of Scope For The Current Implementation
 
 - Terminal emulation, TUI replay, or faithful screen-buffer rendering
 - Cast / asciinema recording (embedder responsibility; scenetake for example)
 - Windows ConPTY `clear()` (requires the conpty.dll signal pipe; not reachable via public Win32 API)
-- Terminal session reconnect / detach-reattach ([Terminal](specs/terminal.md) non-goal N5)
 - Remote shells (`ssh`)
 - Spilling capture to disk when memory is exhausted
 - Capture tuning such as max chunk size or chunk timestamp modes
+- Unix uid/gid spawn and `openpty` without spawning a child
+- XON/XOFF string interception in core; frontend bridges use pause/resume and ACK watermarks
 
-Planning notes for Console implementation are in [plans/plan_minipty_next.md](plans/plan_minipty_next.md); the editor terminal backend (use case 4) decision record is in [plans/plan_editor_backend.md](plans/plan_editor_backend.md). Planning documents are not implemented API contracts unless mirrored in [specs/](specs/).
+Implemented contracts and durable design decisions live in [specs/](specs/); OS-specific lessons live in [references/](references/). Completed milestone plans are intentionally retired after their relevant WHAT, WHY, and lessons are incorporated here.
 
 ## Related Documents
 

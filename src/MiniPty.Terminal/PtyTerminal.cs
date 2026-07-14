@@ -10,9 +10,9 @@ namespace MiniPty.Terminal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The terminal owns its session end-to-end: it is created by <see cref="Start"/>, is the sole
-/// output consumer, and disposing the terminal kills the child if still running. The underlying
-/// session is not exposed so a second output reader cannot be attached by mistake.
+/// The terminal owns its session end-to-end: it is created by <see cref="Start"/> or transferred
+/// by <see cref="Attach"/>, is the sole output consumer, and disposing the terminal kills the child
+/// if still running. The underlying session is not exposed after ownership is transferred.
 /// </para>
 /// <para>
 /// Output ordering contract: every output handler invocation completes before
@@ -52,11 +52,37 @@ public sealed class PtyTerminal : IAsyncDisposable
         return new PtyTerminal(Pty.Start(startInfo), options.Output);
     }
 
+    /// <summary>
+    /// Takes ownership of an existing session and starts pushing its output to the configured
+    /// handler.
+    /// </summary>
+    /// <param name="session">Session whose ownership is transferred to the terminal.</param>
+    /// <param name="options">Terminal behavior; the output handler is required.</param>
+    /// <returns>A terminal that disposes <paramref name="session"/> when disposed.</returns>
+    /// <remarks>
+    /// The session must not have another active output consumer. After a successful call, callers
+    /// must use the returned terminal for lifecycle operations and must not dispose the session.
+    /// </remarks>
+    public static PtyTerminal Attach(PtySession session, PtyTerminalOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(options.Output);
+
+        return new PtyTerminal(session, options.Output);
+    }
+
     /// <summary>Gets the OS process id of the child.</summary>
     public int ProcessId => _session.ProcessId;
 
     /// <summary>Gets the current terminal dimensions.</summary>
     public PtySize Size => _session.Size;
+
+    /// <summary>
+    /// Gets the foreground process name for editor title polling, or <see langword="null"/> when
+    /// the current platform cannot report it.
+    /// </summary>
+    public string? ActiveProcessName => _session.ActiveProcessName;
 
     /// <summary>Gets a value indicating whether the child process has exited.</summary>
     public bool HasExited => _session.HasExited;
@@ -114,6 +140,27 @@ public sealed class PtyTerminal : IAsyncDisposable
         _session.Resize(size);
     }
 
+    /// <summary>Resizes the terminal with optional Unix pixel dimensions.</summary>
+    /// <param name="size">New width and height in character cells.</param>
+    /// <param name="pixelSize">Optional terminal width and height in pixels.</param>
+    public void Resize(PtySize size, PtyPixelSize? pixelSize)
+    {
+        ThrowIfDisposed();
+        _session.Resize(size, pixelSize);
+    }
+
+    /// <summary>
+    /// Synchronizes a cleared frontend buffer when the platform supports it.
+    /// </summary>
+    /// <remarks>
+    /// This is currently a documented no-op. In-box ConPTY exposes no public clear operation and
+    /// Unix frontends own their scrollback, so calling this method is always safe.
+    /// </remarks>
+    public void Clear()
+    {
+        ThrowIfDisposed();
+    }
+
     /// <summary>
     /// Pauses output delivery for flow control. No output handler runs while paused.
     /// </summary>
@@ -143,13 +190,15 @@ public sealed class PtyTerminal : IAsyncDisposable
     }
 
     /// <summary>
-    /// Terminates the child process. Remaining output is drained and delivered before
+    /// Gracefully hangs up the child process. Remaining output is drained and delivered before
     /// <see cref="Completion"/> completes.
+    /// On Unix this sends SIGHUP, matching node-pty's parameterless <c>kill()</c>; on Windows it
+    /// terminates the process because ConPTY has no signal delivery.
     /// </summary>
     public void Kill()
     {
         ThrowIfDisposed();
-        _session.Kill();
+        _session.Kill(PtySignal.Hangup);
     }
 
     /// <summary>

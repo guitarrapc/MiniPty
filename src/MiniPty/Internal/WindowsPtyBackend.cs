@@ -132,13 +132,21 @@ internal static class WindowsPtyBackend
                 lpAttributeList = attrList,
             };
 
-            var arguments = startInfo.Arguments;
             var commandLineBuilder = new StringBuilder();
             commandLineBuilder.Append(QuoteArg(startInfo.FileName));
-            for (var i = 0; i < arguments.Count; i++)
+            if (startInfo.CommandLine is { Length: > 0 } rawCommandLine)
             {
                 commandLineBuilder.Append(' ');
-                commandLineBuilder.Append(QuoteArg(arguments[i]));
+                commandLineBuilder.Append(rawCommandLine);
+            }
+            else
+            {
+                var arguments = startInfo.Arguments;
+                for (var i = 0; i < arguments.Count; i++)
+                {
+                    commandLineBuilder.Append(' ');
+                    commandLineBuilder.Append(QuoteArg(arguments[i]));
+                }
             }
 
             var commandLine = (commandLineBuilder.ToString() + '\0').ToCharArray();
@@ -310,7 +318,9 @@ internal static class WindowsPtyBackend
 
         public PtySize Size => _size;
 
-        public void Resize(int columns, int rows)
+        public string? ActiveProcessName => null;
+
+        public void Resize(int columns, int rows, int pixelWidth, int pixelHeight)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_hpcClosed)

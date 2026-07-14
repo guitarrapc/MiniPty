@@ -39,7 +39,7 @@ case "$rid" in
     build_static_archive "$out_dir/libminipty_unix.a" "${sources[@]}"
     ;;
   osx-*)
-    cc -shared -fPIC -O2 -lutil -o "$out_dir/libminipty_unix.dylib" "${sources[@]}"
+    cc -shared -fPIC -O2 -lutil -lproc -o "$out_dir/libminipty_unix.dylib" "${sources[@]}"
     build_static_archive "$out_dir/libminipty_unix.a" "${sources[@]}"
     cc -O2 -o "$out_dir/minipty_spawn_helper" "$native_dir/minipty_spawn_helper.c" "$native_dir/minipty_unix_exec.c"
     ;;

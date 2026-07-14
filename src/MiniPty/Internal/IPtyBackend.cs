@@ -18,7 +18,8 @@ internal interface IPtyBackend : IDisposable
     /// </summary>
     public int? ExitSignal { get; }
     public PtySize Size { get; }
-    public void Resize(int columns, int rows);
+    public string? ActiveProcessName { get; }
+    public void Resize(int columns, int rows, int pixelWidth, int pixelHeight);
     public void SendEof();
     public void Kill();
     public void Kill(PtySignal signal);

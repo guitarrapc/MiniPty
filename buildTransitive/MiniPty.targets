@@ -13,6 +13,7 @@
     <DirectPInvoke Include="minipty_unix" />
     <NativeLibrary Include="$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\libminipty_unix.a" />
     <LinkerArg Include="-lutil" />
+    <LinkerArg Include="-lproc" Condition="$(RuntimeIdentifier.StartsWith('osx'))" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(MiniPtyStaticUnixNative)' == 'true' and $(RuntimeIdentifier.StartsWith('osx'))">

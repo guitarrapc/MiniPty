@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -16,6 +17,7 @@
 #endif
 
 #if defined(__linux__)
+#include <dirent.h>
 #if defined(__has_include) && __has_include(<linux/close_range.h>)
 #include <linux/close_range.h>
 #else
@@ -28,10 +30,16 @@
 #elif defined(__APPLE__)
 #include <dlfcn.h>
 #include <libgen.h>
+#include <libproc.h>
 #include <spawn.h>
+#include <sys/proc.h>
 #include <util.h>
 #elif defined(__FreeBSD__)
 #include <libutil.h>
+#include <sys/param.h>
+#include <sys/proc.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
 #endif
 
 #if !defined(__APPLE__)
@@ -494,19 +502,204 @@ int minipty_fork_pty_exec(
     return 0;
 }
 
-int minipty_set_winsize(int master, unsigned short rows, unsigned short cols)
+int minipty_set_winsize(
+    int master,
+    unsigned short rows,
+    unsigned short cols,
+    unsigned short pixel_width,
+    unsigned short pixel_height)
 {
     struct winsize ws = {
         .ws_row = rows,
         .ws_col = cols,
-        .ws_xpixel = 0,
-        .ws_ypixel = 0,
+        .ws_xpixel = pixel_width,
+        .ws_ypixel = pixel_height,
     };
 
     if (ioctl(master, TIOCSWINSZ, &ws) != 0)
         return -1;
 
     return 0;
+}
+
+int minipty_get_active_process_name(int master, char *buffer, int buffer_length)
+{
+    pid_t foreground;
+
+    if (buffer == NULL || buffer_length <= 1)
+        return 0;
+
+    foreground = tcgetpgrp(master);
+    if (foreground <= 0 || (kill(-foreground, 0) != 0 && errno != EPERM))
+        return 0;
+
+#if defined(__linux__)
+    {
+        DIR *directory;
+        struct dirent *entry;
+        char path[64];
+        pid_t process = foreground;
+        char leader_stat_path[64];
+        char leader_stat_buffer[1024];
+        char *leader_comm_end;
+        long leader_group = 0;
+        char leader_state = '\0';
+        int leader_stat_fd;
+        ssize_t leader_stat_length;
+
+        /* The process-group leader is the common path. A pipeline can outlive its leader, so
+           scan /proc only when the group id no longer names a live process. */
+        if (snprintf(leader_stat_path, sizeof(leader_stat_path), "/proc/%ld/stat", (long)foreground)
+                >= (int)sizeof(leader_stat_path))
+            return 0;
+        leader_stat_fd = open(leader_stat_path, O_RDONLY | O_CLOEXEC);
+        if (leader_stat_fd >= 0) {
+            do {
+                leader_stat_length = read(leader_stat_fd, leader_stat_buffer, sizeof(leader_stat_buffer) - 1);
+            } while (leader_stat_length < 0 && errno == EINTR);
+            close(leader_stat_fd);
+            if (leader_stat_length > 0) {
+                leader_stat_buffer[leader_stat_length] = '\0';
+                leader_comm_end = strrchr(leader_stat_buffer, ')');
+                if (leader_comm_end != NULL)
+                    (void)sscanf(leader_comm_end + 1, " %c %*d %ld", &leader_state, &leader_group);
+            }
+        }
+        if (leader_state == 'Z' || (pid_t)leader_group != foreground) {
+            process = 0;
+            directory = opendir("/proc");
+            if (directory == NULL)
+                return 0;
+            while ((entry = readdir(directory)) != NULL) {
+                char *end;
+                long candidate = strtol(entry->d_name, &end, 10);
+                char stat_buffer[1024];
+                char *comm_end;
+                char state;
+                long group;
+                int stat_fd;
+                ssize_t stat_length;
+
+                if (*entry->d_name == '\0' || *end != '\0' || candidate <= 0 || candidate > INT_MAX)
+                    continue;
+                if (snprintf(path, sizeof(path), "/proc/%ld/stat", candidate) >= (int)sizeof(path))
+                    continue;
+                stat_fd = open(path, O_RDONLY | O_CLOEXEC);
+                if (stat_fd < 0)
+                    continue;
+                do {
+                    stat_length = read(stat_fd, stat_buffer, sizeof(stat_buffer) - 1);
+                } while (stat_length < 0 && errno == EINTR);
+                close(stat_fd);
+                if (stat_length <= 0)
+                    continue;
+                stat_buffer[stat_length] = '\0';
+                comm_end = strrchr(stat_buffer, ')');
+                if (comm_end == NULL || sscanf(comm_end + 1, " %c %*d %ld", &state, &group) != 2)
+                    continue;
+                if ((pid_t)group == foreground && state != 'Z') {
+                    process = (pid_t)candidate;
+                    break;
+                }
+            }
+            closedir(directory);
+            if (process <= 0)
+                return 0;
+        }
+
+        if (snprintf(path, sizeof(path), "/proc/%ld/comm", (long)process) < (int)sizeof(path)) {
+            int fd = open(path, O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) {
+                ssize_t length;
+                do {
+                    length = read(fd, buffer, (size_t)buffer_length - 1);
+                } while (length < 0 && errno == EINTR);
+                close(fd);
+                if (length > 0) {
+                    while (length > 0 && (buffer[length - 1] == '\n' || buffer[length - 1] == '\r'))
+                        length--;
+                    buffer[length] = '\0';
+                    return (int)length;
+                }
+            }
+        }
+        return 0;
+    }
+#elif defined(__APPLE__)
+    {
+        struct proc_bsdinfo process_info;
+        int info_length = proc_pidinfo(
+            foreground,
+            PROC_PIDTBSDINFO,
+            0,
+            &process_info,
+            sizeof(process_info));
+        int length;
+        if (info_length == (int)sizeof(process_info) && process_info.pbi_status != SZOMB) {
+            length = proc_name(foreground, buffer, (uint32_t)buffer_length);
+            if (length > 0)
+                return length;
+        }
+
+        pid_t processes[64];
+        int bytes = proc_listpids(PROC_PGRP_ONLY, (uint32_t)foreground, processes, sizeof(processes));
+        int count = bytes > 0 ? bytes / (int)sizeof(processes[0]) : 0;
+        for (int i = 0; i < count; i++) {
+            if (processes[i] <= 0 || processes[i] == foreground)
+                continue;
+            info_length = proc_pidinfo(
+                processes[i],
+                PROC_PIDTBSDINFO,
+                0,
+                &process_info,
+                sizeof(process_info));
+            if (info_length != (int)sizeof(process_info) || process_info.pbi_status == SZOMB)
+                continue;
+            length = proc_name(processes[i], buffer, (uint32_t)buffer_length);
+            if (length > 0)
+                return length;
+        }
+        return 0;
+    }
+#elif defined(__FreeBSD__)
+    {
+        int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, foreground };
+        struct kinfo_proc process;
+        size_t process_size = sizeof(process);
+        size_t length;
+
+        if (sysctl(mib, 4, &process, &process_size, NULL, 0) != 0
+                || process_size == 0
+                || process.ki_stat == SZOMB) {
+            struct kinfo_proc processes[64];
+            size_t processes_size = sizeof(processes);
+            size_t count;
+            int found = 0;
+
+            mib[2] = KERN_PROC_PGRP;
+            if (sysctl(mib, 4, processes, &processes_size, NULL, 0) != 0)
+                return 0;
+            count = processes_size / sizeof(processes[0]);
+            for (size_t i = 0; i < count; i++) {
+                if (processes[i].ki_stat != SZOMB) {
+                    process = processes[i];
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found)
+                return 0;
+        }
+        length = strnlen(process.ki_comm, sizeof(process.ki_comm));
+        if (length >= (size_t)buffer_length)
+            length = (size_t)buffer_length - 1;
+        memcpy(buffer, process.ki_comm, length);
+        buffer[length] = '\0';
+        return (int)length;
+    }
+#else
+    return 0;
+#endif
 }
 
 int minipty_peek_readable_bytes(int fd, int *bytes_available)

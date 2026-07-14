@@ -1,6 +1,6 @@
 # Console Input Specification
 
-Planned user-facing contract for the **MiniPty.Console** NuGet package.
+Implemented user-facing contract for the **MiniPty.Console** NuGet package.
 
 This package serves **use case 3** in [spec.md](../spec.md): a human operates an interactive program (for example vim) on the **host terminal** while an embedder records or observes the PTY byte stream through **MiniPty** core APIs.
 

@@ -12,6 +12,7 @@ Implemented user-facing contract for the **MiniPty** core session API.
 |---|---|
 | `FileName` | Executable path or name. Required. |
 | `Arguments` | Arguments after the executable. Default is empty. |
+| `CommandLine` | Optional pre-escaped Windows argument command line. Mutually exclusive with `Arguments`; unsupported on Unix. |
 | `WorkingDirectory` | Optional child working directory. Null inherits the parent working directory. |
 | `Size` | Initial terminal columns x rows. Default is 80x24; values are clamped to 1-512 per dimension at spawn. |
 | `Environment` | Optional child environment overlay. Null inherits the parent environment. Non-null entries override or remove inherited variables. |
@@ -44,7 +45,7 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 | `ReadOutputAsync` | Persistent bytes-only output streaming. Returns `IAsyncEnumerable<PtyOutputChunk>`. |
 | `WriteInputAsync` | Writes UTF-8 text by default, or raw bytes. Does not close stdin. |
 | `SendEof()` | Signals end of stdin using platform-specific behavior. See [Lifecycle](lifecycle.md). |
-| `Resize(PtySize)` | Resizes the terminal after spawn. |
+| `Resize(PtySize)` / `Resize(PtySize, PtyPixelSize?)` | Resizes after spawn; Unix also reports optional pixel dimensions, while Windows ignores pixels. |
 | `WaitForExitAsync` | Waits for child exit. Cancellation stops waiting only; the child keeps running. |
 | `WaitForExitStatusAsync` | Same wait/cancellation semantics as `WaitForExitAsync`; returns `PtyExitStatus` (exit code plus Unix termination signal). |
 | `CompleteAsync` | Convenience API for one-shot input, wait, drain, and result materialization. See [Completion](completion.md). |
@@ -52,6 +53,7 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 | `Kill(PtySignal)` | Sends a signal on Unix (`kill(2)`; the child may handle or ignore catchable signals). On Windows the signal is advisory and the child is terminated (node-pty parity). Undefined enum values throw `ArgumentOutOfRangeException` on both platforms. |
 | `HasExited` / `ExitCode?` | Polls exit state. `ExitCode` is null until the child has exited. |
 | `ExitStatus?` | `PtyExitStatus` after exit; null before. |
+| `ActiveProcessName` | Foreground process name for editor title polling on Unix; null when unavailable and on Windows. |
 | `Dispose` / `DisposeAsync` | Kills the child if still running, then releases handles. |
 
 ## Exit Status
@@ -59,6 +61,7 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 `PtyExitStatus` reports `ExitCode` and `Signal`:
 
 - `ExitCode` always equals `PtySession.ExitCode`. On Unix a signal-terminated child keeps MiniPty's existing `128 + signal` mapping (for example 143 for SIGTERM) — deliberately not node-pty's 0-on-signal, so a killed child never reads as success and there is one exit-code story across the library.
+- `NodePtyExitCode` projects that status into node-pty's frontend shape: zero when `Signal` is present, otherwise `ExitCode`. Terminal bridges use this projection without changing core completion semantics.
 - `Signal` is the raw OS signal number (`waitpid` `WTERMSIG`), null on normal exit and when the wait status was lost (ECHILD reap-lost path). Windows never reports a signal.
 - `PtySignal` members are logical identifiers mapped to native numbers per platform (SIGUSR1/SIGUSR2 numbering differs between Linux and macOS/FreeBSD); reporting uses raw OS numbers.
 
@@ -97,3 +100,5 @@ Only one active `ReadOutputAsync` reader is allowed per session. A concurrent re
 - Windows does not preserve empty environment variables as child-visible empty values. MiniPty keeps the API distinction so Unix can express empty values, but Windows children observe them like missing variables.
 - A fixed public buffer capacity is a poor contract for `ReadOutputAsync`: it turns an allocation/backpressure tuning knob into observable API surface. The stable contract is bounded no-drop streaming with producer wait; capacity should remain internal unless a future options API exposes it deliberately.
 - On Windows ConPTY, `PeekNamedPipe` often reports zero pending bytes even when more output is in flight. `ReadOutputAsync` coalescing therefore uses non-blocking continuation reads (`PIPE_NOWAIT`) and a short micro-window before handing off a partial buffer, so bulk output batches without delaying the first byte of interactive output.
+- Pixel dimensions fit Unix's 16-bit `winsize` fields. MiniPty clamps larger caller values to `ushort.MaxValue`; zero remains a valid "unknown" pixel dimension.
+- Foreground process lookup belongs behind the existing Unix native boundary: `tcgetpgrp` supplies the foreground process group without spawning `ps`, preserving NativeAOT and avoiding a helper process on each editor poll. A process-group id is not always a live process id: after a pipeline leader exits, lookup must fall back to a remaining group member rather than reporting no active process.

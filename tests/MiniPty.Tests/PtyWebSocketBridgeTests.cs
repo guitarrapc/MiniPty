@@ -10,6 +10,31 @@ namespace MiniPty.Tests;
 public sealed class PtyWebSocketBridgeTests
 {
     [Test]
+    public async Task BridgeSignalExitMessageUsesNodePtyProjection()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var bridgeTask = PtyWebSocketBridge.RunAsync(
+            Spawn("sh", ["-c", "kill -TERM $$"]),
+            serverSocket,
+            cancellationToken: cts.Token);
+        var client = new BridgeTestClient(clientSocket);
+
+        var clientTask = client.RunToCloseAsync(ackEverything: true, cts.Token);
+        var status = await bridgeTask.WaitAsync(cts.Token);
+        await clientTask.WaitAsync(cts.Token);
+        var exit = client.ExitMessage!.Value;
+
+        await Assert.That(status.ExitCode).IsEqualTo(143);
+        await Assert.That(status.Signal).IsEqualTo(15);
+        await Assert.That(exit.GetProperty("exitCode").GetInt32()).IsEqualTo(0);
+        await Assert.That(exit.GetProperty("signal").GetInt32()).IsEqualTo(15);
+    }
+
+    [Test]
     public async Task BridgeDeliversChildOutputAsBinaryFrames()
     {
         var (serverSocket, clientSocket) = CreateSocketPair();
@@ -17,8 +42,10 @@ public sealed class PtyWebSocketBridgeTests
 
         var bridgeTask = PtyWebSocketBridge.RunAsync(EchoMarkerChild("BRIDGE_MARKER"), serverSocket, cancellationToken: cts.Token);
         var client = new BridgeTestClient(clientSocket);
-        await client.RunToCloseAsync(ackEverything: true, cts.Token);
+        var clientTask = client.RunToCloseAsync(ackEverything: true, cts.Token);
 
+        await client.WaitForBinaryTextAsync("BRIDGE_MARKER", cts.Token);
+        await clientTask;
         var status = await bridgeTask.WaitAsync(cts.Token);
 
         await Assert.That(status.ExitCode).IsEqualTo(0);
@@ -86,7 +113,10 @@ public sealed class PtyWebSocketBridgeTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var options = new PtyBridgeOptions { HighWatermark = 4096, LowWatermark = 1024 };
 
-        var bridgeTask = PtyWebSocketBridge.RunAsync(BulkOutputChild(), serverSocket, options, cts.Token);
+        // This needs only enough output to cross the watermark and prove an ACK resumes delivery.
+        // A 256 KiB burst creates roughly 64 serialized pause/ACK/resume round trips at this
+        // watermark, which exceeds the test budget on loaded macOS arm64 CI runners.
+        var bridgeTask = PtyWebSocketBridge.RunAsync(BulkOutputChild(lineCount: 64), serverSocket, options, cts.Token);
         var client = new BridgeTestClient(clientSocket);
         var clientTask = client.RunToCloseAsync(ackEverything: false, cts.Token);
 
@@ -203,7 +233,7 @@ public sealed class PtyWebSocketBridgeTests
         await Assert.That(clientSocket.CloseStatus).IsEqualTo(WebSocketCloseStatus.NormalClosure);
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            await Assert.That(status.Signal).IsEqualTo(9);
+            await Assert.That(status.Signal).IsEqualTo(1);
         }
         else
         {
@@ -522,7 +552,7 @@ public sealed class PtyWebSocketBridgeTests
         }
     }
 
-    private static (WebSocket Server, WebSocket Client) CreateSocketPair(int serverToClientCapacityChunks = 0)
+    internal static (WebSocket Server, WebSocket Client) CreateSocketPair(int serverToClientCapacityChunks = 0)
     {
         var (serverStream, clientStream) = InMemoryDuplexStream.CreatePair(serverToClientCapacityChunks);
         var server = WebSocket.CreateFromStream(serverStream, new WebSocketCreationOptions { IsServer = true });
@@ -740,11 +770,11 @@ public sealed class PtyWebSocketBridgeTests
             ? Spawn(WindowsComSpec(), ["/c", "set /p DUMMY="])
             : Spawn("sh", ["-c", "IFS= read -r _"]);
 
-    /// <summary>Child that emits sustained bulk output (~256 KiB) then exits 0.</summary>
-    private static PtyStartInfo BulkOutputChild() =>
+    /// <summary>Child that emits a configurable amount of bulk output (256 KiB by default) then exits 0.</summary>
+    private static PtyStartInfo BulkOutputChild(int lineCount = 2048) =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? Spawn(WindowsComSpec(), ["/c", "for /l %i in (1,1,2048) do @echo 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"])
-            : Spawn("sh", ["-c", "i=0; while [ $i -lt 2048 ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
+            ? Spawn(WindowsComSpec(), ["/c", $"for /l %i in (1,1,{lineCount}) do @echo 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"])
+            : Spawn("sh", ["-c", $"i=0; while [ $i -lt {lineCount} ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
 
     private static string WindowsComSpec() =>
         Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";

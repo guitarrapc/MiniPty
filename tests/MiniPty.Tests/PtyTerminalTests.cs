@@ -64,7 +64,7 @@ public sealed class PtyTerminalTests
         var pausedOnFirstChunk = 0;
         var firstHandlerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var firstHandlerRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var terminal = PtyTerminal.Start(BulkOutputChild(), new PtyTerminalOptions
+        var terminal = PtyTerminal.Start(PauseFlowTestChild(), new PtyTerminalOptions
         {
             Output = async (data, ct) =>
             {
@@ -79,7 +79,7 @@ public sealed class PtyTerminalTests
 
         await using (terminal)
         {
-            using var startCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var startCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             await firstHandlerEntered.Task.WaitAsync(startCts.Token);
             terminal.Pause();
             firstHandlerRelease.TrySetResult();
@@ -156,13 +156,45 @@ public sealed class PtyTerminalTests
 
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            await Assert.That(status.Signal).IsEqualTo(9);
-            await Assert.That(status.ExitCode).IsEqualTo(137);
+            await Assert.That(status.Signal).IsEqualTo(1);
+            await Assert.That(status.ExitCode).IsEqualTo(129);
+            await Assert.That(status.NodePtyExitCode).IsEqualTo(0);
         }
         else
         {
             await Assert.That(status.Signal).IsNull();
         }
+    }
+
+    [Test]
+    public async Task PtyTerminalKillAllowsUnixHangupHandlerToExitNormally()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var readyText = new StringBuilder();
+        await using var terminal = PtyTerminal.Start(UnixHangupHandlerChild(), new PtyTerminalOptions
+        {
+            Output = (data, _) =>
+            {
+                readyText.Append(Encoding.UTF8.GetString(data.Span));
+                if (readyText.ToString().Contains("READY", StringComparison.Ordinal))
+                    ready.TrySetResult();
+                return ValueTask.CompletedTask;
+            },
+        });
+
+        using (var readyCts = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+            await ready.Task.WaitAsync(readyCts.Token);
+
+        terminal.Kill();
+
+        using var completionCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var status = await terminal.Completion.WaitAsync(completionCts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(0);
+        await Assert.That(status.Signal).IsNull();
     }
 
     [Test]
@@ -189,6 +221,41 @@ public sealed class PtyTerminalTests
     }
 
     [Test]
+    public async Task PtyTerminalAttachTakesOverExistingSession()
+    {
+        var output = new MemoryStream();
+        var session = Pty.Start(EchoMarkerChild("ATTACHED_MARKER"));
+        await using var terminal = PtyTerminal.Attach(session, new PtyTerminalOptions
+        {
+            Output = (data, _) =>
+            {
+                output.Write(data.Span);
+                return ValueTask.CompletedTask;
+            },
+        });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var status = await terminal.Completion.WaitAsync(cts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(0);
+        await Assert.That(Encoding.UTF8.GetString(output.ToArray())).Contains("ATTACHED_MARKER");
+    }
+
+    [Test]
+    public async Task PtyTerminalClearIsSafeNoOp()
+    {
+        await using var terminal = PtyTerminal.Start(StdinBlockingChild(), new PtyTerminalOptions
+        {
+            Output = (_, _) => ValueTask.CompletedTask,
+        });
+
+        terminal.Clear();
+        terminal.Kill(PtySignal.Kill);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await terminal.Completion.WaitAsync(cts.Token);
+    }
+
+    [Test]
     public async Task PtyTerminalDisposeKillsRunningChild()
     {
         var terminal = PtyTerminal.Start(StdinBlockingChild(), new PtyTerminalOptions
@@ -200,6 +267,7 @@ public sealed class PtyTerminalTests
 
         await Assert.ThrowsAsync<ObjectDisposedException>(async () => await terminal.WriteInputAsync("x"));
         Assert.Throws<ObjectDisposedException>(() => terminal.Kill());
+        Assert.Throws<ObjectDisposedException>(() => terminal.Clear());
     }
 
     [Test]
@@ -238,6 +306,18 @@ public sealed class PtyTerminalTests
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(WindowsComSpec(), ["/c", "set /p DUMMY="])
             : Spawn("sh", ["-c", "IFS= read -r _"]);
+
+    /// <summary>
+    /// Unix child that installs a HUP trap, prints READY, then blocks on stdin until killed.
+    /// </summary>
+    private static PtyStartInfo UnixHangupHandlerChild() =>
+        Spawn("sh", ["-c", "trap 'exit 0' HUP; printf 'READY\\n'; IFS= read -r _"]);
+
+    /// <summary>Child that emits one line immediately, then sustained bulk output (256 KiB) and exits 0.</summary>
+    private static PtyStartInfo PauseFlowTestChild() =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? Spawn(WindowsComSpec(), ["/c", "echo PAUSE_FLOW_START & for /l %i in (1,1,2048) do @echo 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"])
+            : Spawn("sh", ["-c", "printf 'PAUSE_FLOW_START\\n'; i=0; while [ $i -lt 2048 ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
 
     /// <summary>Child that emits sustained bulk output (256 KiB) then exits 0.</summary>
     private static PtyStartInfo BulkOutputChild() =>

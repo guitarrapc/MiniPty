@@ -270,7 +270,7 @@ sealed class OutputStats
 
 On Unix, write status messages to **stderr before** `Attach` and emit `\r\n` on **stdout after** dispose if the parent shell prompt drifts (see [ConsoleAttach.cs](samples/ConsoleAttach.cs)).
 
-**MiniPty.Terminal** turns MiniPty into a backend PTY for frontend terminals (xterm.js, editor integrations) — the role node-pty plays behind VS Code. `PtyWebSocketBridge.RunAsync` runs a full session over one WebSocket: binary frames carry raw PTY data, text frames carry JSON control messages (`resize` / `ack` from the client, `exit` from the server), with ACK-based watermark flow control per the xterm.js guidance. Try `dotnet samples/WebTerminal.cs` and open the printed URL for a real shell in the browser.
+**MiniPty.Terminal** turns MiniPty into a backend PTY for frontend terminals (xterm.js, editor integrations) — the role node-pty plays behind VS Code. `PtyWebSocketBridge` serves one-shot browser sessions, while `PtyWebSocketSessionManager` adds authenticated reconnect, bounded replay, one-active-client enforcement, explicit termination, and detached-session expiry. `PtyStdioBridge` uses length-prefixed raw frames for helper processes. `PtyTerminal` also exposes node-pty-style graceful kill, foreground process names, attach, pixel resize, and a safe `Clear` compatibility no-op. Try `dotnet samples/WebTerminal.cs` for a browser shell; [VsCodeTerminalHelper.cs](samples/VsCodeTerminalHelper.cs) is the stdio helper entry point, and [VsCodeExtension](samples/VsCodeExtension) runs it in a real VS Code integrated terminal.
 
 ```csharp
 using MiniPty;
@@ -296,6 +296,12 @@ For custom transports (stdio framing to a VS Code extension, SignalR, …), use 
 | [ConsoleAttach.cs](samples/ConsoleAttach.cs) | **MiniPty.Console** host attach: keyboard → PTY, `ReadOutputAsync` → host display (requires interactive TTY) |
 | [Observe.cs](samples/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
 | [WebTerminal.cs](samples/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner |
+| [VsCodeTerminalHelper.cs](samples/VsCodeTerminalHelper.cs) | **MiniPty.Terminal** stdio-framed helper for a VS Code `Pseudoterminal` |
+| [VsCodeExtension](samples/VsCodeExtension) | Dependency-free VS Code extension sample connecting `Pseudoterminal` to the NativeAOT helper |
+| [VsCodePersistentBridge.cs](samples/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |
+
+See the [VS Code extension sample instructions](samples/VsCodeExtension) for complete Windows and
+macOS reproduction steps, including NativeAOT helper publishing and authenticated reconnect.
 
 Run a sample locally (JIT):
 
