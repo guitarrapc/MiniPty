@@ -16,27 +16,17 @@ I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries d
 
 You can check various benchmark patterns at [GitHub Actions/Benchmark](https://github.com/guitarrapc/MiniPty/actions/runs/29358193020).
 
-Here's .NET 10 benchmark result on CI.
+Ubuntu
 
-<table align="center">
-  <tr>
-    <td align="center" width="33%">
-      <img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-ubuntu.png" alt="Benchmark Ubuntu" width="420" />
-      <br />
-      <sub><b>Benchmark</b> - Ubuntu</sub>
-    </td>
-    <td align="center" width="33%">
-      <img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-windows.png" alt="Benchmark" width="420" />
-      <br />
-      <sub><b>Benchmark</b> — Windows</sub>
-    </td>
-    <td align="center" width="33%">
-      <img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-macos.png" alt="Benchmark" width="420" />
-      <br />
-      <sub><b>Benchmark</b> — macOS</sub>
-    </td>
-  </tr>
-</table>
+<img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-ubuntu.png" alt="Benchmark Ubuntu" width="600" />
+
+Windows
+
+<img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-windows.png" alt="Benchmark Windows" width="600" />
+
+macOS
+
+<img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-macos.png" alt="Benchmark macOS" width="600" />
 
 ![](https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark.png)
 
