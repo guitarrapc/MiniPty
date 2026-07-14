@@ -174,23 +174,24 @@ public sealed class PtyTerminalTests
 
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var readyText = new StringBuilder();
-        await using var terminal = PtyTerminal.Start(
-            Spawn("sh", ["-c", "trap 'exit 0' HUP; printf 'READY\\n'; while :; do sleep 1; done"]),
-            new PtyTerminalOptions
+        await using var terminal = PtyTerminal.Start(UnixHangupHandlerChild(), new PtyTerminalOptions
+        {
+            Output = (data, _) =>
             {
-                Output = (data, _) =>
-                {
-                    readyText.Append(Encoding.UTF8.GetString(data.Span));
-                    if (readyText.ToString().Contains("READY", StringComparison.Ordinal))
-                        ready.TrySetResult();
-                    return ValueTask.CompletedTask;
-                },
-            });
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        await ready.Task.WaitAsync(cts.Token);
+                readyText.Append(Encoding.UTF8.GetString(data.Span));
+                if (readyText.ToString().Contains("READY", StringComparison.Ordinal))
+                    ready.TrySetResult();
+                return ValueTask.CompletedTask;
+            },
+        });
+
+        using (var readyCts = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+            await ready.Task.WaitAsync(readyCts.Token);
 
         terminal.Kill();
-        var status = await terminal.Completion.WaitAsync(cts.Token);
+
+        using var completionCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var status = await terminal.Completion.WaitAsync(completionCts.Token);
 
         await Assert.That(status.ExitCode).IsEqualTo(0);
         await Assert.That(status.Signal).IsNull();
@@ -305,6 +306,12 @@ public sealed class PtyTerminalTests
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(WindowsComSpec(), ["/c", "set /p DUMMY="])
             : Spawn("sh", ["-c", "IFS= read -r _"]);
+
+    /// <summary>
+    /// Unix child that installs a HUP trap, prints READY, then blocks on stdin until killed.
+    /// </summary>
+    private static PtyStartInfo UnixHangupHandlerChild() =>
+        Spawn("sh", ["-c", "trap 'exit 0' HUP; printf 'READY\\n'; IFS= read -r _"]);
 
     /// <summary>Child that emits one line immediately, then sustained bulk output (256 KiB) and exits 0.</summary>
     private static PtyStartInfo PauseFlowTestChild() =>
