@@ -522,12 +522,12 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
                     cancellationToken).ConfigureAwait(false);
                 read.Data.CopyTo(_sendBuffer);
                 cursor += read.Data.Length;
-                Interlocked.Exchange(ref _sentOffset, cursor);
                 await _webSocket.SendAsync(
                     _sendBuffer.AsMemory(0, read.Data.Length),
                     WebSocketMessageType.Binary,
                     endOfMessage: true,
                     cancellationToken).ConfigureAwait(false);
+                Interlocked.Exchange(ref _sentOffset, cursor);
             }
         }
 

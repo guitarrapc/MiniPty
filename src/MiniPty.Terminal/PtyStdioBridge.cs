@@ -93,7 +93,9 @@ public static class PtyStdioBridge
                 _discardOutput = true;
                 _flowControl.Disable();
                 teardownCts.Cancel();
-                terminal.Kill();
+                // Input EOF is bridge teardown, not a user graceful hangup; force-kill so Completion
+                // cannot wedge on children that ignore SIGHUP.
+                terminal.Kill(PtySignal.Kill);
                 cancellationToken.ThrowIfCancellationRequested();
                 await receiveTask.ConfigureAwait(false);
                 return await terminal.Completion.WaitAsync(_options.CloseTimeout, CancellationToken.None).ConfigureAwait(false);
