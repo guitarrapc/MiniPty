@@ -453,17 +453,36 @@ static async Task<long> ReadUntilAsync(
     CancellationToken cancellationToken)
 {
     var output = new StringBuilder();
+    long pendingOffset = -1;
+    var pendingBytes = 0;
     while (CountOccurrences(output, marker) < expectedOccurrences)
     {
         var message = await ReceiveMessageAsync(client, cancellationToken);
         if (message.Type == WebSocketMessageType.Text)
+        {
+            using var json = JsonDocument.Parse(message.Payload);
+            if (json.RootElement.TryGetProperty("type", out var type)
+                && type.GetString() == "output")
+            {
+                pendingOffset = json.RootElement.GetProperty("offset").GetInt64();
+                pendingBytes = json.RootElement.GetProperty("bytes").GetInt32();
+            }
+
             continue;
+        }
+
         if (message.Type == WebSocketMessageType.Close)
             throw new InvalidDataException("Persistent bridge closed before the smoke marker was received.");
+        if (pendingOffset < 0 || pendingBytes != message.Payload.Length)
+            throw new InvalidDataException("Binary output did not match its output envelope.");
+
         output.Append(Encoding.UTF8.GetString(message.Payload));
-        acknowledgedOffset += message.Payload.Length;
+        acknowledgedOffset = pendingOffset + message.Payload.Length;
+        pendingOffset = -1;
+        pendingBytes = 0;
         await SendAckAsync(client, acknowledgedOffset, cancellationToken);
     }
+
     return acknowledgedOffset;
 }
 
@@ -483,6 +502,8 @@ static int CountOccurrences(StringBuilder value, string marker)
 static async Task WaitForExitAsync(ClientWebSocket client, long acknowledgedOffset, CancellationToken cancellationToken)
 {
     var sawExit = false;
+    long pendingOffset = -1;
+    var pendingBytes = 0;
     while (true)
     {
         (WebSocketMessageType Type, byte[] Payload) message;
@@ -494,21 +515,39 @@ static async Task WaitForExitAsync(ClientWebSocket client, long acknowledgedOffs
         {
             return;
         }
+
         if (message.Type == WebSocketMessageType.Close)
         {
             if (!sawExit)
                 throw new InvalidDataException("Persistent bridge closed without an exit control message.");
             return;
         }
-        if (message.Type == WebSocketMessageType.Binary)
+
+        if (message.Type == WebSocketMessageType.Text)
         {
-            acknowledgedOffset += message.Payload.Length;
-            await SendAckAsync(client, acknowledgedOffset, cancellationToken);
+            using var json = JsonDocument.Parse(message.Payload);
+            if (json.RootElement.TryGetProperty("type", out var type))
+            {
+                var typeName = type.GetString();
+                if (typeName == "exit")
+                    sawExit = true;
+                else if (typeName == "output")
+                {
+                    pendingOffset = json.RootElement.GetProperty("offset").GetInt64();
+                    pendingBytes = json.RootElement.GetProperty("bytes").GetInt32();
+                }
+            }
+
             continue;
         }
-        using var json = JsonDocument.Parse(message.Payload);
-        if (json.RootElement.TryGetProperty("type", out var type) && type.GetString() == "exit")
-            sawExit = true;
+
+        if (pendingOffset < 0 || pendingBytes != message.Payload.Length)
+            throw new InvalidDataException("Binary output did not match its output envelope.");
+
+        acknowledgedOffset = pendingOffset + message.Payload.Length;
+        pendingOffset = -1;
+        pendingBytes = 0;
+        await SendAckAsync(client, acknowledgedOffset, cancellationToken);
     }
 }
 

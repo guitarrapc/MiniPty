@@ -423,6 +423,7 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
         private readonly WebSocket _webSocket;
         private readonly PtyWebSocketSessionManagerOptions _options;
         private readonly CancellationTokenSource _abortCts = new();
+        private readonly SemaphoreSlim _frameSendLock = new(1, 1);
         private readonly byte[] _outputHeader = new byte[96];
         private readonly byte[] _sendBuffer;
         private long _sentOffset;
@@ -500,7 +501,11 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
             }
         }
 
-        public void Dispose() => _abortCts.Dispose();
+        public void Dispose()
+        {
+            _abortCts.Dispose();
+            _frameSendLock.Dispose();
+        }
 
         private async Task<PtyExitStatus> SendLoopAsync(CancellationToken cancellationToken)
         {
@@ -514,20 +519,28 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
                 if (read.Completion is { } status)
                     return status;
 
-                var headerLength = FormatOutputHeader(cursor, read.Data.Length);
-                await _webSocket.SendAsync(
-                    _outputHeader.AsMemory(0, headerLength),
-                    WebSocketMessageType.Text,
-                    endOfMessage: true,
-                    cancellationToken).ConfigureAwait(false);
-                read.Data.CopyTo(_sendBuffer);
-                cursor += read.Data.Length;
-                await _webSocket.SendAsync(
-                    _sendBuffer.AsMemory(0, read.Data.Length),
-                    WebSocketMessageType.Binary,
-                    endOfMessage: true,
-                    cancellationToken).ConfigureAwait(false);
-                Interlocked.Exchange(ref _sentOffset, cursor);
+                await _frameSendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    var headerLength = FormatOutputHeader(cursor, read.Data.Length);
+                    await _webSocket.SendAsync(
+                        _outputHeader.AsMemory(0, headerLength),
+                        WebSocketMessageType.Text,
+                        endOfMessage: true,
+                        cancellationToken).ConfigureAwait(false);
+                    read.Data.CopyTo(_sendBuffer);
+                    cursor += read.Data.Length;
+                    await _webSocket.SendAsync(
+                        _sendBuffer.AsMemory(0, read.Data.Length),
+                        WebSocketMessageType.Binary,
+                        endOfMessage: true,
+                        cancellationToken).ConfigureAwait(false);
+                    Volatile.Write(ref _sentOffset, cursor);
+                }
+                finally
+                {
+                    _frameSendLock.Release();
+                }
             }
         }
 
@@ -583,10 +596,18 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
             switch (message!.Type)
             {
                 case BridgeJson.TypeAck:
-                    if (message.Offset is not { } offset
-                        || !_session.Output.TryAcknowledge(offset, Interlocked.Read(ref _sentOffset)))
+                    _frameSendLock.Wait();
+                    try
                     {
-                        throw new InvalidDataException("The persistent bridge received an invalid acknowledgement offset.");
+                        if (message.Offset is not { } offset
+                            || !_session.Output.TryAcknowledge(offset, Volatile.Read(ref _sentOffset)))
+                        {
+                            throw new InvalidDataException("The persistent bridge received an invalid acknowledgement offset.");
+                        }
+                    }
+                    finally
+                    {
+                        _frameSendLock.Release();
                     }
                     break;
                 case BridgeJson.TypeResize when message.Cols is > 0 && message.Rows is > 0:

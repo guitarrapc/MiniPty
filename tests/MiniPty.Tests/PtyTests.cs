@@ -1335,11 +1335,11 @@ public sealed class PtyTests
     public async Task PtyDisposeDuringWaitForExitThrowsObjectDisposed()
     {
         var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? WindowsCommand("ping -n 8 127.0.0.1 >nul")
-            : UnixShell("sleep 8"));
+            ? WindowsCommand("set /p DUMMY=")
+            : UnixShell("IFS= read -r _"));
 
         var waitTask = session.WaitForExitAsync();
-        await Task.Delay(200);
+        await Task.Delay(50);
         session.Dispose();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(async () => await waitTask);
@@ -1349,8 +1349,8 @@ public sealed class PtyTests
     public async Task PtyDisposeDuringWriteInputThrowsObjectDisposed()
     {
         var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? WindowsCommand("ping -n 8 127.0.0.1 >nul")
-            : UnixShell("sleep 8"));
+            ? WindowsCommand("set /p DUMMY=")
+            : UnixShell("IFS= read -r _"));
 
         session.Dispose();
 
