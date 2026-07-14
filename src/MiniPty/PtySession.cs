@@ -641,7 +641,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 : ObserveExitForOutputDrainAsync();
 
             void MarkProduceProgress() => _lastProduceProgressTicks = Environment.TickCount64;
-            MarkProduceProgress();
             try
             {
                 using var bytes = PtyReadBuffer.RentBytes();
@@ -753,19 +752,28 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
                 var exitObservedAt = Environment.TickCount64;
                 while (!_producerCancellation.IsCancellationRequested)
                 {
+                    var canCloseAfterQuiet = false;
                     lock (_sync)
                     {
                         if (_completed || _disposed)
                             return;
+
+                        // A fast child exit can beat the terminal pump's first ReadOutputAsync call.
+                        // Closing ConPTY before a consumer attaches would discard output still in the transport.
+                        if (_handoff.IsEmpty && _consumerWaiting)
+                            canCloseAfterQuiet = true;
                     }
 
-                    var now = Environment.TickCount64;
-                    var lastProgress = Math.Max(_lastProduceProgressTicks, exitObservedAt);
-                    if (now - lastProgress >= PostExitStallBeforeCloseMs
-                        && now - exitObservedAt >= PostExitStallBeforeCloseMs)
+                    if (canCloseAfterQuiet)
                     {
-                        _session.CloseOutputTransport();
-                        return;
+                        var now = Environment.TickCount64;
+                        var lastProgress = Math.Max(_lastProduceProgressTicks, exitObservedAt);
+                        if (now - lastProgress >= PostExitStallBeforeCloseMs
+                            && now - exitObservedAt >= PostExitStallBeforeCloseMs)
+                        {
+                            _session.CloseOutputTransport();
+                            return;
+                        }
                     }
 
                     var pollDeadline = Environment.TickCount64 + 10;

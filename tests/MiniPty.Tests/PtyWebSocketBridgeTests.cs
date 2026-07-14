@@ -42,8 +42,10 @@ public sealed class PtyWebSocketBridgeTests
 
         var bridgeTask = PtyWebSocketBridge.RunAsync(EchoMarkerChild("BRIDGE_MARKER"), serverSocket, cancellationToken: cts.Token);
         var client = new BridgeTestClient(clientSocket);
-        await client.RunToCloseAsync(ackEverything: true, cts.Token);
+        var clientTask = client.RunToCloseAsync(ackEverything: true, cts.Token);
 
+        await client.WaitForBinaryTextAsync("BRIDGE_MARKER", cts.Token);
+        await clientTask;
         var status = await bridgeTask.WaitAsync(cts.Token);
 
         await Assert.That(status.ExitCode).IsEqualTo(0);
