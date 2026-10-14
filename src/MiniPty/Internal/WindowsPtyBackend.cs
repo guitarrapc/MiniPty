@@ -323,16 +323,47 @@ internal static class WindowsPtyBackend
         public void Resize(int columns, int rows, int pixelWidth, int pixelHeight)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_hpcClosed)
-                throw new InvalidOperationException("Cannot resize after the pseudo-console has been closed.");
+
+            // Frontend size events race child exit. Once post-exit drain has closed the pseudo-console
+            // there is nothing left to resize, so the call is a no-op rather than an error.
+            if (_hpc.IsClosed)
+                return;
 
             columns = Math.Clamp(columns, 1, 512);
             rows = Math.Clamp(rows, 1, 512);
-            var hr = WindowsInterop.ResizePseudoConsole(
-                _hpc.DangerousGetHandle(),
-                new WindowsCoord((short)columns, (short)rows));
+
+            // The reference keeps the HPCON valid if drain closes the pseudo-console during the call;
+            // the deferred ClosePseudoConsole then runs on release instead of under ResizePseudoConsole.
+            var addedRef = false;
+            try
+            {
+                _hpc.DangerousAddRef(ref addedRef);
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+
+            int hr;
+            try
+            {
+                hr = WindowsInterop.ResizePseudoConsole(
+                    _hpc.DangerousGetHandle(),
+                    new WindowsCoord((short)columns, (short)rows));
+            }
+            finally
+            {
+                if (addedRef)
+                    _hpc.DangerousRelease();
+            }
+
             if (hr < 0)
+            {
+                if (_hpc.IsClosed || TryRefreshExitState())
+                    return;
+
                 throw new Win32Exception(hr, "ResizePseudoConsole failed");
+            }
 
             _size = new PtySize(columns, rows);
         }

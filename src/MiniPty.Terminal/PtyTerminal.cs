@@ -132,7 +132,10 @@ public sealed class PtyTerminal : IAsyncDisposable
         _session.SendEof();
     }
 
-    /// <summary>Resizes the pseudo-terminal to the given dimensions.</summary>
+    /// <summary>
+    /// Resizes the pseudo-terminal to the given dimensions. Safe to call for every frontend size change,
+    /// including after the child exits; see <see cref="PtySession.Resize(PtySize)"/>.
+    /// </summary>
     /// <param name="size">New width and height in character cells.</param>
     public void Resize(PtySize size)
     {
@@ -140,7 +143,10 @@ public sealed class PtyTerminal : IAsyncDisposable
         _session.Resize(size);
     }
 
-    /// <summary>Resizes the terminal with optional Unix pixel dimensions.</summary>
+    /// <summary>
+    /// Resizes the terminal with optional Unix pixel dimensions. Safe to call after the child exits;
+    /// see <see cref="PtySession.Resize(PtySize, PtyPixelSize?)"/>.
+    /// </summary>
     /// <param name="size">New width and height in character cells.</param>
     /// <param name="pixelSize">Optional terminal width and height in pixels.</param>
     public void Resize(PtySize size, PtyPixelSize? pixelSize)

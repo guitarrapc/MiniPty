@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** G1 design agreed (2026-10-15); implementation not started. The other items are proposed.
+**Status:** G2 implemented (2026-10-15). G1 design agreed; implementation not started. The other items are proposed.
 
 ## Background
 
@@ -210,16 +210,32 @@ Large. This restructures both backends and every output consumer.
 
 A terminal resizes on every layout change, and child exit is asynchronous to layout. A shell that exits while its tab is still visible makes the next size change throw (F6). In WinUI an unhandled exception from a size handler terminates the application.
 
-### Decision
+### Decision (implemented)
 
-- After the child has exited, or after the transport has been closed for drain, `Resize` is a silent no-op and `Size` keeps its last applied value.
-- `ObjectDisposedException` is still thrown after `Dispose`.
-- Update the `PtySession.Resize` and `PtyTerminal.Resize` exception documentation to match.
+- **Child exit never makes `Resize` fail.**
+  - While the transport is open, the size is applied, even if the child has already exited.
+  - Once the transport has been closed after exit, `Resize` is a no-op and `Size` keeps its last applied value.
+  - If the OS rejects the call and the child has exited in the meantime, that is also a no-op.
+- **What still throws:** `ObjectDisposedException` after `Dispose`, `ArgumentOutOfRangeException` for negative pixel dimensions (validated before the exit state is considered), and OS failures while the child is running.
+- **Windows race guard:** a reference on the pseudo-console handle is held for the duration of `ResizePseudoConsole`. A drain close on another thread therefore defers `ClosePseudoConsole` until the call returns, instead of invalidating the handle mid-call.
+- **Documentation:** `PtySession.Resize`, `PtyTerminal.Resize`, [core_session.md](../specs/core_session.md), and [terminal.md](../specs/terminal.md) describe the behavior.
 
-### Acceptance
+### Tests
 
-- Tests on both platforms: resize after exit and after drain completion does not throw, and `Size` is unchanged.
-- Resize after dispose still throws `ObjectDisposedException`.
+| Test | State it covers |
+|---|---|
+| `PtyResizeUpdatesSize`, `PtyResizeAcceptsPixelDimensions` (existing) | Child running |
+| `PtyResizeAfterExitWithOpenTransportDoesNotThrow` | Child exited, transport open |
+| `PtyResizeAfterTransportClosedIsNoOp` | Child exited, transport closed (F6) |
+| `PtyResizeAfterDisposeThrowsObjectDisposed` | Disposed |
+| `PtyTerminalResizeAfterCompletionIsNoOp` | Size change after `Completion` (F6) |
+
+The two F6 tests fail on the previous code with `InvalidOperationException`.
+
+### Lessons Learned
+
+- **Define the no-op by transport state, not by `HasExited`.** The planned rule, a no-op as soon as the child had exited, would have broken existing resize tests that use fast-exiting children (`PtyResizeUpdatesSize`, `PtyWindowsSpawnAllowsImmediateResize`). Their resize would race the exit and silently stop applying. Applying the size while the transport is open is harmless on both platforms, and it keeps `Size` deterministic until drain closes the transport.
+- **The Unix master fd can still be closed and reused by a concurrent drain during the ioctl.** This race predates this change and is resolved by G1's fd-lifetime design (see G10).
 
 ### Estimate
 
@@ -454,6 +470,7 @@ flowchart LR
 - **The pool starvation threshold is the minimum worker thread count** (the processor count). It is not a large number of sessions, so the problem appears with only a few tabs.
 - **Large pastes through `WriteInputAsync` did not block the UI thread on Windows**, even with output undrained. ConPTY accepts input into its own buffer independently of output backpressure. Unix tty input queues are small and can block a writer.
 - **The in-box ConPTY reorders forwarded sequences relative to text** and consumes several query and graphics sequences. Its behavior must be treated as Windows-build-dependent, and must not be assumed to be a transparent relay.
+- **Measure allocation baselines in the same checkout path as the change.** Spawn allocations grow with the length of the executable and working-directory paths. A baseline measured in a worktree under a long temp path came out about 1.5 KB higher and looked like a stale baseline, but it was not one. Async paths also jitter by roughly 50–400 B between runs, and single runs occasionally double, so compare several runs before attributing a delta.
 
 ## Open Questions
 

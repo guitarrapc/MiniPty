@@ -198,8 +198,11 @@ internal static partial class UnixPtyBackend
         public void Resize(int columns, int rows, int pixelWidth, int pixelHeight)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+
+            // Frontend size events race child exit. Once post-exit drain has closed the master there is
+            // nothing left to resize, so the call is a no-op rather than an error.
             if (_masterClosed)
-                throw new InvalidOperationException("Cannot resize after the PTY has been closed.");
+                return;
 
             columns = Math.Clamp(columns, 1, 512);
             rows = Math.Clamp(rows, 1, 512);
@@ -209,7 +212,14 @@ internal static partial class UnixPtyBackend
                     (ushort)columns,
                     (ushort)pixelWidth,
                     (ushort)pixelHeight) != 0)
-                throw new IOException($"TIOCSWINSZ failed (errno {Marshal.GetLastPInvokeError()})");
+            {
+                // Capture errno before the exit probe issues its own P/Invoke.
+                var errno = Marshal.GetLastPInvokeError();
+                if (_masterClosed || TryRefreshExitState())
+                    return;
+
+                throw new IOException($"TIOCSWINSZ failed (errno {errno})");
+            }
 
             _size = new PtySize(columns, rows);
         }

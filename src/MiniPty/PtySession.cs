@@ -248,9 +248,15 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// Resizes the pseudo-terminal to the given dimensions.
     /// </summary>
     /// <param name="size">New width and height in character cells.</param>
-    /// <exception cref="InvalidOperationException">The PTY transport has already been closed.</exception>
-    /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed.</exception>
-    /// <exception cref="IOException">Unix: <c>TIOCSWINSZ</c> failed.</exception>
+    /// <remarks>
+    /// Frontend size changes race child exit, so exit never makes this call fail. While the PTY
+    /// transport is open the size is applied, even if the child has already exited. Once the transport
+    /// has been closed after exit, the call does nothing and <see cref="Size"/> keeps its last applied
+    /// value. Hosts can therefore forward every layout change without checking <see cref="HasExited"/>.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
+    /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed while the child was running.</exception>
+    /// <exception cref="IOException">Unix: <c>TIOCSWINSZ</c> failed while the child was running.</exception>
     public void Resize(PtySize size)
         => Resize(size, null);
 
@@ -259,7 +265,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="size">New width and height in character cells.</param>
     /// <param name="pixelSize">Optional width and height in pixels. Ignored on Windows.</param>
+    /// <remarks>
+    /// Arguments are validated before the exit state is considered. See <see cref="Resize(PtySize)"/>
+    /// for behavior after the child exits.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">A pixel dimension is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
+    /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed while the child was running.</exception>
+    /// <exception cref="IOException">Unix: <c>TIOCSWINSZ</c> failed while the child was running.</exception>
     public void Resize(PtySize size, PtyPixelSize? pixelSize)
     {
         ThrowIfDisposed();
