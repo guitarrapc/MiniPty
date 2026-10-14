@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** proposed (2026-10-15). Not started.
+**Status:** G1 design agreed (2026-10-15); implementation not started. The other items are proposed.
 
 ## Background
 
@@ -25,7 +25,7 @@ All measurements were taken on Windows 11 build 26200 with 32 logical CPUs, the 
 | F6 | `PtyTerminal.Resize` after the child exited (a size change before tab teardown) | Throws `InvalidOperationException`: "Cannot resize after the pseudo-console has been closed." |
 | F7 | `Resize(new PtySize(600, 200))` | Silently clamped to 512×200, so the frontend grid and the PTY disagree |
 | F8 | N idle `PtyTerminal` instances, then a burst of 64 × 20 ms `Task.Run` items | N=0: 60 ms, N=4: 91 ms, N=8: 121 ms, **N=16: 1996 ms**. Minimum worker threads is 32, and 16 sessions × 2 parked threads = 32 |
-| F9 | A 304 KB paste through `WriteInputAsync` (bytes and string overloads) from the UI thread, with output undrained | UI stays responsive because ConPTY buffers the input. No action needed |
+| F9 | A 304 KB paste through `WriteInputAsync` (bytes and string overloads) from the UI thread, with output undrained | UI stays responsive because ConPTY buffers the input. No action needed on Windows |
 | F10 | VT sequences written by a child through the in-box ConPTY | See the table below |
 
 VT sequences written by the child through the in-box ConPTY (F10):
@@ -54,6 +54,13 @@ Some forwarded sequences also arrived **earlier than the text the child wrote be
 5. **The 512-cell clamp is below the platform limits** ([PtyStartInfo.cs:66](../../../src/MiniPty/PtyStartInfo.cs), [WindowsPtyBackend.cs:329](../../../src/MiniPty/Internal/WindowsPtyBackend.cs), [UnixPtyBackend.cs:204](../../../src/MiniPty/Internal/UnixPtyBackend.cs)). ConPTY takes a signed 16-bit `COORD`, and Unix `winsize` is unsigned 16-bit. This causes F7.
 6. **The in-box ConPTY is the only Windows backend.** Its VT behavior is whatever conhost the user's Windows build ships, and it renders child output instead of relaying it. This causes F10.
 
+Causes 1–3 share one structure:
+
+- **Three independent transport read paths:** the `ReadOutputAsync` producer, raw `Output` stream reads, and the one-shot pumps of `CompleteAsync` and Capture.
+- **Two polling drain paths:** the output buffer's exit observer and `PtyOutputDrain`.
+- **A shared assumption:** each path blocks on whatever thread it was handed, and that thread is selected by `Task.Yield`.
+- **EOF staging rides on the exit-polling loops** (`PromoteEofIfPending`, `SendEotIfPending`), so `SendEof` only makes progress while somebody is waiting for exit.
+
 ## Priority Legend
 
 | Priority | Meaning |
@@ -66,16 +73,16 @@ Some forwarded sequences also arrived **earlier than the text the child wrote be
 
 | ID | Priority | Gap | Resolution |
 |---|---|---|---|
-| G1 | **P0** | Async APIs block or deadlock when awaited on a UI `SynchronizationContext` (F1–F4) | [Caller-context safety](#g1-caller-context-safety-p0) |
+| G1 | **P0** | Async APIs block or deadlock when awaited on a UI `SynchronizationContext` (F1–F4) | [Session-owned output pump and caller-context-safe API](#g1-caller-context-safety-p0). This also delivers G3 and non-blocking input |
 | G2 | **P0** | `Resize` after child exit throws (F6) | [Exit-tolerant resize](#g2-exit-tolerant-resize-p0) |
-| G3 | **P1** | Idle sessions park thread-pool workers (F8) | [Thread-pool independence](#g3-thread-pool-independence-p1) |
+| G3 | **P1** | Idle sessions park thread-pool workers (F8) | [Merged into G1](#g3-thread-pool-independence-merged-into-g1) |
 | G4 | **P1** | Terminal size clamped to 512 (F7) | [Platform size limits](#g4-platform-size-limits-p1) |
 | G5 | **P1** | No guidance for GUI hosts; README patterns are unsafe on a UI thread | [GUI host guidance](#g5-gui-host-guidance-p1) |
-| G6 | **P2** | Reads cannot be canceled without closing the transport; sessions still need dedicated threads after G3 | [Thread-free async I/O](#g6-thread-free-async-io-p2) |
+| G6 | **P2** | After G1, each session still holds one dedicated reader thread, and a pending read cannot be canceled at the OS level | [Thread-free async I/O](#g6-thread-free-async-io-p2) |
 | G7 | **P2** | Windows is limited to the in-box ConPTY (F10); `PtyTerminal.Clear()` is a no-op | [Opt-in out-of-band ConPTY](#g7-opt-in-out-of-band-conpty-p2) |
 | G8 | **P2** | No process-tree cleanup on Windows | [Opt-in job object](#g8-opt-in-process-tree-cleanup-p2) |
 | G9 | **P2** | Unix termios relies on kernel defaults; `IUTF8` is missing | [Explicit termios](#g9-explicit-unix-termios-p2) |
-| G10 | **P2** | Unix teardown blocks the caller and has fd-lifetime races | [Unix teardown hygiene](#g10-unix-teardown-hygiene-p2) |
+| G10 | **P2** | Unix `Dispose` kills with `SIGKILL` immediately | [Graceful Unix termination](#g10-graceful-unix-termination-on-dispose-p2) |
 
 ---
 
@@ -87,22 +94,113 @@ GUI frameworks run user code on a thread that owns a `SynchronizationContext`. T
 
 The existing tests run without a `SynchronizationContext`, where `Task.Yield` happens to resume on the thread pool, so none of them can observe the problem.
 
-### Decision
+### Scope
 
-- **Contract:** no public async API performs a blocking OS wait or blocking transport I/O on the calling thread or on the caller's captured context. Awaiting any MiniPty API from a UI thread leaves that thread responsive. The contract covers `ReadOutputAsync`, `Output.ReadAsync`, `WaitForExitAsync`, `WaitForExitStatusAsync`, `CompleteAsync`, `PtyCapture.RunAsync`, and every `MiniPty.Terminal` entry point.
-- **Background dispatch:** replace `Task.Yield` with explicit thread-pool dispatch that ignores `SynchronizationContext`. The allocation-free work-item pattern already used for one-shot transport pumps is the template.
-- **`Output.ReadAsync`:** attempt a non-blocking read inline first, so the zero-allocation hot path is kept when data is ready. Only when no data is available does the read complete off the caller's thread. The synchronous `Output.Read` keeps its blocking semantics.
-- **Continuations:** MiniPty does not marshal callbacks back to the UI thread. The caller's own `await` resumes on its context as usual. `PtyTerminal` output handlers keep running on background threads, and G5 documents how to marshal them.
+G1 covers three things that come from the same structure (see Root Causes):
+
+- caller-context safety (F1–F4);
+- thread-pool independence (G3, F8);
+- non-blocking input writes.
+
+Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a thread-pool hop per read, keep pool starvation, and keep the duplicated read and drain paths. G2 is independent and small, and may ship in the same phase.
+
+### Contract
+
+- **No blocking on the caller:** no public async API performs a blocking OS wait or blocking transport I/O on the calling thread or on the caller's captured context.
+- **No library code on the caller's context:** library code never runs on the caller's `SynchronizationContext`.
+- **Standard await semantics for the caller's own continuations:** they resume on the captured context unless `ConfigureAwait(false)` is used.
+- **Synchronous members keep their contract:** members that block by contract (`Stream.Read`, `Stream.Write`) still block.
+
+### Architecture decisions
+
+1. **Output pump, one per session, started by `Pty.Start`.**
+   - The pump is the only code that reads the transport.
+   - It reads into a bounded ring of fixed-size slots taken from the shared array pool. Each transport read fills one slot, and data that is immediately available may be appended to the same slot.
+   - Each slot records its read-completion timestamp.
+   - When every slot is full, the pump stops reading, and backpressure flows through the OS pipe to the child as it does today.
+   - **Phase 1 driver:** a dedicated background thread per session, never a thread-pool worker.
+     - Windows uses synchronous `ReadFile`. Shutdown relies on closing the pseudoconsole's write side, which makes the read return.
+     - Unix puts the master in non-blocking mode, and the thread waits on the master and a wake descriptor together. On Linux, closing an fd does not interrupt a `read` blocked on it in another thread (see close(2)), so the wake descriptor is the reliable way to stop the reader.
+   - **Phase 2 driver:** G6 replaces the thread with thread-free async I/O. The public API does not change.
+2. **Exit watcher.**
+   - Windows uses a runtime registered wait on the process handle. The runtime's wait threads multiplex the handles, so no thread is dedicated to a session.
+   - Unix uses one process-wide watcher thread: pidfd on Linux 5.3+, `kqueue` `EVFILT_PROC` on macOS and FreeBSD, and consolidated `waitpid` polling on the same thread where neither is available.
+   - The watcher is the only code that reaps children.
+   - Exit completes a single per-session `Task<PtyExitStatus>`, whose continuations run asynchronously.
+3. **Session timer.**
+   - One lazily created timer per session drives two things:
+     - EOF staging: Windows Ctrl+Z / CR and deferred input-pipe close, and Unix EOT deferral.
+     - Post-exit quiet drain: ConPTY does not report EOF until the pseudoconsole is closed, and on Unix a grandchild can keep the slave open.
+   - The existing heuristic values do not change: 100 ms quiet, `OutputDrainGrace`, and the deferral counts. Only the mechanism that drives them changes.
+   - EOF staging no longer depends on somebody awaiting exit.
+4. **Single consumer.**
+   - `ReadOutputAsync`, the `Output` stream, `CompleteAsync`, `PtyCapture.RunAsync`, and `PtyTerminal` are all consumers of the pump.
+   - The existing one-active-consumer rule stays.
+   - Removed:
+     - the direct transport read paths;
+     - the polling drain helpers;
+     - the exit-observer loop inside the output buffer;
+     - the raw-read gating;
+     - the macOS-only pump scheduling.
+5. **Input.**
+   - A write completes synchronously when the transport accepts the bytes.
+   - When the write would block, for example when a Unix tty input queue is full because the child is not reading, the remainder goes to a background writer that preserves order.
+   - On Windows, ConPTY accepts input promptly (F9), so the fast path is effectively always taken.
+
+### Public API decisions
+
+| Member | Decision | Why |
+|---|---|---|
+| `ReadOutputAsync` | Shape unchanged. Completes synchronously when a chunk is ready, and resumes on the caller's context only when it has to wait. Chunk memory stays valid until the next `MoveNextAsync`. The enumerator is reused per session | Zero allocation per `MoveNextAsync`. The simplest GUI pattern, `await foreach` on the UI thread, also becomes the fastest: chunks are processed in place on the UI thread with no copy and no marshaling |
+| `Output` (Stream) | Kept as a view over the pump, with one copy into the caller's buffer. `ReadAsync` never blocks; `Read` blocks, per the Stream contract | Interop: `CopyToAsync`, readers, adapters |
+| `WaitForExitAsync` | **Breaking:** returns `Task<PtyExitStatus>`; `WaitForExitStatusAsync` is removed. Returns the cached exit task when the token cannot be canceled | One exit API, and zero allocation for the common call |
+| `HasExited` / `ExitCode` / `ExitStatus` | Read the watcher's cached state, with no OS call | No reaping race, and polling from UI code is cheap |
+| `WriteInputAsync` / `Input` | Non-blocking fast path with an ordered background slow path. `Input.WriteAsync` goes through the same path | Today `Input.WriteAsync` falls through to the base `Stream` implementation and allocates a pool task per call. Unix input writes can block the caller when the tty input queue is full |
+| `CompleteAsync` | Shape unchanged; implemented as a pump consumer plus the exit task | Never blocks the caller |
+| `Dispose` | **Behavior change:** does not block. It kills the child, signals the pump to stop, and returns; pooled slots go back to the pool when the pump stops, so chunk memory is invalid after `Dispose`. `DisposeAsync` awaits pump shutdown and is the deterministic option. Disposing before exit still faults pending `WaitForExitAsync` calls with `ObjectDisposedException` | Closing a tab must not freeze the UI |
+| `PtyOutputChunk` | Unchanged. Read timestamps stay internal, for Capture | Avoids growing the public surface |
+
+### Specification changes implied
+
+- **Managed buffering bound:** from "one in-flight chunk" to "slot count × slot size", in [core_session.md](../specs/core_session.md) (`ReadOutputAsync`) and [terminal.md](../specs/terminal.md) (`Pause`).
+- **Output is read from spawn:** output is read into the bounded ring before any consumer attaches. Early output is never stranded, and a child no longer stalls on its first writes while nobody is reading.
+- **Exit API merged:** as described in the table above.
+- **Dispose versus DisposeAsync:** the new semantics above.
+- **Capture timestamps:** they become pump read-completion times, which are closer to the transport than consumer receipt times.
+
+### Rejected alternatives
+
+| Alternative | Why rejected |
+|---|---|
+| Replace `Task.Yield` with a context-ignoring thread-pool switch only | Smallest diff and fixes F1–F4, but every `Output.ReadAsync` still hops to the pool and allocates, pool starvation (F8) remains, and three read paths plus two drain paths remain. Acceptable only as a stopgap |
+| Expose `System.IO.Pipelines` `PipeReader` as the output API | Ships with the shared framework, so it adds no dependency, and it batches naturally. But `ReadOnlySequence` and `AdvanceTo(consumed, examined)` are easy to misuse and contradict the "immediately intuitive API" principle. Awaiting `FlushAsync` from a dedicated reader thread also allocates. A fixed-slot ring is simpler internally |
+| Make `PtyTerminal` (push) the recommended GUI pattern | Handlers run off the UI thread, so each chunk needs either a copy or a completion handshake with the UI before the handler returns |
+| Start Windows on overlapped I/O immediately | Zero-allocation, cancelable reads are available, but this would rebuild the ConPTY coalescing behavior (`PIPE_NOWAIT`, micro-window) at the same time as the API restructuring. Deferred to G6 so each change can be measured separately |
+| Start the pump lazily on the first consumer (current behavior) | Leaves a window where early output stalls the child and fast children race the reader's start, which is the reason for today's macOS-only scheduling. The cost of eager start, one thread plus pooled slots for sessions that are never read, is acceptable |
+
+### Delivery steps
+
+Run the narrowest relevant tests after each step, so a hang can be attributed to that step.
+
+1. **Test harness first:** add a single-threaded `SynchronizationContext` helper. Write tests for F1–F4, `Output.ReadAsync`, `WriteInputAsync` against a full Unix input queue, and `Dispose` on the UI thread, and confirm they fail before any implementation changes.
+2. **Exit watcher, exit task, and session timer:** move EOF staging off the wait loops.
+3. **Output pump and consumer views:** migrate `ReadOutputAsync`, `Output`, `CompleteAsync`, Capture, and `PtyTerminal`, then delete the old paths.
+4. **Input path.**
+5. **Public API break:** `WaitForExitAsync` returns `PtyExitStatus`. Update samples, specifications, the README, and benchmarks.
 
 ### Acceptance
 
-- A test helper provides a single-threaded `SynchronizationContext`. Every API in the contract is driven from it against an idle interactive child. The test asserts that a posted probe callback runs within a short bound (F1–F4 turn green) and that output and exit are still observed.
-- Coverage on Windows and Unix.
-- No allocation regression in the integration and output benchmarks (`Session_32KiB_OutputStreamBytes` and related).
+- **Caller context:** F1–F4 tests are green on Windows and Unix. A probe posted to the single-threaded context runs within a short bound while the child is idle, and output and exit are still observed.
+- **Thread pool (F8):** with 16 idle sessions, a burst of short pool work completes within 2× of the zero-session baseline, and the pool thread count does not depend on the number of sessions.
+- **Exit latency:** exit-to-completion latency is no worse than today's 100 ms / 10 ms polling.
+- **Allocation:**
+  - No benchmark in [baselines/integration.json](../../../BenchmarkDotNet.Artifacts/baselines/integration.json) exceeds its baseline.
+  - Steady state allocates nothing per chunk and nothing per wait.
+- **Behavior preserved:** the existing lifecycle behavior holds, covering drain-then-exit, EOF staging, kill-then-drain, and one active consumer.
 
 ### Estimate
 
-Medium.
+Large. This restructures both backends and every output consumer.
 
 ---
 
@@ -129,32 +227,11 @@ Small.
 
 ---
 
-## G3: Thread-pool independence (P1)
+## G3: Thread-pool independence (merged into G1)
 
-### Why P1
+Each idle session parks two thread-pool workers. With 16 idle sessions on a 32-thread minimum pool, an unrelated burst of short work took 1996 ms instead of 60 ms (F8). On an 8-core laptop the threshold is four tabs.
 
-Each idle session parks two thread-pool workers. With 16 idle sessions on a 32-thread minimum pool, an unrelated burst of short work took 1996 ms instead of 60 ms (F8). On an 8-core laptop the threshold is four tabs. A starved pool delays every background continuation in the host, including the host's own UI-bound async work.
-
-### Decision
-
-- **Producer:** the strict-handoff producer runs on a dedicated background thread per session, not on a pool worker. One reader thread per terminal connection is an accepted cost for terminal hosts, and it keeps the existing handoff and coalescing design intact.
-- **Exit observation:** exit is observed through an OS wait registration instead of polling.
-  - Windows: a registered wait on the process handle, which is multiplexed by the runtime's wait threads.
-  - Linux: pidfd (5.3+). macOS and FreeBSD: `kqueue` `EVFILT_PROC`. One shared watcher serves all sessions.
-  - Polling remains only as the fallback for kernels without these facilities.
-- **`WaitForExitAsync`:** completes from that registration, so a waiter holds no thread.
-- **One-shot paths:** `CompleteAsync` and Capture may keep pool-based pumps when benchmarks show that is cheaper. They are short-lived by definition.
-
-### Acceptance
-
-- With 16 idle sessions, a burst of short pool work completes within 2× of the zero-session baseline.
-- Pool thread count does not grow with the number of idle sessions.
-- Exit-to-`Completion` latency is no worse than the current 100 ms / 10 ms polling.
-- No allocation regression in the benchmarks.
-
-### Estimate
-
-Medium–large. This also changes the drain heuristics that currently piggyback on the exit poller.
+The fix uses the same components as G1: the session-owned output pump on a dedicated thread, the exit watcher with no per-session thread, and the session timer in place of polling loops. G3 is therefore delivered by G1, and its acceptance criteria (pool burst latency, and pool thread count independent of session count) are part of G1's acceptance.
 
 ---
 
@@ -184,16 +261,16 @@ Small.
 
 ### Why P1
 
-The README's primary pattern, `ReadOutputAsync` followed by `WaitForExitAsync`, is exactly F1 and F3 when it is placed in an event handler. Until G1 ships, hosts need a warning. After G1, they still need the threading model spelled out.
+The README's primary pattern, `ReadOutputAsync` followed by `WaitForExitAsync`, is exactly F1 and F3 when it is placed in an event handler. After G1 the pattern is safe, and on a UI thread it becomes the recommended one. Hosts still need the threading model spelled out.
 
 ### Decision
 
-- Add a "GUI hosts" section to the Terminal specification and a short README note. It covers:
-  - `PtyTerminal` as the recommended entry point.
-  - Output handlers run on a background thread, so they marshal to the UI dispatcher and copy the bytes when they retain them.
-  - Resize from size-change events, which is safe after G2.
-  - Observe exit through `Completion`.
-  - Dispose on tab close.
+- Add a "GUI hosts" section to the core session specification and a short README note. It covers:
+  - the pull pattern on the UI thread (`await foreach` over `ReadOutputAsync`, no copy, no marshaling) as the primary recommendation;
+  - `PtyTerminal` for push-style transports, where handlers run on background threads and must marshal to the UI and copy any retained bytes;
+  - resize from size-change events, which is safe after G2;
+  - exit through `WaitForExitAsync` or `Completion`;
+  - `DisposeAsync` on tab close, with `Dispose` as the non-blocking alternative.
 - Until G1 ships, the README explicitly warns against awaiting session APIs on a UI thread.
 
 ### Acceptance
@@ -211,19 +288,19 @@ Small.
 
 ### Why P2
 
-After G3, an idle session still holds one dedicated reader thread, and a pending read can only be abandoned by closing the transport. A host that hands a session between owners, or that keeps dozens of background tabs, benefits from reads that hold no thread and can be canceled without consuming bytes. G1 and G3 already fix every observed failure, so this item is about scale and cancellation.
+After G1, an idle session holds one dedicated reader thread, and a pending read is stopped only by closing or waking the transport. A host that keeps dozens of background tabs, or that hands sessions between owners, benefits from reads that hold no thread and can be canceled at the OS level. G1 already fixes every observed failure, so this item is about scale.
 
 ### Decision
 
-- **Windows:** create MiniPty's own pipe ends overlapped; the ConPTY ends stay synchronous. Complete reads through the I/O completion port and cancel them with `CancelIoEx`, leaving the pipe open.
-- **Unix:** put the master in non-blocking mode and drive it from one shared readiness loop (`epoll` / `kqueue`). Use reference-counted fd lifetime so that a close cannot race an in-flight syscall. This also closes the EBADF-as-EOF masking described in G10.
-- **Writes:** writes wait for writability instead of blocking or throwing on `EAGAIN`.
-- **Coalescing:** the `PIPE_NOWAIT` and micro-window coalescing, and the `FIONREAD` / `minipty_try_read` continuation reads, are redesigned around readiness notifications.
+G6 replaces G1's phase 1 pump driver without changing the public API.
+
+- **Windows:** create MiniPty's own pipe ends overlapped; the ConPTY ends stay synchronous. Complete reads through the I/O completion port and cancel them with `CancelIoEx`.
+- **Unix:** drive every session's non-blocking master from one shared readiness loop (`epoll` / `kqueue`). This is the same loop that G1's exit watcher already runs.
+- **Coalescing:** redesign the ConPTY coalescing (`PIPE_NOWAIT`, micro-window) and the Unix continuation reads around completion and readiness notifications.
 
 ### Acceptance
 
-- Pool and OS thread counts stay constant with 64 idle sessions.
-- Canceling `Output.ReadAsync` returns without consuming bytes, and the stream stays usable.
+- Thread count stays constant with 64 idle sessions.
 - No throughput or allocation regression in the benchmarks.
 
 ### Estimate
@@ -308,28 +385,34 @@ Small.
 
 ---
 
-## G10: Unix teardown hygiene (P2)
+## G10: Graceful Unix termination on dispose (P2)
 
 ### Why P2
 
-- **Dispose blocks the caller:** Unix `Dispose` sends `SIGKILL` and then sleep-polls for up to 1 s on the caller's thread to reap the child ([UnixPtyBackend.cs:339](../../../src/MiniPty/Internal/UnixPtyBackend.cs)). Closing a tab freezes the UI, and the child is left as a zombie when the deadline passes.
-- **EBADF masks a closed fd:** EBADF is reported as EOF ([PtyStreams.cs:399](../../../src/MiniPty/Internal/PtyStreams.cs)). A transport close while the producer is blocked in `read(2)` can therefore be masked, and the fd number reused.
-- **macOS write race:** on macOS, continuation reads toggle `O_NONBLOCK` on the shared master description ([minipty_unix.c:731](../../../src/MiniPty/Native/minipty_unix.c)). A concurrent write in that window can get `EAGAIN`, which `PtyIo.WriteAll` throws.
+Unix `Dispose` used to have several teardown hazards. Most of them are removed by G1:
+
+| Original hazard | Removed by G1 because |
+|---|---|
+| `Dispose` sleep-polls up to 1 s on the caller's thread to reap ([UnixPtyBackend.cs:339](../../../src/MiniPty/Internal/UnixPtyBackend.cs)) | `Dispose` no longer blocks |
+| A child is left as a zombie when that 1 s deadline passes | The exit watcher always reaps |
+| A transport close races a `read` blocked in another thread, and EBADF reported as EOF ([PtyStreams.cs:399](../../../src/MiniPty/Internal/PtyStreams.cs)) masks it | The pump stops through its wake descriptor and closes the master only after leaving the read |
+| macOS toggles `O_NONBLOCK` on the shared master description ([minipty_unix.c:731](../../../src/MiniPty/Native/minipty_unix.c)), so a concurrent write can fail with `EAGAIN` | The master is permanently non-blocking, and writes handle `EAGAIN` through the slow path |
+
+What remains is the termination policy itself. `Dispose` sends `SIGKILL` immediately, so shells cannot save history or clean up.
 
 ### Decision
 
-- **Dispose:** hang up first with a bounded escalation to kill. Do not block the caller. Reaping is guaranteed by the exit watcher (G3).
-- **fd lifetime:** a transport close must not race an in-flight read. G6 provides the general solution; until then, close only after the producer has left the read.
-- **macOS:** stop toggling file-status flags on the shared description. Either use a readiness check, or retry writes on `EAGAIN`.
+On `Dispose`, hang up first and escalate to kill after a bounded grace period. Both steps run off the caller's thread.
 
 ### Acceptance
 
-- `Dispose` returns promptly when called on a UI thread, and no zombie remains.
-- Concurrent writes during continuation reads on macOS do not throw.
+- An interactive shell observes the hangup and can exit cleanly.
+- A child that ignores hangup is still killed within the bound.
+- `Dispose` returns promptly.
 
 ### Estimate
 
-Medium.
+Small, after G1.
 
 ---
 
@@ -337,33 +420,30 @@ Medium.
 
 ```mermaid
 flowchart LR
-    G1[G1 Caller-context safety P0]
+    G1[G1 Output pump + caller-context safety P0]
     G2[G2 Exit-tolerant resize P0]
-    G3[G3 Thread-pool independence P1]
     G4[G4 Size limits P1]
     G5[G5 GUI host guidance P1]
     G6[G6 Thread-free async I/O P2]
     G9[G9 Explicit termios P2]
-    G10[G10 Unix teardown P2]
+    G10[G10 Graceful termination P2]
     G7[G7 Out-of-band ConPTY P2]
     G8[G8 Process-tree cleanup P2]
 
-    G1 --> G3
-    G2 --> G5
     G1 --> G5
-    G3 --> G6
-    G3 --> G10
-    G6 --> G10
+    G2 --> G5
+    G4 --> G5
+    G1 --> G6
+    G1 --> G10
     G5 --> G7
     G5 --> G8
-    G4 --> G5
 ```
 
 | Phase | Items | Outcome |
 |---|---|---|
-| **Phase A** | G1, G2 | A WinUI host can use any MiniPty API from its UI thread without freezes or resize crashes |
-| **Phase B** | G3, G4, G5 | Multi-tab hosts do not starve the thread pool; wide windows work; the threading model is documented |
-| **Phase C** | G6, G9, G10 | Reads hold no thread and can be canceled; Unix input and teardown are correct |
+| **Phase A** | G1 (including G3), G2 | A WinUI host can use any MiniPty API from its UI thread without freezes or resize crashes, and idle tabs do not starve the thread pool |
+| **Phase B** | G4, G5 | Wide windows work, and the threading model is documented with the pull pattern as the GUI recommendation |
+| **Phase C** | G6, G9, G10 | Reads hold no thread, and Unix input and teardown are correct |
 | **Phase D** | G7, G8 | Optional Windows VT fidelity and process-tree cleanup for hosts that opt in |
 
 ## Lessons Learned
@@ -372,28 +452,31 @@ flowchart LR
 - **Tests without a `SynchronizationContext` cannot detect caller-context blocking.** The console and test runners resume continuations on the pool. Context-sensitive behavior needs an explicit single-threaded context in tests.
 - **`PtyTerminal` avoided F1–F4 only incidentally.** Its pump starts with `Task.Run`, which detaches from the caller's context. The core APIs offered no such protection.
 - **The pool starvation threshold is the minimum worker thread count** (the processor count). It is not a large number of sessions, so the problem appears with only a few tabs.
-- **Large pastes through `WriteInputAsync` did not block the UI thread**, even with output undrained. ConPTY accepts input into its own buffer independently of output backpressure.
+- **Large pastes through `WriteInputAsync` did not block the UI thread on Windows**, even with output undrained. ConPTY accepts input into its own buffer independently of output backpressure. Unix tty input queues are small and can block a writer.
 - **The in-box ConPTY reorders forwarded sequences relative to text** and consumes several query and graphics sequences. Its behavior must be treated as Windows-build-dependent, and must not be assumed to be a transparent relay.
 
 ## Open Questions
 
-- API shape for the G7 opt-in: a `PtyStartInfo` property, a process-wide setting, or a separate start method.
-- G5 sample form: a WinUI sample needs the Windows App SDK, which is a third-party dependency in a sample and cannot run in CI. The alternative is a framework-neutral console sample with a single-threaded context.
-- Whether `ClosePseudoConsole` during `Dispose` can block on older Windows builds when output is not being drained. If it can, Windows `Dispose` on a UI thread needs the same treatment as G10. Verify on Windows 10 and Windows 11 builds before 24H2.
-- Whether `Output.Read` (synchronous) should document that it blocks, or whether hosts should be steered entirely to the async and push APIs.
+- **Slot sizing:** the pump's slot count and size. Start from 4 × 4 KiB and tune with the streaming throughput and allocation benchmarks.
+- **Coalescing micro-window:** whether the ConPTY 1 ms coalescing micro-window is still needed once reads are pipelined into multiple slots.
+- **Unix fallback interval:** the `waitpid` polling interval for the fallback exit watcher on kernels without pidfd.
+- **`ClosePseudoConsole` blocking:** whether `ClosePseudoConsole` can block on older Windows builds when output is not being drained. G1 makes `Dispose` non-blocking, so if it can block, the call must run off the caller's thread. Verify on Windows 10 and Windows 11 builds before 24H2.
+- **G7 API shape:** a `PtyStartInfo` property, a process-wide setting, or a separate start method.
+- **G5 sample form:** a WinUI sample needs the Windows App SDK, which is a third-party dependency in a sample and cannot run in CI. The alternative is a framework-neutral console sample with a single-threaded context.
 
 ## Documentation Touchpoints (after each phase)
 
-- [specs/core_session.md](../specs/core_session.md): caller-context contract, `Resize` semantics after exit, size limits.
-- [specs/lifecycle.md](../specs/lifecycle.md): exit observation without polling, teardown behavior.
-- [specs/terminal.md](../specs/terminal.md): GUI host section, handler threading, `Clear()` with out-of-band ConPTY.
+- [specs/core_session.md](../specs/core_session.md): caller-context contract, consumer model, managed buffering bound, merged exit API, `Dispose` versus `DisposeAsync`, `Resize` after exit, size limits, GUI host section.
+- [specs/lifecycle.md](../specs/lifecycle.md): output pump started at spawn, exit watcher, timer-driven EOF staging and post-exit drain.
+- [specs/terminal.md](../specs/terminal.md): `Pause` buffering bound, handler threading, `Clear()` with out-of-band ConPTY.
+- [specs/capture.md](../specs/capture.md): timestamps taken at pump read completion.
 - [specs/platform_support.md](../specs/platform_support.md): Windows ConPTY implementation choice, kernel requirements for pidfd.
-- [references/pty_crossplatform.md](../references/pty_crossplatform.md): ConPTY VT forwarding measurements, termios settings.
-- [README.md](../../../README.md): GUI host note and recommended entry point.
+- [references/pty_crossplatform.md](../references/pty_crossplatform.md): ConPTY VT forwarding measurements, reader shutdown via wake descriptor, termios settings.
+- [README.md](../../../README.md): GUI host note, recommended pull pattern, `WaitForExitAsync` signature.
 
 ## Related Documents
 
 - [plan_terminal_parity.md](plan_terminal_parity.md): T7 (ConPTY clear), revisited by G7.
-- [specs/core_session.md](../specs/core_session.md): `ReadOutputAsync` strict handoff and coalescing that G3 and G6 must preserve.
+- [specs/core_session.md](../specs/core_session.md): `ReadOutputAsync` strict handoff and coalescing, which G1 replaces with the pump and G6 later re-drives.
 - [specs/terminal.md](../specs/terminal.md): `PtyTerminal` contract.
 - [references/pty_crossplatform.md](../references/pty_crossplatform.md): ConPTY and Unix spawn details.
