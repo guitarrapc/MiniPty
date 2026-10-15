@@ -194,9 +194,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <remarks>
     /// <para>
     /// Never blocks the calling thread. The bytes the terminal accepts right away are written synchronously, and the
-    /// task is then already complete; this is the usual case and allocates nothing. On Unix, when the child is not
-    /// reading and the tty input queue is full, the rest is written in order by the session's background reader as
-    /// the child reads, and the task completes then. Windows ConPTY accepts input promptly, so writes complete at once.
+    /// task is then already complete; this is the usual case and allocates nothing. Otherwise the rest is written in
+    /// order in the background, and the task completes then: on Unix when the child is not reading and the tty input
+    /// queue is full, and on Windows while output nobody reads has backed up and ConPTY has stopped taking input.
     /// </para>
     /// <para>Writes, including <see cref="SendEof"/>, reach the child in the order they were issued.</para>
     /// </remarks>

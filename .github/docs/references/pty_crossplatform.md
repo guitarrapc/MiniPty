@@ -69,8 +69,8 @@ Redirecting `CreateProcess` stdin/stdout to anonymous pipes **without** ConPTY i
 
 ### Setup sequence
 
-1. Create input and output pipe pairs (`CreatePipe` with inheritable handles).
-2. Mark the **parent** ends non-inheritable (`SetHandleInformation` on `inputWrite` and `outputRead`).
+1. Create the output pipe with `CreatePipe`, and the input pipe as a named pipe whose MiniPty end (the server) is opened overlapped and whose ConPTY end is opened synchronously by name. An anonymous pipe cannot be overlapped. The named pipe has a random name, one instance, `FILE_FLAG_FIRST_PIPE_INSTANCE`, and `PIPE_REJECT_REMOTE_CLIENTS`, so anything else that connects first makes the spawn fail instead of sharing the pipe. It keeps a 4 KiB buffer; with none, every write would wait for ConPTY to read.
+2. Create every handle non-inheritable. ConPTY duplicates its ends into its host process itself, and the child is created with `bInheritHandles = false`. Non-inheritable handles do not prevent one leak, though: a process the host spawns with inheritance while `CreatePseudoConsole` runs can still hold the output pipe open (see [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md) F12 and G11).
 3. `CreatePseudoConsole(size, inputRead, outputWrite, …)` → `HPCON`. Returns **HRESULT** (not `GetLastError`); treat `hr < 0` as failure and use `Marshal.ThrowExceptionForHR(hr)`.
 4. **Close** `inputRead` and `outputWrite` in the parent immediately (ConPTY holds its own duplicates).
 5. Build `STARTUPINFOEX` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`.
@@ -256,7 +256,7 @@ Each session's output is read by one pump, from spawn until end of output, on a 
 | Unix stop | Closing a descriptor does not interrupt a `read` or `poll` blocked on it in another thread (close(2)), so a close or disposal signals the reader's wake descriptor: an `eventfd` on Linux, a pipe elsewhere. |
 | Unix master lifetime | Reference-counted. The reader, input writes, resize, foreground-process lookup, and EOT writes each pin the master; a close stops new users and drops the owner's reference, and the descriptor closes on the last release, so its number is never reused under an in-flight call. |
 | Unix input | The master is non-blocking. A write takes what the tty input queue accepts on the calling thread, and the rest is queued in issue order. The reader thread adds `POLLOUT` (the write set of `select` on macOS) to its wait while input is queued, including while it is parked on a full ring, and writes the queue whenever the master can take more. A queued write completes when written; disposal fails it with `ObjectDisposedException`, and the end of output (the slave closed) with `IOException`. Staged EOT waits until nothing is queued. |
-| Windows input | Synchronous `WriteFile` on the ConPTY input pipe. ConPTY takes input into its own buffer promptly whether or not the child reads (measured with a 304 KB paste), and the anonymous pipe cannot be waited on. |
+| Windows input | MiniPty's end of the input pipe is overlapped. ConPTY takes input into its own buffer whether or not the child reads, but stops reading input while its output is blocked: after about 4 KiB when a child writes output nobody reads. A write the pipe takes at once completes synchronously through a reusable overlapped structure and one 4 KiB native staging buffer, both created on the first write. The rest is queued in issue order and written by I/O completions on the runtime's completion port, with completion-port notification skipped for writes that finish at once. Queue semantics match Unix: disposal fails queued writes with `ObjectDisposedException`, the transport close after exit fails them with `IOException`, cancellation discards bytes not yet written, and staged Ctrl+Z / CR waits until nothing is queued. |
 
 ### Post-exit drain
 

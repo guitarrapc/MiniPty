@@ -10,9 +10,9 @@ internal interface IPtyBackend : IDisposable
     /// <summary>Gets the stdin stream: a <see cref="PtyInputStream"/> over the write members below.</summary>
     public Stream Input { get; }
 
-    // Input. Writes take what the transport accepts now on the calling thread. On Unix the rest is queued in
-    // order and written by the session's reader thread when the master can take it, so no write blocks its
-    // caller; ConPTY accepts input promptly, so Windows writes synchronously.
+    // Input. Writes take what the transport accepts now on the calling thread, and the rest is queued in order, so
+    // no write blocks its caller. On Unix the session's reader thread writes the queue when the master can take
+    // more; on Windows I/O completions on the overlapped input pipe do, as ConPTY reads input again.
 
     /// <summary>
     /// Writes <paramref name="bytes"/>, completing once all of them are written. The caller keeps the memory

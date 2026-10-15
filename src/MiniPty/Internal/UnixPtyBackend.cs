@@ -114,7 +114,7 @@ internal static partial class UnixPtyBackend
         public void Dispose() => FreeUtf8Allocations(_owned);
     }
 
-    private sealed class UnixPtyBackendInstance : IPtyBackend, IValueTaskSource<int>
+    private sealed class UnixPtyBackendInstance : IPtyBackend, IPtyInputQueue, IValueTaskSource<int>
     {
         // _masterState: bit 0 is set once the master is closed to new users; the remaining bits count references
         // in units of MasterReference. The owner holds one reference from spawn until the transport closes.
@@ -145,8 +145,8 @@ internal static partial class UnixPtyBackend
         // Input the tty input queue could not take yet, oldest first; guarded by lock (this), which serializes
         // every input and EOT write with the queue. Locking the instance itself, which is never exposed, adds no
         // object to the session.
-        private PendingInput? _inputHead;
-        private PendingInput? _inputTail;
+        private PtyPendingInput? _inputHead;
+        private PtyPendingInput? _inputTail;
         private int _inputState;
         private PtyOutputPump? _pump;
         private bool _exited;
@@ -191,7 +191,7 @@ internal static partial class UnixPtyBackend
                 return default;
 
             cancellationToken.ThrowIfCancellationRequested();
-            PendingInput entry;
+            PtyPendingInput entry;
             lock (this)
             {
                 OnInputWritten(bytes);
@@ -223,7 +223,7 @@ internal static partial class UnixPtyBackend
                     return default;
 
                 cancellationToken.ThrowIfCancellationRequested();
-                PendingInput entry;
+                PtyPendingInput entry;
                 lock (this)
                 {
                     OnInputWritten(bytes.Span);
@@ -296,7 +296,7 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>Appends a queued write. Caller holds lock (this).</summary>
-        private PendingInput EnqueueLocked(ReadOnlyMemory<byte> remaining, byte[]? owned)
+        private PtyPendingInput EnqueueLocked(ReadOnlyMemory<byte> remaining, byte[]? owned)
         {
             switch (_inputState)
             {
@@ -306,7 +306,7 @@ internal static partial class UnixPtyBackend
                     throw new IOException("PTY input cannot be written: the child's terminal has closed.");
             }
 
-            var entry = new PendingInput(this, remaining, owned);
+            var entry = PtyPendingInput.Rent(this, remaining, owned);
             if (_inputTail is null)
                 _inputHead = entry;
             else
@@ -316,27 +316,19 @@ internal static partial class UnixPtyBackend
             return entry;
         }
 
-        private ValueTask Queued(PendingInput entry, CancellationToken cancellationToken)
+        private ValueTask Queued(PtyPendingInput entry, CancellationToken cancellationToken)
         {
             // The reader thread may be waiting for output only; this makes it wait for the master to take input too.
             Volatile.Read(ref _pump)?.WakeReader();
-            if (cancellationToken.CanBeCanceled)
-            {
-                entry.Token = cancellationToken;
-                entry.Registration = cancellationToken.UnsafeRegister(
-                    static state => ((PendingInput)state!).Owner.CancelInput((PendingInput)state!),
-                    entry);
-            }
-
-            return new ValueTask(entry, entry.Version);
+            return entry.ToValueTask(cancellationToken);
         }
 
         /// <summary>Writes queued input until the master is full again. Runs on the reader thread.</summary>
         private void FlushInput()
         {
-            PendingInput? done = null;
-            PendingInput? doneTail = null;
-            PendingInput? failed = null;
+            PtyPendingInput? done = null;
+            PtyPendingInput? doneTail = null;
+            PtyPendingInput? failed = null;
             Exception? error = null;
             lock (this)
             {
@@ -377,16 +369,16 @@ internal static partial class UnixPtyBackend
             }
 
             // Completed outside the lock: a waiter's continuation must never run while the queue is held.
-            CompleteChain(done, null);
-            CompleteChain(failed, error);
+            PtyPendingInput.CompleteChain(done, null);
+            PtyPendingInput.CompleteChain(failed, error);
         }
 
-        private void CancelInput(PendingInput entry)
+        public void CancelInput(PtyPendingInput entry)
         {
             var removed = false;
             lock (this)
             {
-                PendingInput? previous = null;
+                PtyPendingInput? previous = null;
                 for (var current = _inputHead; current is not null; previous = current, current = current.Next)
                 {
                     if (current != entry)
@@ -414,7 +406,7 @@ internal static partial class UnixPtyBackend
         /// <summary>Stops accepting queued input and fails what is queued. The first reason wins.</summary>
         private void CloseInput(int reason)
         {
-            PendingInput? queued;
+            PtyPendingInput? queued;
             lock (this)
             {
                 if (_inputState == InputOpen)
@@ -430,90 +422,9 @@ internal static partial class UnixPtyBackend
             Exception error = reason == InputDisposed
                 ? new ObjectDisposedException(nameof(PtySession))
                 : new IOException("PTY input cannot be written: the child's terminal has closed.");
-            CompleteChain(queued, error);
+            PtyPendingInput.CompleteChain(queued, error);
         }
 
-        private static void CompleteChain(PendingInput? chain, Exception? error)
-        {
-            while (chain is not null)
-            {
-                var next = chain.Next;
-                chain.Next = null;
-                chain.Complete(error);
-                chain = next;
-            }
-        }
-
-        /// <summary>
-        /// A write queued because the tty input queue was full. Completes once the reader thread has written all
-        /// of it, or with the error that ended the queue; one object per queued write, so writes that complete at
-        /// once allocate nothing.
-        /// </summary>
-        private sealed class PendingInput : IValueTaskSource
-        {
-            private ManualResetValueTaskSourceCore<bool> _core;
-            private byte[]? _owned;
-            private int _completed;
-
-            internal PendingInput(UnixPtyBackendInstance owner, ReadOnlyMemory<byte> remaining, byte[]? owned)
-            {
-                Owner = owner;
-                Remaining = remaining;
-                _owned = owned;
-                _core.RunContinuationsAsynchronously = true;
-            }
-
-            internal UnixPtyBackendInstance Owner { get; }
-
-            /// <summary>Not yet written. Guarded by the owner's lock.</summary>
-            internal ReadOnlyMemory<byte> Remaining;
-
-            /// <summary>Next queued write, or the next entry of a chain being completed. Guarded by the owner's lock.</summary>
-            internal PendingInput? Next;
-
-            internal CancellationToken Token;
-            internal CancellationTokenRegistration Registration;
-
-            internal short Version => _core.Version;
-
-            internal void Complete(Exception? error)
-            {
-                if (Interlocked.Exchange(ref _completed, 1) != 0)
-                    return;
-
-                Remaining = default;
-                var owned = _owned;
-                _owned = null;
-                if (owned is not null)
-                    ArrayPool<byte>.Shared.Return(owned);
-
-                // A context whose Post throws can never run the continuation; that must not escape into the
-                // reader thread or a disposing caller.
-                try
-                {
-                    if (error is null)
-                        _core.SetResult(true);
-                    else
-                        _core.SetException(error);
-                }
-                catch (Exception)
-                {
-                }
-            }
-
-            void IValueTaskSource.GetResult(short token)
-            {
-                var registration = Registration;
-                Registration = default;
-                registration.Dispose();
-                _core.GetResult(token);
-            }
-
-            ValueTaskSourceStatus IValueTaskSource.GetStatus(short token) => _core.GetStatus(token);
-
-            void IValueTaskSource.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
-                _core.OnCompleted(continuation, state, token, flags);
-        }
         public int ProcessId => _pid;
 
         // Exit state is cached by the watcher's reap; reading it never calls waitpid, which would race

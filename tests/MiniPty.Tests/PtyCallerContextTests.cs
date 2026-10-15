@@ -181,8 +181,8 @@ public sealed class PtyCallerContextTests
     private static async Task AssertWriteInputDoesNotBlockUiThreadAsync(bool textOverload)
     {
         // A Unix tty input queue fills when the child does not read, and a blocking write to the master then
-        // blocks its caller. ConPTY accepts input into its own buffer instead (plan F9), so Windows is not
-        // affected.
+        // blocks its caller. ConPTY accepts input into its own buffer instead while its output flows (plan F9);
+        // the backed-up-output tests below cover Windows.
         if (OperatingSystem.IsWindows())
             return;
 
@@ -190,6 +190,40 @@ public sealed class PtyCallerContextTests
         var session = Pty.Start(Spawn("sleep", ["30"]));
         // 4 MiB of short lines: well past the tty line buffer and the kernel flip-buffer limit.
         var text = string.Concat(Enumerable.Repeat(new string('x', 63) + "\n", 65536));
+        var bytes = Encoding.ASCII.GetBytes(text);
+        var write = ui.RunAsync(() => textOverload
+            ? session.WriteInputAsync(text).AsTask()
+            : session.WriteInputAsync(bytes).AsTask());
+
+        try
+        {
+            await AssertUiThreadStaysFreeAsync(ui);
+        }
+        finally
+        {
+            await CleanupAsync(ui, session, write);
+        }
+    }
+
+    [Test]
+    public Task WriteInputAsyncTextOnUiThreadDoesNotBlockItWhileOutputIsBackedUp() =>
+        AssertWriteInputDoesNotBlockUiThreadWhileOutputIsBackedUpAsync(textOverload: true);
+
+    [Test]
+    public Task WriteInputAsyncBytesOnUiThreadDoesNotBlockItWhileOutputIsBackedUp() =>
+        AssertWriteInputDoesNotBlockUiThreadWhileOutputIsBackedUpAsync(textOverload: false);
+
+    private static async Task AssertWriteInputDoesNotBlockUiThreadWhileOutputIsBackedUpAsync(bool textOverload)
+    {
+        // F11: once output nobody reads has filled the ring and the pipe, ConPTY stops reading input after about
+        // 4 KiB, and a synchronous write then blocks its caller until output is read. On a UI thread that also runs
+        // the output loop, that is a deadlock. On Unix the child never reads, so the tty input queue fills instead.
+        using var ui = new SingleThreadSynchronizationContext();
+        var session = Pty.Start(FloodingChild());
+        // Long enough for the flood to fill the ring and the transport behind it.
+        await Task.Delay(500);
+        // 64 KiB of short lines: far past both the ConPTY input pipe and a tty input queue.
+        var text = string.Concat(Enumerable.Repeat(new string('x', 63) + LineInput[^1], 1024));
         var bytes = Encoding.ASCII.GetBytes(text);
         var write = ui.RunAsync(() => textOverload
             ? session.WriteInputAsync(text).AsTask()
@@ -449,6 +483,12 @@ public sealed class PtyCallerContextTests
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(WindowsComSpec(), ["/c", "ping -n 3 127.0.0.1 >nul & echo DONE"])
             : Spawn("sh", ["-c", "sleep 2; printf 'DONE\\n'"]);
+
+    /// <summary>Writes output without end and never reads input.</summary>
+    private static PtyStartInfo FloodingChild() =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? Spawn(WindowsComSpec(), ["/c", "for /L %i in (1,1,100000000) do @echo %i"])
+            : Spawn("yes", ["flood"]);
 
     /// <summary>Line terminator that submits a line: ConPTY needs CR, a Unix tty accepts LF.</summary>
     private static string LineInput => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "x\r" : "x\n";

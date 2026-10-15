@@ -21,18 +21,15 @@ internal static partial class WindowsInterop
         out uint lpNumberOfBytesRead,
         IntPtr lpOverlapped);
 
+    /// <summary>Overlapped write: pass a null byte count and read the count from the overlapped structure.</summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static unsafe partial bool WriteFile(
         SafeFileHandle hFile,
         byte* lpBuffer,
         uint nNumberOfBytesToWrite,
-        out uint lpNumberOfBytesWritten,
-        IntPtr lpOverlapped);
-
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FlushFileBuffers(SafeFileHandle hFile);
+        IntPtr lpNumberOfBytesWritten,
+        NativeOverlapped* lpOverlapped);
 
     [LibraryImport("kernel32.dll")]
     internal static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
