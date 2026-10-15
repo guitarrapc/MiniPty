@@ -8,7 +8,7 @@ namespace MiniPty.Terminal;
 /// <paramref name="data"/> is valid only until the returned <see cref="ValueTask"/> completes;
 /// handlers that retain bytes must copy them. The terminal does not read further output until the
 /// returned task completes, so a slow handler applies backpressure all the way to the child
-/// process (strict handoff, then OS PTY pipe fill) without copying or dropping data.
+/// process (the session's bounded output buffer, then OS PTY pipe fill) without copying or dropping data.
 /// </para>
 /// <para>
 /// Handlers must honor <paramref name="cancellationToken"/>; it is canceled when the terminal is

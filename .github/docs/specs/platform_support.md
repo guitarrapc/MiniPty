@@ -37,7 +37,7 @@ Allocation regressions are checked with `scripts/compare-benchmark-allocations.p
 `BenchmarkDotNet.Artifacts/baselines/integration.json`; the gate is allocated bytes less than or
 equal to the recorded baseline. Refresh that baseline only when an intentional lifecycle change
 alters the measured path, and record the reason. The current one-shot baseline includes the bounded
-post-exit quiet polling and drain behavior; persistent streaming and capture remain separate
+post-exit quiet drain; persistent streaming and capture remain separate
 benchmark categories because they use different orchestration.
 
 ## Platform-specific Test Constraints
@@ -67,7 +67,7 @@ These are verification choices, not API requirements, but they document pitfalls
 - **`minipty_fork_pty_exec` returns spawn errno.** Failures return a positive errno to managed code; do not rely on `SetLastError` across the native shim boundary.
 - **Linux fork child scrubs inherited fds; FreeBSD fd scrub is follow-up.** After `forkpty`, Linux closes or marks close-on-exec on inherited descriptors `>= 3` and resets signal handlers to `SIG_DFL` before exec. FreeBSD gets signal reset only; inherited-fd close (`closefrom` or equivalent) remains open work — see [pty_crossplatform.md](../references/pty_crossplatform.md) → Fork child hygiene.
 - **Linux `forkpty` exec payloads must outlive the pre-exec child.** Freeing managed UTF-8 blocks immediately after `forkpty` returns races the child under parallel CI and flakes as exit **127**. Hold the payload until session/backend disposal; see [lifecycle.md](lifecycle.md) and [pty_crossplatform.md](../references/pty_crossplatform.md) → `forkpty()` safety.
-- **macOS one-shot capture needs a prompt transport pump.** Under burst parallel CI, `Task.Run` can queue the blocking PTY read too late and fast children close the slave before output is captured (`PtyUnixParallelSpawnCompletes`). macOS queues the pump via `UnsafeQueueUserWorkItem(preferLocal: true)`; a caller-side wait loop was rejected (thread-pool starvation / cancel-before-kill). See [pty_crossplatform.md](../references/pty_crossplatform.md) → One-shot transport pump scheduling.
+- **Output must be read from spawn, not when a consumer gets scheduled.** Under burst parallel CI, `Task.Run` queued the blocking PTY read too late and fast macOS children closed the slave before output was captured (`PtyUnixParallelSpawnCompletes`); a macOS-only work-item scheduling fix and a rejected caller-side wait loop (thread-pool starvation, cancel-before-kill) preceded the current design. Every session now reads from spawn on a dedicated reader thread on all platforms. See [pty_crossplatform.md](../references/pty_crossplatform.md) → Output pump.
 - **Explicit Unix environments require `execve`.** Passing `envp` means MiniPty cannot rely on plain `execvp`; the native shim provides portable path lookup before `execve`.
 - **Unix plain-script fallback differs from shebang exec.** `ENOEXEC` / `EACCES` / missing-interpreter `ENOENT` retry via `/bin/sh` then `/usr/bin/sh`. Shebang execution is attempted first and is sensitive to `noexec` mounts; see [pty_crossplatform.md](../references/pty_crossplatform.md) → Plain scripts and shell fallback.
 - **Do not assume `/tmp` is exec-enabled on Linux CI.** Hardened runners treat `/tmp` as data-only; spawn tests that need executable fixtures belong under the build output tree or another exec-enabled path.

@@ -8,7 +8,6 @@
 internal interface IPtyBackend : IDisposable
 {
     public Stream Input { get; }
-    public Stream Output { get; }
     public int ProcessId { get; }
     public bool HasExited { get; }
     public int ExitCode { get; }
@@ -39,10 +38,31 @@ internal interface IPtyBackend : IDisposable
     /// Sets the listener notified, allocation-free, on the thread that observes child exit.
     /// </summary>
     public void SetExitListener(IPtyExitListener listener);
+
+    // Output transport. Only the session's PtyOutputPump reads it, on its reader thread.
+
     /// <summary>
-    /// Windows closes the ConPTY transport once exit has been observed, because ConPTY output does not
-    /// reach EOF until the pseudo-console is closed. Unix does nothing: the PTY reports EOF on its own.
+    /// Pins the transport for the reader. Returns <see langword="false"/> when it is already closed, which the
+    /// reader treats as end of output. Paired with <see cref="EndOutputRead"/>.
     /// </summary>
-    public void CloseTransportAfterExit();
+    public bool TryBeginOutputRead();
+    public void EndOutputRead();
+    /// <summary>
+    /// Blocks until output arrives. Returns the byte count, 0 at end of output, or -1 when
+    /// <paramref name="reader"/> was woken first (Unix), so the pump re-checks its state.
+    /// </summary>
+    public int ReadOutput(Span<byte> buffer, PtyReaderThread reader);
+    /// <summary>
+    /// Reads output that is available now or arrives within a short micro-window, for appending to the slot
+    /// the last read filled. Returns 0 when none arrived; <paramref name="endOfOutput"/> reports end of output.
+    /// </summary>
+    public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput);
+    /// <summary>Gets whether the transport was closed, after which reads report end of output without blocking.</summary>
+    public bool IsOutputClosed { get; }
+    /// <summary>
+    /// Closes the transport so the reader reaches end of output: the pseudo-console on Windows (output already
+    /// produced still drains), the master on Unix (released once the reader and any in-flight call let go).
+    /// Afterwards <see cref="Resize"/> is a no-op.
+    /// </summary>
     public void CloseOutputTransport();
 }

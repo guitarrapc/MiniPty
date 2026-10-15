@@ -1,252 +1,6 @@
-﻿using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
+﻿using Microsoft.Win32.SafeHandles;
 
 namespace MiniPty.Internal;
-
-/// <summary>Read stream over a PTY output handle. Does not close the underlying handle.</summary>
-internal sealed class PtyHandleReadStream : Stream
-{
-    private readonly SafeFileHandle handle;
-    private PtySession? session;
-    private int rawHoldActive;
-    private long lastTransportReadTick64;
-
-    public PtyHandleReadStream(SafeFileHandle handle) => this.handle = handle;
-
-    internal void BindOutputGate(PtySession outputSession) => session = outputSession;
-
-    /// <summary>Tick count of the last successful <see cref="ReadTransport"/> (0 when none yet).</summary>
-    internal long LastTransportReadTick64 => Volatile.Read(ref lastTransportReadTick64);
-
-    public override bool CanRead => true;
-    public override bool CanSeek => false;
-    public override bool CanWrite => false;
-    public override long Length => throw new NotSupportedException();
-    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-
-    public override void Flush() { }
-
-    public override int Read(byte[] buffer, int offset, int count)
-    {
-        ArgumentOutOfRangeException.ThrowIfGreaterThan((uint)offset, (uint)buffer.Length);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan((uint)count, (uint)(buffer.Length - offset));
-        return Read(buffer.AsSpan(offset, count));
-    }
-
-    public override int Read(Span<byte> buffer)
-    {
-        if (buffer.IsEmpty)
-            return 0;
-
-        session?.BeforeRawOutputRead(ref rawHoldActive);
-        try
-        {
-            return EndRawOutputRead(ReadTransport(buffer));
-        }
-        catch
-        {
-            session?.AfterRawOutputRead(ref rawHoldActive);
-            throw;
-        }
-    }
-
-    /// <inheritdoc cref="Stream.ReadAsync(Memory{byte}, CancellationToken)" />
-    /// <remarks>
-    /// <para>
-    /// Intentionally not <c>async</c>: when <see cref="rawHoldActive"/> is already set, this returns
-    /// <see cref="ValueTask.FromResult{TResult}(TResult)"/> so tight <c>Output.ReadAsync</c> loops do not pay
-    /// an async state machine per call (see <c>Session_32KiB_OutputStreamBytes</c>).
-    /// </para>
-    /// <para>
-    /// <see cref="PtySession.BeforeRawOutputRead"/> runs synchronously at call start so a second
-    /// <c>ReadOutputAsync</c> / <c>CompleteAsync</c> fails immediately even if transport I/O has not begun.
-    /// </para>
-    /// <para>
-    /// Only the first read of an exclusive session delegates to <see cref="ReadFirstAsync"/>, which
-    /// <see cref="Task.Yield"/>s before blocking transport I/O. That lets callers start concurrent pumps
-    /// without deadlocking on an empty pipe; later reads in the same session use the synchronous fast path above.
-    /// </para>
-    /// </remarks>
-    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
-    {
-        if (buffer.IsEmpty)
-            return ValueTask.FromResult(0);
-
-        cancellationToken.ThrowIfCancellationRequested();
-        var continuing = Volatile.Read(ref rawHoldActive) != 0;
-        session?.BeforeRawOutputRead(ref rawHoldActive);
-        try
-        {
-            if (continuing)
-                return ValueTask.FromResult(EndRawOutputRead(ReadTransport(buffer.Span)));
-
-            return ReadFirstAsync(buffer, cancellationToken);
-        }
-        catch
-        {
-            session?.AfterRawOutputRead(ref rawHoldActive);
-            throw;
-        }
-    }
-
-    /// <summary>First gated read of a raw-output session; yields before blocking transport I/O.</summary>
-    private async ValueTask<int> ReadFirstAsync(Memory<byte> buffer, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await Task.Yield();
-            cancellationToken.ThrowIfCancellationRequested();
-            return EndRawOutputRead(ReadTransport(buffer.Span));
-        }
-        catch
-        {
-            session?.AfterRawOutputRead(ref rawHoldActive);
-            throw;
-        }
-    }
-
-    internal int ReadTransport(Span<byte> buffer)
-    {
-        if (buffer.IsEmpty)
-            return 0;
-
-        if (handle.IsClosed || handle.IsInvalid)
-            return 0;
-
-        try
-        {
-            unsafe
-            {
-                fixed (byte* ptr = buffer)
-                {
-                    if (!WindowsInterop.ReadFile(handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
-                    {
-                        var error = Marshal.GetLastPInvokeError();
-                        if (error is 109 or 6) // ERROR_BROKEN_PIPE, ERROR_INVALID_HANDLE
-                            return 0;
-
-                        throw new IOException($"ReadFile failed (Win32 {error})");
-                    }
-
-                    if (read > 0)
-                        Volatile.Write(ref lastTransportReadTick64, Environment.TickCount64);
-
-                    return (int)read;
-                }
-            }
-        }
-        catch (ObjectDisposedException)
-        {
-            return 0;
-        }
-    }
-
-    /// <summary>
-    /// Reads when bytes are immediately available; returns 0 when the pipe would block.
-    /// ConPTY anonymous pipes use <c>PIPE_NOWAIT</c> because <see cref="TryGetAvailableBytes"/> is unreliable there.
-    /// </summary>
-    internal unsafe int TryReadTransportIfReady(Span<byte> buffer, out bool eof)
-    {
-        eof = false;
-        if (buffer.IsEmpty)
-            return 0;
-
-        if (handle.IsClosed || handle.IsInvalid)
-        {
-            eof = true;
-            return 0;
-        }
-
-        uint nowait = WindowsInterop.PipeNowait;
-        if (!WindowsInterop.SetNamedPipeHandleState(handle, &nowait, IntPtr.Zero, IntPtr.Zero))
-            return 0;
-
-        try
-        {
-            fixed (byte* ptr = buffer)
-            {
-                if (!WindowsInterop.ReadFile(handle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
-                {
-                    var error = Marshal.GetLastPInvokeError();
-                    if (error is 109 or 6) // ERROR_BROKEN_PIPE, ERROR_INVALID_HANDLE
-                    {
-                        eof = true;
-                        return 0;
-                    }
-
-                    if (error == WindowsInterop.ErrorNoData)
-                        return 0;
-
-                    throw new IOException($"ReadFile failed (Win32 {error})");
-                }
-
-                return (int)read;
-            }
-        }
-        catch (ObjectDisposedException)
-        {
-            eof = true;
-            return 0;
-        }
-        finally
-        {
-            if (!handle.IsClosed && !handle.IsInvalid)
-            {
-                uint wait = WindowsInterop.PipeWait;
-                _ = WindowsInterop.SetNamedPipeHandleState(handle, &wait, IntPtr.Zero, IntPtr.Zero);
-            }
-        }
-    }
-
-    /// <summary>Returns immediately readable bytes without consuming them. Peek failure is reported as <see langword="false"/>.</summary>
-    internal unsafe bool TryGetAvailableBytes(out int available)
-    {
-        available = 0;
-        if (WindowsInterop.PeekNamedPipe(handle, null, 0, out _, out var totalAvail, IntPtr.Zero))
-        {
-            available = (int)totalAvail;
-            if (available > 0)
-                return true;
-        }
-        else if (Marshal.GetLastPInvokeError() != 109) // ERROR_BROKEN_PIPE
-        {
-            return false;
-        }
-
-        // ConPTY anonymous pipes often report zero via byte-count peek; buffer peek can still observe pending bytes.
-        Span<byte> scratch = stackalloc byte[1];
-        fixed (byte* ptr = scratch)
-        {
-            if (!WindowsInterop.PeekNamedPipe(handle, ptr, 1, out _, out totalAvail, IntPtr.Zero))
-            {
-                if (Marshal.GetLastPInvokeError() != 109) // ERROR_BROKEN_PIPE
-                    return false;
-
-                return true;
-            }
-
-            available = (int)totalAvail;
-            return true;
-        }
-    }
-
-    private int EndRawOutputRead(int read)
-    {
-        if (read == 0)
-            session?.AfterRawOutputRead(ref rawHoldActive);
-
-        return read;
-    }
-
-    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-    public override void SetLength(long value) => throw new NotSupportedException();
-    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-
-    protected override void Dispose(bool disposing)
-    {
-        // Handle lifetime is owned by the session backend.
-    }
-}
 
 /// <summary>Write stream over a PTY input handle. Does not close the underlying handle.</summary>
 internal sealed class PtyHandleWriteStream : Stream
@@ -279,207 +33,21 @@ internal sealed class PtyHandleWriteStream : Stream
     }
 }
 
-/// <summary>Read stream over a Unix PTY master fd. Does not close the fd.</summary>
-internal sealed class PtyFdReadStream : Stream
+/// <summary>Reference-counted access to a Unix PTY master, so a close never lands while the descriptor is in use.</summary>
+internal interface IPtyMasterLease
 {
-    private readonly int fd;
-    private PtySession? session;
-    private int rawHoldActive;
-    private long lastTransportReadTick64;
+    /// <summary>Pins the master for one use. Fails once the transport is closed.</summary>
+    bool TryAcquireMaster(out int master);
 
-    public PtyFdReadStream(int fd) => this.fd = fd;
-
-    internal void BindOutputGate(PtySession outputSession) => session = outputSession;
-
-    /// <summary>Tick count of the last successful <see cref="ReadTransport"/> (0 when none yet).</summary>
-    internal long LastTransportReadTick64 => Volatile.Read(ref lastTransportReadTick64);
-
-    public override bool CanRead => true;
-    public override bool CanSeek => false;
-    public override bool CanWrite => false;
-    public override long Length => throw new NotSupportedException();
-    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-
-    public override void Flush() { }
-
-    public override int Read(byte[] buffer, int offset, int count)
-    {
-        ArgumentOutOfRangeException.ThrowIfGreaterThan((uint)offset, (uint)buffer.Length);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan((uint)count, (uint)(buffer.Length - offset));
-        return Read(buffer.AsSpan(offset, count));
-    }
-
-    public override unsafe int Read(Span<byte> buffer)
-    {
-        if (buffer.IsEmpty)
-            return 0;
-
-        session?.BeforeRawOutputRead(ref rawHoldActive);
-        try
-        {
-            return EndRawOutputRead(ReadTransport(buffer));
-        }
-        catch
-        {
-            session?.AfterRawOutputRead(ref rawHoldActive);
-            throw;
-        }
-    }
-
-    /// <inheritdoc cref="Stream.ReadAsync(Memory{byte}, CancellationToken)" />
-    /// <remarks>
-    /// <para>
-    /// Intentionally not <c>async</c>: when <see cref="rawHoldActive"/> is already set, this returns
-    /// <see cref="ValueTask.FromResult{TResult}(TResult)"/> so tight <c>Output.ReadAsync</c> loops do not pay
-    /// an async state machine per call (see <c>Session_32KiB_OutputStreamBytes</c>).
-    /// </para>
-    /// <para>
-    /// <see cref="PtySession.BeforeRawOutputRead"/> runs synchronously at call start so a second
-    /// <c>ReadOutputAsync</c> / <c>CompleteAsync</c> fails immediately even if transport I/O has not begun.
-    /// </para>
-    /// <para>
-    /// Only the first read of an exclusive session delegates to <see cref="ReadFirstAsync"/>, which
-    /// <see cref="Task.Yield"/>s before blocking transport I/O. That lets callers start concurrent pumps
-    /// without deadlocking on an empty pipe; later reads in the same session use the synchronous fast path above.
-    /// </para>
-    /// </remarks>
-    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
-    {
-        if (buffer.IsEmpty)
-            return ValueTask.FromResult(0);
-
-        cancellationToken.ThrowIfCancellationRequested();
-        var continuing = Volatile.Read(ref rawHoldActive) != 0;
-        session?.BeforeRawOutputRead(ref rawHoldActive);
-        try
-        {
-            if (continuing)
-                return ValueTask.FromResult(EndRawOutputRead(ReadTransport(buffer.Span)));
-
-            return ReadFirstAsync(buffer, cancellationToken);
-        }
-        catch
-        {
-            session?.AfterRawOutputRead(ref rawHoldActive);
-            throw;
-        }
-    }
-
-    /// <summary>First gated read of a raw-output session; yields before blocking transport I/O.</summary>
-    private async ValueTask<int> ReadFirstAsync(Memory<byte> buffer, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await Task.Yield();
-            cancellationToken.ThrowIfCancellationRequested();
-            return EndRawOutputRead(ReadTransport(buffer.Span));
-        }
-        catch
-        {
-            session?.AfterRawOutputRead(ref rawHoldActive);
-            throw;
-        }
-    }
-
-    internal unsafe int ReadTransport(Span<byte> buffer)
-    {
-        if (buffer.IsEmpty)
-            return 0;
-
-        fixed (byte* ptr = buffer)
-        {
-            while (true)
-            {
-                var read = UnixInterop.Read(fd, ptr, (nuint)buffer.Length);
-                if (read < 0)
-                {
-                    var errno = Marshal.GetLastPInvokeError();
-                    if (errno == UnixInterop.EINTR)
-                        continue;
-                    if (errno is 0 or UnixInterop.EIO or UnixInterop.EBADF)
-                        return 0;
-
-                    throw new IOException($"read failed (errno {errno})");
-                }
-
-                if (read > 0)
-                    Volatile.Write(ref lastTransportReadTick64, Environment.TickCount64);
-
-                return read;
-            }
-        }
-    }
-
-    /// <summary>Returns immediately readable bytes without consuming them. Peek failure is reported as <see langword="false"/>.</summary>
-    internal unsafe bool TryGetAvailableBytes(out int available)
-    {
-        available = 0;
-        int count;
-        if (UnixInterop.minipty_peek_readable_bytes(fd, &count) != 0)
-            return false;
-
-        available = count;
-        return true;
-    }
-
-    /// <summary>
-    /// Reads when bytes are immediately available; returns 0 when the pipe would block.
-    /// Linux PTY masters report pending bytes via <c>FIONREAD</c>; macOS often reports zero while data is
-    /// readable, so macOS uses a temporary <c>O_NONBLOCK</c> read via <see cref="UnixInterop.minipty_try_read"/>.
-    /// </summary>
-    internal unsafe int TryReadTransportIfReady(Span<byte> buffer, out bool eof)
-    {
-        eof = false;
-        if (buffer.IsEmpty)
-            return 0;
-
-        if (!OperatingSystem.IsMacOS())
-        {
-            if (!TryGetAvailableBytes(out var available) || available == 0)
-                return 0;
-
-            var blockingRead = ReadTransport(buffer);
-            if (blockingRead == 0)
-                eof = true;
-
-            return blockingRead;
-        }
-
-        int tryRead;
-        int isEof;
-        fixed (byte* ptr = buffer)
-        {
-            if (UnixInterop.minipty_try_read(fd, ptr, (uint)buffer.Length, &tryRead, &isEof) != 0)
-                throw new IOException($"minipty_try_read failed (errno {Marshal.GetLastPInvokeError()})");
-        }
-
-        if (isEof != 0)
-            eof = true;
-
-        return tryRead;
-    }
-
-    private int EndRawOutputRead(int read)
-    {
-        if (read == 0)
-            session?.AfterRawOutputRead(ref rawHoldActive);
-
-        return read;
-    }
-
-    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-    public override void SetLength(long value) => throw new NotSupportedException();
-    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-
-    protected override void Dispose(bool disposing) { }
+    void ReleaseMaster();
 }
 
-/// <summary>Write stream over a Unix PTY master fd. Does not close the fd.</summary>
+/// <summary>Write stream over a Unix PTY master. Does not close the master.</summary>
 internal sealed class PtyFdWriteStream : Stream
 {
-    private readonly int _fd;
+    private readonly IPtyMasterLease _master;
 
-    public PtyFdWriteStream(int fd) => _fd = fd;
+    public PtyFdWriteStream(IPtyMasterLease master) => _master = master;
 
     public override bool CanRead => false;
     public override bool CanSeek => false;
@@ -496,7 +64,20 @@ internal sealed class PtyFdWriteStream : Stream
     public override void Write(byte[] buffer, int offset, int count) =>
         Write(buffer.AsSpan(offset, count));
 
-    public override void Write(ReadOnlySpan<byte> buffer) => PtyIo.WriteAll(_fd, buffer);
+    public override void Write(ReadOnlySpan<byte> buffer)
+    {
+        if (!_master.TryAcquireMaster(out var master))
+            throw new IOException("The PTY transport is closed.");
+
+        try
+        {
+            PtyIo.WriteAll(master, buffer);
+        }
+        finally
+        {
+            _master.ReleaseMaster();
+        }
+    }
 
     protected override void Dispose(bool disposing) { }
 }

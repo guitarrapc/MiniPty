@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** G2 implemented (2026-10-15). G1 design agreed; delivery steps 1 (caller-context test harness) and 2 (exit watcher, exit task, EOF staging timer) are done. The other items are proposed.
+**Status:** G2 implemented (2026-10-15). G1 design agreed; delivery steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), and 3 (output pump and consumer views) are done. The other items are proposed.
 
 ## Background
 
@@ -116,25 +116,24 @@ Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a
 1. **Output pump, one per session, started by `Pty.Start`.**
    - The pump is the only code that reads the transport.
    - It reads into a bounded ring of fixed-size slots taken from the shared array pool. Each transport read fills one slot, and data that is immediately available may be appended to the same slot.
-   - Each slot records its read-completion timestamp.
+   - Read-completion timestamps travel with each read to one-shot sinks (step 3). Ring slots do not store one: only Capture needs it, and Capture receives every read directly on the reader thread.
    - When every slot is full, the pump stops reading, and backpressure flows through the OS pipe to the child as it does today.
-   - **Phase 1 driver:** a dedicated background thread per session, never a thread-pool worker.
+   - **Phase 1 driver:** a dedicated background thread per reading session, never a thread-pool worker. Step 3 takes it from a process-wide pool of reader threads that park and serve later sessions, because a thread per spawn allocated about 4.9 KB once pooled buffers were returned on it.
      - Windows uses synchronous `ReadFile`. Shutdown relies on closing the pseudoconsole's write side, which makes the read return.
-     - Unix puts the master in non-blocking mode, and the thread waits on the master and a wake descriptor together. On Linux, closing an fd does not interrupt a `read` blocked on it in another thread (see close(2)), so the wake descriptor is the reliable way to stop the reader.
+     - Unix waits on the master and a wake descriptor together before each read. On Linux, closing an fd does not interrupt a `read` blocked on it in another thread (see close(2)), so the wake descriptor is the reliable way to stop the reader. Step 3 keeps the master in blocking mode instead of the planned non-blocking mode, because input writes share the descriptor and step 4 owns the input path.
    - **Phase 2 driver:** G6 replaces the thread with thread-free async I/O. The public API does not change.
 2. **Exit watcher.**
    - Windows uses process-wide watcher threads, each waiting on up to 63 duplicated process handles with `WaitForMultipleObjects`. A runtime registered wait was the original plan; step 2 replaced it because it allocates about 270 bytes per session.
    - Unix uses one process-wide watcher thread: pidfd on Linux 5.3+, `kqueue` `EVFILT_PROC` on macOS and FreeBSD, and consolidated `waitpid` polling on the same thread where neither is available.
    - The watcher is the only code that reaps children.
    - Exit is recorded once per session. Public waits get a `Task<PtyExitStatus>` created on first use, whose continuations run asynchronously; library-internal waits use an allocation-free waiter slot; the session's output drain is notified through an allocation-free listener.
-3. **Session timer.**
-   - One lazily created timer per session drives two things:
-     - EOF staging: Windows Ctrl+Z / CR and deferred input-pipe close, and Unix EOT deferral.
-     - Post-exit quiet drain: ConPTY does not report EOF until the pseudoconsole is closed, and on Unix a grandchild can keep the slave open.
+3. **Timers instead of wait loops.**
+   - EOF staging (Windows Ctrl+Z / CR and deferred input-pipe close, Unix EOT deferral) runs on one lazily created timer per session (step 2).
+   - Post-exit quiet drain runs on one process-wide timer that ticks only while some session is between exit and end of output (step 3). ConPTY does not report EOF until the pseudoconsole is closed, and on Unix a grandchild can keep the slave open. A shared timer replaced the planned per-session one because the drain needs no per-session state beyond what the pump already holds.
    - The existing heuristic values do not change: 100 ms quiet, `OutputDrainGrace`, and the deferral counts. Only the mechanism that drives them changes.
    - EOF staging no longer depends on somebody awaiting exit.
 4. **Single consumer.**
-   - `ReadOutputAsync`, the `Output` stream, `CompleteAsync`, `PtyCapture.RunAsync`, and `PtyTerminal` are all consumers of the pump.
+   - `ReadOutputAsync`, the `Output` stream, `CompleteAsync`, `PtyCapture.RunAsync`, and `PtyTerminal` are all consumers of the pump. `ReadOutputAsync` and `Output` drain the ring on their own thread; `CompleteAsync` and Capture attach a sink that the pump writes into on the reader thread (step 3), so a one-shot run needs no consumer thread and cannot fill the ring while it waits for exit.
    - The existing one-active-consumer rule stays.
    - Removed:
      - the direct transport read paths;
@@ -162,11 +161,12 @@ Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a
 
 ### Specification changes implied
 
-- **Managed buffering bound:** from "one in-flight chunk" to "slot count × slot size", in [core_session.md](../specs/core_session.md) (`ReadOutputAsync`) and [terminal.md](../specs/terminal.md) (`Pause`).
-- **Output is read from spawn:** output is read into the bounded ring before any consumer attaches. Early output is never stranded, and a child no longer stalls on its first writes while nobody is reading.
-- **Exit API merged:** as described in the table above.
-- **Dispose versus DisposeAsync:** the new semantics above.
-- **Capture timestamps:** they become pump read-completion times, which are closer to the transport than consumer receipt times.
+- **Managed buffering bound:** from "one in-flight chunk" to "slot count × slot size", in [core_session.md](../specs/core_session.md) (`ReadOutputAsync`) and [terminal.md](../specs/terminal.md) (`Pause`). Done in step 3.
+- **Output is read from spawn:** output is read into the bounded ring before any consumer attaches. Early output is never stranded, and a child no longer stalls on its first writes while nobody is reading. Done in step 3.
+- **Exit API merged:** as described in the table above. Step 5.
+- **Dispose versus DisposeAsync:** the new semantics above. Done in step 3.
+- **Capture timestamps:** they become pump read-completion times, which are closer to the transport than consumer receipt times. Done in step 3.
+- **Exit waits no longer close the transport** (step 3): the post-exit drain closes it for every consumer after output has gone quiet, in [lifecycle.md](../specs/lifecycle.md).
 
 ### Rejected alternatives
 
@@ -259,6 +259,67 @@ Lessons:
   - Never construct an exception that is not thrown (`Dispose` built an `ObjectDisposedException` on every call).
   - Pooled `ValueTask` builders did not help: boxes returned on another thread were often not reused.
 - **The caller-context probe must not depend on the thread pool.** Its latency is now timestamped on the UI thread. Tests whose operation spawns a child on the UI thread start measuring after the spawn, which is inherent and can exceed 100 ms under load.
+
+### Step 3 result: output pump and consumer views
+
+What changed:
+
+- **Reader:** each session's output is read from spawn by one pump on a dedicated reader thread, into a ring of 4 × 4 KiB slots. Reader threads come from a process-wide pool: a thread parks when its session's output ends and serves the next session (see [Output pump](../references/pty_crossplatform.md#output-pump)).
+- **Ring consumers:** `ReadOutputAsync` uses one enumerator per session that hands out slots in place and allocates nothing per `MoveNextAsync`. `Output` is a stream view whose `ReadAsync` never blocks.
+- **Sink consumers:** `CompleteAsync` and Capture attach a sink that the pump writes into on the reader thread. Capture chunk times are read-completion times.
+- **Post-exit drain:** one process-wide timer closes the transport after 100 ms of quiet. Exit waits no longer close it.
+- **Disposal:** `Dispose` does not block. `DisposeAsync` completes when the reader has stopped.
+- **Unix master:** reference-counted, with each reader stopped through its own wake descriptor (`eventfd` on Linux, a pipe elsewhere, `select` on macOS).
+- **Removed:**
+  - the transport read streams and raw-read gating;
+  - the output buffer and its drain work item;
+  - the transport pump tasks, including the macOS scheduling;
+  - the polling drain helpers;
+  - the `FIONREAD` and `minipty_try_read` natives;
+  - `CloseTransportAfterExit`;
+  - `PtyTransportPumpBenchmarks`.
+
+Results:
+
+| Test | Windows | Linux |
+|---|---|---|
+| F1 `ReadOutputAsync` on the UI thread | Pass | Pass |
+| F2 `Output.ReadAsync` on the UI thread | Pass | Pass |
+| F8 occupied workers, 4 idle sessions | Pass (≤ 2; was 4 after step 2) | Pass |
+| Full suite (3 new tests: output kept for a late reader, `CompleteAsync` after output ended, blocking `Output.Read`) | 197 pass, 1 skipped (step 4), 3 runs | 197 pass, 1 skipped, 3 runs |
+
+NativeAOT publish and run were verified on Windows and Linux with the `Session` and `Interactive` samples, with no trim or AOT warnings. On Linux the static archive under the ignored `runtimes/` folder must be rebuilt with `scripts/build-native.sh` first; the stale local copy lacked the new natives.
+
+Allocation (Windows, KB per operation, in the repository checkout; HEAD minimum against this step's final three runs, which had no outliers):
+
+| Benchmark | HEAD | Step 3 |
+|---|---|---|
+| `Session_Exit0_Bytes` | 2.68 | 1.98 |
+| `Session_Echo_Bytes` | 2.72 | 2.03–2.04 |
+| `Capture_Echo_Bytes` | 3.89 | 3.21–3.22 |
+| `Session_32KiB_Bytes` | 39.25 | 38.51 |
+| `Capture_32KiB_Bytes` | 45.29 | 39.92–39.93 |
+| `Session_32KiB_StreamBytes` | 4.24 | 1.70 |
+| `Session_32KiB_OutputStreamBytes` | 2.00 | 1.80 |
+| `Session_Echo_Text` | 3.04 | 2.35–2.36 |
+| `Capture_Echo_Text` | 5.36 | 4.68 |
+| `Capture_32KiB_Text` | 124.14 | 114.10–114.12 |
+| `Capture_32KiB_DisplayPlain` | 189.67 | 179.64 |
+
+Notes on the numbers:
+
+- `Session_32KiB_OutputStreamBytes` now only reads `Output` to the end. Before, it had to wait for exit and run the drain helper itself, because ConPTY output never ended on its own.
+- Its time rose from 94 ms to about 185–245 ms. Exit no longer closes the pseudo-console, so output ends after the 100 ms quiet period, as `ReadOutputAsync` always did (`Session_32KiB_StreamBytes`, about 188–223 ms). The one-shot benchmarks got slightly faster (for example `Capture_32KiB_Bytes` 202 → 187 ms).
+- Capture allocates about 5–10 KB less because coalescing now applies to it, which gives fewer chunks and less chunk metadata.
+
+Lessons:
+
+- **Reuse reader threads.** A bare thread start allocates 137 B. One pooled-array return on a fresh thread raises that to about 4.9 KB, because the array pool allocates a per-thread cache and strands the returned array in it when the thread exits.
+- **Keep each pooled buffer's rent and return on one thread.** An array returned on another thread stays in that thread's pool cache, and the next rent elsewhere allocates. Two places did this. Signaling end of output before dropping the pump's ring reference intermittently left the final ring release to the reader thread (the streaming benchmark averaged 7.2 KB instead of 1.7 KB in one run). Detaching a one-shot result on the thread that resumed the caller stranded grown buffers in a worker's cache (intermittent 7 KB and 119 KB averages on the one-shot benchmarks; HEAD showed the same kind of spike). The pump now releases the ring and parks its thread before completion is visible, and a sink finishes its result on the reader thread.
+- **Stamp quiet detection per read, not per slot.** Stamping the last read after the coalescing micro-window let its empty tail postpone the post-exit close by up to a clock tick. Capture runs were about 10 ms slower until the stamp moved to each read that returned bytes.
+- **One-shot consumers belong on the reader thread.** A bounded ring drained by a consumer that only starts after exit would block a bulk-output child before it can exit. Writing into a sink on the reader thread also removed the pump task, the drain polling, and the timeout tasks.
+- **A one-time timeout needs a re-check after arming.** Review found that the drain close timeout, which fires once, could land between the sink's state check and its arming the wait, leaving no wait to signal and the scheduler done with the pump: `CompleteAsync` would have hung instead of throwing. The sink now re-checks after arming, with full fences on both sides. Review also found a full ring spinning against a closed Unix master; that state now ends output. Neither had a failing test.
+- **macOS was not run locally.** The macOS-only native paths (the `select` wait and the pipe wake descriptor) were neither compiled nor exercised here; FreeBSD shares the pipe path. CI on macOS is the first real check.
 
 ### Acceptance
 
@@ -546,10 +607,10 @@ flowchart LR
 
 ## Open Questions
 
-- **Slot sizing:** the pump's slot count and size. Start from 4 × 4 KiB and tune with the streaming throughput and allocation benchmarks.
-- **Coalescing micro-window:** whether the ConPTY 1 ms coalescing micro-window is still needed once reads are pipelined into multiple slots.
+- **Slot sizing:** the pump's slot count and size. Step 3 ships 4 × 4 KiB: a 32 KiB Windows child arrives in 12–13 chunks and every allocation benchmark improved. Throughput tuning is still open.
+- **Coalescing micro-window:** whether the ConPTY 1 ms coalescing micro-window is still needed once reads are pipelined into multiple slots. Step 3 keeps it, on every consumer, and did not measure without it.
 - ~~**Unix fallback interval:** the `waitpid` polling interval for the fallback exit watcher on kernels without pidfd.~~ Resolved in step 2: 10 ms, on the single watcher thread, for unregistrable children only.
-- **`ClosePseudoConsole` blocking:** whether `ClosePseudoConsole` can block on older Windows builds when output is not being drained. G1 makes `Dispose` non-blocking, so if it can block, the call must run off the caller's thread. Verify on Windows 10 and Windows 11 builds before 24H2.
+- **`ClosePseudoConsole` blocking:** whether `ClosePseudoConsole` can block on older Windows builds when output is not being drained. G1 makes `Dispose` non-blocking, so if it can block, the call must run off the caller's thread. Step 3 still closes on the caller's thread but switches the reader to discarding output first, so the final frame always has a reader. Verify on Windows 10 and Windows 11 builds before 24H2.
 - **G7 API shape:** a `PtyStartInfo` property, a process-wide setting, or a separate start method.
 - **G5 sample form:** a WinUI sample needs the Windows App SDK, which is a third-party dependency in a sample and cannot run in CI. The alternative is a framework-neutral console sample with a single-threaded context.
 
@@ -566,6 +627,6 @@ flowchart LR
 ## Related Documents
 
 - [plan_terminal_parity.md](plan_terminal_parity.md): T7 (ConPTY clear), revisited by G7.
-- [specs/core_session.md](../specs/core_session.md): `ReadOutputAsync` strict handoff and coalescing, which G1 replaces with the pump and G6 later re-drives.
+- [specs/core_session.md](../specs/core_session.md): `ReadOutputAsync` bounded buffering and coalescing (the step 3 pump, which G6 later re-drives).
 - [specs/terminal.md](../specs/terminal.md): `PtyTerminal` contract.
 - [references/pty_crossplatform.md](../references/pty_crossplatform.md): ConPTY and Unix spawn details.

@@ -74,6 +74,13 @@ internal static class WindowsPtyBackend
     /// <summary>Sentinel for <see cref="WindowsPtyBackendInstance._inputTailByte"/> when no stdin bytes were written.</summary>
     private const byte InputTailUnset = 0xFF;
     private const int EofDeferPollsEmptyInput = 40;
+    private const int ErrorInvalidHandle = 6;
+    private const int ErrorBrokenPipe = 109;
+    /// <summary>
+    /// How long a read keeps appending ConPTY slices to its slot. Measured with <see cref="Environment.TickCount64"/>,
+    /// so it ends on the next tick of the system clock (up to about 16 ms on Windows).
+    /// </summary>
+    private const int CoalesceMicroWindowMs = 1;
     private const uint CreateUnicodeEnvironment = 0x00000400;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
@@ -275,14 +282,12 @@ internal static class WindowsPtyBackend
             _processInfo = processInfo;
             _size = size;
             Input = new InputTrackingWriteStream(new PtyHandleWriteStream(inputWriteHandle), OnInputWritten);
-            Output = new PtyHandleReadStream(outputReadHandle);
 
             // Last, so the watcher never observes a partially constructed instance.
             WindowsExitWatcher.Register(processInfo.hProcess, this);
         }
 
         public Stream Input { get; }
-        public Stream Output { get; }
         public int ProcessId => _processInfo.dwProcessId;
 
         public Task<PtyExitStatus> Exited => _exitSignal.GetTask();
@@ -413,12 +418,6 @@ internal static class WindowsPtyBackend
             WindowsInterop.TerminateProcess(_processInfo.hProcess, 1);
         }
 
-        public void CloseTransportAfterExit()
-        {
-            if (!_disposed && TryRefreshExitState())
-                CloseTransport();
-        }
-
         public void OnProcessExited()
         {
             if (!_disposed)
@@ -448,12 +447,122 @@ internal static class WindowsPtyBackend
             }
         }
 
+        /// <summary>
+        /// Closes the pseudo-console. ConPTY then flushes what it has rendered and closes its end of the output
+        /// pipe, so the reader drains the rest and sees end of output. The output pipe itself stays open for that
+        /// drain and closes with <see cref="Dispose"/>.
+        /// </summary>
         public void CloseOutputTransport()
         {
             if (!_hpcClosed)
                 CloseTransport();
+        }
 
-            CloseOutputPipe();
+        public bool IsOutputClosed => Volatile.Read(ref _outputClosed);
+
+        // The output pipe handle is pinned by each ReadFile call (SafeHandle reference counting), so a concurrent
+        // Dispose defers the close until the read returns, and later reads see ObjectDisposedException.
+        public bool TryBeginOutputRead() => true;
+
+        public void EndOutputRead()
+        {
+        }
+
+        /// <summary>
+        /// Blocking <c>ReadFile</c> on the ConPTY output pipe. Never woken early: closing the pseudo-console ends
+        /// it, and the drain closes it after exit.
+        /// </summary>
+        public unsafe int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        {
+            try
+            {
+                fixed (byte* ptr = buffer)
+                {
+                    if (WindowsInterop.ReadFile(_outputReadHandle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
+                        return (int)read;
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                return 0;
+            }
+
+            var error = Marshal.GetLastPInvokeError();
+            if (error is ErrorBrokenPipe or ErrorInvalidHandle)
+                return 0;
+
+            throw new IOException($"ReadFile failed (Win32 {error})");
+        }
+
+        /// <summary>
+        /// Appends output that is available now or arrives within the micro-window. ConPTY delivers bulk output in
+        /// small slices shortly after one another, and <c>PeekNamedPipe</c> often reports zero bytes on its pipes
+        /// while more is in flight, so this reads with <c>PIPE_NOWAIT</c> and retries until the window ends.
+        /// </summary>
+        public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
+        {
+            var read = TryReadOutputNow(buffer, out endOfOutput);
+            if (read > 0 || endOfOutput)
+                return read;
+
+            var deadline = Environment.TickCount64 + CoalesceMicroWindowMs;
+            while (Environment.TickCount64 < deadline)
+            {
+                Thread.Sleep(0);
+                read = TryReadOutputNow(buffer, out endOfOutput);
+                if (read > 0 || endOfOutput)
+                    return read;
+            }
+
+            return 0;
+        }
+
+        private unsafe int TryReadOutputNow(Span<byte> buffer, out bool endOfOutput)
+        {
+            endOfOutput = false;
+            if (_outputReadHandle.IsClosed)
+            {
+                endOfOutput = true;
+                return 0;
+            }
+
+            uint nowait = WindowsInterop.PipeNowait;
+            try
+            {
+                if (!WindowsInterop.SetNamedPipeHandleState(_outputReadHandle, &nowait, IntPtr.Zero, IntPtr.Zero))
+                    return 0;
+
+                try
+                {
+                    fixed (byte* ptr = buffer)
+                    {
+                        if (WindowsInterop.ReadFile(_outputReadHandle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
+                            return (int)read;
+                    }
+
+                    var error = Marshal.GetLastPInvokeError();
+                    if (error == WindowsInterop.ErrorNoData)
+                        return 0;
+
+                    if (error is ErrorBrokenPipe or ErrorInvalidHandle)
+                    {
+                        endOfOutput = true;
+                        return 0;
+                    }
+
+                    throw new IOException($"ReadFile failed (Win32 {error})");
+                }
+                finally
+                {
+                    uint wait = WindowsInterop.PipeWait;
+                    _ = WindowsInterop.SetNamedPipeHandleState(_outputReadHandle, &wait, IntPtr.Zero, IntPtr.Zero);
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                endOfOutput = true;
+                return 0;
+            }
         }
 
         public void Dispose()

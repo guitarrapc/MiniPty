@@ -50,14 +50,15 @@ internal static partial class WindowsInterop
     internal static partial bool CloseHandle(IntPtr hObject);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial IntPtr CreateEventW(
+        IntPtr lpEventAttributes,
+        [MarshalAs(UnmanagedType.Bool)] bool bManualReset,
+        [MarshalAs(UnmanagedType.Bool)] bool bInitialState,
+        IntPtr lpName);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static unsafe partial bool PeekNamedPipe(
-        SafeFileHandle hNamedPipe,
-        byte* lpBuffer,
-        uint nBufferSize,
-        out uint lpBytesRead,
-        out uint lpTotalBytesAvail,
-        IntPtr lpBytesLeftThisMessage);
+    internal static partial bool SetEvent(IntPtr hEvent);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

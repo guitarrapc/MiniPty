@@ -32,7 +32,6 @@ public sealed class PtyCallerContextTests
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(10);
 
     [Test]
-    [Skip("Pending G1 step 3 (output pump): the output producer still starts on the caller's context and deadlocks a UI thread. Remove this Skip in step 3.")]
     public async Task ReadOutputAsyncOnUiThreadDeliversOutputWithoutBlockingIt()
     {
         // F1: the producer used to start on the caller's context and deadlock it before any chunk arrived.
@@ -58,7 +57,6 @@ public sealed class PtyCallerContextTests
     }
 
     [Test]
-    [Skip("Pending G1 step 3 (output pump): Output.ReadAsync still reads synchronously on the caller's thread after the first call. Remove this Skip in step 3.")]
     public async Task OutputReadAsyncOnUiThreadDoesNotBlockItWhileIdle()
     {
         // F2: every read after the first used to block the calling thread inside ReadFile / read(2).
@@ -306,7 +304,6 @@ public sealed class PtyCallerContextTests
 
     [Test]
     [NotInParallel]
-    [Skip("Pending G1 step 3 (output pump): each idle session still parks its output producer on a pool worker (4 sessions occupy 4 workers; step 2 removed the exit pollers). Remove this Skip in step 3.")]
     public async Task IdleSessionsDoNotOccupyThreadPoolWorkers()
     {
         // F8: each idle session used to park two pool workers (the output producer and the exit poller),

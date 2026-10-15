@@ -171,9 +171,9 @@ public sealed class PtyTerminal : IAsyncDisposable
     /// Pauses output delivery for flow control. No output handler runs while paused.
     /// </summary>
     /// <remarks>
-    /// Pausing parks the pump: the session's strict-handoff producer stops reading the PTY
+    /// Pausing parks the pump: the session's bounded output buffer fills, its reader stops reading the PTY
     /// transport, the OS PTY buffer fills, and the child eventually blocks on write. No data is
-    /// dropped or buffered in managed memory beyond the single in-flight chunk. Equivalent to
+    /// dropped, and managed buffering stays within that buffer (4 × 4 KiB, including the in-flight chunk). Equivalent to
     /// node-pty's <c>pause()</c>.
     /// </remarks>
     public void Pause()

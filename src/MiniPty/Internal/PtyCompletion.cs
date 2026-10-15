@@ -1,78 +1,44 @@
 ﻿namespace MiniPty.Internal;
 
+/// <summary>
+/// One-shot completion shared by <see cref="PtySession.CompleteAsync"/> and <c>PtyCapture.RunAsync</c>: route
+/// output into a sink, apply input, wait for exit, then wait for end of output within the drain deadlines.
+/// </summary>
+/// <remarks>
+/// Output flows into the sink on the session's reader thread from the moment it attaches, so nothing waits for
+/// output on the caller's thread and the exit wait and the drain wait hold no thread. The caller owns the
+/// session's single-consumer ownership for the duration.
+/// </remarks>
 internal static class PtyCompletion
 {
-    internal delegate Task<TOutput> OutputPump<TOutput>(Stream output, CancellationToken cancellationToken);
-
-    internal delegate Task<TOutput> SessionOutputPump<TOutput>(PtySession session, CancellationToken cancellationToken);
-
-    internal static Task<(TOutput Output, int ExitCode)> RunAsync<TOutput>(
+    internal static async Task<int> RunAsync(
         PtySession session,
         PtyCompleteOptions options,
-        OutputPump<TOutput> pump,
-        CancellationToken cancellationToken) =>
-        RunWithTransportPumpAsync(session, options, (output, ct) => pump(output, ct), cancellationToken);
-
-    internal static Task<(TOutput Output, int ExitCode)> RunAsync<TOutput>(
-        PtySession session,
-        PtyCompleteOptions options,
-        SessionOutputPump<TOutput> pump,
-        CancellationToken cancellationToken) =>
-        RunWithSessionPumpAsync(session, options, pump, cancellationToken);
-
-    private static async Task<(TOutput Output, int ExitCode)> RunWithTransportPumpAsync<TOutput>(
-        PtySession session,
-        PtyCompleteOptions options,
-        OutputPump<TOutput> pump,
+        PtyOutputSink sink,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(pump);
+        ArgumentNullException.ThrowIfNull(sink);
 
-        using var orchestration = session.EnterCompletionOrchestration();
-        var pumpTask = pump(session.OutputTransport, cancellationToken);
-        await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
-        // Defer CloseTransport on child exit so ConPTY bulk stdout is not truncated; post-exit drain
-        // may close the transport early on Windows when output has been quiet long enough.
-        var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
-        var output = await PtyOutputDrain.AwaitPumpAsync(
-            pumpTask,
-            session.OutputTransport,
-            session.CloseOutputTransport,
-            options.OutputDrainGrace,
-            options.OutputReaderCloseTimeout,
-            throwOnTimeout: true,
-            transportAlreadyClosed: false,
-            cancellationToken).ConfigureAwait(false);
+        var pump = session.OutputPump;
+        pump.AttachSink(sink);
+        try
+        {
+            await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
+            var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
+            while (!await sink.WaitForDrainAsync(pump, options.OutputDrainGrace, options.OutputReaderCloseTimeout, cancellationToken).ConfigureAwait(false))
+            {
+            }
 
-        return (output, exitCode);
-    }
-
-    private static async Task<(TOutput Output, int ExitCode)> RunWithSessionPumpAsync<TOutput>(
-        PtySession session,
-        PtyCompleteOptions options,
-        SessionOutputPump<TOutput> pump,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(session);
-        ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(pump);
-
-        using var orchestration = session.EnterCompletionOrchestration();
-        var pumpTask = pump(session, cancellationToken);
-        await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
-        // Match transport-pump ordering (exit then drain). Defer CloseTransport on Windows until after
-        // ReadOutputAsync finishes so BoundedOutputBuffer's producer is not mid-read on a disposed handle.
-        var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
-        var output = await PtyOutputDrain.AwaitSessionPumpAsync(
-            pumpTask,
-            session.CloseOutputTransport,
-            options.OutputDrainGrace,
-            options.OutputReaderCloseTimeout,
-            cancellationToken).ConfigureAwait(false);
-
-        return (output, exitCode);
+            return exitCode;
+        }
+        catch
+        {
+            // Output read from here on stays in the ring for whichever consumer comes next.
+            pump.DetachSink(sink);
+            throw;
+        }
     }
 
     private static async Task ApplyInputAsync(PtySession session, PtyCompleteOptions options, CancellationToken cancellationToken)
@@ -96,8 +62,6 @@ internal static class PtyCompletion
         PtyCompleteOptions options,
         CancellationToken cancellationToken)
     {
-        // The drain below closes the transport itself, after output has been quiet long enough, so the exit
-        // wait never closes it: closing at exit would truncate ConPTY bulk output.
         var waitTask = session.WaitForExitForCompletionAsync(cancellationToken, options.KillOnCancellation);
         return options.ExitTimeout is { } exitTimeout
             ? WaitForExitWithTimeoutAsync(waitTask, exitTimeout, cancellationToken)

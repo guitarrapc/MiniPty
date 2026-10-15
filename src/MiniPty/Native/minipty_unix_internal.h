@@ -33,12 +33,16 @@ int minipty_set_winsize(
     unsigned short pixel_width,
     unsigned short pixel_height);
 int minipty_get_active_process_name(int master, char *buffer, int buffer_length);
-int minipty_peek_readable_bytes(int fd, int *bytes_available);
-int minipty_try_read(int fd, void *buf, unsigned int count, int *bytes_read, int *is_eof);
 
 int minipty_child_watch_init(void);
 int minipty_child_watch_add(int pid);
 int minipty_child_watch_wake(void);
 int minipty_child_watch_wait(int *pids, int capacity, int timeout_ms);
+
+int minipty_wake_open(int *read_fd, int *write_fd);
+int minipty_wake_signal(int write_fd);
+void minipty_wake_drain(int read_fd);
+void minipty_wake_close(int read_fd, int write_fd);
+int minipty_output_wait(int master, int wake_fd, int timeout_ms);
 
 #endif

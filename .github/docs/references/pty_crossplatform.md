@@ -7,10 +7,11 @@ Source layout:
 | Area | Location |
 |---|---|
 | Factory + session | `src/MiniPty/Pty.cs`, `PtySession.cs` |
-| Completion / drain | `src/MiniPty/Internal/PtyCompletion.cs`, `PtyOutputDrain.cs`, `PtyTextPump.cs` |
+| Output pump / drain | `src/MiniPty/Internal/PtyOutputPump.cs`, `PtyReaderThread.cs`, `PtyOutputDrainScheduler.cs`, `PtyOutputReader.cs`, `PtyOutputStream.cs` |
+| Completion | `src/MiniPty/Internal/PtyCompletion.cs`, `PtyOutputSink.cs`, `PtyCompletionSink.cs` |
 | Windows backend | `src/MiniPty/Internal/WindowsPtyBackend.cs` |
 | Unix backend | `src/MiniPty/Internal/UnixPtyBackend.cs` |
-| Timestamped observation | `src/MiniPty.Capture/PtyCapture.cs`, `Internal/PtyCapturePump.cs` |
+| Timestamped observation | `src/MiniPty.Capture/PtyCapture.cs`, `Internal/PtyCaptureSink.cs` |
 
 ## Architecture
 
@@ -33,7 +34,7 @@ Do not parse escape sequences inside the PTY backend. Terminal rendering (ANSI �
 
 ## Session Lifecycle
 
-Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps the same session with a timestamp pump and `CompleteAsync`. For responsibility split and session-state flow diagrams, see [lifecycle.md](../specs/lifecycle.md) → Mental Model and Session Flow.
+Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps the same session with a timestamping completion sink. For responsibility split and session-state flow diagrams, see [lifecycle.md](../specs/lifecycle.md) → Mental Model and Session Flow.
 
 | API | Behavior |
 |---|---|
@@ -41,15 +42,15 @@ Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps th
 | `HasExited` | Reports the exit recorded by the process-wide exit watcher (see [Child exit observation](#child-exit-observation)). Windows may also check `WaitForSingleObject(0)` on the process handle. On Unix it never calls `waitpid`: the watcher is the only reaper, so the one-time wait status is read once. |
 | `WriteInputAsync` | Writes UTF-8 (default) or raw bytes to PTY stdin. Does not close stdin. |
 | `SendEof()` | **Windows:** after bytes were written, writes Ctrl+Z + CR (`0x1A`, `0x0D`) and keeps the input pipe open until exit (pipe close during wait yields `0xC000013A`); when input lacks a trailing `\r`/`\n`, an extra CR is written first. With no bytes, defers input pipe close—see [Staged stdin EOF](#staged-stdin-eof). **Unix:** writes EOT (`0x04`, Ctrl-D) on the first staging tick. Staging runs on a per-session timer, so it progresses whether or not anyone awaits exit. |
-| `WaitForExitAsync(CancellationToken)` | Awaits the OS exit notification; holds no thread and never polls. Cancellation stops waiting only; the child keeps running (`OperationCanceledException`). |
+| `WaitForExitAsync(CancellationToken)` | Awaits the OS exit notification; holds no thread and never polls. Does not close the transport. Cancellation stops waiting only; the child keeps running (`OperationCanceledException`). |
 | `CompleteAsync(PtyCompleteOptions, CancellationToken)` | Optional stdin, wait for exit, drain output, return `PtyResult`. Cancellation kills the child when `KillOnCancellation` is true (default). |
 | `Kill()` | `TerminateProcess` (Windows) or `kill(SIGKILL)` (Unix). Does not release handles; call `Dispose` afterward. |
 | `Kill(PtySignal)` | **Unix:** `kill(2)` with the per-OS native number (SIGUSR1/2 differ: Linux 10/12, macOS/FreeBSD 30/31). **Windows:** signal is advisory; validates the enum then `TerminateProcess` (node-pty parity). |
 | `WaitForExitStatusAsync` / `ExitStatus` | Adds the Unix termination signal (`waitpid` `WTERMSIG`) to the exit code; decoding is fully managed (identical exited/signaled status layout on Linux/macOS/FreeBSD). Windows always reports a null signal. |
 | `PtyCompleteOptions.OutputDrainGrace` | Default 1s—post-exit drain before closing transport. |
 | `PtyCompleteOptions.OutputReaderCloseTimeout` | Default 5s—wait after transport close for the reader to finish. |
-| `Dispose()` | If the child is still running, **kills** it, then closes ConPTY/pipes/process handles. The exit watcher reaps the killed child, so `Dispose` never waits for it and leaves no zombie. |
-| `PtyCapture.RunAsync` | `Pty.Start` + timestamp pump + `CompleteAsync`. Returns `PtyCaptureResult` with `Chunks`. |
+| `Dispose()` | If the child is still running, **kills** it, then closes ConPTY/pipes/process handles without blocking; the output pump stops on its own (see [Disposal](#disposal)). The exit watcher reaps the killed child, so `Dispose` never waits for it and leaves no zombie. `DisposeAsync` also waits for the pump to stop. |
+| `PtyCapture.RunAsync` | `Pty.Start` + timestamping completion sink. Returns `PtyCaptureResult` with `Chunks`. |
 
 ## Windows: ConPTY
 
@@ -179,16 +180,9 @@ minipty_spawn_helper:
 
 Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux or macOS.
 
-### One-shot transport pump scheduling
+### Output reading
 
-`CompleteAsync` and `PtyCapture.RunAsync` start a background transport read immediately after spawn. Do **not** busy-wait on the caller thread for the pump to enter its read loop — that starves the thread pool under parallel CI and can throw cancellation before `KillOnCancellation` runs.
-
-| Platform | Scheduling |
-|---|---|
-| macOS | `ThreadPool.UnsafeQueueUserWorkItem(..., preferLocal: true)` so the blocking read starts promptly (node-pty attaches its reader synchronously at spawn) |
-| Other | `Task.Run` |
-
-Post-exit quiet drain on ConPTY and Unix PTY masters may close the transport when reads have been quiet long enough, bounded by `OutputDrainGrace` — drain timing only, not command completion. See [lifecycle.md](../specs/lifecycle.md) and [completion.md](../specs/completion.md).
+The session's output pump starts reading at spawn on a dedicated reader thread, for every consumer and on every platform, so fast children never race a consumer's first read. See [Output pump](#output-pump).
 
 ### Parent I/O (all Unix)
 
@@ -196,7 +190,7 @@ Post-exit quiet drain on ConPTY and Unix PTY masters may close the transport whe
 2. Consumer reads `Output` while the child runs.
 3. If one-shot stdin was provided, `SendEof()` before waiting—see [Unix stdin EOF](#unix-stdin-eof).
 4. If no stdin bytes, leave the master open for writes until the child exits (TUI programs).
-5. The exit watcher reaps the child; on the normal exit path, `CompleteAsync` drains output (natural EOF, then `close(master)` on timeout). `Dispose()` closes the master immediately, then drains with `OutputReaderCloseTimeout` only.
+5. The exit watcher reaps the child. The output pump reads until natural EOF; the post-exit drain closes the master only when output stays open after exit (a grandchild holds the slave). `Dispose()` closes the master, and the descriptor closes once the reader releases it.
 
 ### Unix stdin EOF
 
@@ -243,9 +237,36 @@ Shared session logic lives in `UnixPtyBackend`; spawn and resize ioctl live in `
 | macOS | `<util.h>`, `<spawn.h>` / `libminipty_unix.dylib` + helper |
 | FreeBSD | `<libutil.h>` / `libutil` |
 
-`waitpid`, `kill`, `read`, `write`, and other syscalls remain on `libc` in the shared partial class. `TIOCSWINSZ` resize uses `minipty_set_winsize` in `libminipty_unix`—not a direct `ioctl` P/Invoke—because `ioctl` is variadic and mis-marshals on macOS arm64. `FIONREAD` peek for `ReadOutputAsync` coalescing uses `minipty_peek_readable_bytes` in the same native library for the same reason.
+`waitpid`, `kill`, `read`, `write`, and other syscalls remain on `libc` in the shared partial class. `TIOCSWINSZ` resize uses `minipty_set_winsize` in `libminipty_unix`—not a direct `ioctl` P/Invoke—because `ioctl` is variadic and mis-marshals on macOS arm64. Output readiness waits (`minipty_output_wait`) and the reader wake descriptors live in the same native library.
 
-On Windows ConPTY, `ReadOutputAsync` coalescing uses `PIPE_NOWAIT` on the output pipe because `PeekNamedPipe` is unreliable on anonymous ConPTY pipes; see `core_session.md` lessons learned. On Linux, continuation reads use `FIONREAD` peek before blocking `read`. macOS PTY masters often report zero via `FIONREAD` while data is readable; macOS uses `minipty_try_read` (`O_NONBLOCK`) for continuation reads instead.
+## Output pump
+
+Each session's output is read by one pump, from spawn until end of output, on a dedicated reader thread. Consumers never read the transport themselves, so no consumer blocks a caller's thread or a thread-pool worker, and output produced before a consumer attaches is never stranded.
+
+| Aspect | Implementation |
+|---|---|
+| Reader thread | A process-wide pool of dedicated background threads, one per session that is still reading. When a session's output ends, its thread parks and serves the next session; a thread idle for 30 s exits. Never a thread-pool worker, never the caller's thread. |
+| Buffer | A ring of 4 slots × 4 KiB in one array from the shared array pool. Each read fills one slot and keeps appending output that arrives within a short micro-window. When all four slots hold unread output the pump stops reading, and backpressure reaches the child through the OS pipe. |
+| Ring consumers | `ReadOutputAsync` hands out slots in place; `Output` copies out of them. Both wait through an allocation-free wait slot that the pump completes; continuations run asynchronously, so no consumer code runs on the reader thread. |
+| Sink consumers | `CompleteAsync` and `PtyCapture.RunAsync` attach a sink. The pump writes into it on the reader thread, after delivering anything the ring already held; writes are serialized with attach and detach under the pump lock. |
+| Windows read | Blocking `ReadFile` on the ConPTY output pipe. It ends when ConPTY closes its end of the pipe, after the pseudo-console is closed. |
+| Windows coalescing | Continuation reads toggle `PIPE_NOWAIT`, because `PeekNamedPipe` often reports zero bytes on ConPTY pipes while output is in flight, and retry with `Thread.Sleep(0)` until `Environment.TickCount64` passes a 1 ms deadline, which on Windows lasts until the next system clock tick. |
+| Unix read | `minipty_output_wait` waits on the master and the reader thread's wake descriptor together (`poll` on Linux and FreeBSD; `select` on macOS, whose `poll` does not support devices such as PTY masters), then `read`s the master. The master stays in blocking mode because input writes share it. |
+| Unix coalescing | The same wait with a 1 ms timeout before each continuation read. |
+| Unix stop | Closing a descriptor does not interrupt a `read` or `poll` blocked on it in another thread (close(2)), so a close or disposal signals the reader's wake descriptor: an `eventfd` on Linux, a pipe elsewhere. |
+| Unix master lifetime | Reference-counted. The reader, input writes, resize, foreground-process lookup, and EOT writes each pin the master; a close stops new users and drops the owner's reference, and the descriptor closes on the last release, so its number is never reused under an in-flight call. |
+
+### Post-exit drain
+
+ConPTY reports end of output only after the pseudo-console closes, and on Unix a grandchild can keep the slave open after the child exits. Once the exit watcher reports exit, a process-wide 10 ms timer, running only while some session is draining, closes the transport after the pump has read nothing for 100 ms and is not parked on a full ring.
+
+A one-shot completion sink adds bounds: the transport closes at `OutputDrainGrace` after exit at the latest, and the drain wait fails with `TimeoutException` when the reader has not finished `OutputReaderCloseTimeout` after the close. It also never quiet-closes before the first read, because ConPTY can emit its first frame after a fast child has already exited.
+
+Closing ends output without losing it: ConPTY flushes its final frame and the pump drains the pipe to its end, and Unix closes only after output has been quiet. Waiting for exit never closes the transport.
+
+### Disposal
+
+`Dispose` switches the pump to discarding output, kills the child, closes the transport, and returns. On Windows the pump keeps reading until the pipe ends, because closing a pseudo-console can wait until its final frame fits in the pipe; on Unix the wake descriptor stops it at once. The ring returns to the pool when both the session and the pump have released it, so the reader never writes into an array that another renter owns. `DisposeAsync` additionally completes once the pump has stopped.
 
 ## Child exit observation
 
@@ -276,7 +297,7 @@ PTY output is a **byte stream**, not lines or Unicode strings:
 - Do not use line-based APIs (`ReadLine`) as the primary read path.
 - Decode PTY bytes with `PtyCompleteOptions.OutputEncoding` (default **UTF-8**). Do not use `Console.OutputEncoding`—in NativeAOT, containers, and CI it may not match the child terminal.
 
-`PtyCapturePump` timestamps each read from a `TimeProvider` origin captured at session start (`PtyCaptureOptions.TimeProvider`, default `TimeProvider.System`).
+`PtyCaptureSink` timestamps each read at its completion, relative to a `TimeProvider` origin captured right after spawn (`PtyCaptureOptions.TimeProvider`, default `TimeProvider.System`).
 
 ### Terminal size
 
@@ -291,11 +312,11 @@ Current builds inherit the parent environment. Unix tools often expect `TERM=xte
 PTY shutdown is timing-sensitive. General pattern:
 
 ```text
-1. Start reading PTY output (pump task)
+1. The output pump reads PTY output from spawn (dedicated reader thread)
 2. One-shot stdin: WriteInputAsync → SendEof (Windows: Ctrl+Z + CR when bytes written, else pipe close; Unix: EOT) before wait
 3. Detect child exit (exit watcher notification)
-4. Drain output (OutputDrainGrace), then close ConPTY (Windows) or master fd (Unix)
-5. Wait for reader (OutputReaderCloseTimeout), release process handles
+4. Post-exit drain: close ConPTY (Windows) or the master (Unix) once output is quiet; one-shot completion bounds this by OutputDrainGrace
+5. One-shot completion waits for the reader (OutputReaderCloseTimeout); disposal releases process handles
 ```
 
 Exact ordering differs slightly by OS; avoid forcing one sequence if it causes hangs on one platform.
@@ -304,7 +325,7 @@ Exact ordering differs slightly by OS; avoid forcing one sequence if it causes h
 
 At minimum, separate:
 
-- **Output read**—background task reading the PTY while the child runs
+- **Output read**—the session's reader thread reads the PTY while the child runs; one consumer drains its buffer
 - **Process wait**—foreground wait for exit
 - **Input write**—optional; `SendEof()` when done (platform-specific EOF semantics)
 

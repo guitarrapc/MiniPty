@@ -283,7 +283,7 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// Capture transport pump shares completion orchestration with <see cref="PtySession.CompleteAsync"/>.
+    /// Capture shares completion orchestration with <see cref="PtySession.CompleteAsync"/>.
     /// </summary>
     [Test]
     public async Task PtyCaptureDrainsBulkStdout()
@@ -571,7 +571,7 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// Regression test: sustained large output (2 MiB) must drain without data loss under strict handoff.
+    /// Regression test: sustained large output (2 MiB) must drain without data loss through the bounded output buffer.
     /// </summary>
     [Test]
     public async Task PtyReadOutputAsyncDrainsLargeOutputWithoutDropping()
@@ -1438,6 +1438,73 @@ public sealed class PtyTests
         await Assert.That(text).Contains(marker);
     }
 
+    /// <summary>
+    /// Output is read from spawn into the session's buffer, so what a child writes before any consumer attaches
+    /// survives the child's exit and the post-exit transport close, and a reader started afterwards gets all of it.
+    /// </summary>
+    [Test]
+    public async Task PtyOutputWrittenBeforeAnyReaderIsDeliveredAfterOutputEnded()
+    {
+        const string marker = "lifecycle-read-after-end";
+
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand($"echo {marker}")
+            : UnixShell($"printf {marker}"));
+
+        await WaitUntilOutputEnded(session);
+        var text = await ReadAllOutputTextAsync(session).WaitAsync(TimeSpan.FromSeconds(15));
+
+        await Assert.That(text).Contains(marker);
+    }
+
+    /// <summary>
+    /// One-shot completion attached after the session's output has already ended takes the buffered output and
+    /// finishes its result on the attaching thread.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncAfterOutputEndedReturnsBufferedOutput()
+    {
+        const string marker = "lifecycle-complete-after-end";
+
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand($"echo {marker}")
+            : UnixShell($"printf {marker}"));
+
+        await WaitUntilOutputEnded(session);
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true })
+            .WaitAsync(TimeSpan.FromSeconds(15));
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.Contains(marker)).IsTrue();
+    }
+
+    /// <summary>
+    /// The blocking <c>Output.Read</c> waits for output that arrives later and copies a slot across several small
+    /// reads, then returns 0 at end of output.
+    /// </summary>
+    [Test]
+    public async Task PtyOutputSynchronousReadWaitsForOutputAndReachesEnd()
+    {
+        const string marker = "lifecycle-sync-read";
+
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand($"ping -n 2 127.0.0.1 >nul & echo {marker}")
+            : UnixShell($"sleep 0.3; printf {marker}"));
+
+        var text = await Task.Run(() =>
+        {
+            using var output = new MemoryStream();
+            var buffer = new byte[16];
+            int read;
+            while ((read = session.Output.Read(buffer, 0, buffer.Length)) > 0)
+                output.Write(buffer, 0, read);
+
+            return Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
+        }).WaitAsync(TimeSpan.FromSeconds(15));
+
+        await Assert.That(text).Contains(marker);
+    }
+
     [Test]
     public async Task PtyCancelReadDoesNotCancelWaitForExit()
     {
@@ -1658,6 +1725,25 @@ public sealed class PtyTests
         }
 
         return Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
+    }
+
+    private static async Task<string> ReadAllOutputTextAsync(PtySession session)
+    {
+        using var output = new MemoryStream();
+        await foreach (var chunk in session.ReadOutputAsync())
+            await output.WriteAsync(chunk.Data);
+
+        return Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
+    }
+
+    /// <summary>Waits until the session's reader has seen end of output (after exit and the post-exit drain).</summary>
+    private static async Task WaitUntilOutputEnded(PtySession session)
+    {
+        await session.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        for (var attempt = 0; attempt < 500 && !session.OutputPump.IsProducerFinished; attempt++)
+            await Task.Delay(20);
+
+        await Assert.That(session.OutputPump.IsProducerFinished).IsTrue();
     }
 
     private static async Task WaitUntilExited(PtySession session)
