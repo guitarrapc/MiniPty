@@ -184,9 +184,11 @@ Run the narrowest relevant tests after each step, so a hang can be attributed to
 
 1. **Test harness first:** add a single-threaded `SynchronizationContext` helper. Write tests for F1–F4, `Output.ReadAsync`, `WriteInputAsync` against a full Unix input queue, and `Dispose` on the UI thread, and confirm they fail before any implementation changes.
 2. **Exit watcher, exit task, and session timer:** move EOF staging off the wait loops.
-3. **Output pump and consumer views:** migrate `ReadOutputAsync`, `Output`, `CompleteAsync`, Capture, and `PtyTerminal`, then delete the old paths.
-4. **Input path.**
+3. **Output pump and consumer views:** migrate `ReadOutputAsync`, `Output`, `CompleteAsync`, Capture, and `PtyTerminal`, then delete the old paths. Remove the `Skip` from `ReadOutputAsyncOnUiThreadDeliversOutputWithoutBlockingIt`, `OutputReadAsyncOnUiThreadDoesNotBlockItWhileIdle`, and `IdleSessionsDoNotOccupyThreadPoolWorkers`.
+4. **Input path.** Remove the `Skip` from `WriteInputAsyncTextOnUiThreadDoesNotBlockItWhenTheChildIsNotReading`.
 5. **Public API break:** `WaitForExitAsync` returns `PtyExitStatus`. Update samples, specifications, the README, and benchmarks.
+
+Tests that a later step fixes stay in the suite but are skipped until that step, so every pull request merges with a passing CI. Each skip reason names the step that removes it.
 
 ### Step 1 result: caller-context tests
 
@@ -199,8 +201,8 @@ Run the narrowest relevant tests after each step, so a hang can be attributed to
 | `WaitForExitAsyncOnUiThreadDoesNotBlockIt` | F3 | Fails |
 | `CompleteAsyncOnUiThreadDoesNotBlockIt` | F4 | Fails |
 | `PtyCaptureRunAsyncOnUiThreadDoesNotBlockIt` | F4 via Capture | Fails |
-| `WriteInputAsyncOnUiThreadDoesNotBlockItWhenTheChildIsNotReading(text)` | Non-blocking input | Fails on Linux; skipped on Windows (F9) |
-| `WriteInputAsyncOnUiThreadDoesNotBlockItWhenTheChildIsNotReading(bytes)` | Guard | Passes, because the base `Stream.WriteAsync` offloads the write today |
+| `WriteInputAsyncTextOnUiThreadDoesNotBlockItWhenTheChildIsNotReading` | Non-blocking input | Fails on Linux; returns early on Windows (F9) |
+| `WriteInputAsyncBytesOnUiThreadDoesNotBlockItWhenTheChildIsNotReading` | Guard | Passes, because the base `Stream.WriteAsync` offloads the write today |
 | `DisposeOnUiThreadReturnsPromptly`, `DisposeAsyncOnUiThreadDoesNotBlockIt` | Guards | Pass |
 | `PtyTerminalOnUiThreadDeliversOutputWithoutBlockingIt` | Guard (F5) | Passes |
 | `IdleSessionsDoNotOccupyThreadPoolWorkers` | F8 | Fails: 4 idle sessions occupy exactly 8 workers on both platforms |

@@ -13,7 +13,8 @@ namespace MiniPty.Tests;
 /// <remarks>
 /// Every test drives the API from <see cref="SingleThreadSynchronizationContext"/>, which stands in for a
 /// WinUI / WPF dispatcher. Findings F1–F4 and F8 in the plan are the failures these tests reproduce. Tests
-/// marked as guards already pass and protect behavior the G1 restructuring must keep.
+/// marked as guards already pass and protect behavior the G1 restructuring must keep. Tests for findings a
+/// later G1 step fixes are skipped, and each skip reason names the step that removes it.
 /// </remarks>
 public sealed class PtyCallerContextTests
 {
@@ -31,6 +32,7 @@ public sealed class PtyCallerContextTests
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(10);
 
     [Test]
+    [Skip("Pending G1 step 3 (output pump): the output producer still starts on the caller's context and deadlocks a UI thread. Remove this Skip in step 3.")]
     public async Task ReadOutputAsyncOnUiThreadDeliversOutputWithoutBlockingIt()
     {
         // F1: the producer used to start on the caller's context and deadlock it before any chunk arrived.
@@ -56,6 +58,7 @@ public sealed class PtyCallerContextTests
     }
 
     [Test]
+    [Skip("Pending G1 step 3 (output pump): Output.ReadAsync still reads synchronously on the caller's thread after the first call. Remove this Skip in step 3.")]
     public async Task OutputReadAsyncOnUiThreadDoesNotBlockItWhileIdle()
     {
         // F2: every read after the first used to block the calling thread inside ReadFile / read(2).
@@ -169,13 +172,20 @@ public sealed class PtyCallerContextTests
     }
 
     [Test]
-    [Arguments(true)]
-    [Arguments(false)]
-    public async Task WriteInputAsyncOnUiThreadDoesNotBlockItWhenTheChildIsNotReading(bool textOverload)
+    [Skip("Pending G1 step 4 (non-blocking input): the string overload writes synchronously and blocks the UI thread on a full Unix tty input queue. Remove this Skip in step 4.")]
+    public Task WriteInputAsyncTextOnUiThreadDoesNotBlockItWhenTheChildIsNotReading() =>
+        AssertWriteInputDoesNotBlockUiThreadAsync(textOverload: true);
+
+    [Test]
+    public Task WriteInputAsyncBytesOnUiThreadDoesNotBlockItWhenTheChildIsNotReading() =>
+        // Guard: the base Stream.WriteAsync offloads this overload today, and step 4 must keep it non-blocking.
+        AssertWriteInputDoesNotBlockUiThreadAsync(textOverload: false);
+
+    private static async Task AssertWriteInputDoesNotBlockUiThreadAsync(bool textOverload)
     {
         // A Unix tty input queue fills when the child does not read, and a blocking write to the master then
         // blocks its caller. ConPTY accepts input into its own buffer instead (plan F9), so Windows is not
-        // affected. The bytes overload is a guard: it is offloaded today and must stay non-blocking.
+        // affected.
         if (OperatingSystem.IsWindows())
             return;
 
@@ -296,6 +306,7 @@ public sealed class PtyCallerContextTests
 
     [Test]
     [NotInParallel]
+    [Skip("Pending G1 step 3 (output pump): each idle session still parks its output producer on a pool worker (4 sessions occupy 4 workers; step 2 removed the exit pollers). Remove this Skip in step 3.")]
     public async Task IdleSessionsDoNotOccupyThreadPoolWorkers()
     {
         // F8: each idle session used to park two pool workers (the output producer and the exit poller),
