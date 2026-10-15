@@ -77,10 +77,24 @@ internal static class WindowsPtyBackend
     private const int ErrorInvalidHandle = 6;
     private const int ErrorBrokenPipe = 109;
     /// <summary>
-    /// How long a read keeps appending ConPTY slices to its slot. Measured with <see cref="Environment.TickCount64"/>,
-    /// so it ends on the next tick of the system clock (up to about 16 ms on Windows).
+    /// How long a continuation read waits for the next ConPTY slice. ConPTY delivers bulk output in slices of up to
+    /// about 1.7 KB that arrive 20–45 µs apart (median and 90th percentile measured on Windows 11), so this window
+    /// joins them into full slots with ample margin, while output trickling in is published within it.
     /// </summary>
-    private const int CoalesceMicroWindowMs = 1;
+    /// <remarks>
+    /// Measured with <see cref="System.Diagnostics.Stopwatch"/>, not <see cref="Environment.TickCount64"/>: a
+    /// tick-count window lasts until the next system clock tick (up to about 16 ms), during which the reader spun
+    /// a whole core for any session whose child wrote small pieces.
+    /// </remarks>
+    private const int CoalesceWindowMicroseconds = 500;
+    private static readonly long s_coalesceWindowTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceWindowMicroseconds / 1_000_000;
+    /// <summary>
+    /// Bounds the windows chained into one slot, as on Unix, so output trickling in faster than the window is
+    /// published within about 2.5 ms instead of being held until the slot fills. Bulk output fills a slot within
+    /// a few slices, long before the budget.
+    /// </summary>
+    private const int CoalesceBudgetMs = 2;
+    private static readonly long s_coalesceBudgetTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceBudgetMs / 1000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
@@ -460,9 +474,7 @@ internal static class WindowsPtyBackend
 
         public bool IsOutputClosed => Volatile.Read(ref _outputClosed);
 
-        // Unbounded: ConPTY bulk output arrives in slices that each window chains into the slot, and a budget has
-        // not been measured on Windows yet. Output trickling in faster than a clock tick is held until the slot fills.
-        public long CoalesceBudgetTicks => 0;
+        public long CoalesceBudgetTicks => s_coalesceBudgetTicks;
 
         // The output pipe handle is pinned by each ReadFile call (SafeHandle reference counting), so a concurrent
         // Dispose defers the close until the read returns, and later reads see ObjectDisposedException.
@@ -501,7 +513,8 @@ internal static class WindowsPtyBackend
         /// <summary>
         /// Appends output that is available now or arrives within the micro-window. ConPTY delivers bulk output in
         /// small slices shortly after one another, and <c>PeekNamedPipe</c> often reports zero bytes on its pipes
-        /// while more is in flight, so this reads with <c>PIPE_NOWAIT</c> and retries until the window ends.
+        /// while more is in flight, so this reads with <c>PIPE_NOWAIT</c> and retries until the window ends. The
+        /// anonymous pipe cannot be waited on, so the window is a short yield loop.
         /// </summary>
         public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
         {
@@ -509,8 +522,8 @@ internal static class WindowsPtyBackend
             if (read > 0 || endOfOutput)
                 return read;
 
-            var deadline = Environment.TickCount64 + CoalesceMicroWindowMs;
-            while (Environment.TickCount64 < deadline)
+            var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + s_coalesceWindowTicks;
+            while (System.Diagnostics.Stopwatch.GetTimestamp() < deadline)
             {
                 Thread.Sleep(0);
                 read = TryReadOutputNow(buffer, out endOfOutput);

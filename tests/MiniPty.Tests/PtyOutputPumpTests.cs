@@ -41,6 +41,23 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
+    /// The ConPTY backend bounds coalescing too. Unbounded, each continuation window lasted until the next system
+    /// clock tick, so output trickling in faster than about 16 ms kept a slot open and the reader spinning.
+    /// </summary>
+    [Test]
+    public async Task WindowsBackendBoundsCoalescing()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+        using var backend = WindowsPtyBackend.Start(new PtyStartInfo { FileName = cmd, Arguments = ["/c", "exit 0"] });
+
+        await Assert.That(backend.CoalesceBudgetTicks).IsGreaterThan(0L);
+        await Assert.That(backend.CoalesceBudgetTicks).IsLessThanOrEqualTo(Stopwatch.Frequency * 5 / 1000);
+    }
+
+    /// <summary>
     /// End of output completes a pending read on the reader thread, which posts the reader's continuation to the
     /// context it captured. A context that throws from <c>Post</c> (a shut-down UI dispatcher) must not terminate
     /// the process; without the guard this test crashes the test host.
