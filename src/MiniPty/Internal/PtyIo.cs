@@ -29,31 +29,6 @@ internal static class PtyIo
         }
     }
 
-    internal static unsafe void WriteAll(int fd, ReadOnlySpan<byte> bytes)
-    {
-        if (bytes.IsEmpty)
-            return;
-
-        fixed (byte* ptr = bytes)
-        {
-            var offset = 0;
-            while (offset < bytes.Length)
-            {
-                var written = UnixInterop.Write(fd, ptr + offset, (nuint)(bytes.Length - offset));
-                if (written < 0)
-                {
-                    if (Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
-                        continue;
-                    throw new IOException($"write failed (errno {Marshal.GetLastPInvokeError()})");
-                }
-
-                if (written == 0)
-                    throw new IOException("write wrote 0 bytes");
-                offset += written;
-            }
-        }
-    }
-
     internal static void WriteUtf8(SafeFileHandle handle, string input)
     {
         var byteCount = Encoding.UTF8.GetByteCount(input);
@@ -69,55 +44,6 @@ internal static class PtyIo
         }
 
         WriteAll(handle, Encoding.UTF8.GetBytes(input));
-    }
-
-    internal static void WriteUtf8(int fd, string input)
-    {
-        var byteCount = Encoding.UTF8.GetByteCount(input);
-        if (byteCount == 0)
-            return;
-
-        if (byteCount <= Utf8StackThreshold)
-        {
-            Span<byte> buffer = stackalloc byte[byteCount];
-            Encoding.UTF8.GetBytes(input, buffer);
-            WriteAll(fd, buffer);
-            return;
-        }
-
-        WriteAll(fd, Encoding.UTF8.GetBytes(input));
-    }
-
-    internal static Task WriteTextAsync(
-        Stream stream,
-        string text,
-        Encoding encoding,
-        CancellationToken cancellationToken)
-    {
-        var byteCount = encoding.GetByteCount(text);
-        if (byteCount == 0)
-            return Task.CompletedTask;
-
-        if (byteCount <= Utf8StackThreshold)
-        {
-            Span<byte> buffer = stackalloc byte[byteCount];
-            encoding.GetBytes(text, buffer);
-            stream.Write(buffer);
-            return Task.CompletedTask;
-        }
-
-        var rented = ArrayPool<byte>.Shared.Rent(byteCount);
-        try
-        {
-            var written = encoding.GetBytes(text, rented.AsSpan(0, byteCount));
-            stream.Write(rented.AsSpan(0, written));
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(rented);
-        }
-
-        return Task.CompletedTask;
     }
 
     internal static Task WriteUtf8Async(Stream stream, string input, CancellationToken cancellationToken)

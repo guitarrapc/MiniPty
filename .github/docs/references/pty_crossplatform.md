@@ -40,7 +40,7 @@ Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps th
 |---|---|
 | `Pty.Start(PtyStartInfo)` | Spawns the child. Does not wait. |
 | `HasExited` | Reports the exit recorded by the process-wide exit watcher (see [Child exit observation](#child-exit-observation)). Windows may also check `WaitForSingleObject(0)` on the process handle. On Unix it never calls `waitpid`: the watcher is the only reaper, so the one-time wait status is read once. |
-| `WriteInputAsync` | Writes UTF-8 (default) or raw bytes to PTY stdin. Does not close stdin. |
+| `WriteInputAsync` | Writes UTF-8 (default) or raw bytes to PTY stdin without blocking the caller (see [Output pump](#output-pump)). Does not close stdin. |
 | `SendEof()` | **Windows:** after bytes were written, writes Ctrl+Z + CR (`0x1A`, `0x0D`) and keeps the input pipe open until exit (pipe close during wait yields `0xC000013A`); when input lacks a trailing `\r`/`\n`, an extra CR is written first. With no bytes, defers input pipe close—see [Staged stdin EOF](#staged-stdin-eof). **Unix:** writes EOT (`0x04`, Ctrl-D) on the first staging tick. Staging runs on a per-session timer, so it progresses whether or not anyone awaits exit. |
 | `WaitForExitAsync(CancellationToken)` | Awaits the OS exit notification; holds no thread and never polls. Does not close the transport. Cancellation stops waiting only; the child keeps running (`OperationCanceledException`). |
 | `CompleteAsync(PtyCompleteOptions, CancellationToken)` | Optional stdin, wait for exit, drain output, return `PtyResult`. Cancellation kills the child when `KillOnCancellation` is true (default). |
@@ -217,7 +217,7 @@ Platform-specific staging avoids signaling EOF before the child has attached std
 | Platform | After successful `WriteInputAsync` | EOF with no bytes (`Input: ""`) |
 |---|---|---|
 | **Windows** | After bytes: Ctrl+Z + CR on the first staging tick; pipe stays open until exit. Empty stdin: close the pipe after 40 further ticks (or at transport close)—`WriteFile` does **not** mean the child stdin is wired yet (`0xC000013A` if closed too early) | Same |
-| **Unix** | Write EOT (`0x04`) on the first staging tick (a second EOT on the next tick when the last line lacks a terminator) | Defer EOT to the staging ticks / transport close |
+| **Unix** | Write EOT (`0x04`) on the first staging tick with no input still queued (a second EOT on the next tick when the last line lacks a terminator) | Defer EOT to the staging ticks / transport close |
 
 Staging ticks are 100 ms apart on a per-session one-shot timer that re-arms itself while staging is pending. They replaced the exit-wait poll loop that used to advance staging, so `SendEof` no longer depends on somebody awaiting exit; the tick count and spacing are unchanged.
 
@@ -255,6 +255,8 @@ Each session's output is read by one pump, from spawn until end of output, on a 
 | Unix coalescing | The same wait with a 1 ms timeout before each continuation read. |
 | Unix stop | Closing a descriptor does not interrupt a `read` or `poll` blocked on it in another thread (close(2)), so a close or disposal signals the reader's wake descriptor: an `eventfd` on Linux, a pipe elsewhere. |
 | Unix master lifetime | Reference-counted. The reader, input writes, resize, foreground-process lookup, and EOT writes each pin the master; a close stops new users and drops the owner's reference, and the descriptor closes on the last release, so its number is never reused under an in-flight call. |
+| Unix input | The master is non-blocking. A write takes what the tty input queue accepts on the calling thread, and the rest is queued in issue order. The reader thread adds `POLLOUT` (the write set of `select` on macOS) to its wait while input is queued, including while it is parked on a full ring, and writes the queue whenever the master can take more. A queued write completes when written; disposal fails it with `ObjectDisposedException`, and the end of output (the slave closed) with `IOException`. Staged EOT waits until nothing is queued. |
+| Windows input | Synchronous `WriteFile` on the ConPTY input pipe. ConPTY takes input into its own buffer promptly whether or not the child reads (measured with a 304 KB paste), and the anonymous pipe cannot be waited on. |
 
 ### Post-exit drain
 

@@ -129,7 +129,7 @@ internal sealed class PtyReaderThread
             return result == WindowsInterop.WaitObject0;
         }
 
-        var ready = UnixInterop.minipty_output_wait(-1, _wakeRead, timeoutMs);
+        var ready = UnixInterop.minipty_pty_wait(-1, 0, _wakeRead, timeoutMs);
         if (ready < 0)
         {
             Thread.Sleep(10);

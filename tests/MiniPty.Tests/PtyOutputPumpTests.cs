@@ -376,6 +376,11 @@ public sealed class PtyOutputPumpTests
         private volatile bool _closed;
 
         public Stream Input => Stream.Null;
+        public void WriteInput(ReadOnlySpan<byte> bytes) { }
+        public ValueTask WriteInputAsync(ReadOnlySpan<byte> bytes, CancellationToken cancellationToken) => default;
+        public ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer, CancellationToken cancellationToken) => default;
+        public void SetOutputPump(PtyOutputPump pump) { }
+        public void WaitWhileOutputBlocked(PtyReaderThread reader) => reader.WaitForWake(System.Threading.Timeout.Infinite);
         public int ProcessId => 0;
         public bool HasExited => false;
         public int ExitCode => 0;

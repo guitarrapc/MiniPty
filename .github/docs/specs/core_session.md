@@ -43,7 +43,7 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 |---|---|
 | `Input` / `Output` | Raw byte streams. No line-ending translation. stdout and stderr are merged on `Output`. `Output` is a view over the session's output buffer: `ReadAsync` never blocks the calling thread; `Read` blocks, per the `Stream` contract. |
 | `ReadOutputAsync` | Persistent bytes-only output streaming. Returns `IAsyncEnumerable<PtyOutputChunk>`. |
-| `WriteInputAsync` | Writes UTF-8 text by default, or raw bytes. Does not close stdin. |
+| `WriteInputAsync` | Writes UTF-8 text by default, or raw bytes. Does not close stdin. Never blocks the calling thread: bytes the terminal accepts at once are written synchronously (the usual case, allocation-free), and on Unix the rest is written in order by the session's background reader as the child reads. Writes and `SendEof` reach the child in issue order. Canceling a waiting write discards the bytes not yet written. |
 | `SendEof()` | Signals end of stdin using platform-specific behavior. See [Lifecycle](lifecycle.md). |
 | `Resize(PtySize)` / `Resize(PtySize, PtyPixelSize?)` | Resizes after spawn; Unix also reports optional pixel dimensions, while Windows ignores pixels. Child exit never makes it fail: while the transport is open the size is applied, and once the transport has been closed after exit the call is a no-op that keeps `Size`. Only disposal (`ObjectDisposedException`), invalid pixel dimensions, and an OS failure while the child is running throw. |
 | `WaitForExitAsync` | Waits for child exit. Cancellation stops waiting only; the child keeps running. |
@@ -96,16 +96,16 @@ Managed buffering is bounded by the buffer's slot count times its slot size (cur
 
 ## Caller Context
 
-Asynchronous members never block the calling thread and never run library code on the caller's `SynchronizationContext`, so they can be awaited from a UI thread, except the text overload of `WriteInputAsync`, which still writes synchronously, and `CompleteAsync` / `PtyCapture.RunAsync` with `Input` set, which write it through that overload (see the table). Only the caller's own continuation resumes on its captured context, and only when the operation had to wait; `ConfigureAwait(false)` opts out as usual.
+Asynchronous members never block the calling thread and never run library code on the caller's `SynchronizationContext`, so they can be awaited from a UI thread. Only the caller's own continuation resumes on its captured context, and only when the operation had to wait; `ConfigureAwait(false)` opts out as usual.
 
 | Member | Behavior on the caller's thread |
 |---|---|
 | `ReadOutputAsync`, `Output.ReadAsync` | Complete synchronously while output is buffered; otherwise resume when output arrives. |
 | `WaitForExitAsync`, `WaitForExitStatusAsync` | Await the exit watcher's notification. |
-| `CompleteAsync`, `PtyCapture.RunAsync` | Output is collected on the session's reader thread; the caller only awaits exit and end of output. `Input`, when set, is written synchronously first (see `WriteInputAsync(string)`). |
+| `CompleteAsync`, `PtyCapture.RunAsync` | Output is collected on the session's reader thread; the caller only awaits exit and end of output. `Input`, when set, is written as by `WriteInputAsync`. |
 | `DisposeAsync` | Returns at once and completes when the reader has stopped, for every caller. |
 | `Output.Read`, `Input.Write` | Block, per the `Stream` contract. |
-| `WriteInputAsync(string)` | Still writes synchronously: a full Unix tty input queue can block it (planned in [GUI host readiness](../plans/plan_gui_host_readiness.md), G1 step 4). |
+| `WriteInputAsync` | Completes at once when the terminal takes the bytes; otherwise (Unix, child not reading) when the background reader has written them. |
 
 ## Lessons Learned
 
@@ -132,3 +132,5 @@ Asynchronous members never block the calling thread and never run library code o
 - Let go of pooled resources before publishing completion. The reader first signaled end of output and only then dropped its reference to the buffer, so a consumer that disposed at once sometimes left the final release to the reader thread. The array then went back to the pool from that thread and stayed in its per-thread cache, and the next session's rent allocated a fresh 16 KiB array: the streaming benchmark intermittently averaged 7.2 KB instead of 1.7 KB. Releasing the buffer and parking the reader thread before completion becomes observable makes both deterministic. For the same reason a one-shot sink finishes its result (decoder flush, buffer detach, scratch return) on the reader thread at end of output: detaching on the thread that resumed the caller left grown result buffers in a worker's cache, and the next run's growth on the reader thread allocated again (intermittent 7 KB and 119 KB averages on the one-shot benchmarks, also seen before this change).
 - Post-exit quiet means the reader could read and found nothing. Time parked on a full ring had counted as silence, so a drain tick right after a stalled reader resumed could close a Unix master that still held output; resuming now restarts the quiet interval. A drain tick also needs the exit time: exit waits complete before the exit listener records it, so a completion could schedule ticks that read every deadline as long past. Ticks now wait for the exit to be recorded. Both came from review, not from failing tests.
 - Check ring capacity on its own, never as the alternative branch to "a sink is attached". A failed completion can detach its sink between that check and the drain, and the reader then read into a full ring, overwriting an unread slot.
+- Stream's async-over-sync defaults are a trap for a stream over a blocking transport. `Input.WriteAsync` and the bytes overload of `WriteInputAsync` ran the write on a thread-pool worker and allocated 112–248 bytes per call. The input stream now overrides every asynchronous overload, and a write the terminal takes at once completes synchronously, allocation-free and about 20% faster.
+- On Unix the session's reader thread writes the input a full tty input queue cannot take yet: it already waits on the master, so write readiness joins the same wait. The master is non-blocking, so callers never block, and `Dispose` fails queued writes itself rather than waiting on a writer. EOF is ordered input too: staged EOT waits until nothing is queued, or it would overtake input the child has not read.

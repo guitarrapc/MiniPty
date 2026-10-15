@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Buffers;
+using System.Text;
 using MiniPty.Internal;
 
 namespace MiniPty;
@@ -22,9 +23,9 @@ namespace MiniPty;
 /// </para>
 /// <para>
 /// Asynchronous members never block the calling thread and never run library code on the caller's
-/// <see cref="SynchronizationContext"/>, so they can be awaited from a UI thread. The exception for now is
-/// <see cref="WriteInputAsync(string, Encoding?, CancellationToken)"/>, which writes synchronously, and with it
-/// <see cref="CompleteAsync"/> when <see cref="PtyCompleteOptions.Input"/> is set.
+/// <see cref="SynchronizationContext"/>, so they can be awaited from a UI thread. Synchronous members that block by
+/// contract, such as <see cref="Stream.Write(ReadOnlySpan{byte})"/> on <see cref="Input"/> and <see cref="Stream.Read(Span{byte})"/>
+/// on <see cref="Output"/>, still block.
 /// </para>
 /// <para>
 /// Disposing or awaiting <see cref="DisposeAsync"/> kills the child if it is still running, then releases handles.
@@ -51,6 +52,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     {
         _backend = backend;
         _pump = new PtyOutputPump(backend);
+        backend.SetOutputPump(_pump);
         try
         {
             _pump.Start();
@@ -94,7 +96,12 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <summary>
     /// Gets the write-only stream connected to the child's standard input (PTY master input).
     /// </summary>
-    /// <remarks>Writes are raw bytes; no line-ending translation is performed.</remarks>
+    /// <remarks>
+    /// Writes are raw bytes; no line-ending translation is performed. <see cref="Stream.WriteAsync(ReadOnlyMemory{byte}, CancellationToken)"/>
+    /// behaves as <see cref="WriteInputAsync(ReadOnlyMemory{byte}, CancellationToken)"/> and never blocks the calling thread;
+    /// <see cref="Stream.Write(ReadOnlySpan{byte})"/> blocks until the bytes are written, as the <see cref="Stream"/>
+    /// contract requires.
+    /// </remarks>
     public Stream Input => _backend.Input;
 
     /// <summary>
@@ -178,14 +185,25 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <summary>
     /// Writes raw bytes to the PTY stdin.
     /// </summary>
-    /// <param name="bytes">Bytes to write. Empty buffers are ignored.</param>
-    /// <param name="cancellationToken">Token used to cancel the write operation.</param>
+    /// <param name="bytes">Bytes to write. Empty buffers are ignored. Keep them unchanged until the task completes.</param>
+    /// <param name="cancellationToken">
+    /// Token used to cancel a write that is still waiting. Bytes not yet written are discarded; bytes already written
+    /// stay written.
+    /// </param>
     /// <returns>A task that completes when the bytes are written.</returns>
-    public async ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
+    /// <remarks>
+    /// <para>
+    /// Never blocks the calling thread. The bytes the terminal accepts right away are written synchronously, and the
+    /// task is then already complete; this is the usual case and allocates nothing. On Unix, when the child is not
+    /// reading and the tty input queue is full, the rest is written in order by the session's background reader as
+    /// the child reads, and the task completes then. Windows ConPTY accepts input promptly, so writes complete at once.
+    /// </para>
+    /// <para>Writes, including <see cref="SendEof"/>, reach the child in the order they were issued.</para>
+    /// </remarks>
+    public ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        if (!bytes.IsEmpty)
-            await Input.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        return bytes.IsEmpty ? default : _backend.WriteInputAsync(bytes, ownedBuffer: null, cancellationToken);
     }
 
     /// <summary>
@@ -195,20 +213,48 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <param name="encoding">
     /// Encoding used to convert <paramref name="text"/> to bytes. Default is <see cref="Encoding.UTF8"/>.
     /// </param>
-    /// <param name="cancellationToken">Token used to cancel the write operation.</param>
+    /// <param name="cancellationToken">
+    /// Token used to cancel a write that is still waiting. Bytes not yet written are discarded; bytes already written
+    /// stay written.
+    /// </param>
     /// <returns>A task that completes when the text is written.</returns>
     /// <remarks>
-    /// The text is written synchronously on the calling thread. On Unix, writing more input than the child reads
-    /// fills the tty input queue and blocks the caller until the child reads or exits, so a UI thread should not
-    /// write large input through this overload.
+    /// Never blocks the calling thread; see <see cref="WriteInputAsync(ReadOnlyMemory{byte}, CancellationToken)"/>.
+    /// The encoded bytes live in a pooled buffer until they are written.
     /// </remarks>
     public ValueTask WriteInputAsync(
         string text,
         Encoding? encoding = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(text);
         ThrowIfDisposed();
-        return new(PtyIo.WriteTextAsync(Input, text, encoding ?? Encoding.UTF8, cancellationToken));
+        encoding ??= Encoding.UTF8;
+        var byteCount = encoding.GetByteCount(text);
+        if (byteCount == 0)
+            return default;
+
+        if (byteCount <= PtyIo.Utf8StackThreshold)
+        {
+            Span<byte> buffer = stackalloc byte[byteCount];
+            encoding.GetBytes(text, buffer);
+            return _backend.WriteInputAsync(buffer, cancellationToken);
+        }
+
+        var rented = ArrayPool<byte>.Shared.Rent(byteCount);
+        int length;
+        try
+        {
+            length = encoding.GetBytes(text, rented);
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+            throw;
+        }
+
+        // The backend owns the rental from here and returns it once the bytes are written.
+        return _backend.WriteInputAsync(rented.AsMemory(0, length), rented, cancellationToken);
     }
 
     /// <summary>
@@ -348,8 +394,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <returns>A <see cref="PtyResult"/> with merged <see cref="PtyResult.Output"/> bytes and exit code.</returns>
     /// <remarks>
     /// Output is collected on the session's reader thread while the child runs, so awaiting this method does not
-    /// block the calling thread on output or exit. <see cref="PtyCompleteOptions.Input"/> is still written
-    /// synchronously first, as by <see cref="WriteInputAsync(string, Encoding?, CancellationToken)"/>.
+    /// block the calling thread. <see cref="PtyCompleteOptions.Input"/> is written as by
+    /// <see cref="WriteInputAsync(string, Encoding?, CancellationToken)"/>, without blocking either.
     /// </remarks>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">

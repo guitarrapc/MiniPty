@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using MiniPty.Capture;
@@ -170,13 +170,12 @@ public sealed class PtyCallerContextTests
     }
 
     [Test]
-    [Skip("Pending G1 step 4 (non-blocking input): the string overload writes synchronously and blocks the UI thread on a full Unix tty input queue. Remove this Skip in step 4.")]
     public Task WriteInputAsyncTextOnUiThreadDoesNotBlockItWhenTheChildIsNotReading() =>
         AssertWriteInputDoesNotBlockUiThreadAsync(textOverload: true);
 
+    // Both overloads take what the tty accepts and queue the rest for the reader thread.
     [Test]
     public Task WriteInputAsyncBytesOnUiThreadDoesNotBlockItWhenTheChildIsNotReading() =>
-        // Guard: the base Stream.WriteAsync offloads this overload today, and step 4 must keep it non-blocking.
         AssertWriteInputDoesNotBlockUiThreadAsync(textOverload: false);
 
     private static async Task AssertWriteInputDoesNotBlockUiThreadAsync(bool textOverload)

@@ -295,13 +295,55 @@ internal static class WindowsPtyBackend
             _attrList = attrList;
             _processInfo = processInfo;
             _size = size;
-            Input = new InputTrackingWriteStream(new PtyHandleWriteStream(inputWriteHandle), OnInputWritten);
+            Input = new PtyInputStream(this);
 
             // Last, so the watcher never observes a partially constructed instance.
             WindowsExitWatcher.Register(processInfo.hProcess, this);
         }
 
         public Stream Input { get; }
+
+        /// <summary>
+        /// ConPTY takes input into its own buffer promptly whether or not the child reads it (measured: plan F9),
+        /// and the anonymous input pipe cannot be waited on, so writes are synchronous and complete before return.
+        /// </summary>
+        public void WriteInput(ReadOnlySpan<byte> bytes)
+        {
+            if (bytes.IsEmpty)
+                return;
+
+            OnInputWritten(bytes);
+            PtyIo.WriteAll(_inputWriteHandle, bytes);
+        }
+
+        public ValueTask WriteInputAsync(ReadOnlySpan<byte> bytes, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            WriteInput(bytes);
+            return default;
+        }
+
+        public ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer, CancellationToken cancellationToken)
+        {
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                WriteInput(bytes.Span);
+                return default;
+            }
+            finally
+            {
+                if (ownedBuffer is not null)
+                    System.Buffers.ArrayPool<byte>.Shared.Return(ownedBuffer);
+            }
+        }
+
+        // Input is never queued on Windows, so the reader has nothing to write while it waits.
+        public void SetOutputPump(PtyOutputPump pump)
+        {
+        }
+
+        public void WaitWhileOutputBlocked(PtyReaderThread reader) => reader.WaitForWake(Timeout.Infinite);
         public int ProcessId => _processInfo.dwProcessId;
 
         public Task<PtyExitStatus> Exited => _exitSignal.GetTask();

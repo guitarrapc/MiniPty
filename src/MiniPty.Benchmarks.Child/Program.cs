@@ -1,9 +1,21 @@
 using System.Buffers;
 using System.Globalization;
 
+if (args is ["--stdin-sink"])
+{
+    // Input benchmarks: read stdin until end of input and discard it, so writes to the PTY never back up.
+    using var stdin = Console.OpenStandardInput();
+    var sink = new byte[4096];
+    while (stdin.Read(sink, 0, sink.Length) > 0)
+    {
+    }
+
+    return 0;
+}
+
 if (!TryParseBytesArg(args, out var byteCount))
 {
-    Console.Error.WriteLine("Usage: MiniPty.Benchmarks.Child --bytes <count>");
+    Console.Error.WriteLine("Usage: MiniPty.Benchmarks.Child --bytes <count> | --stdin-sink");
     return 2;
 }
 

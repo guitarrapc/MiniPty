@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** G2 implemented (2026-10-15). G1 design agreed; delivery steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), and 3 (output pump and consumer views) are done. The other items are proposed.
+**Status:** G2 implemented (2026-10-15). G1 design agreed; delivery steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), and 4 (input path) are done. The other items are proposed.
 
 ## Background
 
@@ -143,8 +143,8 @@ Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a
      - the macOS-only pump scheduling.
 5. **Input.**
    - A write completes synchronously when the transport accepts the bytes.
-   - When the write would block, for example when a Unix tty input queue is full because the child is not reading, the remainder goes to a background writer that preserves order.
-   - On Windows, ConPTY accepts input promptly (F9), so the fast path is effectively always taken.
+   - When the write would block, for example when a Unix tty input queue is full because the child is not reading, the remainder goes to a background writer that preserves order. Step 4 makes the session's reader thread that writer: it already waits on the master, so it adds write readiness to the same wait while input is queued. No thread or pool worker is added, and `Dispose` fails queued writes on its own thread. A queued write completes when written, which gives the caller backpressure and errors.
+   - On Windows, ConPTY accepts input promptly (F9), so the fast path is effectively always taken. Step 4 has no slow path there: the anonymous input pipe cannot be waited on, so writes stay synchronous (G6 can revisit with overlapped I/O).
 
 ### Public API decisions
 
@@ -212,7 +212,7 @@ Lessons from building the harness:
 - **A single probe is not enough.** The previous Unix exit wait blocks for 100 ms and then calls `Task.Yield`, which lets a probe slip through between slices, so the UI thread looks responsive while it is blocked about 100% of the time. The harness therefore also measures the time the UI thread spends inside callbacks during a 500 ms idle window. A free thread is busy for well under 1 ms; a blocked one is busy for the whole window.
 - **Measure pool occupancy directly.** Occupied workers, computed as `GetMaxThreads` minus `GetAvailableThreads`, give a deterministic F8 signal (2 per session), where burst latency does not. The test runs `[NotInParallel]`.
 - **Until G1 fixes F8, run the guards on their own.** The failing tests occupy pool workers in the test process itself. On an 8-core Linux machine (minimum 8 workers), that starves the timing-sensitive guards in a full parallel run, and they time out. Run `PtyCallerContextTests` by itself to check the guards until the occupancy is gone. On the 32-core Windows machine the full run shows only the expected failures.
-- **A blocked Unix input write can outlive cleanup.** A write blocked on a full tty input queue stays blocked through cleanup when the pool is starved. The background writer in step 4 must be stoppable by `Dispose` without depending on pool threads.
+- **A blocked Unix input write can outlive cleanup.** A write blocked on a full tty input queue stays blocked through cleanup when the pool is starved. The background writer in step 4 must be stoppable by `Dispose` without depending on pool threads (resolved in step 4: the reader thread writes, and `Dispose` fails queued writes itself).
 
 ### Step 2 result: exit watcher, exit task, EOF staging timer
 
@@ -320,6 +320,38 @@ Lessons:
 - **One-shot consumers belong on the reader thread.** A bounded ring drained by a consumer that only starts after exit would block a bulk-output child before it can exit. Writing into a sink on the reader thread also removed the pump task, the drain polling, and the timeout tasks.
 - **A one-time timeout needs a re-check after arming.** Review found that the drain close timeout, which fires once, could land between the sink's state check and its arming the wait, leaving no wait to signal and the scheduler done with the pump: `CompleteAsync` would have hung instead of throwing. The sink now re-checks after arming, with full fences on both sides. Review also found a full ring spinning against a closed Unix master; that state now ends output. Neither had a failing test.
 - **macOS was not run locally.** The macOS-only native paths (the `select` wait and the pipe wake descriptor) were neither compiled nor exercised here; FreeBSD shares the pipe path. CI on macOS is the first real check.
+
+### Step 4 result: input path
+
+What changed:
+
+- **Unix:** the master is non-blocking. A write takes what the tty input queue accepts on the calling thread, and the rest is queued in issue order. The session's reader thread writes the queue: while input is queued it waits for the master to be writable along with readable, including while parked on a full ring. A queued write completes when written. `Dispose` fails queued writes with `ObjectDisposedException` on the disposing thread, end of output fails them with `IOException`, and cancellation discards the bytes not yet written. Staged EOT waits until nothing is queued.
+- **Windows:** writes stay synchronous; ConPTY takes input promptly (F9), and the anonymous pipe cannot be waited on.
+- **Both:** `WriteInputAsync` (both overloads), `Input.WriteAsync`, and the APM pair go through the backend directly; Stream's async-over-sync default is gone. One `PtyInputStream` replaces the per-platform write-stream wrappers.
+
+Results:
+
+| Test | Windows | Linux |
+|---|---|---|
+| `WriteInputAsyncTextOnUiThreadDoesNotBlockItWhenTheChildIsNotReading` | Pass (returns early, F9) | Pass; the skip is removed |
+| New `PtyInputTests`: synchronous small writes; 140 KB queued while the child sleeps, delivered in order with EOF after it (and a blocking `Input.Write` waiting its turn); canceling and disposing a queued write | Pass (Unix cases return early) | Pass |
+| Full suite | 216 pass, no skips, 3 runs | 216 pass, no skips, 3 runs |
+
+Allocation and time (Windows, new `PtyInputBenchmarks`: one 64-byte line into a live session whose child reads and discards it):
+
+| Benchmark | Before | After |
+|---|---|---|
+| `WriteInputBytes` | 111.6 µs, 248 B | 89.9 µs, 0 B |
+| `WriteInputText` | 105.1 µs, 0 B | 88.8 µs, 0 B |
+| `InputStreamWriteAsync` | 107.6 µs, 112 B | 90.9 µs, 0 B |
+
+Every `PtyIntegrationBenchmarks` scenario allocates about 0.1 KB less, because one input stream object replaced two; times did not change. NativeAOT publish and run were verified on Windows and Linux (`Session` and `Interactive` samples).
+
+Lessons:
+
+- **The reader thread is the natural input writer on Unix.** It already waits on the master, so write readiness joins the same wait. A separate writer would cost a thread per session or a pool worker, and step 1 showed that a pool worker blocked on a full tty can outlive cleanup.
+- **EOF is ordered input too.** Staged EOT must not overtake input still queued for a child that is not reading. The ordering test writes 20,000 numbered lines plus EOF at once and checks that the child saw every line.
+- **macOS was not run locally.** Its write wait uses the `select` write set, which only macOS compiles; CI on macOS is the first real check.
 
 ### Acceptance
 

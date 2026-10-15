@@ -43,6 +43,7 @@ int minipty_wake_open(int *read_fd, int *write_fd);
 int minipty_wake_signal(int write_fd);
 void minipty_wake_drain(int read_fd);
 void minipty_wake_close(int read_fd, int write_fd);
-int minipty_output_wait(int master, int wake_fd, int timeout_ms);
+int minipty_set_nonblocking(int fd);
+int minipty_pty_wait(int master, int events, int wake_fd, int timeout_ms);
 
 #endif
