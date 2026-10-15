@@ -129,7 +129,7 @@ Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a
    - Exit is recorded once per session. Public waits get a `Task<PtyExitStatus>` created on first use, whose continuations run asynchronously; library-internal waits use an allocation-free waiter slot; the session's output drain is notified through an allocation-free listener.
 3. **Timers instead of wait loops.**
    - EOF staging (Windows Ctrl+Z / CR and deferred input-pipe close, Unix EOT deferral) runs on one lazily created timer per session (step 2).
-   - Post-exit quiet drain runs on one process-wide timer that ticks only while some session is between exit and end of output (step 3). ConPTY does not report EOF until the pseudoconsole is closed, and on Unix a grandchild can keep the slave open. A shared timer replaced the planned per-session one because the drain needs no per-session state beyond what the pump already holds.
+   - Post-exit quiet drain runs on one process-wide timer that ticks only while some session is between exit and end of output (step 3). ConPTY does not report EOF until the pseudoconsole is closed, and on Linux a grandchild can keep the slave open (macOS revokes the tty when the session leader exits). A shared timer replaced the planned per-session one because the drain needs no per-session state beyond what the pump already holds.
    - The existing heuristic values do not change: 100 ms quiet, `OutputDrainGrace`, and the deferral counts. Only the mechanism that drives them changes.
    - EOF staging no longer depends on somebody awaiting exit.
 4. **Single consumer.**
@@ -609,6 +609,7 @@ flowchart LR
 
 - **Slot sizing:** the pump's slot count and size. Step 3 ships 4 × 4 KiB: a 32 KiB Windows child arrives in 12–13 chunks and every allocation benchmark improved. Throughput tuning is still open.
 - **Coalescing micro-window:** whether the ConPTY 1 ms coalescing micro-window is still needed once reads are pipelined into multiple slots. Step 3 keeps it, on every consumer, and did not measure without it.
+- **Windows coalescing budget:** Unix bounds the continuation reads chained into one slot to 2 ms after its first read, because unbounded chaining held trickling output (a progress meter, token streaming) until the 4 KiB slot filled, about 150 ms on macOS. The ConPTY chain is still unbounded: its window lasts until the next clock tick, so output trickling in faster than about 16 ms is held the same way, and the reader spins in its `Thread.Sleep(0)` wait loop meanwhile. Bounding it needs a Windows measurement of `PtyReadOutputAsyncCoalescesBulkStdoutOnWindows` and the capture chunk counts.
 - ~~**Unix fallback interval:** the `waitpid` polling interval for the fallback exit watcher on kernels without pidfd.~~ Resolved in step 2: 10 ms, on the single watcher thread, for unregistrable children only.
 - **`ClosePseudoConsole` blocking:** whether `ClosePseudoConsole` can block on older Windows builds when output is not being drained. G1 makes `Dispose` non-blocking, so if it can block, the call must run off the caller's thread. Step 3 still closes on the caller's thread but switches the reader to discarding output first, so the final frame always has a reader. Verify on Windows 10 and Windows 11 builds before 24H2.
 - **G7 API shape:** a `PtyStartInfo` property, a process-wide setting, or a separate start method.

@@ -181,6 +181,34 @@ static int minipty_spawn_err_is_transient(int err)
     return err == EAGAIN || err == ENOMEM || err == ENXIO;
 }
 
+/*
+ * Under concurrent PTY open/close, macOS fails posix_openpt with errno set to the negated ENXIO (-6) even far
+ * below kern.tty.ptmx_max. The failure is momentary, so it is retried here on a short interval first: re-running
+ * the whole spawn after its longer backoff still exhausted every attempt under heavy parallel spawning.
+ */
+#define MINIPTY_OPENPT_RETRY_MAX 8
+#define MINIPTY_OPENPT_RETRY_US 1000
+
+static int minipty_openpt(void)
+{
+    int fd;
+
+    for (int attempt = 0;; attempt++) {
+        /* Cleared so a failure that leaves errno untouched is not read as an earlier, unrelated error. */
+        errno = 0;
+        fd = posix_openpt(O_RDWR | O_CLOEXEC);
+        if (fd >= 0 || errno > 0 || attempt + 1 >= MINIPTY_OPENPT_RETRY_MAX)
+            return fd;
+        usleep(MINIPTY_OPENPT_RETRY_US);
+    }
+}
+
+/* Error for a failed minipty_openpt: a non-positive errno is reported as ENXIO, which the spawn retries. */
+static int minipty_openpt_err(void)
+{
+    return errno > 0 ? errno : ENXIO;
+}
+
 static int minipty_resolve_helper_path(char *out, size_t out_len)
 {
     Dl_info info;
@@ -257,9 +285,9 @@ static int minipty_spawn_darwin_once(
     *master = -1;
 
     for (size_t i = 0; i < 3; i++) {
-        int fd = posix_openpt(O_RDWR | O_CLOEXEC);
+        int fd = minipty_openpt();
         if (fd < 0) {
-            err = errno > 0 ? errno : EINVAL;
+            err = minipty_openpt_err();
             goto done;
         }
 
@@ -280,9 +308,9 @@ static int minipty_spawn_darwin_once(
         goto done;
     }
 
-    *master = posix_openpt(O_RDWR | O_CLOEXEC);
+    *master = minipty_openpt();
     if (*master < 0) {
-        err = errno > 0 ? errno : EINVAL;
+        err = minipty_openpt_err();
         goto done;
     }
 

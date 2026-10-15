@@ -7,7 +7,7 @@ namespace MiniPty.Internal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// ConPTY reports end of output only after the pseudo-console closes, and a Unix grandchild can hold the slave
+/// ConPTY reports end of output only after the pseudo-console closes, and a Linux grandchild can hold the slave
 /// open after the child exits, so something has to close the transport once output has gone quiet. One shared
 /// timer does that for every session: no session holds a thread or a timer of its own for it, and the timer
 /// stops while no session is draining. Ticks run on the thread pool and only check state or close a transport.

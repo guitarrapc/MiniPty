@@ -190,7 +190,7 @@ The session's output pump starts reading at spawn on a dedicated reader thread, 
 2. Consumer reads `Output` while the child runs.
 3. If one-shot stdin was provided, `SendEof()` before waiting—see [Unix stdin EOF](#unix-stdin-eof).
 4. If no stdin bytes, leave the master open for writes until the child exits (TUI programs).
-5. The exit watcher reaps the child. The output pump reads until natural EOF; the post-exit drain closes the master only when output stays open after exit (a grandchild holds the slave). `Dispose()` closes the master, and the descriptor closes once the reader releases it.
+5. The exit watcher reaps the child. The output pump reads until natural EOF; the post-exit drain closes the master only when output stays open after exit (a grandchild holds the slave on Linux; on macOS the session leader's exit revokes the tty, so output ends at once and later grandchild output is lost; FreeBSD is expected to revoke like macOS but is unverified). `Dispose()` closes the master, and the descriptor closes once the reader releases it.
 
 ### Unix stdin EOF
 
@@ -246,7 +246,7 @@ Each session's output is read by one pump, from spawn until end of output, on a 
 | Aspect | Implementation |
 |---|---|
 | Reader thread | A process-wide pool of dedicated background threads, one per session that is still reading. When a session's output ends, its thread parks and serves the next session; a thread idle for 30 s exits. Never a thread-pool worker, never the caller's thread. |
-| Buffer | A ring of 4 slots × 4 KiB in one array from the shared array pool. Each read fills one slot and keeps appending output that arrives within a short micro-window. When all four slots hold unread output the pump stops reading, and backpressure reaches the child through the OS pipe. |
+| Buffer | A ring of 4 slots × 4 KiB in one array from the shared array pool. Each read fills one slot and keeps appending output that arrives within a short micro-window. On Unix the windows chained into one slot stop 2 ms after its first read, so a slot is held for at most about 3 ms; on Windows the chain is unbounded until a window passes empty. When all four slots hold unread output the pump stops reading, and backpressure reaches the child through the OS pipe. |
 | Ring consumers | `ReadOutputAsync` hands out slots in place; `Output` copies out of them. Both wait through an allocation-free wait slot that the pump completes; continuations run asynchronously, so no consumer code runs on the reader thread. |
 | Sink consumers | `CompleteAsync` and `PtyCapture.RunAsync` attach a sink. The pump writes into it on the reader thread, after delivering anything the ring already held; writes are serialized with attach and detach under the pump lock. |
 | Windows read | Blocking `ReadFile` on the ConPTY output pipe. It ends when ConPTY closes its end of the pipe, after the pseudo-console is closed. |
@@ -258,7 +258,7 @@ Each session's output is read by one pump, from spawn until end of output, on a 
 
 ### Post-exit drain
 
-ConPTY reports end of output only after the pseudo-console closes, and on Unix a grandchild can keep the slave open after the child exits. Once the exit watcher reports exit, a process-wide 10 ms timer, running only while some session is draining, closes the transport after the pump has read nothing for 100 ms and is not parked on a full ring.
+ConPTY reports end of output only after the pseudo-console closes, and on Linux a grandchild can keep the slave open after the child exits (macOS revokes the tty when the session leader exits, so output ends there without the drain; FreeBSD is unverified). Once the exit watcher reports exit, a process-wide 10 ms timer, running only while some session is draining, closes the transport after the pump has read nothing for 100 ms and is not parked on a full ring.
 
 A one-shot completion sink adds bounds: the transport closes at `OutputDrainGrace` after exit at the latest, and the drain wait fails with `TimeoutException` when the reader has not finished `OutputReaderCloseTimeout` after the close. It also never quiet-closes before the first read, because ConPTY can emit its first frame after a fast child has already exited.
 
@@ -270,7 +270,7 @@ Closing ends output without losing it: ConPTY flushes its final frame and the pu
 
 ## Child exit observation
 
-Exit is observed by one process-wide watcher per platform, so an idle session holds no thread of its own and no thread-pool worker. Exit is recorded once; awaiters get a task created only on demand, library-internal waits use an allocation-free waiter slot, and the session's output drain is notified through an allocation-free listener.
+Exit is observed by one process-wide watcher per platform, so observing exit adds no per-session thread and no thread-pool worker (output reading still holds the session's reader thread until end of output). Exit is recorded once; awaiters get a task created only on demand, library-internal waits use an allocation-free waiter slot, and the session's output drain is notified through an allocation-free listener.
 
 | Platform | Mechanism |
 |---|---|

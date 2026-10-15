@@ -33,7 +33,7 @@ internal interface IPtyOutputWaiter
 /// </para>
 /// <para>
 /// <b>End of output.</b> Unix PTYs report end of output once every slave descriptor closes. ConPTY reports it
-/// only after the pseudo-console closes, and a Unix grandchild can hold the slave open, so after child exit
+/// only after the pseudo-console closes, and a Linux grandchild can hold the slave open, so after child exit
 /// <see cref="PtyOutputDrainScheduler"/> closes the transport once reads have been quiet for
 /// <see cref="PostExitQuietMs"/> (one-shot completion also bounds this by its grace and close timeouts).
 /// </para>
@@ -51,12 +51,14 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// <summary>Post-exit silence after which the transport is closed so the reader sees end of output.</summary>
     internal const int PostExitQuietMs = 100;
 
+
     private const int FlagProducerFinished = 1;
     private const int FlagSessionDisposed = 2;
     private const int FlagCloseRequested = 4;
     private const int FlagExitObserved = 8;
 
     private readonly IPtyBackend _backend;
+    private readonly long _coalesceBudgetTicks;
     private readonly byte[] _ring;
     private SlotLengths _lengths;
     // Consumer side: the slot being read, and how much of it the Output stream has already copied out.
@@ -84,6 +86,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal PtyOutputPump(IPtyBackend backend)
     {
         _backend = backend;
+        _coalesceBudgetTicks = backend.CoalesceBudgetTicks > 0 ? backend.CoalesceBudgetTicks : long.MaxValue;
         _ring = ArrayPool<byte>.Shared.Rent(SlotCount * SlotSize);
     }
 
@@ -179,7 +182,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
             Volatile.Write(ref _lastReadTick, Environment.TickCount64);
             var length = read;
             var end = false;
-            while (length < SlotSize)
+            // Each continuation read waits its own micro-window, so output that keeps trickling in faster than the
+            // window would otherwise hold the slot until it fills. The backend's budget bounds the hold from the
+            // first read; the last window may still run past it.
+            var coalesceDeadline = _coalesceBudgetTicks == long.MaxValue ? long.MaxValue : timestamp + _coalesceBudgetTicks;
+            while (length < SlotSize && Stopwatch.GetTimestamp() < coalesceDeadline)
             {
                 var more = _backend.ReadMoreOutput(buffer[length..], reader, out end);
                 if (more <= 0)
@@ -283,7 +290,16 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
         SignalConsumer(dataArrived: false);
         if (Interlocked.CompareExchange(ref _stopWaitState, 2, 1) == 1)
-            _stopped.SetResult(true);
+        {
+            // Same hazard as in SignalConsumer: a throwing context must not take the reader thread down.
+            try
+            {
+                _stopped.SetResult(true);
+            }
+            catch (Exception)
+            {
+            }
+        }
     }
 
     // ---------------------------------------------------------------- Ring consumer (ReadOutputAsync, Output)
@@ -368,7 +384,19 @@ internal sealed class PtyOutputPump : IValueTaskSource
             return;
 
         if (Interlocked.CompareExchange(ref _consumerWaiting, 0, 1) == 1)
-            Volatile.Read(ref _waiter)!.OnOutputSignaled();
+        {
+            // Completing the wait posts the consumer's continuation to the context it captured, on this thread: the
+            // reader thread, or a thread disposing the session. A context whose Post throws (a UI dispatcher that
+            // already shut down) can never run that continuation; the exception must not end output reading,
+            // escape Dispose, or terminate the process from the reader thread.
+            try
+            {
+                Volatile.Read(ref _waiter)!.OnOutputSignaled();
+            }
+            catch (Exception)
+            {
+            }
+        }
     }
 
     // ---------------------------------------------------------------- Sink consumer (one-shot completion)

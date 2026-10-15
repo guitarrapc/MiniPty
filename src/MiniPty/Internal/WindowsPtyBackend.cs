@@ -460,6 +460,10 @@ internal static class WindowsPtyBackend
 
         public bool IsOutputClosed => Volatile.Read(ref _outputClosed);
 
+        // Unbounded: ConPTY bulk output arrives in slices that each window chains into the slot, and a budget has
+        // not been measured on Windows yet. Output trickling in faster than a clock tick is held until the slot fills.
+        public long CoalesceBudgetTicks => 0;
+
         // The output pipe handle is pinned by each ReadFile call (SafeHandle reference counting), so a concurrent
         // Dispose defers the close until the read returns, and later reads see ObjectDisposedException.
         public bool TryBeginOutputRead() => true;

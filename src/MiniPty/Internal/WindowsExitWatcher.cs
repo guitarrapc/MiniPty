@@ -5,8 +5,8 @@ namespace MiniPty.Internal;
 
 /// <summary>
 /// Process-wide observer of ConPTY child exits: background threads that each wait on up to 63 child
-/// process handles with <c>WaitForMultipleObjects</c>, so an idle session holds no thread of its own and
-/// never occupies a thread-pool worker.
+/// process handles with <c>WaitForMultipleObjects</c>, so observing exit adds no thread per
+/// session and never occupies a thread-pool worker.
 /// </summary>
 /// <remarks>
 /// <para>

@@ -242,8 +242,19 @@ internal sealed class PtyOutputStream : Stream, IValueTaskSource<int>, IPtyOutpu
 
     private void OnCanceled()
     {
-        if (_pump.TryCancelWait())
+        if (!_pump.TryCancelWait())
+            return;
+
+        // Runs on the canceling thread, which may be a timer thread, and posts the waiter's continuation to the
+        // context it captured. A context whose Post throws can never run it; the exception must not escape
+        // Cancel or terminate the process from a timer thread.
+        try
+        {
             _core.SetException(new OperationCanceledException(_pendingToken));
+        }
+        catch (Exception)
+        {
+        }
     }
 
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();

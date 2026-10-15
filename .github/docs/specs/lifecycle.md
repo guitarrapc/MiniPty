@@ -140,7 +140,7 @@ EOF staging advances on a per-session 100 ms timer, so it gives the child time t
 
 | Behavior | Contract |
 |---|---|
-| `ReadOutputAsync` / `Output` after child exit | Drains remaining output and then completes normally. Where the transport stays open after exit (ConPTY always, Unix when a grandchild holds the slave), the post-exit drain closes it once output has been quiet for 100 ms. |
+| `ReadOutputAsync` / `Output` after child exit | Drains remaining output and then completes normally. Where the transport stays open after exit (ConPTY always, Linux when a grandchild holds the slave; macOS revokes the tty when the child exits, so output a grandchild writes afterwards is lost), the post-exit drain closes it once output has been quiet for 100 ms. |
 | `WaitForExitAsync` | Observes exit only. It does not close the transport, so a concurrent reader keeps receiving output until end of output. |
 | `ReadOutputAsync` after `Kill()` | Same as exit: drain remaining output, then complete normally (EOF). |
 | `CompleteAsync` after child exit | Drains output; the transport closes once output has been quiet, and at `OutputDrainGrace` after exit at the latest. |

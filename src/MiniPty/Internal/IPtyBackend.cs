@@ -57,6 +57,12 @@ internal interface IPtyBackend : IDisposable
     /// the last read filled. Returns 0 when none arrived; <paramref name="endOfOutput"/> reports end of output.
     /// </summary>
     public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput);
+    /// <summary>
+    /// Longest time, in <see cref="System.Diagnostics.Stopwatch"/> ticks, that one slot keeps appending
+    /// <see cref="ReadMoreOutput"/> results after its first read; 0 or less appends until the slot fills or a
+    /// micro-window passes with no output.
+    /// </summary>
+    public long CoalesceBudgetTicks { get; }
     /// <summary>Gets whether the transport was closed, after which reads report end of output without blocking.</summary>
     public bool IsOutputClosed { get; }
     /// <summary>

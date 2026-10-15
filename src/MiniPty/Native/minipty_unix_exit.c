@@ -23,8 +23,8 @@
 /*
  * Process-wide child exit watcher.
  *
- * One managed thread blocks in minipty_child_watch_wait for every MiniPty child in the process, so an
- * idle session holds no thread of its own. Linux watches pidfds with epoll; macOS and FreeBSD watch
+ * One managed thread blocks in minipty_child_watch_wait for every MiniPty child in the process, so
+ * observing exit adds no thread per session. Linux watches pidfds with epoll; macOS and FreeBSD watch
  * EVFILT_PROC NOTE_EXIT with kqueue.
  *
  * The watcher only reports that a child exited. Reaping stays with the managed caller so the wait

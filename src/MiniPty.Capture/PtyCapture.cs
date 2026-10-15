@@ -7,7 +7,8 @@ namespace MiniPty.Capture;
 /// </summary>
 /// <remarks>
 /// Built on <see cref="Pty.Start"/> and the session's output reader, which hands each read to the capture on its
-/// background thread as soon as it completes, so awaiting <see cref="RunAsync"/> never blocks the calling thread.
+/// background thread as soon as it completes, so awaiting <see cref="RunAsync"/> does not block the calling thread on
+/// output or exit; completion input, when set, is still written synchronously first.
 /// <see cref="PtySession.ReadOutputAsync"/> remains the persistent public streaming API.
 /// Each <see cref="PtyCaptureChunk"/> records one output read with the elapsed time from session start
 /// (immediately after spawn) to the read's completion.

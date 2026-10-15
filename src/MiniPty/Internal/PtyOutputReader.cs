@@ -227,8 +227,19 @@ internal sealed class PtyOutputReader :
 
     private void OnCanceled()
     {
-        if (_pump.TryCancelWait())
+        if (!_pump.TryCancelWait())
+            return;
+
+        // Runs on the canceling thread, which may be a timer thread, and posts the waiter's continuation to the
+        // context it captured. A context whose Post throws can never run it; the exception must not escape
+        // Cancel or terminate the process from a timer thread.
+        try
+        {
             _core.SetException(new OperationCanceledException(_token));
+        }
+        catch (Exception)
+        {
+        }
     }
 
     /// <summary><see cref="PtySession.ReadOutputAsync"/> with a cancelable token, which must travel with the enumerable.</summary>

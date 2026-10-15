@@ -22,7 +22,9 @@ namespace MiniPty;
 /// </para>
 /// <para>
 /// Asynchronous members never block the calling thread and never run library code on the caller's
-/// <see cref="SynchronizationContext"/>, so they can be awaited from a UI thread.
+/// <see cref="SynchronizationContext"/>, so they can be awaited from a UI thread. The exception for now is
+/// <see cref="WriteInputAsync(string, Encoding?, CancellationToken)"/>, which writes synchronously, and with it
+/// <see cref="CompleteAsync"/> when <see cref="PtyCompleteOptions.Input"/> is set.
 /// </para>
 /// <para>
 /// Disposing or awaiting <see cref="DisposeAsync"/> kills the child if it is still running, then releases handles.
@@ -195,6 +197,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </param>
     /// <param name="cancellationToken">Token used to cancel the write operation.</param>
     /// <returns>A task that completes when the text is written.</returns>
+    /// <remarks>
+    /// The text is written synchronously on the calling thread. On Unix, writing more input than the child reads
+    /// fills the tty input queue and blocks the caller until the child reads or exits, so a UI thread should not
+    /// write large input through this overload.
+    /// </remarks>
     public ValueTask WriteInputAsync(
         string text,
         Encoding? encoding = null,
@@ -340,8 +347,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </param>
     /// <returns>A <see cref="PtyResult"/> with merged <see cref="PtyResult.Output"/> bytes and exit code.</returns>
     /// <remarks>
-    /// Output is collected on the session's reader thread while the child runs, so awaiting this method never
-    /// blocks the calling thread.
+    /// Output is collected on the session's reader thread while the child runs, so awaiting this method does not
+    /// block the calling thread on output or exit. <see cref="PtyCompleteOptions.Input"/> is still written
+    /// synchronously first, as by <see cref="WriteInputAsync(string, Encoding?, CancellationToken)"/>.
     /// </remarks>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">

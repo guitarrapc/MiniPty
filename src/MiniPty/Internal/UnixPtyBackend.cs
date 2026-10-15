@@ -14,6 +14,10 @@ internal static partial class UnixPtyBackend
     private const int MacOsEofAttachDeferPolls = 4;
     // How long a read keeps appending output that arrives right after it to the same ring slot.
     private const int CoalesceMicroWindowMs = 1;
+    // Bounds the windows chained into one slot, so output trickling in faster than the window is not held until
+    // the slot fills. The last window may run past it: a slot is held for at most about 3 ms.
+    private const int CoalesceBudgetMs = 2;
+    private static readonly long s_coalesceBudgetTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceBudgetMs / 1000;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
@@ -305,10 +309,13 @@ internal static partial class UnixPtyBackend
         };
 
         // Unix PTYs report end of output on their own once every slave descriptor closes; the post-exit drain
-        // closes the master only when a grandchild keeps the slave open.
+        // closes the master only when a grandchild keeps the slave open (Linux; macOS revokes the tty when the
+        // session leader exits).
         public void CloseOutputTransport() => CloseMaster();
 
         public bool IsOutputClosed => IsMasterClosed;
+
+        public long CoalesceBudgetTicks => s_coalesceBudgetTicks;
 
         public bool TryBeginOutputRead() => TryAcquireMaster(out _);
 
@@ -488,6 +495,24 @@ internal static partial class UnixPtyBackend
 
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, _termSignal != 0 ? _termSignal : null));
             return true;
+        }
+
+        /// <summary>
+        /// Records exit for a child that something outside MiniPty reaped, without calling <c>waitpid</c>: its pid
+        /// already belongs to another child. The wait status is lost, as on <c>ECHILD</c>. Called only by
+        /// <see cref="ChildWatcher"/>.
+        /// </summary>
+        internal void OnReapedElsewhere()
+        {
+            lock (_pidLock)
+            {
+                if (_exited)
+                    return;
+
+                Volatile.Write(ref _exited, true);
+            }
+
+            _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, null));
         }
 
         /// <summary>Arms the one-shot EOF staging tick; each tick re-arms itself while staging is in progress.</summary>
