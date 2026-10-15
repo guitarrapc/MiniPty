@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** G2 implemented (2026-10-15). G1 design agreed, and delivery step 1 (caller-context test harness) is done. The other items are proposed.
+**Status:** G2 implemented (2026-10-15). G1 design agreed; delivery steps 1 (caller-context test harness) and 2 (exit watcher, exit task, EOF staging timer) are done. The other items are proposed.
 
 ## Background
 
@@ -123,10 +123,10 @@ Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a
      - Unix puts the master in non-blocking mode, and the thread waits on the master and a wake descriptor together. On Linux, closing an fd does not interrupt a `read` blocked on it in another thread (see close(2)), so the wake descriptor is the reliable way to stop the reader.
    - **Phase 2 driver:** G6 replaces the thread with thread-free async I/O. The public API does not change.
 2. **Exit watcher.**
-   - Windows uses a runtime registered wait on the process handle. The runtime's wait threads multiplex the handles, so no thread is dedicated to a session.
+   - Windows uses process-wide watcher threads, each waiting on up to 63 duplicated process handles with `WaitForMultipleObjects`. A runtime registered wait was the original plan; step 2 replaced it because it allocates about 270 bytes per session.
    - Unix uses one process-wide watcher thread: pidfd on Linux 5.3+, `kqueue` `EVFILT_PROC` on macOS and FreeBSD, and consolidated `waitpid` polling on the same thread where neither is available.
    - The watcher is the only code that reaps children.
-   - Exit completes a single per-session `Task<PtyExitStatus>`, whose continuations run asynchronously.
+   - Exit is recorded once per session. Public waits get a `Task<PtyExitStatus>` created on first use, whose continuations run asynchronously; library-internal waits use an allocation-free waiter slot; the session's output drain is notified through an allocation-free listener.
 3. **Session timer.**
    - One lazily created timer per session drives two things:
      - EOF staging: Windows Ctrl+Z / CR and deferred input-pipe close, and Unix EOT deferral.
@@ -211,6 +211,52 @@ Lessons from building the harness:
 - **Measure pool occupancy directly.** Occupied workers, computed as `GetMaxThreads` minus `GetAvailableThreads`, give a deterministic F8 signal (2 per session), where burst latency does not. The test runs `[NotInParallel]`.
 - **Until G1 fixes F8, run the guards on their own.** The failing tests occupy pool workers in the test process itself. On an 8-core Linux machine (minimum 8 workers), that starves the timing-sensitive guards in a full parallel run, and they time out. Run `PtyCallerContextTests` by itself to check the guards until the occupancy is gone. On the 32-core Windows machine the full run shows only the expected failures.
 - **A blocked Unix input write can outlive cleanup.** A write blocked on a full tty input queue stays blocked through cleanup when the pool is starved. The background writer in step 4 must be stoppable by `Dispose` without depending on pool threads.
+
+### Step 2 result: exit watcher, exit task, EOF staging timer
+
+What changed:
+
+- **Exit observation:** process-wide watchers replace every exit poll loop (see [Child exit observation](../references/pty_crossplatform.md#child-exit-observation)).
+- **Waits:** `WaitForExitAsync`, `WaitForExitStatusAsync`, and `CompleteAsync` await the recorded exit and never poll or block.
+- **EOF staging:** a per-session 100 ms timer advances it, with the same tick counts as before. `SendEof` no longer depends on somebody awaiting exit.
+- **Unix `Dispose`:** kills without the caller-thread reap wait, and the watcher always reaps.
+- **Output drain:** `ReadOutputAsync`'s post-exit drain is queued by the exit listener instead of a polling task.
+
+Results:
+
+| Test | Windows | Linux |
+|---|---|---|
+| F3 `WaitForExitAsync`, F4 `CompleteAsync`, F4 Capture | Pass | Pass |
+| F8 occupied workers | 8 → 4 (producers only; step 3) | 8 → 4 |
+| F1, F2, Unix text input | Still fail (steps 3–4) | Still fail |
+| Existing suite | All pass, 3 runs | All pass, 3 runs |
+
+On Linux, exit is reported 2 ms after it happens through pidfd. The previous polling took 10–100 ms. A process with three sessions has one watcher thread and no zombies after `Dispose`. NativeAOT publish and run were verified on Windows and on Linux (project reference, shared native library).
+
+Allocation (Windows, KB per operation, in the repository checkout; HEAD maximum of four runs against this step's three runs):
+
+| Benchmark | HEAD | Step 2 |
+|---|---|---|
+| `Session_Exit0_Bytes` | 3.75 | 2.68 |
+| `Session_32KiB_Bytes` | 41.97 | 39.25–39.58 |
+| `Session_32KiB_StreamBytes` | 6.50 | 4.19–4.30 |
+| `Session_32KiB_OutputStreamBytes` | 4.13 | 2.00 |
+| `Capture_32KiB_Text` | 126.87 | 124.14–124.48 |
+
+About 1.1 KB of each improvement comes from the Windows command-line builder: it now measures and writes one exact-size buffer instead of building a string, a NUL-terminated copy, and a char array. The exit work alone saved about 170 B on the one-shot paths, but added about 85 B to `OutputStreamBytes`, because the exit state lives in every backend object. The command-line change more than offsets that, and `WindowsCommandLineTests` checks it against the previous quoting with 2000 random inputs.
+
+Lessons:
+
+- **Kill-on-cancellation cannot ride on a token registration next to `WaitAsync(token)`.** Callbacks run in reverse registration order, so the waiter resumed and unregistered the kill before it ran (`PtyCancellationKill` caught it).
+- **A latent deadlock in the output buffer surfaced once exit timing changed.** Completing the consumer's wait under the buffer lock deadlocked against a concurrent cancellation callback (see [core_session.md](../specs/core_session.md) lessons). It hung two stdio bridge tests deterministically on Linux.
+- **Stale epoll registrations from forked children closed live descriptors** and hung the Linux suite until registrations became one-shot and explicitly removed.
+- **Allocation-neutral exit observation needs care at every layer:**
+  - Create the task lazily.
+  - Give internal waits a slot, not a task.
+  - Avoid async state machines where only one await happens.
+  - Never construct an exception that is not thrown (`Dispose` built an `ObjectDisposedException` on every call).
+  - Pooled `ValueTask` builders did not help: boxes returned on another thread were often not reused.
+- **The caller-context probe must not depend on the thread pool.** Its latency is now timestamped on the UI thread. Tests whose operation spawns a child on the UI thread start measuring after the spawn, which is inherent and can exceed 100 ms under load.
 
 ### Acceptance
 
@@ -500,7 +546,7 @@ flowchart LR
 
 - **Slot sizing:** the pump's slot count and size. Start from 4 × 4 KiB and tune with the streaming throughput and allocation benchmarks.
 - **Coalescing micro-window:** whether the ConPTY 1 ms coalescing micro-window is still needed once reads are pipelined into multiple slots.
-- **Unix fallback interval:** the `waitpid` polling interval for the fallback exit watcher on kernels without pidfd.
+- ~~**Unix fallback interval:** the `waitpid` polling interval for the fallback exit watcher on kernels without pidfd.~~ Resolved in step 2: 10 ms, on the single watcher thread, for unregistrable children only.
 - **`ClosePseudoConsole` blocking:** whether `ClosePseudoConsole` can block on older Windows builds when output is not being drained. G1 makes `Dispose` non-blocking, so if it can block, the call must run off the caller's thread. Verify on Windows 10 and Windows 11 builds before 24H2.
 - **G7 API shape:** a `PtyStartInfo` property, a process-wide setting, or a separate start method.
 - **G5 sample form:** a WinUI sample needs the Windows App SDK, which is a third-party dependency in a sample and cannot run in CI. The alternative is a framework-neutral console sample with a single-threaded context.

@@ -36,4 +36,9 @@ int minipty_get_active_process_name(int master, char *buffer, int buffer_length)
 int minipty_peek_readable_bytes(int fd, int *bytes_available);
 int minipty_try_read(int fd, void *buf, unsigned int count, int *bytes_read, int *is_eof);
 
+int minipty_child_watch_init(void);
+int minipty_child_watch_add(int pid);
+int minipty_child_watch_wake(void);
+int minipty_child_watch_wait(int *pids, int capacity, int timeout_ms);
+
 #endif

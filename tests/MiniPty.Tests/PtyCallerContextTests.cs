@@ -152,6 +152,9 @@ public sealed class PtyCallerContextTests
 
         try
         {
+            // RunAsync spawns the child synchronously on the UI thread, which can take over 100 ms under load.
+            // That spawn is inherent; the waiting that follows is what must leave the UI thread free.
+            await Task.Delay(TimeSpan.FromMilliseconds(300));
             await AssertUiThreadStaysFreeAsync(ui);
             await Assert.That(await CompletesWithinAsync(capture, OperationTimeout)).IsTrue();
 

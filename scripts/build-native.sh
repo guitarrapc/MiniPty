@@ -7,6 +7,7 @@ native_dir="$root/src/MiniPty/Native"
 sources=(
   "$native_dir/minipty_unix.c"
   "$native_dir/minipty_unix_exec.c"
+  "$native_dir/minipty_unix_exit.c"
 )
 out_dir="$root/runtimes/$rid/native"
 

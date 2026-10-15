@@ -1,15 +1,15 @@
 ﻿using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks.Sources;
 
 namespace MiniPty.Internal;
 
 internal static partial class UnixPtyBackend
 {
     private const byte InputEot = 0x04;
-    private const int WaitPollMs = 100;
-    private const int ReapPollMs = 10;
-    private const int ReapDeadlineMs = 1_000;
-    // macOS posix_spawn children can still be running short -c scripts when the first wait poll ends.
+    // EOF staging advances one step per tick, matching the cadence of the exit-wait poll loop it replaced.
+    private const int EofTickMs = 100;
+    // macOS posix_spawn children can still be running short -c scripts when the first EOF tick fires.
     // Sending EOT before they finish leaves /bin/sh waiting on stdin and never exiting.
     private const int MacOsEofAttachDeferPolls = 4;
 
@@ -107,12 +107,18 @@ internal static partial class UnixPtyBackend
         public void Dispose() => FreeUtf8Allocations(_owned);
     }
 
-    private sealed class UnixPtyBackendInstance : IPtyBackend
+    private sealed class UnixPtyBackendInstance : IPtyBackend, IValueTaskSource<int>
     {
         private readonly int _master;
         private readonly int _pid;
         private readonly UnixExecPayload? _execHold;
         private readonly InputTrackingWriteStream _inputStream;
+        // Serializes the child's reap with signal delivery, so Kill can never reach a pid the watcher has
+        // already released for reuse.
+        private readonly Lock _pidLock = new();
+        // Mutable struct: used only through this field, never copied.
+        private PtyExitSignal _exitSignal;
+        private Timer? _eofTimer;
         private bool _eofSent;
         private bool _eofPending;
         private int _eofAttachPollsRemaining;
@@ -135,38 +141,36 @@ internal static partial class UnixPtyBackend
             _inputStream = new InputTrackingWriteStream(new PtyFdWriteStream(master), OnInputWritten);
             Input = _inputStream;
             Output = new PtyFdReadStream(master);
+            // Last, so the watcher never observes a partially constructed instance.
+            ChildWatcher.Register(this);
         }
 
         public Stream Input { get; }
         public Stream Output { get; }
         public int ProcessId => _pid;
 
-        public bool HasExited
-        {
-            get
-            {
-                TryRefreshExitState();
-                return _exited;
-            }
-        }
+        // Exit state is cached by the watcher's reap; reading it never calls waitpid, which would race
+        // the watcher for the one-time wait status.
+        public bool HasExited => IsExitObserved;
 
-        public int ExitCode
-        {
-            get
-            {
-                TryRefreshExitState();
-                return _exitCode;
-            }
-        }
+        public int ExitCode => _exitCode;
 
-        public int? ExitSignal
-        {
-            get
-            {
-                TryRefreshExitState();
-                return _exited && _termSignal != 0 ? _termSignal : null;
-            }
-        }
+        public int? ExitSignal => IsExitObserved && _termSignal != 0 ? _termSignal : null;
+
+        public Task<PtyExitStatus> Exited => _exitSignal.GetTask();
+
+        public ValueTask<int> WaitForExitCodeAsync() => _exitSignal.WaitForExitCodeAsync(this);
+
+        public void SetExitListener(IPtyExitListener listener) => _exitSignal.SetListener(listener);
+
+        int IValueTaskSource<int>.GetResult(short token) => _exitSignal.GetWaiterResult(token);
+
+        ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token) => _exitSignal.GetWaiterStatus(token);
+
+        void IValueTaskSource<int>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
+            _exitSignal.OnWaiterCompleted(continuation, state, token, flags);
+
+        private bool IsExitObserved => Volatile.Read(ref _exited);
 
         public PtySize Size => _size;
 
@@ -174,7 +178,7 @@ internal static partial class UnixPtyBackend
         {
             get
             {
-                if (_disposed || _masterClosed || TryRefreshExitState())
+                if (_disposed || _masterClosed || IsExitObserved)
                     return null;
 
                 Span<byte> name = stackalloc byte[256];
@@ -213,9 +217,8 @@ internal static partial class UnixPtyBackend
                     (ushort)pixelWidth,
                     (ushort)pixelHeight) != 0)
             {
-                // Capture errno before the exit probe issues its own P/Invoke.
                 var errno = Marshal.GetLastPInvokeError();
-                if (_masterClosed || TryRefreshExitState())
+                if (_masterClosed || IsExitObserved)
                     return;
 
                 throw new IOException($"TIOCSWINSZ failed (errno {errno})");
@@ -227,32 +230,41 @@ internal static partial class UnixPtyBackend
         public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState() || _eofSent || _eofPending)
+            if (IsExitObserved || _eofSent || _eofPending)
                 return;
 
-            // Defer EOT until the wait loop gives the child time to attach (same attach race as ConPTY).
+            // Defer EOT so the child has time to attach (same attach race as ConPTY). The staging timer
+            // advances it, so EOF no longer depends on somebody awaiting exit.
             _eofPending = true;
             if (OperatingSystem.IsMacOS())
                 _eofAttachPollsRemaining = MacOsEofAttachDeferPolls;
+
+            ScheduleEofTick();
         }
 
         public void Kill()
         {
-            if (_disposed || TryRefreshExitState())
-                return;
+            lock (_pidLock)
+            {
+                if (_disposed || _exited)
+                    return;
 
-            KillCore();
+                KillCore();
+            }
         }
 
         public void Kill(PtySignal signal)
         {
             // Validate before the disposed/exited guards so misuse always throws.
             var nativeSignal = MapSignal(signal);
-            if (_disposed || TryRefreshExitState())
-                return;
+            lock (_pidLock)
+            {
+                if (_disposed || _exited)
+                    return;
 
-            // Fire-and-forget like KillCore; ESRCH after a racing exit is benign.
-            UnixInterop.kill(_pid, nativeSignal);
+                // Fire-and-forget like KillCore; ESRCH after a racing exit is benign.
+                UnixInterop.kill(_pid, nativeSignal);
+            }
         }
 
         private void KillCore()
@@ -272,69 +284,9 @@ internal static partial class UnixPtyBackend
             _ => throw new ArgumentOutOfRangeException(nameof(signal)),
         };
 
-        public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true) =>
-            WaitForExitCoreAsync(cancellationToken, killOnCancellation);
-
-        public void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit)
+        // Unix PTYs report EOF on their own once the child side closes, so exit does not close the master.
+        public void CloseTransportAfterExit()
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState())
-                return;
-
-            while (!TryRefreshExitState())
-            {
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (PollForChildExit(WaitPollMs, cancellationToken))
-                    break;
-
-                SendEotIfPending();
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            ObjectDisposedException.ThrowIf(_disposed, this);
-        }
-
-        private async Task<int> WaitForExitCoreAsync(CancellationToken cancellationToken, bool killOnCancellation)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState())
-                return _exitCode;
-
-            CancellationTokenRegistration registration = default;
-            if (killOnCancellation)
-            {
-                registration = cancellationToken.Register(static state =>
-                {
-                    var session = (UnixPtyBackendInstance)state!;
-                    session.Kill();
-                }, this);
-            }
-
-            try
-            {
-                while (!TryRefreshExitState())
-                {
-                    ObjectDisposedException.ThrowIf(_disposed, this);
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    if (PollForChildExit(WaitPollMs, cancellationToken))
-                        break;
-
-                    SendEotIfPending();
-
-                    await Task.Yield();
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                return _exitCode;
-            }
-            finally
-            {
-                registration.Dispose();
-            }
         }
 
         public void CloseOutputTransport()
@@ -352,51 +304,81 @@ internal static partial class UnixPtyBackend
                 return;
 
             _disposed = true;
-            if (!TryRefreshExitState())
+            var exitObserved = true;
+            lock (_pidLock)
             {
-                KillCore();
-                TryReapChild();
+                // The watcher reaps the killed child, so disposal never waits for it on the caller's thread.
+                if (!_exited)
+                {
+                    exitObserved = false;
+                    KillCore();
+                }
             }
+
+            _eofTimer?.Dispose();
+            if (!exitObserved)
+                _exitSignal.SetDisposedBeforeExit();
 
             CloseTransport();
             _execHold?.Dispose();
         }
 
-        private void TryReapChild()
+        /// <summary>
+        /// Reaps the child when it has exited. Called only by <see cref="ChildWatcher"/>, the sole reaper.
+        /// </summary>
+        /// <returns><see langword="true"/> once the child has been reaped.</returns>
+        internal bool TryReapExitedChild()
         {
-            var deadline = Environment.TickCount64 + ReapDeadlineMs;
-            while (Environment.TickCount64 < deadline)
+            lock (_pidLock)
             {
-                if (TryRefreshExitState())
-                    return;
-
-                Thread.Sleep(ReapPollMs);
-            }
-        }
-
-        private bool TryRefreshExitState()
-        {
-            if (_exited)
-                return true;
-
-            if (!TryWaitPid(_pid, UnixInterop.WaitNoHang, out var status, out var result))
-            {
-                if (Marshal.GetLastPInvokeError() == UnixInterop.ECHILD)
-                {
-                    _exited = true;
+                if (_exited)
                     return true;
+
+                if (TryWaitPid(_pid, UnixInterop.WaitNoHang, out var status, out var result))
+                {
+                    if (result != _pid)
+                        return false;
+
+                    _exitCode = MapWaitStatusToExitCode(status);
+                    _termSignal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+                }
+                else if (Marshal.GetLastPInvokeError() != UnixInterop.ECHILD)
+                {
+                    return false;
                 }
 
-                return false;
+                // ECHILD: something outside MiniPty reaped the child, so its status is lost; report exit 0.
+                Volatile.Write(ref _exited, true);
             }
 
-            if (result != _pid)
-                return false;
-
-            _exitCode = MapWaitStatusToExitCode(status);
-            _termSignal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
-            _exited = true;
+            _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, _termSignal != 0 ? _termSignal : null));
             return true;
+        }
+
+        /// <summary>Arms the one-shot EOF staging tick; each tick re-arms itself while staging is in progress.</summary>
+        private void ScheduleEofTick()
+        {
+            _eofTimer ??= new Timer(static state => ((UnixPtyBackendInstance)state!).OnEofTick(), this, Timeout.Infinite, Timeout.Infinite);
+            _eofTimer.Change(EofTickMs, Timeout.Infinite);
+        }
+
+        private void OnEofTick()
+        {
+            if (_disposed || IsExitObserved || !_eofPending)
+                return;
+
+            // A timer callback must never throw: an unhandled exception there terminates the host process.
+            try
+            {
+                SendEotIfPending();
+                if (!_disposed && !IsExitObserved && _eofPending)
+                    _eofTimer?.Change(EofTickMs, Timeout.Infinite);
+            }
+            catch (Exception)
+            {
+                // The transport failed, or Dispose closed it or the timer under the tick; nothing is left to signal.
+                CompleteEotSignaling();
+            }
         }
 
         private void CloseTransport()
@@ -435,7 +417,7 @@ internal static partial class UnixPtyBackend
             if (_eofSent || _exited || _masterClosed)
                 return;
 
-            if (TryRefreshExitState())
+            if (IsExitObserved)
             {
                 CompleteEotSignaling();
                 return;
@@ -443,7 +425,7 @@ internal static partial class UnixPtyBackend
 
             DrainMasterOutputBeforeEot();
 
-            if (TryRefreshExitState())
+            if (IsExitObserved)
             {
                 CompleteEotSignaling();
                 return;
@@ -451,7 +433,7 @@ internal static partial class UnixPtyBackend
 
             // Canonical line discipline: one EOT on a non-empty buffer submits the line but
             // does not signal EOF; a second EOT on the empty buffer ends input for programs like cat.
-            // Stage the two EOT writes on separate wait polls so the child can attach and consume the submit.
+            // Stage the two EOT writes on separate ticks so the child can attach and consume the submit.
             if (_inputWritten && !_inputEndsWithNewline && !_eotLineSubmitSent)
             {
                 if (TryWriteEotByte())
@@ -492,7 +474,7 @@ internal static partial class UnixPtyBackend
                                 continue;
                             case UnixInterop.EIO:
                             case UnixInterop.EPIPE:
-                                TryRefreshExitState();
+                                // The slave closed: the child exited or is exiting, and the watcher will reap it.
                                 return false;
                             default:
                                 throw new IOException($"write failed (errno {Marshal.GetLastPInvokeError()})");
@@ -513,7 +495,7 @@ internal static partial class UnixPtyBackend
             if (!_inputWritten)
                 return;
 
-            if (TryRefreshExitState())
+            if (IsExitObserved)
                 return;
 
             if (OperatingSystem.IsMacOS())
@@ -525,25 +507,6 @@ internal static partial class UnixPtyBackend
                     continue;
                 return;
             }
-        }
-
-        /// Polls for child exit for up to <paramref name="timeoutMs"/> without allocating a delay task.
-        /// Mirrors the Windows backend's timed <c>WaitForSingleObject</c> loop.
-        private bool PollForChildExit(int timeoutMs, CancellationToken cancellationToken)
-        {
-            var deadline = Environment.TickCount64 + timeoutMs;
-            while (Environment.TickCount64 < deadline)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (TryRefreshExitState())
-                    return true;
-
-                var remaining = (int)Math.Min(10, deadline - Environment.TickCount64);
-                if (remaining > 0)
-                    Thread.Sleep(remaining);
-            }
-
-            return TryRefreshExitState();
         }
     }
 

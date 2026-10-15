@@ -33,7 +33,7 @@ flowchart TB
 | `PtyStartInfo` | Public data | Executable, arguments, cwd, size, environment overlay, Unix `TERM` name. No orchestration logic. |
 | `Pty.Start` | Public entry | Null and OS support checks; Windows vs Unix backend selection; returns `PtySession`. Does not wait for exit. |
 | `WindowsPtyBackend` / `UnixPtyBackend` | Internal | ConPTY or Unix PTY spawn, handle ownership, platform EOF and resize. |
-| `IPtyBackend` | Internal contract | Thin runtime boundary: streams, process id, exit poll/wait, kill, transport close. Not a launch or plugin abstraction. |
+| `IPtyBackend` | Internal contract | Thin runtime boundary: streams, process id, exit notification (task, internal waiter, listener), kill, transport close. Not a launch or plugin abstraction. |
 | `PtySession` | Public session | Live PTY lifecycle only: output consumers, stdin writes, `SendEof`, resize, `WaitForExitAsync`, `CompleteAsync`, kill, dispose. Does not decide how the child was spawned. |
 
 Normalization stays localized: `PtyStartInfo.ClampedSize` for dimensions, `PtyEnvironment` for child environment materialization, backends for platform launch preparation.
@@ -124,7 +124,7 @@ Interactive hosts (use case 3) keep a single embedder-owned `ReadOutputAsync` re
 
 | Platform | Behavior |
 |---|---|
-| Windows (bytes written) | Writes Ctrl+Z + CR (`0x1A`, `0x0D`) to the ConPTY input stream; keeps the input pipe open until the child exits. Pipe close during the wait loop is not used — it is observed as `STATUS_CONTROL_C_EXIT`, not EOF. |
+| Windows (bytes written) | Writes Ctrl+Z + CR (`0x1A`, `0x0D`) to the ConPTY input stream; keeps the input pipe open until the child exits. Pipe close is not used for this case — it is observed as `STATUS_CONTROL_C_EXIT`, not EOF. |
 | Windows (no bytes) | Closes the ConPTY input pipe after staging (attach deferral). |
 | Unix | Writes EOT (`0x04`, Ctrl-D) to the PTY master. It does not close the master fd. |
 
@@ -134,7 +134,7 @@ If the slave side is already closed when staged EOT runs, the master write may f
 
 ### ConPTY spawn readiness
 
-Windows may defer stdin EOF until the wait loop has given the child time to attach. Milestone 3 validates that immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof` do not cause spurious child failure (for example `STATUS_CONTROL_C_EXIT`). This remains an internal transport concern; there is no public ready-state API.
+EOF staging advances on a per-session 100 ms timer, so it gives the child time to attach and progresses whether or not anyone awaits exit. Milestone 3 validates that immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof` do not cause spurious child failure (for example `STATUS_CONTROL_C_EXIT`). This remains an internal transport concern; there is no public ready-state API.
 
 ## Drain, kill, and disposal
 
@@ -166,7 +166,7 @@ MiniPty does not fall back to pipe redirect when PTY creation fails.
 ## Lessons Learned
 
 - **ConPTY pipes are transport, not the terminal.** `HPCON` is the pseudo-console; mishandling pipe ends after `CreatePseudoConsole` causes missing output, hangs, or leaks to the parent console.
-- **Child stdin must not be closed before launch completes on Windows.** Early ConPTY input pipe close yields `STATUS_CONTROL_C_EXIT` (0xC000013A). Empty-stdin EOF is staged to the first wait poll or transport close.
+- **Child stdin must not be closed before launch completes on Windows.** Early ConPTY input pipe close yields `STATUS_CONTROL_C_EXIT` (0xC000013A). Empty-stdin EOF is staged to the staging timer or transport close.
 - **ConPTY input pipe close after a write is not clean EOF.** For one-shot stdin with bytes, MiniPty writes Ctrl+Z + CR and waits for natural exit; pipe close is deferred to transport cleanup after exit.
 - **Unix PTY master fds cannot be half-closed.** Closing the master ends both read and write, so `SendEof()` writes EOT instead.
 - **Canonical EOT is not kernel EOF on Unix.** One EOT on a non-empty line buffer delivers buffered bytes but does not end input; a submitted line or a second EOT may be needed.

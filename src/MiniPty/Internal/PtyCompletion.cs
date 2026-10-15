@@ -35,7 +35,7 @@ internal static class PtyCompletion
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
         // Defer CloseTransport on child exit so ConPTY bulk stdout is not truncated; post-exit drain
         // may close the transport early on Windows when output has been quiet long enough.
-        var exitCode = await WaitForExitAsync(session, options, cancellationToken, closeTransportOnExit: false).ConfigureAwait(false);
+        var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
         var output = await PtyOutputDrain.AwaitPumpAsync(
             pumpTask,
             session.OutputTransport,
@@ -64,7 +64,7 @@ internal static class PtyCompletion
         await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
         // Match transport-pump ordering (exit then drain). Defer CloseTransport on Windows until after
         // ReadOutputAsync finishes so BoundedOutputBuffer's producer is not mid-read on a disposed handle.
-        var exitCode = await WaitForExitAsync(session, options, cancellationToken, closeTransportOnExit: false).ConfigureAwait(false);
+        var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
         var output = await PtyOutputDrain.AwaitSessionPumpAsync(
             pumpTask,
             session.CloseOutputTransport,
@@ -87,20 +87,31 @@ internal static class PtyCompletion
             session.SendEof();
     }
 
-    private static async Task<int> WaitForExitAsync(
+    /// <summary>
+    /// Waits for exit. Without an exit timeout this hands back the session's allocation-free wait as is;
+    /// only a configured timeout needs a task and a state machine.
+    /// </summary>
+    private static ValueTask<int> WaitForExitAsync(
         PtySession session,
         PtyCompleteOptions options,
-        CancellationToken cancellationToken,
-        bool closeTransportOnExit = true)
+        CancellationToken cancellationToken)
     {
-        var waitTask = session.WaitForExitInternalAsync(cancellationToken, options.KillOnCancellation, closeTransportOnExit);
+        // The drain below closes the transport itself, after output has been quiet long enough, so the exit
+        // wait never closes it: closing at exit would truncate ConPTY bulk output.
+        var waitTask = session.WaitForExitForCompletionAsync(cancellationToken, options.KillOnCancellation);
+        return options.ExitTimeout is { } exitTimeout
+            ? WaitForExitWithTimeoutAsync(waitTask, exitTimeout, cancellationToken)
+            : waitTask;
+    }
 
-        if (!options.ExitTimeout.HasValue)
-            return await waitTask.ConfigureAwait(false);
-
+    private static async ValueTask<int> WaitForExitWithTimeoutAsync(
+        ValueTask<int> waitTask,
+        TimeSpan exitTimeout,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            return await waitTask.WaitAsync(options.ExitTimeout.Value, cancellationToken).ConfigureAwait(false);
+            return await waitTask.AsTask().WaitAsync(exitTimeout, cancellationToken).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {

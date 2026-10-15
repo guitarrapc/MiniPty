@@ -38,17 +38,17 @@ Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps th
 | API | Behavior |
 |---|---|
 | `Pty.Start(PtyStartInfo)` | Spawns the child. Does not wait. |
-| `HasExited` | Polls the child (`WaitForSingleObject(0)` / `waitpid(WNOHANG)`). On Unix, a successful poll reaps the zombie and records the exit code. |
+| `HasExited` | Reports the exit recorded by the process-wide exit watcher (see [Child exit observation](#child-exit-observation)). Windows may also check `WaitForSingleObject(0)` on the process handle. On Unix it never calls `waitpid`: the watcher is the only reaper, so the one-time wait status is read once. |
 | `WriteInputAsync` | Writes UTF-8 (default) or raw bytes to PTY stdin. Does not close stdin. |
-| `SendEof()` | **Windows:** after bytes were written, writes Ctrl+Z + CR (`0x1A`, `0x0D`) and keeps the input pipe open until exit (pipe close during wait yields `0xC000013A`); when input lacks a trailing `\r`/`\n`, an extra CR is written first. With no bytes, defers input pipe close to the first wait poll—see [Staged stdin EOF](#staged-stdin-eof). **Unix:** writes EOT (`0x04`, Ctrl-D); immediate after successful write, deferred when there were no bytes. |
-| `WaitForExitAsync(CancellationToken)` | Polls the child. Cancellation stops waiting only; the child keeps running (`OperationCanceledException`). |
+| `SendEof()` | **Windows:** after bytes were written, writes Ctrl+Z + CR (`0x1A`, `0x0D`) and keeps the input pipe open until exit (pipe close during wait yields `0xC000013A`); when input lacks a trailing `\r`/`\n`, an extra CR is written first. With no bytes, defers input pipe close—see [Staged stdin EOF](#staged-stdin-eof). **Unix:** writes EOT (`0x04`, Ctrl-D) on the first staging tick. Staging runs on a per-session timer, so it progresses whether or not anyone awaits exit. |
+| `WaitForExitAsync(CancellationToken)` | Awaits the OS exit notification; holds no thread and never polls. Cancellation stops waiting only; the child keeps running (`OperationCanceledException`). |
 | `CompleteAsync(PtyCompleteOptions, CancellationToken)` | Optional stdin, wait for exit, drain output, return `PtyResult`. Cancellation kills the child when `KillOnCancellation` is true (default). |
 | `Kill()` | `TerminateProcess` (Windows) or `kill(SIGKILL)` (Unix). Does not release handles; call `Dispose` afterward. |
 | `Kill(PtySignal)` | **Unix:** `kill(2)` with the per-OS native number (SIGUSR1/2 differ: Linux 10/12, macOS/FreeBSD 30/31). **Windows:** signal is advisory; validates the enum then `TerminateProcess` (node-pty parity). |
 | `WaitForExitStatusAsync` / `ExitStatus` | Adds the Unix termination signal (`waitpid` `WTERMSIG`) to the exit code; decoding is fully managed (identical exited/signaled status layout on Linux/macOS/FreeBSD). Windows always reports a null signal. |
 | `PtyCompleteOptions.OutputDrainGrace` | Default 1s—post-exit drain before closing transport. |
 | `PtyCompleteOptions.OutputReaderCloseTimeout` | Default 5s—wait after transport close for the reader to finish. |
-| `Dispose()` | If the child is still running, **kills** it, then closes ConPTY/pipes/process handles. On Unix, `Dispose` also attempts a bounded `waitpid` after `SIGKILL` to avoid leaving a zombie (up to ~1s). |
+| `Dispose()` | If the child is still running, **kills** it, then closes ConPTY/pipes/process handles. The exit watcher reaps the killed child, so `Dispose` never waits for it and leaves no zombie. |
 | `PtyCapture.RunAsync` | `Pty.Start` + timestamp pump + `CompleteAsync`. Returns `PtyCaptureResult` with `Chunks`. |
 
 ## Windows: ConPTY
@@ -196,7 +196,7 @@ Post-exit quiet drain on ConPTY and Unix PTY masters may close the transport whe
 2. Consumer reads `Output` while the child runs.
 3. If one-shot stdin was provided, `SendEof()` before waiting—see [Unix stdin EOF](#unix-stdin-eof).
 4. If no stdin bytes, leave the master open for writes until the child exits (TUI programs).
-5. `waitpid`; on the normal exit path, `CompleteAsync` drains output (natural EOF, then `close(master)` on timeout). `Dispose()` closes the master immediately, then drains with `OutputReaderCloseTimeout` only.
+5. The exit watcher reaps the child; on the normal exit path, `CompleteAsync` drains output (natural EOF, then `close(master)` on timeout). `Dispose()` closes the master immediately, then drains with `OutputReaderCloseTimeout` only.
 
 ### Unix stdin EOF
 
@@ -222,8 +222,10 @@ Platform-specific staging avoids signaling EOF before the child has attached std
 
 | Platform | After successful `WriteInputAsync` | EOF with no bytes (`Input: ""`) |
 |---|---|---|
-| **Windows** | After bytes: Ctrl+Z + CR on first wait poll; pipe stays open until exit. Empty stdin: defer pipe close to first wait poll (or transport close)—`WriteFile` does **not** mean the child stdin is wired yet (`0xC000013A` if closed too early) | Same |
-| **Unix** | Write EOT (`0x04`) immediately | Defer EOT to wait loop / transport close |
+| **Windows** | After bytes: Ctrl+Z + CR on the first staging tick; pipe stays open until exit. Empty stdin: close the pipe after 40 further ticks (or at transport close)—`WriteFile` does **not** mean the child stdin is wired yet (`0xC000013A` if closed too early) | Same |
+| **Unix** | Write EOT (`0x04`) on the first staging tick (a second EOT on the next tick when the last line lacks a terminator) | Defer EOT to the staging ticks / transport close |
+
+Staging ticks are 100 ms apart on a per-session one-shot timer that re-arms itself while staging is pending. They replaced the exit-wait poll loop that used to advance staging, so `SendEof` no longer depends on somebody awaiting exit; the tick count and spacing are unchanged.
 
 ### Platform differences
 
@@ -244,6 +246,25 @@ Shared session logic lives in `UnixPtyBackend`; spawn and resize ioctl live in `
 `waitpid`, `kill`, `read`, `write`, and other syscalls remain on `libc` in the shared partial class. `TIOCSWINSZ` resize uses `minipty_set_winsize` in `libminipty_unix`—not a direct `ioctl` P/Invoke—because `ioctl` is variadic and mis-marshals on macOS arm64. `FIONREAD` peek for `ReadOutputAsync` coalescing uses `minipty_peek_readable_bytes` in the same native library for the same reason.
 
 On Windows ConPTY, `ReadOutputAsync` coalescing uses `PIPE_NOWAIT` on the output pipe because `PeekNamedPipe` is unreliable on anonymous ConPTY pipes; see `core_session.md` lessons learned. On Linux, continuation reads use `FIONREAD` peek before blocking `read`. macOS PTY masters often report zero via `FIONREAD` while data is readable; macOS uses `minipty_try_read` (`O_NONBLOCK`) for continuation reads instead.
+
+## Child exit observation
+
+Exit is observed by one process-wide watcher per platform, so an idle session holds no thread of its own and no thread-pool worker. Exit is recorded once; awaiters get a task created only on demand, library-internal waits use an allocation-free waiter slot, and the session's output drain is notified through an allocation-free listener.
+
+| Platform | Mechanism |
+|---|---|
+| **Windows** | Background threads, each waiting on up to 63 child process handles with `WaitForMultipleObjects` (slot 0 is a wake event). The watcher owns a **duplicate** of each process handle and closes it when the child exits. |
+| **Linux** | One thread blocked in `epoll_wait` over pidfds (`pidfd_open`, Linux 5.3+) plus a wake pipe. |
+| **macOS / FreeBSD** | One thread blocked in `kevent` on `EVFILT_PROC` `NOTE_EXIT` plus a wake pipe. |
+| **Fallback** | A child that cannot be registered (no pidfd, seccomp, or already exited before `kqueue` registration) joins a set the same thread polls with `waitpid(WNOHANG)` every 10 ms. |
+
+The Unix watcher is the only code that calls `waitpid` on MiniPty children. `HasExited`, `Kill`, and EOF staging read the recorded state instead; `Kill` and the reap share a lock so a signal can never reach a pid the reap has already released for reuse.
+
+Lessons learned:
+
+- **Duplicated process handles make teardown unordered.** Closing a handle while another thread waits on it is undefined behavior. With the watcher owning a duplicate, a session closes its own handle at any time, and the child it kills on dispose drains its watcher slot without any unregistration handshake.
+- **`RegisterWaitForSingleObject` costs about 270 bytes per session** (wait-handle wrappers, the registration object, its lock, a callback wrapper, and a completion work item). The shared `WaitForMultipleObjects` watcher costs nothing per session.
+- **A closed pidfd can stay registered in epoll.** A child forked concurrently holds a duplicate of every parent descriptor until it execs, and epoll drops a registration only when every descriptor for the open file description is closed. The stale registration reported the same exit again with a pidfd number since reused for an unrelated descriptor, which closed live descriptors of other sessions and hung the parallel test suite. Registrations are now `EPOLLONESHOT` and are removed with `EPOLL_CTL_DEL` before the pidfd is closed.
 
 ## Shared Rules
 
@@ -272,7 +293,7 @@ PTY shutdown is timing-sensitive. General pattern:
 ```text
 1. Start reading PTY output (pump task)
 2. One-shot stdin: WriteInputAsync → SendEof (Windows: Ctrl+Z + CR when bytes written, else pipe close; Unix: EOT) before wait
-3. Detect child exit (wait / WaitForSingleObject)
+3. Detect child exit (exit watcher notification)
 4. Drain output (OutputDrainGrace), then close ConPTY (Windows) or master fd (Unix)
 5. Wait for reader (OutputReaderCloseTimeout), release process handles
 ```

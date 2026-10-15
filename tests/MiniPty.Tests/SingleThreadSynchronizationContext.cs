@@ -80,14 +80,20 @@ internal sealed class SingleThreadSynchronizationContext : SynchronizationContex
     /// Returns <see langword="true"/> when a probe posted to the UI thread runs within
     /// <paramref name="timeout"/>, that is, when nothing is blocking the UI thread.
     /// </summary>
+    /// <remarks>
+    /// The latency is timestamped on the UI thread itself, so only the UI thread's own delay counts. Observing
+    /// the result needs thread-pool continuations, and a starved pool in a parallel test run must not make a
+    /// free UI thread look blocked, so the observation gets a generous allowance of its own.
+    /// </remarks>
     public async Task<bool> IsResponsiveAsync(TimeSpan timeout)
     {
-        var probe = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Post(static state => ((TaskCompletionSource)state!).TrySetResult(), probe);
+        var postedAt = Stopwatch.GetTimestamp();
+        var probe = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Post(static state => ((TaskCompletionSource<long>)state!).TrySetResult(Stopwatch.GetTimestamp()), probe);
         try
         {
-            await probe.Task.WaitAsync(timeout);
-            return true;
+            var ranAt = await probe.Task.WaitAsync(timeout + TimeSpan.FromSeconds(10));
+            return Stopwatch.GetElapsedTime(postedAt, ranAt) <= timeout;
         }
         catch (TimeoutException)
         {
