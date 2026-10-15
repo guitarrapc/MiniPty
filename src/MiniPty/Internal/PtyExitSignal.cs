@@ -50,7 +50,12 @@ internal struct PtyExitSignal
     private int _state;
     private int _waiterState;
 
-    public void SetListener(IPtyExitListener listener) => Volatile.Write(ref _listener, listener);
+    /// <summary>
+    /// Sets the listener with a full fence. The owner checks for an exit that happened earlier right after this
+    /// call, and <see cref="TrySetExited"/> reads the listener after recording exit; with only release/acquire
+    /// ordering both sides could miss each other, and the exit would never reach the listener.
+    /// </summary>
+    public void SetListener(IPtyExitListener listener) => Interlocked.Exchange(ref _listener, listener);
 
     /// <summary>
     /// Gets a task that completes with the exit status, or faults with <see cref="ObjectDisposedException"/>

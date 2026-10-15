@@ -3,7 +3,7 @@
 namespace MiniPty.Internal;
 
 /// <summary>
-/// Raw pump output transferred from <see cref="PtyBytePump"/> to public result types.
+/// Raw one-shot output transferred from a completion sink to public result types.
 /// </summary>
 internal sealed class PtyPumpPayload(byte[] bytes, char[]? chars, Encoding encoding)
 {

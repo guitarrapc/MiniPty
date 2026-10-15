@@ -6,11 +6,12 @@ namespace MiniPty.Capture;
 /// High-level API for spawning a PTY child and observing timestamped output in one call.
 /// </summary>
 /// <remarks>
-/// Built on <see cref="Pty.Start"/> and the session output transport.
-/// <see cref="PtySession.ReadOutputAsync"/> remains the persistent public streaming API; <see cref="RunAsync"/>
-/// reads the transport directly during completion orchestration to avoid double-buffering with
-/// <c>BoundedOutputBuffer</c> on fast-consumer paths.
-/// Each <see cref="PtyCaptureChunk"/> records one read from the PTY output stream with elapsed time since session start (immediately after spawn).
+/// Built on <see cref="Pty.Start"/> and the session's output reader, which hands each read to the capture on its
+/// background thread as soon as it completes, so awaiting <see cref="RunAsync"/> does not block the calling thread on
+/// output or exit; completion input, when set, is still written synchronously first.
+/// <see cref="PtySession.ReadOutputAsync"/> remains the persistent public streaming API.
+/// Each <see cref="PtyCaptureChunk"/> records one output read with the elapsed time from session start
+/// (immediately after spawn) to the read's completion.
 /// </remarks>
 public static class PtyCapture
 {
@@ -43,18 +44,8 @@ public static class PtyCapture
         var timeProvider = options.TimeProvider;
         await using var session = Pty.Start(startInfo);
         var originTimestamp = timeProvider.GetTimestamp();
-        var (capture, exitCode) = await PtyCompletion.RunAsync(
-            session,
-            completion,
-            (output, ct) => PtyCapturePump.ReadAsync(
-                output,
-                originTimestamp,
-                timeProvider,
-                completion.OutputEncoding,
-                completion.DecodeOutput,
-                ct),
-            cancellationToken).ConfigureAwait(false);
-
-        return new PtyCaptureResult(capture.ToPayload(), exitCode, capture.Chunks, capture.TextChunks);
+        var sink = new PtyCaptureSink(originTimestamp, timeProvider, completion.OutputEncoding, completion.DecodeOutput);
+        var exitCode = await PtyCompletion.RunAsync(session, completion, sink, cancellationToken).ConfigureAwait(false);
+        return sink.ToResult(exitCode);
     }
 }

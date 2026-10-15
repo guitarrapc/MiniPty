@@ -39,9 +39,27 @@ internal static partial class UnixInterop
     [LibraryImport("libc", SetLastError = true)]
     internal static partial int close(int fd);
 
-    [LibraryImport("minipty_unix", SetLastError = true)]
-    internal static unsafe partial int minipty_peek_readable_bytes(int fd, int* bytes_available);
+    // Output reader wake descriptors and PTY master readiness (minipty_unix_output.c).
+    internal const int OutputReady = 1;
+    internal const int OutputWoken = 2;
 
     [LibraryImport("minipty_unix", SetLastError = true)]
-    internal static unsafe partial int minipty_try_read(int fd, byte* buf, uint count, int* bytes_read, int* is_eof);
+    internal static unsafe partial int minipty_wake_open(int* readFd, int* writeFd);
+
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_wake_signal(int writeFd);
+
+    [LibraryImport("minipty_unix")]
+    internal static partial void minipty_wake_drain(int readFd);
+
+    [LibraryImport("minipty_unix")]
+    internal static partial void minipty_wake_close(int readFd, int writeFd);
+
+    /// <summary>
+    /// Waits until <paramref name="master"/> is readable or hung up, <paramref name="wakeFd"/> is signaled, or
+    /// the timeout elapses. Returns a mask of <see cref="OutputReady"/> and <see cref="OutputWoken"/>, 0 on
+    /// timeout or interruption, and -1 on failure. A negative descriptor is left out of the wait.
+    /// </summary>
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_output_wait(int master, int wakeFd, int timeoutMs);
 }

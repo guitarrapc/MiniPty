@@ -1,6 +1,4 @@
-﻿using System.Runtime.CompilerServices;
-using System.Text;
-using System.Threading.Tasks.Sources;
+﻿using System.Text;
 using MiniPty.Internal;
 
 namespace MiniPty;
@@ -17,9 +15,16 @@ namespace MiniPty;
 /// <c>UnixPtyBackend</c> behind <see cref="IPtyBackend"/>.
 /// </para>
 /// <para>
-/// PTY output is a byte stream with terminal semantics. If the child writes output and nothing reads
-/// <see cref="Output"/>, the child may block when the terminal buffer fills. Use <see cref="CompleteAsync"/>,
-/// continuously read <see cref="Output"/>, or the <c>MiniPty.Capture</c> package for timestamped observation.
+/// PTY output is read from spawn on a dedicated background thread into a small bounded buffer, and exactly one
+/// consumer drains it: <see cref="ReadOutputAsync"/>, <see cref="Output"/>, <see cref="CompleteAsync"/>, or the
+/// <c>MiniPty.Capture</c> package. When nothing drains it the buffer fills, reading stops, and the child may block
+/// on its next write, as it would on a terminal nobody reads.
+/// </para>
+/// <para>
+/// Asynchronous members never block the calling thread and never run library code on the caller's
+/// <see cref="SynchronizationContext"/>, so they can be awaited from a UI thread. The exception for now is
+/// <see cref="WriteInputAsync(string, Encoding?, CancellationToken)"/>, which writes synchronously, and with it
+/// <see cref="CompleteAsync"/> when <see cref="PtyCompleteOptions.Input"/> is set.
 /// </para>
 /// <para>
 /// Disposing or awaiting <see cref="DisposeAsync"/> kills the child if it is still running, then releases handles.
@@ -36,27 +41,38 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     private static readonly PtyCompleteOptions DefaultCompleteOptions = new();
 
     private readonly IPtyBackend _backend;
-    private readonly Stream outputTransport;
-    private readonly Lock outputReaderLock = new();
-    private BoundedOutputBuffer? _outputBuffer;
+    private readonly PtyOutputPump _pump;
+    private PtyOutputReader? _outputReader;
+    private PtyOutputStream? _outputStream;
     private int _outputReaderActive;
-    private int _completionOrchestrationDepth;
-    private int _exitWaitDepth;
     private bool _disposed;
 
     internal PtySession(IPtyBackend backend)
     {
         _backend = backend;
-        outputTransport = backend.Output;
-        BindOutputGate(outputTransport);
+        _pump = new PtyOutputPump(backend);
+        try
+        {
+            _pump.Start();
+        }
+        catch
+        {
+            backend.Dispose();
+            throw;
+        }
+
         backend.SetExitListener(this);
+
+        // The child may have exited before the listener was set; repeating the notification is harmless.
+        if (backend.HasExited)
+            _pump.OnChildExited();
     }
 
     /// <summary>
     /// Runs on the thread that observed child exit (usually a process-wide watcher), so it only hands the
-    /// event to the output buffer, which queues its post-exit drain instead of running it here.
+    /// event to the output pump, which schedules its post-exit drain instead of running it here.
     /// </summary>
-    void IPtyExitListener.OnChildExited() => Volatile.Read(ref _outputBuffer)?.OnChildExited();
+    void IPtyExitListener.OnChildExited() => _pump.OnChildExited();
 
     /// <summary>
     /// Gets the operating-system process identifier of the child.
@@ -84,29 +100,24 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <summary>
     /// Gets the read-only stream of merged stdout and stderr from the child (PTY master output).
     /// </summary>
-    /// <remarks>Reads are raw bytes; decode with <see cref="PtyCompleteOptions.OutputEncoding"/> or your own decoder.</remarks>
-    public Stream Output => outputTransport;
+    /// <remarks>
+    /// <para>Reads are raw bytes; decode with <see cref="PtyCompleteOptions.OutputEncoding"/> or your own decoder.</para>
+    /// <para>
+    /// <see cref="Stream.ReadAsync(Memory{byte}, CancellationToken)"/> never blocks the calling thread: it completes
+    /// at once when output is buffered and otherwise when output arrives. <see cref="Stream.Read(Span{byte})"/>
+    /// blocks until output arrives, as the <see cref="Stream"/> contract requires.
+    /// </para>
+    /// <para>
+    /// The first read makes this stream the session's output consumer until a read returns 0 (end of output) or
+    /// fails. Meanwhile <see cref="ReadOutputAsync"/> and <see cref="CompleteAsync"/> throw
+    /// <see cref="InvalidOperationException"/>.
+    /// </para>
+    /// </remarks>
+    public Stream Output => _outputStream ?? CreateOutputStream();
 
-    internal Stream OutputTransport => outputTransport;
+    internal PtyOutputPump OutputPump => _pump;
 
-    internal bool IsCompletionOrchestrated => Volatile.Read(ref _completionOrchestrationDepth) > 0;
-
-    internal bool IsExitWaitActive => Volatile.Read(ref _exitWaitDepth) > 0;
-
-    internal CompletionOrchestrationScope EnterCompletionOrchestration() => new(this);
-
-    internal readonly struct CompletionOrchestrationScope : IDisposable
-    {
-        private readonly PtySession _session;
-
-        internal CompletionOrchestrationScope(PtySession session)
-        {
-            _session = session;
-            Interlocked.Increment(ref session._completionOrchestrationDepth);
-        }
-
-        public void Dispose() => Interlocked.Decrement(ref _session._completionOrchestrationDepth);
-    }
+    internal bool IsDisposed => Volatile.Read(ref _disposed);
 
     /// <summary>
     /// Reads persistent PTY output as raw byte chunks.
@@ -118,8 +129,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <remarks>
     /// <para>Only one active output reader is allowed. Concurrent readers throw <see cref="InvalidOperationException"/>.</para>
     /// <para>
-    /// Each chunk's memory is valid only until the next successful <c>MoveNextAsync</c> call on the same enumeration.
-    /// Copy the bytes if they must be retained.
+    /// Each chunk's memory is valid only until the next successful <c>MoveNextAsync</c> call on the same enumeration,
+    /// or until the session is disposed. Copy the bytes if they must be retained.
+    /// </para>
+    /// <para>
+    /// <c>MoveNextAsync</c> completes synchronously while output is buffered and never blocks the calling thread.
+    /// When it has to wait, the caller's continuation resumes on its captured context, so <c>await foreach</c> on a
+    /// UI thread processes chunks in place on that thread. Enumerating allocates nothing per chunk.
     /// </para>
     /// <para>Normal PTY EOF completes the sequence after all available output is drained.</para>
     /// </remarks>
@@ -127,52 +143,19 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <exception cref="ObjectDisposedException">The session was disposed while reading.</exception>
     /// <exception cref="IOException">The PTY output transport failed unexpectedly.</exception>
     /// <exception cref="OperationCanceledException">The reader was canceled.</exception>
-    public async IAsyncEnumerable<PtyOutputChunk> ReadOutputAsync(
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    public IAsyncEnumerable<PtyOutputChunk> ReadOutputAsync(CancellationToken cancellationToken = default)
     {
-        ThrowIfDisposed();
-        if (Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerReadOutputAsync, OutputConsumerNone) != OutputConsumerNone)
-            throw new InvalidOperationException(OutputConsumerConflictMessage);
-
-        BoundedOutputBuffer? outputBuffer = null;
-        var pendingAdvance = 0;
-        try
-        {
-            outputBuffer = GetOrCreateOutputBuffer();
-            while (true)
-            {
-                if (pendingAdvance > 0)
-                {
-                    outputBuffer.Advance(pendingAdvance);
-                    pendingAdvance = 0;
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
-                ThrowIfDisposed();
-
-                var chunk = await outputBuffer.ReadAsync(cancellationToken).ConfigureAwait(false);
-                if (chunk.IsEmpty)
-                    yield break;
-
-                ThrowIfDisposed();
-                pendingAdvance = chunk.Length;
-                yield return new PtyOutputChunk(chunk);
-            }
-        }
-        finally
-        {
-            if (pendingAdvance > 0)
-                outputBuffer?.Advance(pendingAdvance);
-
-            Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
-        }
+        var reader = _outputReader ?? CreateOutputReader();
+        return cancellationToken.CanBeCanceled
+            ? new PtyOutputReader.WithToken(reader, cancellationToken)
+            : reader;
     }
 
     /// <summary>
     /// Gets a value indicating whether the child process has exited.
     /// </summary>
     /// <value>
-    /// <see langword="true"/> after the OS reports exit; on Unix the zombie is reaped on the first successful poll.
+    /// <see langword="true"/> after the process-wide exit watcher has observed the exit. Reading it never blocks.
     /// </value>
     public bool HasExited => _backend.HasExited;
 
@@ -214,6 +197,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </param>
     /// <param name="cancellationToken">Token used to cancel the write operation.</param>
     /// <returns>A task that completes when the text is written.</returns>
+    /// <remarks>
+    /// The text is written synchronously on the calling thread. On Unix, writing more input than the child reads
+    /// fills the tty input queue and blocks the caller until the child reads or exits, so a UI thread should not
+    /// write large input through this overload.
+    /// </remarks>
     public ValueTask WriteInputAsync(
         string text,
         Encoding? encoding = null,
@@ -318,6 +306,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// The child process continues running.
     /// </param>
     /// <returns>A task that completes with the child exit code.</returns>
+    /// <remarks>
+    /// Waiting does not affect output: a concurrent output reader keeps receiving output until end of output,
+    /// which follows shortly after exit once output has gone quiet.
+    /// </remarks>
     /// <exception cref="OperationCanceledException">Waiting was canceled.</exception>
     public Task<int> WaitForExitAsync(CancellationToken cancellationToken = default)
     {
@@ -347,13 +339,18 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// Pumps and drains the PTY output stream, optionally writes stdin, waits for exit, and returns captured bytes.
+    /// Collects the PTY output, optionally writes stdin, waits for exit, and returns captured bytes.
     /// </summary>
     /// <param name="options">Completion behavior, or <see langword="null"/> for defaults.</param>
     /// <param name="cancellationToken">
     /// When canceled, behavior depends on <see cref="PtyCompleteOptions.KillOnCancellation"/> (default: kill child).
     /// </param>
     /// <returns>A <see cref="PtyResult"/> with merged <see cref="PtyResult.Output"/> bytes and exit code.</returns>
+    /// <remarks>
+    /// Output is collected on the session's reader thread while the child runs, so awaiting this method does not
+    /// block the calling thread on output or exit. <see cref="PtyCompleteOptions.Input"/> is still written
+    /// synchronously first, as by <see cref="WriteInputAsync(string, Encoding?, CancellationToken)"/>.
+    /// </remarks>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">
     /// <see cref="PtyCompleteOptions.ExitTimeout"/> or output drain timeout was exceeded.
@@ -363,49 +360,55 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         CancellationToken cancellationToken = default)
     {
         options ??= DefaultCompleteOptions;
-        ThrowIfDisposed();
-        if (Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerComplete, OutputConsumerNone) != OutputConsumerNone)
-            throw new InvalidOperationException(OutputConsumerConflictMessage);
-
+        AcquireOutputConsumer(OutputConsumerComplete);
         try
         {
-            var encoding = options.OutputEncoding;
-            var (output, exitCode) = await PtyCompletion.RunAsync(
-                this,
-                options,
-                (stream, ct) => PtyBytePump.ReadAllAsync(stream, encoding, options.DecodeOutput, ct),
-                cancellationToken).ConfigureAwait(false);
-
-            return new PtyResult(output.ToPayload(), exitCode);
+            var sink = new PtyCompletionSink(options.OutputEncoding, options.DecodeOutput);
+            var exitCode = await PtyCompletion.RunAsync(this, options, sink, cancellationToken).ConfigureAwait(false);
+            return new PtyResult(sink.ToPayload(), exitCode);
         }
         finally
         {
-            Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
+            ReleaseOutputConsumer(OutputConsumerComplete);
         }
     }
 
     /// <summary>
-    /// Synchronously releases PTY and process handles, killing the child if it is still running.
+    /// Releases PTY and process handles, killing the child if it is still running. Does not block.
     /// </summary>
+    /// <remarks>
+    /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. The background
+    /// reader stops on its own shortly afterwards; output chunk memory must not be used after this call. Use
+    /// <see cref="DisposeAsync"/> to also wait until the reader has stopped.
+    /// </remarks>
     public void Dispose()
     {
         if (_disposed)
             return;
 
-        _disposed = true;
+        Volatile.Write(ref _disposed, true);
         Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
-        _outputBuffer?.Dispose();
+
+        // Discard mode first: closing the pseudo-console waits for ConPTY to flush, which needs a reader.
+        _pump.OnSessionDisposing();
         _backend.Dispose();
+        _pump.OnSessionDisposed();
     }
 
     /// <summary>
-    /// Asynchronously releases PTY and process handles, killing the child if it is still running.
+    /// Releases PTY and process handles, killing the child if it is still running, and completes once the
+    /// background output reader has stopped.
     /// </summary>
-    /// <returns>A completed value task; disposal is synchronous under the hood.</returns>
+    /// <returns>A value task that completes when the reader has released the transport.</returns>
+    /// <remarks>
+    /// Does not wait for the reader on the calling thread. Every call waits for the same shutdown, including calls
+    /// after <see cref="Dispose"/> and concurrent ones.
+    /// </remarks>
     public ValueTask DisposeAsync()
     {
+        // Idempotent teardown; disposal having started does not mean the reader has stopped.
         Dispose();
-        return ValueTask.CompletedTask;
+        return _pump.WaitForStopAsync();
     }
 
     /// <summary>
@@ -415,30 +418,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </summary>
     private async Task<PtyExitStatus> WaitForExitStatusCoreAsync(CancellationToken cancellationToken)
     {
-        // Counted synchronously, before the first await, so a concurrent output drain sees the waiter.
-        Interlocked.Increment(ref _exitWaitDepth);
-        try
-        {
-            var status = await _backend.Exited.WaitAsync(cancellationToken).ConfigureAwait(false);
-            _backend.CloseTransportAfterExit();
-            ThrowIfDisposed();
-            return status;
-        }
-        finally
-        {
-            Interlocked.Decrement(ref _exitWaitDepth);
-        }
+        var status = await _backend.Exited.WaitAsync(cancellationToken).ConfigureAwait(false);
+        ThrowIfDisposed();
+        return status;
     }
 
     /// <summary>
-    /// Library-internal exit wait that can also close the ConPTY transport once exit is observed.
-    /// </summary>
-    internal Task<int> WaitForExitInternalAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true) =>
-        WaitForExitCodeCoreAsync(cancellationToken, killOnCancellation, closeTransportOnExit);
-
-    /// <summary>
-    /// Exit wait for one-shot completion, which drains the transport itself. Without a cancelable token it is
-    /// the backend's allocation-free waiter slot. Each result must be awaited exactly once.
+    /// Exit wait for one-shot completion. Without a cancelable token it is the backend's allocation-free waiter
+    /// slot. Each result must be awaited exactly once.
     /// </summary>
     internal ValueTask<int> WaitForExitForCompletionAsync(CancellationToken cancellationToken, bool killOnCancellation)
     {
@@ -446,25 +433,17 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         if (!cancellationToken.CanBeCanceled)
             return _backend.WaitForExitCodeAsync();
 
-        return new ValueTask<int>(WaitForExitCodeCoreAsync(cancellationToken, killOnCancellation, closeTransportOnExit: false));
+        return new ValueTask<int>(WaitForExitCodeCoreAsync(cancellationToken, killOnCancellation));
     }
 
     /// <summary>
-    /// Internal exit wait with work around it. Never polls or blocks.
+    /// Cancelable internal exit wait that can kill the child on cancellation. Never polls or blocks.
     /// </summary>
-    private async Task<int> WaitForExitCodeCoreAsync(
-        CancellationToken cancellationToken,
-        bool killOnCancellation,
-        bool closeTransportOnExit)
+    private async Task<int> WaitForExitCodeCoreAsync(CancellationToken cancellationToken, bool killOnCancellation)
     {
         try
         {
-            var exitCode = cancellationToken.CanBeCanceled
-                ? (await _backend.Exited.WaitAsync(cancellationToken).ConfigureAwait(false)).ExitCode
-                : await _backend.WaitForExitCodeAsync().ConfigureAwait(false);
-            if (closeTransportOnExit)
-                _backend.CloseTransportAfterExit();
-
+            var exitCode = (await _backend.Exited.WaitAsync(cancellationToken).ConfigureAwait(false)).ExitCode;
             ThrowIfDisposed();
             return exitCode;
         }
@@ -478,545 +457,40 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         }
     }
 
-    internal void CloseOutputTransport() => _backend.CloseOutputTransport();
+    /// <summary>Closes the output transport as the post-exit drain does. For tests of the closed-transport state.</summary>
+    internal void CloseOutputTransport() => _pump.RequestClose();
 
-    private void ThrowIfDisposed()
+    internal void ThrowIfDisposed()
     {
-        if (_disposed)
+        if (Volatile.Read(ref _disposed))
             throw new ObjectDisposedException(nameof(PtySession));
     }
 
-    private void ThrowIfOutputConsumerActive()
-    {
-        if (Volatile.Read(ref _outputReaderActive) != OutputConsumerNone)
-            throw new InvalidOperationException(OutputConsumerConflictMessage);
-    }
-
-    internal void EnsureRawOutputReadAllowed() => ThrowIfDisposed();
-
-    internal void BeforeRawOutputRead(ref int rawHoldActive)
-    {
-        EnsureRawOutputReadAllowed();
-        if (Volatile.Read(ref rawHoldActive) != 0)
-            return;
-
-        AcquireRawOutputConsumer();
-        Volatile.Write(ref rawHoldActive, 1);
-    }
-
-    internal void AfterRawOutputRead(ref int rawHoldActive)
-    {
-        if (Interlocked.Exchange(ref rawHoldActive, 0) != 0)
-            ReleaseRawOutputConsumer();
-    }
-
-    internal void AcquireRawOutputConsumer()
+    /// <summary>Takes the session's single-consumer ownership for <paramref name="consumer"/>.</summary>
+    /// <exception cref="ObjectDisposedException">The session was disposed.</exception>
+    /// <exception cref="InvalidOperationException">Another consumer is active.</exception>
+    internal void AcquireOutputConsumer(int consumer)
     {
         ThrowIfDisposed();
-        if (Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerRawOutput, OutputConsumerNone) != OutputConsumerNone)
+        if (!TryAcquireOutputConsumer(consumer))
             throw new InvalidOperationException(OutputConsumerConflictMessage);
     }
 
-    internal void ReleaseRawOutputConsumer() =>
-        Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerNone, OutputConsumerRawOutput);
+    internal bool TryAcquireOutputConsumer(int consumer) =>
+        Interlocked.CompareExchange(ref _outputReaderActive, consumer, OutputConsumerNone) == OutputConsumerNone;
 
-    internal int ReadOutputTransport(Span<byte> buffer) =>
-        outputTransport switch
-        {
-            PtyHandleReadStream windowsOutput => windowsOutput.ReadTransport(buffer),
-            PtyFdReadStream unixOutput => unixOutput.ReadTransport(buffer),
-            _ => throw new InvalidOperationException("Unsupported PTY output transport.")
-        };
+    internal void ReleaseOutputConsumer(int consumer) =>
+        Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerNone, consumer);
 
-    internal int TryReadOutputTransportIfReady(Span<byte> buffer, out bool eof) =>
-        outputTransport switch
-        {
-            PtyHandleReadStream windowsOutput => windowsOutput.TryReadTransportIfReady(buffer, out eof),
-            PtyFdReadStream unixOutput => unixOutput.TryReadTransportIfReady(buffer, out eof),
-            _ => throw new InvalidOperationException("Unsupported PTY output transport.")
-        };
-
-    internal bool TryGetAvailableOutputBytes(out int available) =>
-        outputTransport switch
-        {
-            PtyHandleReadStream windowsOutput => windowsOutput.TryGetAvailableBytes(out available),
-            PtyFdReadStream unixOutput => unixOutput.TryGetAvailableBytes(out available),
-            _ => throw new InvalidOperationException("Unsupported PTY output transport.")
-        };
-
-    private void BindOutputGate(Stream output)
+    private PtyOutputReader CreateOutputReader()
     {
-        switch (output)
-        {
-            case PtyHandleReadStream windowsOutput:
-                windowsOutput.BindOutputGate(this);
-                break;
-            case PtyFdReadStream unixOutput:
-                unixOutput.BindOutputGate(this);
-                break;
-        }
+        var created = new PtyOutputReader(this, _pump);
+        return Interlocked.CompareExchange(ref _outputReader, created, null) ?? created;
     }
 
-    private BoundedOutputBuffer GetOrCreateOutputBuffer()
+    private PtyOutputStream CreateOutputStream()
     {
-        BoundedOutputBuffer buffer;
-        lock (outputReaderLock)
-            buffer = _outputBuffer ??= new BoundedOutputBuffer(this);
-
-        // The exit listener may have fired before the buffer was published; repeating it is harmless.
-        if (_backend.HasExited)
-            buffer.OnChildExited();
-
-        return buffer;
-    }
-
-    private sealed class BoundedOutputBuffer : IDisposable, IValueTaskSource, IThreadPoolWorkItem
-    {
-        /// <summary>ConPTY may deliver the next micro-slice shortly after the previous read; peek is unreliable there.</summary>
-        private const int CoalesceMicroWindowMs = 1;
-
-        // Post-exit drain state flags. The drain is queued once, when both the producer has started and
-        // child exit has been observed, in either order.
-        private const int DrainProducerStarted = 1;
-        private const int DrainExitObserved = 2;
-        private const int DrainQueued = 4;
-
-        private readonly PtySession _session;
-        private int _drainState;
-        private bool _concurrentExitWait;
-        private readonly object _sync = new();
-        private readonly CancellationTokenSource _producerCancellation = new();
-        private readonly Task _producer;
-        private ManualResetValueTaskSourceCore<bool> _dataWaitState;
-        private short _dataWaitToken;
-        private long _lastProduceProgressTicks;
-        private ReadOnlyMemory<byte> _handoff;
-        private bool _consumerWaiting;
-        private bool _dataWaitArmed;
-        private bool _completed;
-        private bool _disposed;
-        private Exception? _error;
-
-        internal BoundedOutputBuffer(PtySession session)
-        {
-            _session = session;
-            _producer = ProduceAsync();
-        }
-
-        internal async ValueTask<ReadOnlyMemory<byte>> ReadAsync(CancellationToken cancellationToken)
-        {
-            while (true)
-            {
-                lock (_sync)
-                {
-                    if (_disposed)
-                        throw new ObjectDisposedException(nameof(PtySession));
-
-                    if (!_handoff.IsEmpty)
-                    {
-                        _consumerWaiting = false;
-                        return _handoff;
-                    }
-
-                    if (_error is not null)
-                        throw _error;
-
-                    if (_completed)
-                        return ReadOnlyMemory<byte>.Empty;
-
-                    _consumerWaiting = true;
-                    _dataWaitState.Reset();
-                    _dataWaitToken = _dataWaitState.Version;
-                    _dataWaitArmed = true;
-                    Monitor.PulseAll(_sync);
-                }
-
-                if (!cancellationToken.CanBeCanceled)
-                {
-                    await new ValueTask(this, _dataWaitToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    var registration = cancellationToken.Register(
-                        static state => ((BoundedOutputBuffer)state!).CancelDataWait(),
-                        this);
-
-                    try
-                    {
-                        await new ValueTask(this, _dataWaitToken).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        registration.Dispose();
-                    }
-                }
-
-                lock (_sync)
-                    _dataWaitArmed = false;
-            }
-        }
-
-        internal void Advance(int length)
-        {
-            if (length <= 0)
-                return;
-
-            lock (_sync)
-            {
-                if (!_handoff.IsEmpty)
-                    _handoff = default;
-
-                Monitor.PulseAll(_sync);
-            }
-        }
-
-        public void Dispose()
-        {
-            lock (_sync)
-            {
-                if (_disposed)
-                    return;
-
-                _disposed = true;
-            }
-
-            _producerCancellation.Cancel();
-            SignalAll();
-            if (_producer.IsCompleted)
-            {
-                DisposeProducerCancellation();
-                return;
-            }
-
-            _ = _producer.ContinueWith(
-                static (_, state) => ((BoundedOutputBuffer)state!).DisposeProducerCancellation(),
-                this,
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
-        }
-
-        private void DisposeProducerCancellation() => _producerCancellation.Dispose();
-
-        private async Task ProduceAsync()
-        {
-            // ReadOutputTransport is synchronous and can block on an empty pipe. Yield before the
-            // first read so ReadOutputAsync returns promptly and the caller can write stdin or start
-            // WaitForExitAsync concurrently (PtyReadOutputAsyncSupportsPersistentCommandLoop).
-            await Task.Yield();
-
-            // One-shot completion drives its own drain. Otherwise arm the post-exit drain: it runs once the
-            // child exit is observed, holding no thread while the child runs.
-            if (!_session.IsCompletionOrchestrated)
-            {
-                _concurrentExitWait = _session.IsExitWaitActive;
-                AdvanceDrainState(DrainProducerStarted);
-            }
-
-            void MarkProduceProgress() => _lastProduceProgressTicks = Environment.TickCount64;
-            try
-            {
-                using var bytes = PtyReadBuffer.RentBytes();
-                while (true)
-                {
-                    _producerCancellation.Token.ThrowIfCancellationRequested();
-                    if (!WaitUntilReadyToRead(_producerCancellation.Token))
-                        break;
-
-                    var offset = 0;
-                    var eof = false;
-                    while (true)
-                    {
-                        int read;
-                        if (offset == 0)
-                        {
-                            read = _session.ReadOutputTransport(bytes.Span);
-                            if (read <= 0)
-                            {
-                                eof = true;
-                                break;
-                            }
-                        }
-                        else
-                        {
-                            read = _session.TryReadOutputTransportIfReady(bytes.Span.Slice(offset), out var readEof);
-                            if (read <= 0 && !readEof)
-                            {
-                                var coalesceDeadline = Environment.TickCount64 + CoalesceMicroWindowMs;
-                                while (read <= 0 && Environment.TickCount64 < coalesceDeadline)
-                                {
-                                    Thread.Sleep(0);
-                                    read = _session.TryReadOutputTransportIfReady(bytes.Span.Slice(offset), out readEof);
-                                }
-                            }
-
-                            if (read <= 0)
-                            {
-                                eof = readEof;
-                                break;
-                            }
-                        }
-
-                        offset += read;
-                        if (offset >= bytes.Span.Length)
-                            break;
-                    }
-
-                    if (offset > 0)
-                    {
-                        MarkProduceProgress();
-                        Handoff(bytes.Memory.Slice(0, offset), _producerCancellation.Token);
-                        MarkProduceProgress();
-                    }
-
-                    if (eof)
-                        break;
-                }
-
-                Complete(null);
-            }
-            catch (OperationCanceledException) when (_producerCancellation.IsCancellationRequested)
-            {
-                Complete(null);
-            }
-            catch (ObjectDisposedException)
-            {
-                Complete(null);
-            }
-            catch (Exception ex) when (_session._disposed && ex is System.ComponentModel.Win32Exception)
-            {
-                Complete(new ObjectDisposedException(nameof(PtySession), ex));
-            }
-            catch (Exception ex)
-            {
-                Complete(ex);
-            }
-            finally
-            {
-                _producerCancellation.Cancel();
-            }
-        }
-
-        /// <summary>
-        /// Called on the thread that observed child exit. Never blocks: the drain, when due, is queued.
-        /// </summary>
-        internal void OnChildExited() => AdvanceDrainState(DrainExitObserved);
-
-        /// <summary>
-        /// Sets <paramref name="flag"/> and queues the post-exit drain exactly once, when both the producer
-        /// has started and child exit has been observed. Queuing <see langword="this"/> as the work item keeps
-        /// the hand-off allocation-free.
-        /// </summary>
-        private void AdvanceDrainState(int flag)
-        {
-            while (true)
-            {
-                var current = Volatile.Read(ref _drainState);
-                var next = current | flag;
-                var queue = (next & (DrainProducerStarted | DrainExitObserved)) == (DrainProducerStarted | DrainExitObserved)
-                    && (next & DrainQueued) == 0;
-                if (queue)
-                    next |= DrainQueued;
-
-                if (Interlocked.CompareExchange(ref _drainState, next, current) != current)
-                    continue;
-
-                if (queue)
-                    ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
-
-                return;
-            }
-        }
-
-        void IThreadPoolWorkItem.Execute() => DrainAfterExit();
-
-        /// <summary>
-        /// On Windows, ConPTY output may not EOF until the transport is closed after the child exits, and on
-        /// Unix a grandchild can keep the slave open. Once output has been quiet long enough after exit, close
-        /// the transport so the producer reads EOF. Runs on a pool thread, only after exit.
-        /// </summary>
-        private void DrainAfterExit()
-        {
-            const int PostExitStallBeforeCloseMs = 100;
-
-            // A concurrent WaitForExitAsync closes the ConPTY transport itself once exit is observed.
-            if (_concurrentExitWait)
-                return;
-
-            var exitObservedAt = Environment.TickCount64;
-            while (!_producerCancellation.IsCancellationRequested)
-            {
-                var canCloseAfterQuiet = false;
-                lock (_sync)
-                {
-                    if (_completed || _disposed)
-                        return;
-
-                    // A fast child exit can beat the terminal pump's first ReadOutputAsync call.
-                    // Closing ConPTY before a consumer attaches would discard output still in the transport.
-                    if (_handoff.IsEmpty && _consumerWaiting)
-                        canCloseAfterQuiet = true;
-                }
-
-                if (canCloseAfterQuiet)
-                {
-                    var now = Environment.TickCount64;
-                    var lastProgress = Math.Max(_lastProduceProgressTicks, exitObservedAt);
-                    if (now - lastProgress >= PostExitStallBeforeCloseMs
-                        && now - exitObservedAt >= PostExitStallBeforeCloseMs)
-                    {
-                        // A thread-pool work item must never throw: that would terminate the host process.
-                        try
-                        {
-                            _session.CloseOutputTransport();
-                        }
-                        catch (Exception)
-                        {
-                            // Disposal raced the close, or the transport already failed; either way the
-                            // producer reaches EOF and disposal finishes the teardown.
-                        }
-
-                        return;
-                    }
-                }
-
-                var pollDeadline = Environment.TickCount64 + 10;
-                while (Environment.TickCount64 < pollDeadline)
-                {
-                    // IsCancellationRequested stays valid after the producer disposes its source; Token does not.
-                    if (_producerCancellation.IsCancellationRequested)
-                        return;
-
-                    var remaining = (int)Math.Min(10, pollDeadline - Environment.TickCount64);
-                    if (remaining > 0)
-                        Thread.Sleep(remaining);
-                }
-            }
-        }
-
-        private bool WaitUntilReadyToRead(CancellationToken cancellationToken)
-        {
-            lock (_sync)
-            {
-                while (true)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (_disposed)
-                        throw new ObjectDisposedException(nameof(PtySession));
-
-                    if (_completed && _handoff.IsEmpty)
-                        return false;
-
-                    if (_handoff.IsEmpty && _consumerWaiting)
-                        return true;
-
-                    Monitor.Wait(_sync);
-                }
-            }
-        }
-
-        private void Handoff(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
-        {
-            bool signal;
-            lock (_sync)
-            {
-                if (_disposed)
-                    throw new ObjectDisposedException(nameof(PtySession));
-
-                _handoff = data;
-                _consumerWaiting = false;
-                signal = TakeDataWaitLocked();
-                Monitor.PulseAll(_sync);
-            }
-
-            if (signal)
-                _dataWaitState.SetResult(true);
-
-            WaitForHandoffCleared(cancellationToken);
-        }
-
-        /// <summary>
-        /// Claims the right to complete the armed consumer wait. Exactly one caller wins, and it must
-        /// complete the wait only after releasing <see cref="_sync"/>.
-        /// </summary>
-        /// <remarks>
-        /// Completing under the lock deadlocks: the consumer's continuation runs inline, and its
-        /// <see cref="CancellationTokenRegistration.Dispose"/> blocks until a concurrently running
-        /// <see cref="CancelDataWait"/> callback returns, while that callback blocks on the lock.
-        /// </remarks>
-        private bool TakeDataWaitLocked()
-        {
-            if (!_dataWaitArmed)
-                return false;
-
-            _dataWaitArmed = false;
-            return true;
-        }
-
-        private void WaitForHandoffCleared(CancellationToken cancellationToken)
-        {
-            lock (_sync)
-            {
-                while (!_handoff.IsEmpty)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (_disposed || _completed)
-                    {
-                        _handoff = default;
-                        return;
-                    }
-
-                    Monitor.Wait(_sync);
-                }
-            }
-        }
-
-        private void Complete(Exception? error)
-        {
-            lock (_sync)
-            {
-                _error = error;
-                _completed = true;
-            }
-
-            SignalAll();
-        }
-
-        private void SignalAll()
-        {
-            bool signal;
-            lock (_sync)
-            {
-                _handoff = default;
-                signal = TakeDataWaitLocked();
-                Monitor.PulseAll(_sync);
-            }
-
-            if (signal)
-                _dataWaitState.SetResult(true);
-        }
-
-        private void CancelDataWait()
-        {
-            bool signal;
-            lock (_sync)
-                signal = TakeDataWaitLocked();
-
-            if (signal)
-                _dataWaitState.SetException(new OperationCanceledException());
-        }
-
-        void IValueTaskSource.OnCompleted(
-            Action<object?> continuation,
-            object? state,
-            short token,
-            ValueTaskSourceOnCompletedFlags flags) =>
-            _dataWaitState.OnCompleted(continuation, state, token, flags);
-
-        ValueTaskSourceStatus IValueTaskSource.GetStatus(short token) =>
-            _dataWaitState.GetStatus(token);
-
-        void IValueTaskSource.GetResult(short token) =>
-            _dataWaitState.GetResult(token);
+        var created = new PtyOutputStream(this, _pump);
+        return Interlocked.CompareExchange(ref _outputStream, created, null) ?? created;
     }
 }

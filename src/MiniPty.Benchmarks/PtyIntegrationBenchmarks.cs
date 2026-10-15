@@ -110,17 +110,8 @@ public class PtyIntegrationBenchmarks
             return 0;
 
         await using var session = Pty.Start(smallStdout);
-        var readTask = ReadOutputStreamAsync(session.Output);
-        await session.WaitForExitInternalAsync(CancellationToken.None, killOnCancellation: false).ConfigureAwait(false);
-        return await PtyOutputDrain.AwaitPumpAsync(
-            readTask,
-            session.Output,
-            session.CloseOutputTransport,
-            BenchmarkOptions.BytesOnly.OutputDrainGrace,
-            BenchmarkOptions.BytesOnly.OutputReaderCloseTimeout,
-            throwOnTimeout: true,
-            transportAlreadyClosed: false,
-            CancellationToken.None).ConfigureAwait(false);
+        // The post-exit drain ends output on its own, so reading to the end needs no exit or drain orchestration.
+        return await ReadOutputStreamAsync(session.Output).ConfigureAwait(false);
     }
 
     private static async Task<int> ReadOutputStreamAsync(Stream output)

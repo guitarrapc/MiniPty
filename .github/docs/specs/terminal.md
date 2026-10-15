@@ -42,7 +42,7 @@ PtyTerminal.Attach(PtySession session, PtyTerminalOptions options)    // transfe
 |---|---|
 | `Output` handler (options) | `ValueTask handler(ReadOnlyMemory<byte> data, CancellationToken ct)`. Data is valid **only until the returned task completes**; copy to retain. Invoked sequentially. |
 | `Completion` | `Task<PtyExitStatus>` that completes **after every output handler invocation has finished** (drain-then-exit, node-pty onData/onExit ordering). Faults with the handler exception when a handler throws (child is killed first). |
-| `Pause()` / `Resume()` | Stops/resumes output delivery. Paused delivery parks the pump; the strict-handoff producer stops reading, the OS PTY buffer fills, and the child blocks on write. No managed buffering beyond one in-flight chunk; no drops. |
+| `Pause()` / `Resume()` | Stops/resumes output delivery. Paused delivery parks the pump; the session's output buffer fills, its reader stops reading, the OS PTY buffer fills, and the child blocks on write. Managed buffering is bounded by the session's output buffer (4 × 4 KiB, including the in-flight chunk, which stays valid while paused); no drops. |
 | `WriteInputAsync` / `SendEof` / `Resize` / `Kill(PtySignal)` | Pass-through to the owned session; callable concurrently with output delivery. Resize accepts optional pixel dimensions. |
 | `Kill()` | SIGHUP on Unix (node-pty default); process termination on Windows. Core `PtySession.Kill()` remains forceful. |
 | `Clear()` | Safe compatibility no-op pending a public in-box ConPTY clear API. |
@@ -211,7 +211,7 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 ## Related Documents
 
 - [spec.md](../spec.md) — four use cases and package map
-- [core_session.md](core_session.md) — `ReadOutputAsync` strict handoff, chunk lifetime, backpressure
+- [core_session.md](core_session.md) — `ReadOutputAsync` bounded buffering, chunk lifetime, backpressure
 - [lifecycle.md](lifecycle.md) — exit, kill, disposal semantics the facade builds on
 - [samples/WebTerminal.cs](../../../samples/WebTerminal.cs) — browser demo with the client-side protocol
 - [samples/VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs) — stdio-framed helper entry point

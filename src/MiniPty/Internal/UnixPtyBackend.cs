@@ -12,6 +12,12 @@ internal static partial class UnixPtyBackend
     // macOS posix_spawn children can still be running short -c scripts when the first EOF tick fires.
     // Sending EOT before they finish leaves /bin/sh waiting on stdin and never exiting.
     private const int MacOsEofAttachDeferPolls = 4;
+    // How long a read keeps appending output that arrives right after it to the same ring slot.
+    private const int CoalesceMicroWindowMs = 1;
+    // Bounds the windows chained into one slot, so output trickling in faster than the window is not held until
+    // the slot fills. The last window may run past it: a slot is held for at most about 3 ms.
+    private const int CoalesceBudgetMs = 2;
+    private static readonly long s_coalesceBudgetTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceBudgetMs / 1000;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
@@ -107,8 +113,13 @@ internal static partial class UnixPtyBackend
         public void Dispose() => FreeUtf8Allocations(_owned);
     }
 
-    private sealed class UnixPtyBackendInstance : IPtyBackend, IValueTaskSource<int>
+    private sealed class UnixPtyBackendInstance : IPtyBackend, IValueTaskSource<int>, IPtyMasterLease
     {
+        // _masterState: bit 0 is set once the master is closed to new users; the remaining bits count references
+        // in units of MasterReference. The owner holds one reference from spawn until the transport closes.
+        private const int MasterClosedBit = 1;
+        private const int MasterReference = 2;
+
         private readonly int _master;
         private readonly int _pid;
         private readonly UnixExecPayload? _execHold;
@@ -125,7 +136,7 @@ internal static partial class UnixPtyBackend
         private bool _eotLineSubmitSent;
         private bool _inputWritten;
         private bool _inputEndsWithNewline;
-        private bool _masterClosed;
+        private int _masterState = MasterReference;
         private bool _exited;
         private int _exitCode;
         private int _termSignal;
@@ -138,15 +149,13 @@ internal static partial class UnixPtyBackend
             _pid = pid;
             _execHold = execHold;
             _size = size;
-            _inputStream = new InputTrackingWriteStream(new PtyFdWriteStream(master), OnInputWritten);
+            _inputStream = new InputTrackingWriteStream(new PtyFdWriteStream(this), OnInputWritten);
             Input = _inputStream;
-            Output = new PtyFdReadStream(master);
             // Last, so the watcher never observes a partially constructed instance.
             ChildWatcher.Register(this);
         }
 
         public Stream Input { get; }
-        public Stream Output { get; }
         public int ProcessId => _pid;
 
         // Exit state is cached by the watcher's reap; reading it never calls waitpid, which would race
@@ -178,15 +187,22 @@ internal static partial class UnixPtyBackend
         {
             get
             {
-                if (_disposed || _masterClosed || IsExitObserved)
+                if (_disposed || IsExitObserved || !TryAcquireMaster(out var master))
                     return null;
 
                 Span<byte> name = stackalloc byte[256];
                 int length;
-                unsafe
+                try
                 {
-                    fixed (byte* buffer = name)
-                        length = minipty_get_active_process_name(_master, buffer, name.Length);
+                    unsafe
+                    {
+                        fixed (byte* buffer = name)
+                            length = minipty_get_active_process_name(master, buffer, name.Length);
+                    }
+                }
+                finally
+                {
+                    ReleaseMaster();
                 }
 
                 if (length <= 0)
@@ -204,27 +220,35 @@ internal static partial class UnixPtyBackend
             ObjectDisposedException.ThrowIf(_disposed, this);
 
             // Frontend size events race child exit. Once post-exit drain has closed the master there is
-            // nothing left to resize, so the call is a no-op rather than an error.
-            if (_masterClosed)
+            // nothing left to resize, so the call is a no-op rather than an error. The reference keeps the
+            // descriptor from being closed, and its number reused, during the ioctl.
+            if (!TryAcquireMaster(out var master))
                 return;
 
-            columns = Math.Clamp(columns, 1, 512);
-            rows = Math.Clamp(rows, 1, 512);
-            if (minipty_set_winsize(
-                    _master,
-                    (ushort)rows,
-                    (ushort)columns,
-                    (ushort)pixelWidth,
-                    (ushort)pixelHeight) != 0)
+            try
             {
-                var errno = Marshal.GetLastPInvokeError();
-                if (_masterClosed || IsExitObserved)
-                    return;
+                columns = Math.Clamp(columns, 1, 512);
+                rows = Math.Clamp(rows, 1, 512);
+                if (minipty_set_winsize(
+                        master,
+                        (ushort)rows,
+                        (ushort)columns,
+                        (ushort)pixelWidth,
+                        (ushort)pixelHeight) != 0)
+                {
+                    var errno = Marshal.GetLastPInvokeError();
+                    if (IsMasterClosed || IsExitObserved)
+                        return;
 
-                throw new IOException($"TIOCSWINSZ failed (errno {errno})");
+                    throw new IOException($"TIOCSWINSZ failed (errno {errno})");
+                }
+
+                _size = new PtySize(columns, rows);
             }
-
-            _size = new PtySize(columns, rows);
+            finally
+            {
+                ReleaseMaster();
+            }
         }
 
         public void SendEof()
@@ -284,18 +308,136 @@ internal static partial class UnixPtyBackend
             _ => throw new ArgumentOutOfRangeException(nameof(signal)),
         };
 
-        // Unix PTYs report EOF on their own once the child side closes, so exit does not close the master.
-        public void CloseTransportAfterExit()
+        // Unix PTYs report end of output on their own once every slave descriptor closes; the post-exit drain
+        // closes the master only when a grandchild keeps the slave open (Linux; macOS revokes the tty when the
+        // session leader exits).
+        public void CloseOutputTransport() => CloseMaster();
+
+        public bool IsOutputClosed => IsMasterClosed;
+
+        public long CoalesceBudgetTicks => s_coalesceBudgetTicks;
+
+        public bool TryBeginOutputRead() => TryAcquireMaster(out _);
+
+        public void EndOutputRead() => ReleaseMaster();
+
+        /// <summary>
+        /// Waits on the master and the reader's wake descriptor together, then reads. Closing the master does not
+        /// interrupt a read blocked on it in another thread, so a close or disposal wakes the reader instead, and
+        /// the reader's reference keeps the descriptor number from being reused under it.
+        /// </summary>
+        public int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
         {
+            while (true)
+            {
+                if (IsMasterClosed)
+                    return 0;
+
+                var ready = UnixInterop.minipty_output_wait(_master, reader.WakeFd, Timeout.Infinite);
+                if (ready < 0)
+                    throw new IOException($"Waiting for PTY output failed (errno {Marshal.GetLastPInvokeError()})");
+
+                if ((ready & UnixInterop.OutputWoken) != 0)
+                {
+                    reader.ConsumeWake();
+                    return -1;
+                }
+
+                if ((ready & UnixInterop.OutputReady) != 0)
+                    return ReadMaster(buffer);
+            }
         }
 
-        public void CloseOutputTransport()
+        /// <summary>
+        /// Appends output that is available now or arrives within the micro-window. A pending wake is left for
+        /// <see cref="ReadOutput"/>, which re-checks the session state.
+        /// </summary>
+        public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
         {
-            if (_masterClosed)
-                return;
+            endOfOutput = false;
+            if (IsMasterClosed)
+                return 0;
 
-            UnixInterop.close(_master);
-            _masterClosed = true;
+            var ready = UnixInterop.minipty_output_wait(_master, reader.WakeFd, CoalesceMicroWindowMs);
+            if (ready <= 0 || (ready & UnixInterop.OutputReady) == 0)
+                return 0;
+
+            var read = ReadMaster(buffer);
+            endOfOutput = read == 0;
+            return read;
+        }
+
+        /// <summary>Reads after the master reported ready, so the read does not block. Returns 0 at end of output.</summary>
+        private unsafe int ReadMaster(Span<byte> buffer)
+        {
+            fixed (byte* ptr = buffer)
+            {
+                while (true)
+                {
+                    var read = UnixInterop.Read(_master, ptr, (nuint)buffer.Length);
+                    if (read >= 0)
+                        return read;
+
+                    var errno = Marshal.GetLastPInvokeError();
+                    if (errno == UnixInterop.EINTR)
+                        continue;
+
+                    // EIO: every slave descriptor closed (Linux reports end of output this way).
+                    if (errno is 0 or UnixInterop.EIO or UnixInterop.EBADF)
+                        return 0;
+
+                    throw new IOException($"read failed (errno {errno})");
+                }
+            }
+        }
+
+        private bool IsMasterClosed => (Volatile.Read(ref _masterState) & MasterClosedBit) != 0;
+
+        /// <summary>Pins the master for one use. Fails once it is closed; pair a success with <see cref="ReleaseMaster"/>.</summary>
+        public bool TryAcquireMaster(out int master)
+        {
+            var state = Volatile.Read(ref _masterState);
+            while ((state & MasterClosedBit) == 0)
+            {
+                var seen = Interlocked.CompareExchange(ref _masterState, state + MasterReference, state);
+                if (seen == state)
+                {
+                    master = _master;
+                    return true;
+                }
+
+                state = seen;
+            }
+
+            master = -1;
+            return false;
+        }
+
+        public void ReleaseMaster()
+        {
+            // The last reference after the close closes the descriptor.
+            if (Interlocked.Add(ref _masterState, -MasterReference) == MasterClosedBit)
+                UnixInterop.close(_master);
+        }
+
+        /// <summary>
+        /// Stops new uses of the master and drops the owner's reference. The descriptor closes now, or when the
+        /// reader and any in-flight call release theirs, so its number is never reused while someone still uses it.
+        /// </summary>
+        private void CloseMaster()
+        {
+            var state = Volatile.Read(ref _masterState);
+            while ((state & MasterClosedBit) == 0)
+            {
+                var seen = Interlocked.CompareExchange(ref _masterState, state | MasterClosedBit, state);
+                if (seen == state)
+                {
+                    ReleaseMaster();
+                    return;
+                }
+
+                state = seen;
+            }
         }
 
         public void Dispose()
@@ -355,6 +497,24 @@ internal static partial class UnixPtyBackend
             return true;
         }
 
+        /// <summary>
+        /// Records exit for a child that something outside MiniPty reaped, without calling <c>waitpid</c>: its pid
+        /// already belongs to another child. The wait status is lost, as on <c>ECHILD</c>. Called only by
+        /// <see cref="ChildWatcher"/>.
+        /// </summary>
+        internal void OnReapedElsewhere()
+        {
+            lock (_pidLock)
+            {
+                if (_exited)
+                    return;
+
+                Volatile.Write(ref _exited, true);
+            }
+
+            _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, null));
+        }
+
         /// <summary>Arms the one-shot EOF staging tick; each tick re-arms itself while staging is in progress.</summary>
         private void ScheduleEofTick()
         {
@@ -384,11 +544,7 @@ internal static partial class UnixPtyBackend
         private void CloseTransport()
         {
             SendEotIfPending();
-            if (_masterClosed)
-                return;
-
-            UnixInterop.close(_master);
-            _masterClosed = true;
+            CloseMaster();
         }
 
         private void SendEotIfPending()
@@ -414,7 +570,7 @@ internal static partial class UnixPtyBackend
 
         private void WriteEotToMaster()
         {
-            if (_eofSent || _exited || _masterClosed)
+            if (_eofSent || _exited)
                 return;
 
             if (IsExitObserved)
@@ -423,28 +579,38 @@ internal static partial class UnixPtyBackend
                 return;
             }
 
-            DrainMasterOutputBeforeEot();
-
-            if (IsExitObserved)
-            {
-                CompleteEotSignaling();
+            if (!TryAcquireMaster(out var master))
                 return;
-            }
 
-            // Canonical line discipline: one EOT on a non-empty buffer submits the line but
-            // does not signal EOF; a second EOT on the empty buffer ends input for programs like cat.
-            // Stage the two EOT writes on separate ticks so the child can attach and consume the submit.
-            if (_inputWritten && !_inputEndsWithNewline && !_eotLineSubmitSent)
+            try
             {
-                if (TryWriteEotByte())
-                    _eotLineSubmitSent = true;
-                else
+                DrainMasterOutputBeforeEot(master);
+
+                if (IsExitObserved)
+                {
                     CompleteEotSignaling();
-                return;
-            }
+                    return;
+                }
 
-            TryWriteEotByte();
-            CompleteEotSignaling();
+                // Canonical line discipline: one EOT on a non-empty buffer submits the line but
+                // does not signal EOF; a second EOT on the empty buffer ends input for programs like cat.
+                // Stage the two EOT writes on separate ticks so the child can attach and consume the submit.
+                if (_inputWritten && !_inputEndsWithNewline && !_eotLineSubmitSent)
+                {
+                    if (TryWriteEotByte(master))
+                        _eotLineSubmitSent = true;
+                    else
+                        CompleteEotSignaling();
+                    return;
+                }
+
+                TryWriteEotByte(master);
+                CompleteEotSignaling();
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
         }
 
         private void CompleteEotSignaling()
@@ -456,14 +622,14 @@ internal static partial class UnixPtyBackend
         /// <summary>
         /// Writes one EOT byte. Returns <see langword="false"/> when the slave is gone (EIO/EPIPE), which is benign after exit.
         /// </summary>
-        private unsafe bool TryWriteEotByte()
+        private static unsafe bool TryWriteEotByte(int master)
         {
             Span<byte> eot = stackalloc byte[1] { InputEot };
             fixed (byte* ptr = eot)
             {
                 while (true)
                 {
-                    var written = UnixInterop.Write(_master, ptr, 1);
+                    var written = UnixInterop.Write(master, ptr, 1);
                     if (written == 1)
                         return true;
                     if (written < 0)
@@ -490,7 +656,7 @@ internal static partial class UnixPtyBackend
         /// Waits until prior master writes reach the slave, or the slave opens, so staged EOT is not lost to attach races.
         /// macOS <c>tcdrain</c> can block forever when the slave never reads; rely on attach defer and exit checks instead.
         /// </summary>
-        private void DrainMasterOutputBeforeEot()
+        private void DrainMasterOutputBeforeEot(int master)
         {
             if (!_inputWritten)
                 return;
@@ -501,7 +667,7 @@ internal static partial class UnixPtyBackend
             if (OperatingSystem.IsMacOS())
                 return;
 
-            while (UnixInterop.tcdrain(_master) != 0)
+            while (UnixInterop.tcdrain(master) != 0)
             {
                 if (Marshal.GetLastPInvokeError() is UnixInterop.EINTR)
                     continue;

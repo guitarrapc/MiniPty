@@ -6,7 +6,7 @@ internal static partial class UnixPtyBackend
 {
     /// <summary>
     /// Process-wide observer of MiniPty child exits: one dedicated background thread for every Unix
-    /// session, so an idle session holds no thread of its own and never occupies a thread-pool worker.
+    /// session, so observing exit adds no per-session thread and never occupies a thread-pool worker.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -40,6 +40,16 @@ internal static partial class UnixPtyBackend
             lock (s_lock)
             {
                 EnsureStarted();
+                // A registered pid can only be handed out again once its child was reaped. MiniPty had not
+                // reaped it, so something outside MiniPty did and the pid was reused before this thread
+                // noticed; complete the stale session now, or its exit would never be reported.
+                if (s_children.TryGetValue(child.ProcessId, out var stale) && stale != child)
+                {
+                    stale.OnReapedElsewhere();
+                    // Its polling entry would otherwise outlive the new child and keep this thread polling.
+                    s_polled.Remove(child.ProcessId);
+                }
+
                 s_children[child.ProcessId] = child;
                 if (!s_nativeWatch || minipty_child_watch_add(child.ProcessId) != 0)
                 {
