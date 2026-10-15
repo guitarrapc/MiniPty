@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** G1 design agreed (2026-10-15); implementation not started. The other items are proposed.
+**Status:** G2 implemented (2026-10-15). G1 design agreed; delivery steps 1 (caller-context test harness) and 2 (exit watcher, exit task, EOF staging timer) are done. The other items are proposed.
 
 ## Background
 
@@ -123,10 +123,10 @@ Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a
      - Unix puts the master in non-blocking mode, and the thread waits on the master and a wake descriptor together. On Linux, closing an fd does not interrupt a `read` blocked on it in another thread (see close(2)), so the wake descriptor is the reliable way to stop the reader.
    - **Phase 2 driver:** G6 replaces the thread with thread-free async I/O. The public API does not change.
 2. **Exit watcher.**
-   - Windows uses a runtime registered wait on the process handle. The runtime's wait threads multiplex the handles, so no thread is dedicated to a session.
+   - Windows uses process-wide watcher threads, each waiting on up to 63 duplicated process handles with `WaitForMultipleObjects`. A runtime registered wait was the original plan; step 2 replaced it because it allocates about 270 bytes per session.
    - Unix uses one process-wide watcher thread: pidfd on Linux 5.3+, `kqueue` `EVFILT_PROC` on macOS and FreeBSD, and consolidated `waitpid` polling on the same thread where neither is available.
    - The watcher is the only code that reaps children.
-   - Exit completes a single per-session `Task<PtyExitStatus>`, whose continuations run asynchronously.
+   - Exit is recorded once per session. Public waits get a `Task<PtyExitStatus>` created on first use, whose continuations run asynchronously; library-internal waits use an allocation-free waiter slot; the session's output drain is notified through an allocation-free listener.
 3. **Session timer.**
    - One lazily created timer per session drives two things:
      - EOF staging: Windows Ctrl+Z / CR and deferred input-pipe close, and Unix EOT deferral.
@@ -184,9 +184,81 @@ Run the narrowest relevant tests after each step, so a hang can be attributed to
 
 1. **Test harness first:** add a single-threaded `SynchronizationContext` helper. Write tests for F1–F4, `Output.ReadAsync`, `WriteInputAsync` against a full Unix input queue, and `Dispose` on the UI thread, and confirm they fail before any implementation changes.
 2. **Exit watcher, exit task, and session timer:** move EOF staging off the wait loops.
-3. **Output pump and consumer views:** migrate `ReadOutputAsync`, `Output`, `CompleteAsync`, Capture, and `PtyTerminal`, then delete the old paths.
-4. **Input path.**
+3. **Output pump and consumer views:** migrate `ReadOutputAsync`, `Output`, `CompleteAsync`, Capture, and `PtyTerminal`, then delete the old paths. Remove the `Skip` from `ReadOutputAsyncOnUiThreadDeliversOutputWithoutBlockingIt`, `OutputReadAsyncOnUiThreadDoesNotBlockItWhileIdle`, and `IdleSessionsDoNotOccupyThreadPoolWorkers`.
+4. **Input path.** Remove the `Skip` from `WriteInputAsyncTextOnUiThreadDoesNotBlockItWhenTheChildIsNotReading`.
 5. **Public API break:** `WaitForExitAsync` returns `PtyExitStatus`. Update samples, specifications, the README, and benchmarks.
+
+Tests that a later step fixes stay in the suite but are skipped until that step, so every pull request merges with a passing CI. Each skip reason names the step that removes it.
+
+### Step 1 result: caller-context tests
+
+`SingleThreadSynchronizationContext` (test helper) stands in for a GUI dispatcher. `PtyCallerContextTests` drives the API from it.
+
+| Test | Finding | Previous code |
+|---|---|---|
+| `ReadOutputAsyncOnUiThreadDeliversOutputWithoutBlockingIt` | F1 | Fails on Windows and Linux: no chunk arrives |
+| `OutputReadAsyncOnUiThreadDoesNotBlockItWhileIdle` | F2 | Fails: the UI thread is busy for the whole window |
+| `WaitForExitAsyncOnUiThreadDoesNotBlockIt` | F3 | Fails |
+| `CompleteAsyncOnUiThreadDoesNotBlockIt` | F4 | Fails |
+| `PtyCaptureRunAsyncOnUiThreadDoesNotBlockIt` | F4 via Capture | Fails |
+| `WriteInputAsyncTextOnUiThreadDoesNotBlockItWhenTheChildIsNotReading` | Non-blocking input | Fails on Linux; returns early on Windows (F9) |
+| `WriteInputAsyncBytesOnUiThreadDoesNotBlockItWhenTheChildIsNotReading` | Guard | Passes, because the base `Stream.WriteAsync` offloads the write today |
+| `DisposeOnUiThreadReturnsPromptly`, `DisposeAsyncOnUiThreadDoesNotBlockIt` | Guards | Pass |
+| `PtyTerminalOnUiThreadDeliversOutputWithoutBlockingIt` | Guard (F5) | Passes |
+| `IdleSessionsDoNotOccupyThreadPoolWorkers` | F8 | Fails: 4 idle sessions occupy exactly 8 workers on both platforms |
+
+Lessons from building the harness:
+
+- **A single probe is not enough.** The previous Unix exit wait blocks for 100 ms and then calls `Task.Yield`, which lets a probe slip through between slices, so the UI thread looks responsive while it is blocked about 100% of the time. The harness therefore also measures the time the UI thread spends inside callbacks during a 500 ms idle window. A free thread is busy for well under 1 ms; a blocked one is busy for the whole window.
+- **Measure pool occupancy directly.** Occupied workers, computed as `GetMaxThreads` minus `GetAvailableThreads`, give a deterministic F8 signal (2 per session), where burst latency does not. The test runs `[NotInParallel]`.
+- **Until G1 fixes F8, run the guards on their own.** The failing tests occupy pool workers in the test process itself. On an 8-core Linux machine (minimum 8 workers), that starves the timing-sensitive guards in a full parallel run, and they time out. Run `PtyCallerContextTests` by itself to check the guards until the occupancy is gone. On the 32-core Windows machine the full run shows only the expected failures.
+- **A blocked Unix input write can outlive cleanup.** A write blocked on a full tty input queue stays blocked through cleanup when the pool is starved. The background writer in step 4 must be stoppable by `Dispose` without depending on pool threads.
+
+### Step 2 result: exit watcher, exit task, EOF staging timer
+
+What changed:
+
+- **Exit observation:** process-wide watchers replace every exit poll loop (see [Child exit observation](../references/pty_crossplatform.md#child-exit-observation)).
+- **Waits:** `WaitForExitAsync`, `WaitForExitStatusAsync`, and `CompleteAsync` await the recorded exit and never poll or block.
+- **EOF staging:** a per-session 100 ms timer advances it, with the same tick counts as before. `SendEof` no longer depends on somebody awaiting exit.
+- **Unix `Dispose`:** kills without the caller-thread reap wait, and the watcher always reaps.
+- **Output drain:** `ReadOutputAsync`'s post-exit drain is queued by the exit listener instead of a polling task.
+
+Results:
+
+| Test | Windows | Linux |
+|---|---|---|
+| F3 `WaitForExitAsync`, F4 `CompleteAsync`, F4 Capture | Pass | Pass |
+| F8 occupied workers | 8 → 4 (producers only; step 3) | 8 → 4 |
+| F1, F2, Unix text input | Still fail (steps 3–4) | Still fail |
+| Existing suite | All pass, 3 runs | All pass, 3 runs |
+
+On Linux, exit is reported 2 ms after it happens through pidfd. The previous polling took 10–100 ms. A process with three sessions has one watcher thread and no zombies after `Dispose`. NativeAOT publish and run were verified on Windows and on Linux (project reference, shared native library).
+
+Allocation (Windows, KB per operation, in the repository checkout; HEAD maximum of four runs against this step's three runs):
+
+| Benchmark | HEAD | Step 2 |
+|---|---|---|
+| `Session_Exit0_Bytes` | 3.75 | 2.68 |
+| `Session_32KiB_Bytes` | 41.97 | 39.25–39.58 |
+| `Session_32KiB_StreamBytes` | 6.50 | 4.19–4.30 |
+| `Session_32KiB_OutputStreamBytes` | 4.13 | 2.00 |
+| `Capture_32KiB_Text` | 126.87 | 124.14–124.48 |
+
+About 1.1 KB of each improvement comes from the Windows command-line builder: it now measures and writes one exact-size buffer instead of building a string, a NUL-terminated copy, and a char array. The exit work alone saved about 170 B on the one-shot paths, but added about 85 B to `OutputStreamBytes`, because the exit state lives in every backend object. The command-line change more than offsets that, and `WindowsCommandLineTests` checks it against the previous quoting with 2000 random inputs.
+
+Lessons:
+
+- **Kill-on-cancellation cannot ride on a token registration next to `WaitAsync(token)`.** Callbacks run in reverse registration order, so the waiter resumed and unregistered the kill before it ran (`PtyCancellationKill` caught it).
+- **A latent deadlock in the output buffer surfaced once exit timing changed.** Completing the consumer's wait under the buffer lock deadlocked against a concurrent cancellation callback (see [core_session.md](../specs/core_session.md) lessons). It hung two stdio bridge tests deterministically on Linux.
+- **Stale epoll registrations from forked children closed live descriptors** and hung the Linux suite until registrations became one-shot and explicitly removed.
+- **Allocation-neutral exit observation needs care at every layer:**
+  - Create the task lazily.
+  - Give internal waits a slot, not a task.
+  - Avoid async state machines where only one await happens.
+  - Never construct an exception that is not thrown (`Dispose` built an `ObjectDisposedException` on every call).
+  - Pooled `ValueTask` builders did not help: boxes returned on another thread were often not reused.
+- **The caller-context probe must not depend on the thread pool.** Its latency is now timestamped on the UI thread. Tests whose operation spawns a child on the UI thread start measuring after the spawn, which is inherent and can exceed 100 ms under load.
 
 ### Acceptance
 
@@ -210,16 +282,32 @@ Large. This restructures both backends and every output consumer.
 
 A terminal resizes on every layout change, and child exit is asynchronous to layout. A shell that exits while its tab is still visible makes the next size change throw (F6). In WinUI an unhandled exception from a size handler terminates the application.
 
-### Decision
+### Decision (implemented)
 
-- After the child has exited, or after the transport has been closed for drain, `Resize` is a silent no-op and `Size` keeps its last applied value.
-- `ObjectDisposedException` is still thrown after `Dispose`.
-- Update the `PtySession.Resize` and `PtyTerminal.Resize` exception documentation to match.
+- **Child exit never makes `Resize` fail.**
+  - While the transport is open, the size is applied, even if the child has already exited.
+  - Once the transport has been closed after exit, `Resize` is a no-op and `Size` keeps its last applied value.
+  - If the OS rejects the call and the child has exited in the meantime, that is also a no-op.
+- **What still throws:** `ObjectDisposedException` after `Dispose`, `ArgumentOutOfRangeException` for negative pixel dimensions (validated before the exit state is considered), and OS failures while the child is running.
+- **Windows race guard:** a reference on the pseudo-console handle is held for the duration of `ResizePseudoConsole`. A drain close on another thread therefore defers `ClosePseudoConsole` until the call returns, instead of invalidating the handle mid-call.
+- **Documentation:** `PtySession.Resize`, `PtyTerminal.Resize`, [core_session.md](../specs/core_session.md), and [terminal.md](../specs/terminal.md) describe the behavior.
 
-### Acceptance
+### Tests
 
-- Tests on both platforms: resize after exit and after drain completion does not throw, and `Size` is unchanged.
-- Resize after dispose still throws `ObjectDisposedException`.
+| Test | State it covers |
+|---|---|
+| `PtyResizeUpdatesSize`, `PtyResizeAcceptsPixelDimensions` (existing) | Child running |
+| `PtyResizeAfterExitWithOpenTransportDoesNotThrow` | Child exited, transport open |
+| `PtyResizeAfterTransportClosedIsNoOp` | Child exited, transport closed (F6) |
+| `PtyResizeAfterDisposeThrowsObjectDisposed` | Disposed |
+| `PtyTerminalResizeAfterCompletionIsNoOp` | Size change after `Completion` (F6) |
+
+The two F6 tests fail on the previous code with `InvalidOperationException`.
+
+### Lessons Learned
+
+- **Define the no-op by transport state, not by `HasExited`.** The planned rule, a no-op as soon as the child had exited, would have broken existing resize tests that use fast-exiting children (`PtyResizeUpdatesSize`, `PtyWindowsSpawnAllowsImmediateResize`). Their resize would race the exit and silently stop applying. Applying the size while the transport is open is harmless on both platforms, and it keeps `Size` deterministic until drain closes the transport.
+- **The Unix master fd can still be closed and reused by a concurrent drain during the ioctl.** This race predates this change and is resolved by G1's fd-lifetime design (see G10).
 
 ### Estimate
 
@@ -454,12 +542,13 @@ flowchart LR
 - **The pool starvation threshold is the minimum worker thread count** (the processor count). It is not a large number of sessions, so the problem appears with only a few tabs.
 - **Large pastes through `WriteInputAsync` did not block the UI thread on Windows**, even with output undrained. ConPTY accepts input into its own buffer independently of output backpressure. Unix tty input queues are small and can block a writer.
 - **The in-box ConPTY reorders forwarded sequences relative to text** and consumes several query and graphics sequences. Its behavior must be treated as Windows-build-dependent, and must not be assumed to be a transparent relay.
+- **Measure allocation baselines in the same checkout path as the change.** Spawn allocations grow with the length of the executable and working-directory paths. A baseline measured in a worktree under a long temp path came out about 1.5 KB higher and looked like a stale baseline, but it was not one. Async paths also jitter by roughly 50–400 B between runs, and single runs occasionally double, so compare several runs before attributing a delta.
 
 ## Open Questions
 
 - **Slot sizing:** the pump's slot count and size. Start from 4 × 4 KiB and tune with the streaming throughput and allocation benchmarks.
 - **Coalescing micro-window:** whether the ConPTY 1 ms coalescing micro-window is still needed once reads are pipelined into multiple slots.
-- **Unix fallback interval:** the `waitpid` polling interval for the fallback exit watcher on kernels without pidfd.
+- ~~**Unix fallback interval:** the `waitpid` polling interval for the fallback exit watcher on kernels without pidfd.~~ Resolved in step 2: 10 ms, on the single watcher thread, for unregistrable children only.
 - **`ClosePseudoConsole` blocking:** whether `ClosePseudoConsole` can block on older Windows builds when output is not being drained. G1 makes `Dispose` non-blocking, so if it can block, the call must run off the caller's thread. Verify on Windows 10 and Windows 11 builds before 24H2.
 - **G7 API shape:** a `PtyStartInfo` property, a process-wide setting, or a separate start method.
 - **G5 sample form:** a WinUI sample needs the Windows App SDK, which is a third-party dependency in a sample and cannot run in CI. The alternative is a framework-neutral console sample with a single-threaded context.

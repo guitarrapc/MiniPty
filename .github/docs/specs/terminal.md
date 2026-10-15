@@ -183,6 +183,7 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 | `Kill()` during delivery | remaining output drained and delivered, then `Completion` resolves with the status |
 | `Kill()` / child exit while `Pause()`d | `Completion` stays pending until `Resume()` or disposal — flow control holds the drain by design |
 | Dispose before exit | `Completion` faults with `OperationCanceledException`; child killed |
+| `Resize` after exit (frontend size change before teardown) | no-op once the transport is closed; never throws because the child exited |
 | Member call after dispose | `ObjectDisposedException` |
 
 ## Lessons Learned

@@ -1150,6 +1150,69 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyResizeAfterExitWithOpenTransportDoesNotThrow()
+    {
+        using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("exit /b 0")
+            : UnixShell("exit 0"));
+        var initial = session.Size;
+
+        // HasExited observes exit without closing the transport, unlike WaitForExitAsync on Windows.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (!session.HasExited)
+            await Task.Delay(10, cts.Token);
+
+        session.Resize(new PtySize(100, 30));
+
+        if (OperatingSystem.IsWindows())
+        {
+            // conhost stays alive until the pseudo-console is closed, so the size is still applied.
+            await Assert.That(session.Size).IsEqualTo(new PtySize(100, 30));
+            return;
+        }
+
+        // A Unix platform that rejects the ioctl once the slave is gone leaves Size unchanged instead of throwing.
+        await Assert.That(session.Size == new PtySize(100, 30) || session.Size == initial).IsTrue();
+    }
+
+    [Test]
+    public async Task PtyResizeAfterTransportClosedIsNoOp()
+    {
+        using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("exit /b 0")
+            : UnixShell("exit 0"));
+        var initial = session.Size;
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await session.WaitForExitAsync(cts.Token);
+        // Post-exit drain closes the transport; close it directly so every platform reaches that state
+        // deterministically (Unix PTYs usually report EOF without needing the forced close).
+        session.CloseOutputTransport();
+
+        session.Resize(new PtySize(100, 30));
+        session.Resize(new PtySize(100, 30), new PtyPixelSize(900, 500));
+
+        await Assert.That(session.Size).IsEqualTo(initial);
+        // Argument validation still precedes the exit state.
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            session.Resize(new PtySize(100, 30), new PtyPixelSize(-1, 500)));
+    }
+
+    [Test]
+    public async Task PtyResizeAfterDisposeThrowsObjectDisposed()
+    {
+        var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("set /p DUMMY=")
+            : UnixShell("IFS= read -r _"));
+        session.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => session.Resize(new PtySize(100, 30)));
+        Assert.Throws<ObjectDisposedException>(() =>
+            session.Resize(new PtySize(100, 30), new PtyPixelSize(900, 500)));
+        await Task.CompletedTask;
+    }
+
+    [Test]
     public async Task PtyCommandLineRejectsIncompatibleUsage()
     {
         var mixed = new PtyStartInfo

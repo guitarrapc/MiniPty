@@ -1,6 +1,6 @@
 ﻿using System.ComponentModel;
 using System.Runtime.InteropServices;
-using System.Text;
+using System.Threading.Tasks.Sources;
 using Microsoft.Win32.SafeHandles;
 
 namespace MiniPty.Internal;
@@ -66,7 +66,8 @@ internal static class WindowsPtyBackend
     private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const uint StartfUseStdHandles = 0x00000100;
     private static readonly IntPtr InvalidHandleValue = new(-1);
-    private const uint WaitPollMs = 100;
+    // EOF staging advances one step per tick, matching the cadence of the exit-wait poll loop it replaced.
+    private const int EofTickMs = 100;
     private const uint HandleFlagInherit = 0x00000001;
     private const byte InputEofCtrlZ = 0x1A;
     private const byte InputEofSubmit = 0x0D;
@@ -132,24 +133,7 @@ internal static class WindowsPtyBackend
                 lpAttributeList = attrList,
             };
 
-            var commandLineBuilder = new StringBuilder();
-            commandLineBuilder.Append(QuoteArg(startInfo.FileName));
-            if (startInfo.CommandLine is { Length: > 0 } rawCommandLine)
-            {
-                commandLineBuilder.Append(' ');
-                commandLineBuilder.Append(rawCommandLine);
-            }
-            else
-            {
-                var arguments = startInfo.Arguments;
-                for (var i = 0; i < arguments.Count; i++)
-                {
-                    commandLineBuilder.Append(' ');
-                    commandLineBuilder.Append(QuoteArg(arguments[i]));
-                }
-            }
-
-            var commandLine = (commandLineBuilder.ToString() + '\0').ToCharArray();
+            var commandLine = BuildCommandLine(startInfo);
             var environment = PtyEnvironment.BuildWindows(startInfo);
             var creationFlags = ExtendedStartupInfoPresent;
             if (environment is not null)
@@ -248,13 +232,16 @@ internal static class WindowsPtyBackend
         return block;
     }
 
-    private sealed class WindowsPtyBackendInstance : IPtyBackend
+    private sealed class WindowsPtyBackendInstance : IPtyBackend, IWindowsExitObserver, IValueTaskSource<int>
     {
         private readonly SafeFileHandle _inputWriteHandle;
         private readonly SafeFileHandle _outputReadHandle;
         private readonly SafePseudoConsoleHandle _hpc;
         private readonly IntPtr _attrList;
         private readonly WindowsProcessInformation _processInfo;
+        // Mutable struct: used only through this field, never copied.
+        private PtyExitSignal _exitSignal;
+        private Timer? _eofTimer;
         private PtySize _size;
         private bool _inputClosed;
         private bool _outputClosed;
@@ -289,11 +276,27 @@ internal static class WindowsPtyBackend
             _size = size;
             Input = new InputTrackingWriteStream(new PtyHandleWriteStream(inputWriteHandle), OnInputWritten);
             Output = new PtyHandleReadStream(outputReadHandle);
+
+            // Last, so the watcher never observes a partially constructed instance.
+            WindowsExitWatcher.Register(processInfo.hProcess, this);
         }
 
         public Stream Input { get; }
         public Stream Output { get; }
         public int ProcessId => _processInfo.dwProcessId;
+
+        public Task<PtyExitStatus> Exited => _exitSignal.GetTask();
+
+        public ValueTask<int> WaitForExitCodeAsync() => _exitSignal.WaitForExitCodeAsync(this);
+
+        public void SetExitListener(IPtyExitListener listener) => _exitSignal.SetListener(listener);
+
+        int IValueTaskSource<int>.GetResult(short token) => _exitSignal.GetWaiterResult(token);
+
+        ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token) => _exitSignal.GetWaiterStatus(token);
+
+        void IValueTaskSource<int>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
+            _exitSignal.OnWaiterCompleted(continuation, state, token, flags);
 
         public bool HasExited
         {
@@ -323,16 +326,47 @@ internal static class WindowsPtyBackend
         public void Resize(int columns, int rows, int pixelWidth, int pixelHeight)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_hpcClosed)
-                throw new InvalidOperationException("Cannot resize after the pseudo-console has been closed.");
+
+            // Frontend size events race child exit. Once post-exit drain has closed the pseudo-console
+            // there is nothing left to resize, so the call is a no-op rather than an error.
+            if (_hpc.IsClosed)
+                return;
 
             columns = Math.Clamp(columns, 1, 512);
             rows = Math.Clamp(rows, 1, 512);
-            var hr = WindowsInterop.ResizePseudoConsole(
-                _hpc.DangerousGetHandle(),
-                new WindowsCoord((short)columns, (short)rows));
+
+            // The reference keeps the HPCON valid if drain closes the pseudo-console during the call;
+            // the deferred ClosePseudoConsole then runs on release instead of under ResizePseudoConsole.
+            var addedRef = false;
+            try
+            {
+                _hpc.DangerousAddRef(ref addedRef);
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+
+            int hr;
+            try
+            {
+                hr = WindowsInterop.ResizePseudoConsole(
+                    _hpc.DangerousGetHandle(),
+                    new WindowsCoord((short)columns, (short)rows));
+            }
+            finally
+            {
+                if (addedRef)
+                    _hpc.DangerousRelease();
+            }
+
             if (hr < 0)
+            {
+                if (_hpc.IsClosed || TryRefreshExitState())
+                    return;
+
                 throw new Win32Exception(hr, "ResizePseudoConsole failed");
+            }
 
             _size = new PtySize(columns, rows);
         }
@@ -346,8 +380,11 @@ internal static class WindowsPtyBackend
             if (_eofSignaled)
                 return;
 
-            // Stage EOF to the wait loop. WriteFile can succeed before ConPTY stdin is attached.
+            // Stage EOF: WriteFile can succeed before ConPTY stdin is attached. The staging timer advances
+            // it, so EOF no longer depends on somebody awaiting exit.
             _eofPending = true;
+            _eofTimer ??= new Timer(static state => ((WindowsPtyBackendInstance)state!).OnEofTick(), this, Timeout.Infinite, Timeout.Infinite);
+            _eofTimer.Change(EofTickMs, Timeout.Infinite);
         }
 
         public void Kill()
@@ -376,69 +413,38 @@ internal static class WindowsPtyBackend
             WindowsInterop.TerminateProcess(_processInfo.hProcess, 1);
         }
 
-        public void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit)
+        public void CloseTransportAfterExit()
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState())
-            {
-                if (closeTransportOnExit)
-                    CloseTransport();
-
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                return;
-            }
-
-            while (!TryRefreshExitState())
-            {
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var waitResult = WindowsInterop.WaitForSingleObject(_processInfo.hProcess, WaitPollMs);
-                PromoteEofIfPending();
-                CloseInputPipeIfEofSignaled();
-                if (waitResult == WindowsInterop.WaitFailed)
-                    throw new Win32Exception(Marshal.GetLastPInvokeError(), "WaitForSingleObject failed");
-
-                if (waitResult != WindowsInterop.WaitObject0 && waitResult != WindowsInterop.WaitTimeout)
-                    throw new InvalidOperationException($"WaitForSingleObject returned unexpected code 0x{waitResult:X8}");
-            }
-
-            if (closeTransportOnExit)
+            if (!_disposed && TryRefreshExitState())
                 CloseTransport();
-
-            cancellationToken.ThrowIfCancellationRequested();
-            ObjectDisposedException.ThrowIf(_disposed, this);
         }
 
-        public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true)
+        public void OnProcessExited()
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState())
-            {
-                if (closeTransportOnExit)
-                    CloseTransport();
+            if (!_disposed)
+                TryRefreshExitState();
+        }
 
-                return Task.FromResult(_exitCode);
-            }
+        /// <summary>
+        /// One EOF staging step, the work the exit-wait poll loop used to do on each 100 ms timeout:
+        /// promote a staged EOF, then count down to closing an input pipe that never carried bytes.
+        /// </summary>
+        private void OnEofTick()
+        {
+            if (_disposed || _inputClosed || TryRefreshExitState())
+                return;
 
-            CancellationTokenRegistration registration = default;
-            if (killOnCancellation)
-            {
-                registration = cancellationToken.Register(static state =>
-                {
-                    var backend = (WindowsPtyBackendInstance)state!;
-                    backend.Kill();
-                }, this);
-            }
-
+            // A timer callback must never throw: an unhandled exception there terminates the host process.
             try
             {
-                PollForChildExitUntilExited(cancellationToken, closeTransportOnExit);
-                return Task.FromResult(_exitCode);
+                PromoteEofIfPending();
+                CloseInputPipeIfEofSignaled();
+                if (!_disposed && !_inputClosed && (_eofPending || (_eofSignaled && !StreamEofSignaled)))
+                    _eofTimer?.Change(EofTickMs, Timeout.Infinite);
             }
-            finally
+            catch (Exception)
             {
-                registration.Dispose();
+                // The input pipe failed, or Dispose closed it or the timer under the tick; nothing is left to signal.
             }
         }
 
@@ -456,8 +462,14 @@ internal static class WindowsPtyBackend
                 return;
 
             _disposed = true;
+            _eofTimer?.Dispose();
             if (!TryRefreshExitState())
+            {
+                // The watcher owns a duplicate of the process handle, so the handle below can close at once;
+                // the killed child drains the watcher's slot, and OnProcessExited ignores a disposed session.
                 KillCore();
+                _exitSignal.SetDisposedBeforeExit();
+            }
 
             CloseTransport();
             CloseOutputPipe();
@@ -512,6 +524,8 @@ internal static class WindowsPtyBackend
 
             _exitCode = unchecked((int)exitCode);
             _exited = true;
+            // Whichever path observes exit first (the watcher, HasExited, Kill, a tick) records it.
+            _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, null));
             return true;
         }
 
@@ -637,15 +651,98 @@ internal static class WindowsPtyBackend
             throw new Win32Exception(Marshal.GetLastPInvokeError(), "SetHandleInformation failed");
     }
 
-    private static string QuoteArg(string arg)
+    /// <summary>
+    /// Builds the writable, NUL-terminated command line <c>CreateProcessW</c> takes: the quoted file name,
+    /// then either the raw <see cref="PtyStartInfo.CommandLine"/> or each quoted argument.
+    /// </summary>
+    /// <remarks>
+    /// Measures first and writes once into the exact-size buffer. Building through a string builder, a
+    /// string, a NUL concatenation, and a char array copied the command line three times per spawn.
+    /// </remarks>
+    internal static char[] BuildCommandLine(PtyStartInfo startInfo)
+    {
+        var rawCommandLine = startInfo.CommandLine is { Length: > 0 } raw ? raw : null;
+        var arguments = startInfo.Arguments;
+
+        var length = QuotedLength(startInfo.FileName);
+        if (rawCommandLine is not null)
+        {
+            length += 1 + rawCommandLine.Length;
+        }
+        else
+        {
+            for (var i = 0; i < arguments.Count; i++)
+                length += 1 + QuotedLength(arguments[i]);
+        }
+
+        var commandLine = new char[length + 1];
+        var span = commandLine.AsSpan();
+        var position = WriteQuoted(span, startInfo.FileName);
+        if (rawCommandLine is not null)
+        {
+            span[position++] = ' ';
+            rawCommandLine.AsSpan().CopyTo(span[position..]);
+            position += rawCommandLine.Length;
+        }
+        else
+        {
+            for (var i = 0; i < arguments.Count; i++)
+            {
+                span[position++] = ' ';
+                position += WriteQuoted(span[position..], arguments[i]);
+            }
+        }
+
+        span[position] = '\0';
+        return commandLine;
+    }
+
+    /// <summary>Length of <paramref name="arg"/> after <see cref="WriteQuoted"/>.</summary>
+    private static int QuotedLength(string arg)
     {
         if (arg.Length == 0)
-            return "\"\"";
+            return 2;
         if (!NeedsQuoting(arg))
-            return arg;
+            return arg.Length;
 
-        var sb = new StringBuilder(arg.Length + 2);
-        sb.Append('"');
+        var length = 2;
+        var backslashes = 0;
+        foreach (var c in arg)
+        {
+            if (c == '\\')
+            {
+                backslashes++;
+                continue;
+            }
+
+            length += c == '"' ? backslashes * 2 + 2 : backslashes + 1;
+            backslashes = 0;
+        }
+
+        return length + backslashes * 2;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="arg"/> with MSVCRT command-line quoting: backslashes double only before a quote
+    /// or the closing quote, and an embedded quote is escaped. Returns the number of characters written.
+    /// </summary>
+    private static int WriteQuoted(Span<char> destination, string arg)
+    {
+        if (arg.Length == 0)
+        {
+            destination[0] = '"';
+            destination[1] = '"';
+            return 2;
+        }
+
+        if (!NeedsQuoting(arg))
+        {
+            arg.AsSpan().CopyTo(destination);
+            return arg.Length;
+        }
+
+        var position = 0;
+        destination[position++] = '"';
         var backslashes = 0;
         foreach (var c in arg)
         {
@@ -657,20 +754,23 @@ internal static class WindowsPtyBackend
 
             if (c == '"')
             {
-                sb.Append('\\', backslashes * 2 + 1);
-                sb.Append('"');
-                backslashes = 0;
-                continue;
+                destination.Slice(position, backslashes * 2 + 1).Fill('\\');
+                position += backslashes * 2 + 1;
+            }
+            else
+            {
+                destination.Slice(position, backslashes).Fill('\\');
+                position += backslashes;
             }
 
-            sb.Append('\\', backslashes);
+            destination[position++] = c;
             backslashes = 0;
-            sb.Append(c);
         }
 
-        sb.Append('\\', backslashes * 2);
-        sb.Append('"');
-        return sb.ToString();
+        destination.Slice(position, backslashes * 2).Fill('\\');
+        position += backslashes * 2;
+        destination[position++] = '"';
+        return position;
     }
 
     private static bool NeedsQuoting(string arg)

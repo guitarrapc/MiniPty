@@ -23,15 +23,26 @@ internal interface IPtyBackend : IDisposable
     public void SendEof();
     public void Kill();
     public void Kill(PtySignal signal);
-    public Task<int> WaitForExitAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true);
     /// <summary>
-    /// Blocks until the child exits or <paramref name="cancellationToken"/> is canceled; allocation-free path for <see cref="PtySession.ReadOutputAsync"/> exit observation.
+    /// Completes with the exit status once the OS reports that the child exited, or faults with
+    /// <see cref="ObjectDisposedException"/> when the backend is disposed first. Continuations run
+    /// asynchronously. Completion is driven by an OS exit notification, so waiting on it holds no thread.
+    /// The task is created on first access, so a session whose exit nobody awaits never allocates it.
     /// </summary>
-    /// <param name="cancellationToken">Token used to cancel the wait.</param>
-    /// <param name="closeTransportOnExit">
-    /// When <see langword="true"/>, Windows closes the ConPTY transport after exit is observed.
-    /// Unix ignores this flag; PTY reads EOF naturally and callers close the transport when draining.
-    /// </param>
-    public void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit);
+    public Task<PtyExitStatus> Exited { get; }
+    /// <summary>
+    /// Waits for the exit code without allocating when the exit is already known or no other internal wait
+    /// is pending. For library-internal waits that await the result exactly once.
+    /// </summary>
+    public ValueTask<int> WaitForExitCodeAsync();
+    /// <summary>
+    /// Sets the listener notified, allocation-free, on the thread that observes child exit.
+    /// </summary>
+    public void SetExitListener(IPtyExitListener listener);
+    /// <summary>
+    /// Windows closes the ConPTY transport once exit has been observed, because ConPTY output does not
+    /// reach EOF until the pseudo-console is closed. Unix does nothing: the PTY reports EOF on its own.
+    /// </summary>
+    public void CloseTransportAfterExit();
     public void CloseOutputTransport();
 }

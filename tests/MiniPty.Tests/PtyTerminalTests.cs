@@ -102,6 +102,25 @@ public sealed class PtyTerminalTests
     }
 
     [Test]
+    public async Task PtyTerminalResizeAfterCompletionIsNoOp()
+    {
+        await using var terminal = PtyTerminal.Start(EchoMarkerChild("RESIZE_AFTER_EXIT"), new PtyTerminalOptions
+        {
+            Output = static (_, _) => ValueTask.CompletedTask,
+        });
+        await terminal.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+
+        // A frontend size change that arrives after exit but before the tab is torn down.
+        terminal.Resize(new PtySize(100, 40));
+        terminal.Resize(new PtySize(100, 40), new PtyPixelSize(1000, 800));
+
+        // Windows closes the pseudo-console before Completion resolves, so the size cannot change.
+        // Unix may still have the master open, where applying the size is equally harmless.
+        if (OperatingSystem.IsWindows())
+            await Assert.That(terminal.Size).IsEqualTo(new PtySize(80, 24));
+    }
+
+    [Test]
     public async Task PtyTerminalWriteInputAndResizePassThrough()
     {
         var buffer = new MemoryStream();

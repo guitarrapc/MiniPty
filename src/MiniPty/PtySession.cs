@@ -25,7 +25,7 @@ namespace MiniPty;
 /// Disposing or awaiting <see cref="DisposeAsync"/> kills the child if it is still running, then releases handles.
 /// </para>
 /// </remarks>
-public sealed class PtySession : IAsyncDisposable, IDisposable
+public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
 {
     internal const int OutputConsumerNone = 0;
     internal const int OutputConsumerReadOutputAsync = 1;
@@ -49,7 +49,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         _backend = backend;
         outputTransport = backend.Output;
         BindOutputGate(outputTransport);
+        backend.SetExitListener(this);
     }
+
+    /// <summary>
+    /// Runs on the thread that observed child exit (usually a process-wide watcher), so it only hands the
+    /// event to the output buffer, which queues its post-exit drain instead of running it here.
+    /// </summary>
+    void IPtyExitListener.OnChildExited() => Volatile.Read(ref _outputBuffer)?.OnChildExited();
 
     /// <summary>
     /// Gets the operating-system process identifier of the child.
@@ -85,21 +92,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     internal bool IsCompletionOrchestrated => Volatile.Read(ref _completionOrchestrationDepth) > 0;
 
     internal bool IsExitWaitActive => Volatile.Read(ref _exitWaitDepth) > 0;
-
-    internal ExitWaitScope EnterExitWait() => new(this);
-
-    internal readonly struct ExitWaitScope : IDisposable
-    {
-        private readonly PtySession _session;
-
-        internal ExitWaitScope(PtySession session)
-        {
-            _session = session;
-            Interlocked.Increment(ref session._exitWaitDepth);
-        }
-
-        public void Dispose() => Interlocked.Decrement(ref _session._exitWaitDepth);
-    }
 
     internal CompletionOrchestrationScope EnterCompletionOrchestration() => new(this);
 
@@ -248,9 +240,15 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// Resizes the pseudo-terminal to the given dimensions.
     /// </summary>
     /// <param name="size">New width and height in character cells.</param>
-    /// <exception cref="InvalidOperationException">The PTY transport has already been closed.</exception>
-    /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed.</exception>
-    /// <exception cref="IOException">Unix: <c>TIOCSWINSZ</c> failed.</exception>
+    /// <remarks>
+    /// Frontend size changes race child exit, so exit never makes this call fail. While the PTY
+    /// transport is open the size is applied, even if the child has already exited. Once the transport
+    /// has been closed after exit, the call does nothing and <see cref="Size"/> keeps its last applied
+    /// value. Hosts can therefore forward every layout change without checking <see cref="HasExited"/>.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
+    /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed while the child was running.</exception>
+    /// <exception cref="IOException">Unix: <c>TIOCSWINSZ</c> failed while the child was running.</exception>
     public void Resize(PtySize size)
         => Resize(size, null);
 
@@ -259,7 +257,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="size">New width and height in character cells.</param>
     /// <param name="pixelSize">Optional width and height in pixels. Ignored on Windows.</param>
+    /// <remarks>
+    /// Arguments are validated before the exit state is considered. See <see cref="Resize(PtySize)"/>
+    /// for behavior after the child exits.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">A pixel dimension is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
+    /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed while the child was running.</exception>
+    /// <exception cref="IOException">Unix: <c>TIOCSWINSZ</c> failed while the child was running.</exception>
     public void Resize(PtySize size, PtyPixelSize? pixelSize)
     {
         ThrowIfDisposed();
@@ -317,7 +322,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     public Task<int> WaitForExitAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        return WaitForExitInternalScopedAsync(cancellationToken, killOnCancellation: false);
+        return WaitForExitCodeAsync(cancellationToken);
+    }
+
+    private async Task<int> WaitForExitCodeAsync(CancellationToken cancellationToken)
+    {
+        var status = await WaitForExitStatusCoreAsync(cancellationToken).ConfigureAwait(false);
+        return status.ExitCode;
     }
 
     /// <summary>
@@ -329,11 +340,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
     /// </param>
     /// <returns>A task that completes with the child exit code and Unix termination signal.</returns>
     /// <exception cref="OperationCanceledException">Waiting was canceled.</exception>
-    public async Task<PtyExitStatus> WaitForExitStatusAsync(CancellationToken cancellationToken = default)
+    public Task<PtyExitStatus> WaitForExitStatusAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        var exitCode = await WaitForExitInternalScopedAsync(cancellationToken, killOnCancellation: false).ConfigureAwait(false);
-        return new PtyExitStatus(exitCode, _backend.ExitSignal);
+        return WaitForExitStatusCoreAsync(cancellationToken);
     }
 
     /// <summary>
@@ -398,33 +408,77 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>
+    /// Public exit wait. Awaits the backend's OS-driven exit task: nothing here polls or blocks, so awaiting
+    /// it from a UI <see cref="SynchronizationContext"/> leaves that thread free; only the caller's own
+    /// continuation resumes there.
+    /// </summary>
+    private async Task<PtyExitStatus> WaitForExitStatusCoreAsync(CancellationToken cancellationToken)
+    {
+        // Counted synchronously, before the first await, so a concurrent output drain sees the waiter.
+        Interlocked.Increment(ref _exitWaitDepth);
+        try
+        {
+            var status = await _backend.Exited.WaitAsync(cancellationToken).ConfigureAwait(false);
+            _backend.CloseTransportAfterExit();
+            ThrowIfDisposed();
+            return status;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _exitWaitDepth);
+        }
+    }
+
+    /// <summary>
+    /// Library-internal exit wait that can also close the ConPTY transport once exit is observed.
+    /// </summary>
     internal Task<int> WaitForExitInternalAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit = true) =>
-        WaitForExitInternalCoreAsync(cancellationToken, killOnCancellation, closeTransportOnExit);
+        WaitForExitCodeCoreAsync(cancellationToken, killOnCancellation, closeTransportOnExit);
 
-    private async Task<int> WaitForExitInternalScopedAsync(CancellationToken cancellationToken, bool killOnCancellation)
+    /// <summary>
+    /// Exit wait for one-shot completion, which drains the transport itself. Without a cancelable token it is
+    /// the backend's allocation-free waiter slot. Each result must be awaited exactly once.
+    /// </summary>
+    internal ValueTask<int> WaitForExitForCompletionAsync(CancellationToken cancellationToken, bool killOnCancellation)
     {
-        using var exitWait = EnterExitWait();
-        await Task.Yield();
-        return await AwaitExitAsync(_backend.WaitForExitAsync(cancellationToken, killOnCancellation)).ConfigureAwait(false);
+        // A session disposed before exit faults the wait with ObjectDisposedException.
+        if (!cancellationToken.CanBeCanceled)
+            return _backend.WaitForExitCodeAsync();
+
+        return new ValueTask<int>(WaitForExitCodeCoreAsync(cancellationToken, killOnCancellation, closeTransportOnExit: false));
     }
 
-    private async Task<int> WaitForExitInternalCoreAsync(CancellationToken cancellationToken, bool killOnCancellation, bool closeTransportOnExit)
+    /// <summary>
+    /// Internal exit wait with work around it. Never polls or blocks.
+    /// </summary>
+    private async Task<int> WaitForExitCodeCoreAsync(
+        CancellationToken cancellationToken,
+        bool killOnCancellation,
+        bool closeTransportOnExit)
     {
-        await Task.Yield();
-        return await AwaitExitAsync(_backend.WaitForExitAsync(cancellationToken, killOnCancellation, closeTransportOnExit)).ConfigureAwait(false);
-    }
+        try
+        {
+            var exitCode = cancellationToken.CanBeCanceled
+                ? (await _backend.Exited.WaitAsync(cancellationToken).ConfigureAwait(false)).ExitCode
+                : await _backend.WaitForExitCodeAsync().ConfigureAwait(false);
+            if (closeTransportOnExit)
+                _backend.CloseTransportAfterExit();
 
-    private async Task<int> AwaitExitAsync(Task<int> exitTask)
-    {
-        var exitCode = await exitTask.ConfigureAwait(false);
-        ThrowIfDisposed();
-        return exitCode;
+            ThrowIfDisposed();
+            return exitCode;
+        }
+        catch (OperationCanceledException) when (killOnCancellation && cancellationToken.IsCancellationRequested)
+        {
+            // Killed here rather than from a token registration: CancellationTokenSource runs callbacks in
+            // reverse registration order, so WaitAsync's own callback would resume this method first and its
+            // cleanup would unregister a kill callback before it ever ran.
+            _backend.Kill();
+            throw;
+        }
     }
 
     internal void CloseOutputTransport() => _backend.CloseOutputTransport();
-
-    internal void PollForChildExitUntilExited(CancellationToken cancellationToken, bool closeTransportOnExit) =>
-        _backend.PollForChildExitUntilExited(cancellationToken, closeTransportOnExit);
 
     private void ThrowIfDisposed()
     {
@@ -505,16 +559,31 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
     private BoundedOutputBuffer GetOrCreateOutputBuffer()
     {
+        BoundedOutputBuffer buffer;
         lock (outputReaderLock)
-            return _outputBuffer ??= new BoundedOutputBuffer(this);
+            buffer = _outputBuffer ??= new BoundedOutputBuffer(this);
+
+        // The exit listener may have fired before the buffer was published; repeating it is harmless.
+        if (_backend.HasExited)
+            buffer.OnChildExited();
+
+        return buffer;
     }
 
-    private sealed class BoundedOutputBuffer : IDisposable, IValueTaskSource
+    private sealed class BoundedOutputBuffer : IDisposable, IValueTaskSource, IThreadPoolWorkItem
     {
         /// <summary>ConPTY may deliver the next micro-slice shortly after the previous read; peek is unreliable there.</summary>
         private const int CoalesceMicroWindowMs = 1;
 
+        // Post-exit drain state flags. The drain is queued once, when both the producer has started and
+        // child exit has been observed, in either order.
+        private const int DrainProducerStarted = 1;
+        private const int DrainExitObserved = 2;
+        private const int DrainQueued = 4;
+
         private readonly PtySession _session;
+        private int _drainState;
+        private bool _concurrentExitWait;
         private readonly object _sync = new();
         private readonly CancellationTokenSource _producerCancellation = new();
         private readonly Task _producer;
@@ -636,9 +705,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             // WaitForExitAsync concurrently (PtyReadOutputAsyncSupportsPersistentCommandLoop).
             await Task.Yield();
 
-            var exitObserveTask = _session.IsCompletionOrchestrated
-                ? Task.CompletedTask
-                : ObserveExitForOutputDrainAsync();
+            // One-shot completion drives its own drain. Otherwise arm the post-exit drain: it runs once the
+            // child exit is observed, holding no thread while the child runs.
+            if (!_session.IsCompletionOrchestrated)
+            {
+                _concurrentExitWait = _session.IsExitWaitActive;
+                AdvanceDrainState(DrainProducerStarted);
+            }
 
             void MarkProduceProgress() => _lastProduceProgressTicks = Environment.TickCount64;
             try
@@ -721,73 +794,103 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
             finally
             {
                 _producerCancellation.Cancel();
-                try
-                {
-                    await exitObserveTask.ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                }
             }
         }
 
         /// <summary>
-        /// On Windows, ConPTY output may not EOF until the transport is closed after the child exits.
+        /// Called on the thread that observed child exit. Never blocks: the drain, when due, is queued.
         /// </summary>
-        private async Task ObserveExitForOutputDrainAsync()
-        {
-            // Must not run exit polling on the producer thread; ProduceAsync assigns this Task without awaiting.
-            await Task.Yield();
+        internal void OnChildExited() => AdvanceDrainState(DrainExitObserved);
 
+        /// <summary>
+        /// Sets <paramref name="flag"/> and queues the post-exit drain exactly once, when both the producer
+        /// has started and child exit has been observed. Queuing <see langword="this"/> as the work item keeps
+        /// the hand-off allocation-free.
+        /// </summary>
+        private void AdvanceDrainState(int flag)
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref _drainState);
+                var next = current | flag;
+                var queue = (next & (DrainProducerStarted | DrainExitObserved)) == (DrainProducerStarted | DrainExitObserved)
+                    && (next & DrainQueued) == 0;
+                if (queue)
+                    next |= DrainQueued;
+
+                if (Interlocked.CompareExchange(ref _drainState, next, current) != current)
+                    continue;
+
+                if (queue)
+                    ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+
+                return;
+            }
+        }
+
+        void IThreadPoolWorkItem.Execute() => DrainAfterExit();
+
+        /// <summary>
+        /// On Windows, ConPTY output may not EOF until the transport is closed after the child exits, and on
+        /// Unix a grandchild can keep the slave open. Once output has been quiet long enough after exit, close
+        /// the transport so the producer reads EOF. Runs on a pool thread, only after exit.
+        /// </summary>
+        private void DrainAfterExit()
+        {
             const int PostExitStallBeforeCloseMs = 100;
 
-            try
+            // A concurrent WaitForExitAsync closes the ConPTY transport itself once exit is observed.
+            if (_concurrentExitWait)
+                return;
+
+            var exitObservedAt = Environment.TickCount64;
+            while (!_producerCancellation.IsCancellationRequested)
             {
-                var concurrentExitWait = _session.IsExitWaitActive;
-                _session.PollForChildExitUntilExited(_producerCancellation.Token, closeTransportOnExit: false);
-
-                if (concurrentExitWait)
-                    return;
-
-                var exitObservedAt = Environment.TickCount64;
-                while (!_producerCancellation.IsCancellationRequested)
+                var canCloseAfterQuiet = false;
+                lock (_sync)
                 {
-                    var canCloseAfterQuiet = false;
-                    lock (_sync)
-                    {
-                        if (_completed || _disposed)
-                            return;
+                    if (_completed || _disposed)
+                        return;
 
-                        // A fast child exit can beat the terminal pump's first ReadOutputAsync call.
-                        // Closing ConPTY before a consumer attaches would discard output still in the transport.
-                        if (_handoff.IsEmpty && _consumerWaiting)
-                            canCloseAfterQuiet = true;
-                    }
+                    // A fast child exit can beat the terminal pump's first ReadOutputAsync call.
+                    // Closing ConPTY before a consumer attaches would discard output still in the transport.
+                    if (_handoff.IsEmpty && _consumerWaiting)
+                        canCloseAfterQuiet = true;
+                }
 
-                    if (canCloseAfterQuiet)
+                if (canCloseAfterQuiet)
+                {
+                    var now = Environment.TickCount64;
+                    var lastProgress = Math.Max(_lastProduceProgressTicks, exitObservedAt);
+                    if (now - lastProgress >= PostExitStallBeforeCloseMs
+                        && now - exitObservedAt >= PostExitStallBeforeCloseMs)
                     {
-                        var now = Environment.TickCount64;
-                        var lastProgress = Math.Max(_lastProduceProgressTicks, exitObservedAt);
-                        if (now - lastProgress >= PostExitStallBeforeCloseMs
-                            && now - exitObservedAt >= PostExitStallBeforeCloseMs)
+                        // A thread-pool work item must never throw: that would terminate the host process.
+                        try
                         {
                             _session.CloseOutputTransport();
-                            return;
                         }
-                    }
+                        catch (Exception)
+                        {
+                            // Disposal raced the close, or the transport already failed; either way the
+                            // producer reaches EOF and disposal finishes the teardown.
+                        }
 
-                    var pollDeadline = Environment.TickCount64 + 10;
-                    while (Environment.TickCount64 < pollDeadline)
-                    {
-                        _producerCancellation.Token.ThrowIfCancellationRequested();
-                        var remaining = (int)Math.Min(10, pollDeadline - Environment.TickCount64);
-                        if (remaining > 0)
-                            Thread.Sleep(remaining);
+                        return;
                     }
                 }
-            }
-            catch (OperationCanceledException) when (_producerCancellation.IsCancellationRequested)
-            {
+
+                var pollDeadline = Environment.TickCount64 + 10;
+                while (Environment.TickCount64 < pollDeadline)
+                {
+                    // IsCancellationRequested stays valid after the producer disposes its source; Token does not.
+                    if (_producerCancellation.IsCancellationRequested)
+                        return;
+
+                    var remaining = (int)Math.Min(10, pollDeadline - Environment.TickCount64);
+                    if (remaining > 0)
+                        Thread.Sleep(remaining);
+                }
             }
         }
 
@@ -814,6 +917,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
         private void Handoff(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
+            bool signal;
             lock (_sync)
             {
                 if (_disposed)
@@ -821,16 +925,32 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
                 _handoff = data;
                 _consumerWaiting = false;
-                if (_dataWaitArmed)
-                {
-                    _dataWaitArmed = false;
-                    _dataWaitState.SetResult(true);
-                }
-
+                signal = TakeDataWaitLocked();
                 Monitor.PulseAll(_sync);
             }
 
+            if (signal)
+                _dataWaitState.SetResult(true);
+
             WaitForHandoffCleared(cancellationToken);
+        }
+
+        /// <summary>
+        /// Claims the right to complete the armed consumer wait. Exactly one caller wins, and it must
+        /// complete the wait only after releasing <see cref="_sync"/>.
+        /// </summary>
+        /// <remarks>
+        /// Completing under the lock deadlocks: the consumer's continuation runs inline, and its
+        /// <see cref="CancellationTokenRegistration.Dispose"/> blocks until a concurrently running
+        /// <see cref="CancelDataWait"/> callback returns, while that callback blocks on the lock.
+        /// </remarks>
+        private bool TakeDataWaitLocked()
+        {
+            if (!_dataWaitArmed)
+                return false;
+
+            _dataWaitArmed = false;
+            return true;
         }
 
         private void WaitForHandoffCleared(CancellationToken cancellationToken)
@@ -864,29 +984,26 @@ public sealed class PtySession : IAsyncDisposable, IDisposable
 
         private void SignalAll()
         {
+            bool signal;
             lock (_sync)
             {
                 _handoff = default;
-                if (_dataWaitArmed)
-                {
-                    _dataWaitArmed = false;
-                    _dataWaitState.SetResult(true);
-                }
-
+                signal = TakeDataWaitLocked();
                 Monitor.PulseAll(_sync);
             }
+
+            if (signal)
+                _dataWaitState.SetResult(true);
         }
 
         private void CancelDataWait()
         {
+            bool signal;
             lock (_sync)
-            {
-                if (_dataWaitArmed)
-                {
-                    _dataWaitArmed = false;
-                    _dataWaitState.SetException(new OperationCanceledException());
-                }
-            }
+                signal = TakeDataWaitLocked();
+
+            if (signal)
+                _dataWaitState.SetException(new OperationCanceledException());
         }
 
         void IValueTaskSource.OnCompleted(
