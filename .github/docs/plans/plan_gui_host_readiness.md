@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** G2 implemented (2026-10-15). G1 design agreed; implementation not started. The other items are proposed.
+**Status:** G2 implemented (2026-10-15). G1 design agreed, and delivery step 1 (caller-context test harness) is done. The other items are proposed.
 
 ## Background
 
@@ -187,6 +187,30 @@ Run the narrowest relevant tests after each step, so a hang can be attributed to
 3. **Output pump and consumer views:** migrate `ReadOutputAsync`, `Output`, `CompleteAsync`, Capture, and `PtyTerminal`, then delete the old paths.
 4. **Input path.**
 5. **Public API break:** `WaitForExitAsync` returns `PtyExitStatus`. Update samples, specifications, the README, and benchmarks.
+
+### Step 1 result: caller-context tests
+
+`SingleThreadSynchronizationContext` (test helper) stands in for a GUI dispatcher. `PtyCallerContextTests` drives the API from it.
+
+| Test | Finding | Previous code |
+|---|---|---|
+| `ReadOutputAsyncOnUiThreadDeliversOutputWithoutBlockingIt` | F1 | Fails on Windows and Linux: no chunk arrives |
+| `OutputReadAsyncOnUiThreadDoesNotBlockItWhileIdle` | F2 | Fails: the UI thread is busy for the whole window |
+| `WaitForExitAsyncOnUiThreadDoesNotBlockIt` | F3 | Fails |
+| `CompleteAsyncOnUiThreadDoesNotBlockIt` | F4 | Fails |
+| `PtyCaptureRunAsyncOnUiThreadDoesNotBlockIt` | F4 via Capture | Fails |
+| `WriteInputAsyncOnUiThreadDoesNotBlockItWhenTheChildIsNotReading(text)` | Non-blocking input | Fails on Linux; skipped on Windows (F9) |
+| `WriteInputAsyncOnUiThreadDoesNotBlockItWhenTheChildIsNotReading(bytes)` | Guard | Passes, because the base `Stream.WriteAsync` offloads the write today |
+| `DisposeOnUiThreadReturnsPromptly`, `DisposeAsyncOnUiThreadDoesNotBlockIt` | Guards | Pass |
+| `PtyTerminalOnUiThreadDeliversOutputWithoutBlockingIt` | Guard (F5) | Passes |
+| `IdleSessionsDoNotOccupyThreadPoolWorkers` | F8 | Fails: 4 idle sessions occupy exactly 8 workers on both platforms |
+
+Lessons from building the harness:
+
+- **A single probe is not enough.** The previous Unix exit wait blocks for 100 ms and then calls `Task.Yield`, which lets a probe slip through between slices, so the UI thread looks responsive while it is blocked about 100% of the time. The harness therefore also measures the time the UI thread spends inside callbacks during a 500 ms idle window. A free thread is busy for well under 1 ms; a blocked one is busy for the whole window.
+- **Measure pool occupancy directly.** Occupied workers, computed as `GetMaxThreads` minus `GetAvailableThreads`, give a deterministic F8 signal (2 per session), where burst latency does not. The test runs `[NotInParallel]`.
+- **Until G1 fixes F8, run the guards on their own.** The failing tests occupy pool workers in the test process itself. On an 8-core Linux machine (minimum 8 workers), that starves the timing-sensitive guards in a full parallel run, and they time out. Run `PtyCallerContextTests` by itself to check the guards until the occupancy is gone. On the 32-core Windows machine the full run shows only the expected failures.
+- **A blocked Unix input write can outlive cleanup.** A write blocked on a full tty input queue stays blocked through cleanup when the pool is starved. The background writer in step 4 must be stoppable by `Dispose` without depending on pool threads.
 
 ### Acceptance
 
