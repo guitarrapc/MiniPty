@@ -54,7 +54,7 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 | `HasExited` / `ExitCode?` | Reports the exit observed by the process-wide exit watcher; reading it never blocks or reaps. `ExitCode` is null until the child has exited. |
 | `ExitStatus?` | `PtyExitStatus` after exit; null before. |
 | `ActiveProcessName` | Foreground process name for editor title polling on Unix; null when unavailable and on Windows. |
-| `Dispose` / `DisposeAsync` | Kills the child if still running and releases handles without blocking; in-flight output reads and exit waits fail with `ObjectDisposedException`. `DisposeAsync` also completes once the background output reader has stopped. Output chunk memory is invalid after either. |
+| `Dispose` / `DisposeAsync` | Kills the child if still running and releases handles without blocking; in-flight output reads and exit waits fail with `ObjectDisposedException`. `DisposeAsync` also completes once the background output reader has stopped; every call waits, including one after `Dispose` and concurrent ones. Output chunk memory is invalid after either. |
 
 ## Exit Status
 
@@ -103,7 +103,7 @@ Asynchronous members never block the calling thread and never run library code o
 | `ReadOutputAsync`, `Output.ReadAsync` | Complete synchronously while output is buffered; otherwise resume when output arrives. |
 | `WaitForExitAsync`, `WaitForExitStatusAsync` | Await the exit watcher's notification. |
 | `CompleteAsync`, `PtyCapture.RunAsync` | Output is collected on the session's reader thread; the caller only awaits exit and end of output. `Input`, when set, is written synchronously first (see `WriteInputAsync(string)`). |
-| `DisposeAsync` | Returns at once and completes when the reader has stopped. |
+| `DisposeAsync` | Returns at once and completes when the reader has stopped, for every caller. |
 | `Output.Read`, `Input.Write` | Block, per the `Stream` contract. |
 | `WriteInputAsync(string)` | Still writes synchronously: a full Unix tty input queue can block it (planned in [GUI host readiness](../plans/plan_gui_host_readiness.md), G1 step 4). |
 
@@ -130,3 +130,5 @@ Asynchronous members never block the calling thread and never run library code o
 - Coalescing belongs to the reader, so every consumer gets it. Capture used to record one chunk per transport read; slots that keep appending within the micro-window cut a 32 KiB capture's chunks and the metadata they cost (about 5 KB less on Windows).
 - A Unix reader cannot be stopped by closing the master: `close(2)` does not interrupt a `read` or `poll` blocked on the descriptor in another thread, and the number can be reused while that thread still uses it. The reader waits on the master and a wake descriptor together, and the master is reference-counted so it closes only after the reader, input writes, resize, and EOT writes release it. This also resolves the resize race in which a concurrent drain closed the master during the `ioctl`.
 - Let go of pooled resources before publishing completion. The reader first signaled end of output and only then dropped its reference to the buffer, so a consumer that disposed at once sometimes left the final release to the reader thread. The array then went back to the pool from that thread and stayed in its per-thread cache, and the next session's rent allocated a fresh 16 KiB array: the streaming benchmark intermittently averaged 7.2 KB instead of 1.7 KB. Releasing the buffer and parking the reader thread before completion becomes observable makes both deterministic. For the same reason a one-shot sink finishes its result (decoder flush, buffer detach, scratch return) on the reader thread at end of output: detaching on the thread that resumed the caller left grown result buffers in a worker's cache, and the next run's growth on the reader thread allocated again (intermittent 7 KB and 119 KB averages on the one-shot benchmarks, also seen before this change).
+- Post-exit quiet means the reader could read and found nothing. Time parked on a full ring had counted as silence, so a drain tick right after a stalled reader resumed could close a Unix master that still held output; resuming now restarts the quiet interval. A drain tick also needs the exit time: exit waits complete before the exit listener records it, so a completion could schedule ticks that read every deadline as long past. Ticks now wait for the exit to be recorded. Both came from review, not from failing tests.
+- Check ring capacity on its own, never as the alternative branch to "a sink is attached". A failed completion can detach its sink between that check and the drain, and the reader then read into a full ring, overwriting an unread slot.

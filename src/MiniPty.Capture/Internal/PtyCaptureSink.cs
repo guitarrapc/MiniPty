@@ -58,7 +58,12 @@ internal sealed class PtyCaptureSink : PtyOutputSink
 
     internal override void Write(ReadOnlySpan<byte> data, long timestamp)
     {
+        // Output read before the sink attached is delivered first, timestamped on delivery, ahead of a read that was
+        // already in flight and completed earlier; never let the timeline step back.
         var time = ElapsedSinceStart(timestamp);
+        if (time < _lastTime)
+            time = _lastTime;
+
         _lastTime = time;
         _byteChunks.Add(new ChunkMeta(time, _bytes.Length, data.Length));
         _bytes.ReserveForSustainedOutput(data.Length);
@@ -111,6 +116,18 @@ internal sealed class PtyCaptureSink : PtyOutputSink
             }
 
             _chars?.Dispose();
+        }
+    }
+
+    internal override void Abort()
+    {
+        _bytes.Release();
+        _chars?.Dispose();
+        var scratch = _charScratch;
+        if (scratch is not null)
+        {
+            _charScratch = null;
+            ArrayPool<char>.Shared.Return(scratch);
         }
     }
 
@@ -214,7 +231,7 @@ internal sealed class PtyCaptureSink : PtyOutputSink
             buffer = rented;
         }
 
-        private void Release()
+        internal void Release()
         {
             if (buffer.Length > 0)
                 ArrayPool<byte>.Shared.Return(buffer);

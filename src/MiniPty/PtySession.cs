@@ -400,12 +400,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// background output reader has stopped.
     /// </summary>
     /// <returns>A value task that completes when the reader has released the transport.</returns>
-    /// <remarks>Never blocks the calling thread.</remarks>
+    /// <remarks>
+    /// Does not wait for the reader on the calling thread. Every call waits for the same shutdown, including calls
+    /// after <see cref="Dispose"/> and concurrent ones.
+    /// </remarks>
     public ValueTask DisposeAsync()
     {
-        if (_disposed)
-            return default;
-
+        // Idempotent teardown; disposal having started does not mean the reader has stopped.
         Dispose();
         return _pump.WaitForStopAsync();
     }

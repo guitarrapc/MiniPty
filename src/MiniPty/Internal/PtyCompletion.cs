@@ -35,8 +35,10 @@ internal static class PtyCompletion
         }
         catch
         {
-            // Output read from here on stays in the ring for whichever consumer comes next.
+            // Output read from here on stays in the ring for whichever consumer comes next. Detaching waits out a
+            // write in progress, so the sink's pooled buffers can be returned right after.
             pump.DetachSink(sink);
+            sink.Abort();
             throw;
         }
     }

@@ -21,7 +21,7 @@ PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
 
 - `PtyCaptureOptions.Completion` wraps `PtyCompleteOptions`.
 - `PtyCaptureOptions.TimeProvider` supplies the clock for chunk timestamps. Default is `TimeProvider.System`.
-- Each chunk's `Time` is the elapsed time from session start, immediately after `Pty.Start`, to the completion of the read that produced it. With `TimeProvider.System` the read's own timestamp is used; another provider is asked when the read is delivered, which is the same moment for output read after capture attached. Output read before capture attached is timestamped on delivery; a read that completed before the origin counts as zero.
+- Each chunk's `Time` is the elapsed time from session start, immediately after `Pty.Start`, to the completion of the read that produced it. With `TimeProvider.System` the read's own timestamp is used; another provider is asked when the read is delivered, which is the same moment for output read after capture attached. Output read before capture attached is timestamped on delivery; a read that completed before the origin counts as zero. Chunk times never decrease: a read already in flight when capture attached is delivered after that earlier output and takes its time.
 - The session is disposed when `RunAsync` completes. Disposal kills the child if it is still running.
 - Merged `Output`, decoded text, and `ExitCode` are stable results. Chunk count and split points follow output reads (one transport read plus what arrives within a short micro-window) and are not compatibility guarantees.
 

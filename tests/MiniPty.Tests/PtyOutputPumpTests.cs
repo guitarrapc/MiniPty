@@ -157,6 +157,88 @@ public sealed class PtyOutputPumpTests
         await Assert.That(pending.IsCompleted).IsFalse();
     }
 
+    /// <summary>
+    /// Time the reader spends parked on a full ring is not transport silence. After a stall that outlasts the quiet
+    /// period, resuming must restart it; otherwise a drain tick before the next read closes the transport and the
+    /// output still waiting in it is lost.
+    /// </summary>
+    [Test]
+    public async Task ResumingAfterBackpressureDoesNotCloseTheTransport()
+    {
+        var backend = new StallThenSlowBackend();
+        await using var session = new PtySession(backend);
+
+        // No consumer: the ring fills and the reader parks. Exit is then observed, and the stall outlasts the quiet period.
+        await Task.Delay(200);
+        session.OutputPump.OnChildExited();
+        await Task.Delay(300);
+
+        // Each read after the stall takes 50 ms, below the quiet period, so the transport must stay open.
+        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+        for (var i = 0; i < PtyOutputPump.SlotCount + 4; i++)
+            await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+
+        await Assert.That(backend.IsOutputClosed).IsFalse();
+    }
+
+    /// <summary>
+    /// A completion's exit wait resumes before the exit listener runs, and can schedule drain ticks then. Without
+    /// the exit tick, the quiet and grace deadlines read as long past and the transport was closed at once.
+    /// </summary>
+    [Test]
+    public async Task DrainTicksBeforeExitIsObservedDoNotCloseTheTransport()
+    {
+        var backend = new SilentBackend();
+        await using var session = new PtySession(backend);
+        await backend.Reading.WaitAsync(Timeout);
+
+        PtyOutputDrainScheduler.Schedule(session.OutputPump);
+        await Task.Delay(300);
+
+        await Assert.That(backend.IsOutputClosed).IsFalse();
+    }
+
+    /// <summary>
+    /// The array overload of <c>Output.ReadAsync</c> waits like the memory overload. Stream's default ran the
+    /// blocking read on a thread-pool worker, where cancellation could not reach it.
+    /// </summary>
+    [Test]
+    public async Task OutputArrayReadAsyncWaitsWithoutBlockingAndCancels()
+    {
+        var backend = new SilentBackend();
+        await using var session = new PtySession(backend);
+        using var cts = new CancellationTokenSource();
+        var buffer = new byte[16];
+
+        var read = session.Output.ReadAsync(buffer, 0, buffer.Length, cts.Token);
+        await Assert.That(read.IsCompleted).IsFalse();
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await read.WaitAsync(Timeout));
+    }
+
+    /// <summary>
+    /// Disposal having started does not mean the reader has stopped: <c>DisposeAsync</c> after <c>Dispose</c>, and
+    /// a concurrent second <c>DisposeAsync</c>, must both wait for it.
+    /// </summary>
+    [Test]
+    public async Task EveryDisposeAsyncWaitsForTheReader()
+    {
+        var backend = new SilentBackend(holdEndOfOutput: true);
+        var session = new PtySession(backend);
+        await backend.Reading.WaitAsync(Timeout);
+
+        session.Dispose();
+        var first = session.DisposeAsync();
+        var second = session.DisposeAsync();
+        await Assert.That(first.IsCompleted).IsFalse();
+        await Assert.That(second.IsCompleted).IsFalse();
+
+        backend.ReleaseEndOfOutput();
+        await first.AsTask().WaitAsync(Timeout);
+        await second.AsTask().WaitAsync(Timeout);
+    }
+
     private const string ReaderThreadName = "MiniPty output reader";
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
@@ -257,6 +339,33 @@ public sealed class PtyOutputPumpTests
 
             buffer[0] = (byte)'x';
             return 1;
+        }
+    }
+
+    /// <summary>
+    /// Fills the ring at once, then answers each read after 50 ms, as a transport that still holds output but
+    /// produces it more slowly than the reader polls.
+    /// </summary>
+    private sealed class StallThenSlowBackend : FakeBackend
+    {
+        private int _fastReads = PtyOutputPump.SlotCount;
+
+        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        {
+            if (IsOutputClosed)
+                return 0;
+
+            if (Interlocked.Decrement(ref _fastReads) < 0)
+                Thread.Sleep(50);
+
+            buffer[0] = (byte)'x';
+            return 1;
+        }
+
+        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
+        {
+            endOfOutput = false;
+            return 0;
         }
     }
 

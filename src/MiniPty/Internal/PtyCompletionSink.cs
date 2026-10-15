@@ -59,6 +59,19 @@ internal sealed class PtyCompletionSink : PtyOutputSink
         _payload = new PtyPumpPayload(_bytes.Detach(), chars, _encoding);
     }
 
+    // Detached buffers are owned by the payload, so after OnOutputEnded only what it did not reach is returned.
+    internal override void Abort()
+    {
+        _bytes.Dispose();
+        _chars?.Dispose();
+        var scratch = _charScratch;
+        if (scratch is not null)
+        {
+            _charScratch = null;
+            ArrayPool<char>.Shared.Return(scratch);
+        }
+    }
+
     /// <summary>Gets the result. Called once, after the drain wait reported end of output.</summary>
     internal PtyPumpPayload ToPayload() =>
         _payload ?? throw new InvalidOperationException("PTY output has not ended.");

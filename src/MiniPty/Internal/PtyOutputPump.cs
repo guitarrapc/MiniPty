@@ -58,7 +58,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private const int FlagExitObserved = 8;
 
     private readonly IPtyBackend _backend;
-    private readonly long _coalesceBudgetTicks;
+    // A second concurrent stop waiter falls back to a task; the first uses the allocation-free slot below.
+    private TaskCompletionSource? _stoppedFallback;
     private readonly byte[] _ring;
     private SlotLengths _lengths;
     // Consumer side: the slot being read, and how much of it the Output stream has already copied out.
@@ -86,7 +87,6 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal PtyOutputPump(IPtyBackend backend)
     {
         _backend = backend;
-        _coalesceBudgetTicks = backend.CoalesceBudgetTicks > 0 ? backend.CoalesceBudgetTicks : long.MaxValue;
         _ring = ArrayPool<byte>.Shared.Rent(SlotCount * SlotSize);
     }
 
@@ -151,12 +151,13 @@ internal sealed class PtyOutputPump : IValueTaskSource
         {
             if (!IsSessionDisposed)
             {
-                if (Volatile.Read(ref _sink) is not null)
-                {
-                    if (Volatile.Read(ref _count) > 0)
-                        DeliverBacklog();
-                }
-                else if (Volatile.Read(ref _count) == SlotCount)
+                if (Volatile.Read(ref _sink) is not null && Volatile.Read(ref _count) > 0)
+                    DeliverBacklog();
+
+                // Checked on its own, not as an alternative to the sink: a failed completion can detach its sink
+                // after the check above, leaving the backlog in place, and reading into a full ring would overwrite
+                // an unread slot.
+                if (Volatile.Read(ref _count) == SlotCount)
                 {
                     // A closed Unix master reports end of output without a read; the ring keeps what it holds.
                     if (_backend.IsOutputClosed)
@@ -185,7 +186,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
             // Each continuation read waits its own micro-window, so output that keeps trickling in faster than the
             // window would otherwise hold the slot until it fills. The backend's budget bounds the hold from the
             // first read; the last window may still run past it.
-            var coalesceDeadline = _coalesceBudgetTicks == long.MaxValue ? long.MaxValue : timestamp + _coalesceBudgetTicks;
+            // Read per slot rather than cached: the backend returns a constant, and the pump object stays smaller.
+            var coalesceBudget = _backend.CoalesceBudgetTicks;
+            var coalesceDeadline = coalesceBudget > 0 ? timestamp + coalesceBudget : long.MaxValue;
             while (length < SlotSize && Stopwatch.GetTimestamp() < coalesceDeadline)
             {
                 var more = _backend.ReadMoreOutput(buffer[length..], reader, out end);
@@ -259,6 +262,10 @@ internal sealed class PtyOutputPump : IValueTaskSource
             reader.WaitForWake(Timeout.Infinite);
         }
 
+        // Time parked on a full ring is not transport silence. Restart the quiet interval before the drain can see
+        // that the reader no longer waits; otherwise a tick before the next read would find the last read long past
+        // and close a Unix master that still holds unread output.
+        Volatile.Write(ref _lastReadTick, Environment.TickCount64);
         Volatile.Write(ref _producerWaiting, 0);
     }
 
@@ -300,6 +307,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
             {
             }
         }
+
+        // Its continuations run asynchronously, so completing it here never runs a waiter's code on this thread.
+        Volatile.Read(ref _stoppedFallback)?.TrySetResult();
     }
 
     // ---------------------------------------------------------------- Ring consumer (ReadOutputAsync, Output)
@@ -454,6 +464,12 @@ internal sealed class PtyOutputPump : IValueTaskSource
         if ((flags & (FlagProducerFinished | FlagSessionDisposed)) != 0)
             return true;
 
+        // A completion can schedule ticks as soon as its exit wait resumes, which can precede the exit listener:
+        // exit waits complete before the listener runs. Without the exit tick, the quiet and grace deadlines would
+        // read as long past and close the transport at once.
+        if ((flags & FlagExitObserved) == 0)
+            return false;
+
         var sink = Volatile.Read(ref _sink);
         if ((flags & FlagCloseRequested) == 0)
         {
@@ -530,11 +546,17 @@ internal sealed class PtyOutputPump : IValueTaskSource
         ReleaseRing();
     }
 
-    /// <summary>Completes once the reader thread has let go of the transport and the ring.</summary>
+    /// <summary>
+    /// Completes once the reader thread has let go of the transport and the ring. Every caller waits: the first
+    /// through the allocation-free slot, any concurrent one through a task created only then.
+    /// </summary>
     internal ValueTask WaitForStopAsync()
     {
-        if (IsProducerFinished || Interlocked.CompareExchange(ref _stopWaitState, 1, 0) != 0)
+        if (IsProducerFinished)
             return default;
+
+        if (Interlocked.CompareExchange(ref _stopWaitState, 1, 0) != 0)
+            return new ValueTask(GetStopFallbackTask());
 
         _stopped.RunContinuationsAsynchronously = true;
         var token = _stopped.Version;
@@ -544,6 +566,22 @@ internal sealed class PtyOutputPump : IValueTaskSource
             _stopped.SetResult(true);
 
         return new ValueTask(this, token);
+    }
+
+    private Task GetStopFallbackTask()
+    {
+        var fallback = Volatile.Read(ref _stoppedFallback);
+        if (fallback is null)
+        {
+            var created = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fallback = Interlocked.CompareExchange(ref _stoppedFallback, created, null) ?? created;
+        }
+
+        // Finish may have run before the task was published; it reads the field only after publishing completion.
+        if (IsProducerFinished)
+            fallback.TrySetResult();
+
+        return fallback.Task;
     }
 
     void IValueTaskSource.GetResult(short token) => _stopped.GetResult(token);

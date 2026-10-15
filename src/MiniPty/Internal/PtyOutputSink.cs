@@ -54,6 +54,15 @@ internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
     {
     }
 
+    /// <summary>
+    /// Returns pooled buffers after a failed completion detached the sink, which then never reaches
+    /// <see cref="OnOutputEnded"/>. Called once no write can still be in progress (detaching is serialized with
+    /// writes). Idempotent, and safe after <see cref="OnOutputEnded"/> ran or failed part way.
+    /// </summary>
+    internal virtual void Abort()
+    {
+    }
+
     internal bool IsGraceExpired(long now, long exitTick)
     {
         var graceMs = Volatile.Read(ref _graceMs);

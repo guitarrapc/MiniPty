@@ -101,6 +101,19 @@ internal sealed class PtyOutputStream : Stream, IValueTaskSource<int>, IPtyOutpu
         }
     }
 
+    // The array and APM overloads would otherwise inherit Stream's async-over-sync defaults, which run the
+    // blocking Read on a thread-pool worker and cannot cancel it once started.
+    public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    {
+        ValidateBufferArguments(buffer, offset, count);
+        return ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+    }
+
+    public override IAsyncResult BeginRead(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state) =>
+        TaskToAsyncResult.Begin(ReadAsync(buffer, offset, count, CancellationToken.None), callback, state);
+
+    public override int EndRead(IAsyncResult asyncResult) => TaskToAsyncResult.End<int>(asyncResult);
+
     public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
         if (buffer.IsEmpty)
