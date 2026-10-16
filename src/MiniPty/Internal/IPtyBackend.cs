@@ -70,12 +70,15 @@ internal interface IPtyBackend : IDisposable
     public void EndOutputRead();
     /// <summary>
     /// Blocks until output arrives. Returns the byte count, 0 at end of output, or -1 when
-    /// <paramref name="reader"/> was woken first (Unix), so the pump re-checks its state.
+    /// <paramref name="reader"/> was woken first (Unix) or its read was canceled through
+    /// <see cref="PtyReaderThread.CancelRead"/> (Windows), so the pump re-checks its state.
     /// </summary>
     public int ReadOutput(Span<byte> buffer, PtyReaderThread reader);
     /// <summary>
     /// Reads output that is available now or arrives within a short micro-window, for appending to the slot
     /// the last read filled. Returns 0 when none arrived; <paramref name="endOfOutput"/> reports end of output.
+    /// Once the post-exit drain has given up on the OS ending the transport, this is also the pump's only read,
+    /// so it must never block beyond its micro-window.
     /// </summary>
     public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput);
     /// <summary>

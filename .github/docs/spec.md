@@ -67,6 +67,7 @@ flowchart TB
 | VS Code helper sample (length-framed stdio) | [samples/VsCodeTerminalHelper.cs](../../samples/VsCodeTerminalHelper.cs) |
 | Authenticated, expiring WebSocket session reconnect with bounded output replay | [Terminal](specs/terminal.md) |
 | Real VS Code `Pseudoterminal` and persistent reconnect E2E samples | [samples/VsCodeExtension](../../samples/VsCodeExtension), [samples/VsCodePersistentBridge.cs](../../samples/VsCodePersistentBridge.cs) |
+| Drive a session from a GUI thread (WinUI, WPF, …) without blocking it, and a WinUI 3 host sample | [Core session](specs/core_session.md#gui-hosts), [samples/WinUiTerminal](../../samples/WinUiTerminal) |
 
 ## Out of Scope For The Current Implementation
 

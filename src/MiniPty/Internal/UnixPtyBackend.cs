@@ -464,8 +464,8 @@ internal static partial class UnixPtyBackend
 
             try
             {
-                columns = Math.Clamp(columns, 1, 512);
-                rows = Math.Clamp(rows, 1, 512);
+                columns = PtySizeLimits.Clamp(columns);
+                rows = PtySizeLimits.Clamp(rows);
                 if (minipty_set_winsize(
                         master,
                         (ushort)rows,

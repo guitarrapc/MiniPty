@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** G2 implemented (2026-10-15). G1 design agreed; delivery steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`) are done. F12 is tracked as G11. The other items are proposed.
+**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phases C and D (G6, G9, G10, G7, G8) are proposed.
 
 ## Background
 
@@ -628,19 +628,25 @@ The fix uses the same components as G1: the session-owned output pump on a dedic
 
 High-resolution displays with small fonts exceed 512 columns. A silent clamp makes the frontend grid and the PTY disagree, which corrupts line wrapping (F7).
 
-### Decision
+### Decision (implemented)
 
-- Clamp to the platform limits instead: Windows 1–32767 (signed 16-bit `COORD`), Unix 1–65535 (`winsize`).
-- `Size` reports the value actually applied.
-- Update the `PtyStartInfo.Size` documentation.
+- Each dimension is clamped to what the platform API encodes: 1–32767 on Windows (ConPTY's signed 16-bit `COORD`), 1–65535 on Unix (`winsize`). One internal limits type replaces the three `512` literals, so spawn and resize cannot drift apart.
+- Values below 1 still clamp to 1 rather than throw: a GUI window reports zero cells before layout, and that must not fault a size-changed handler.
+- `Size` reports the value applied; `PtyStartInfo.Size` and `PtySize` document the limits.
 
-### Acceptance
+Measured before implementing, on Windows 11 build 26200: `CreatePseudoConsole` and `ResizePseudoConsole` succeeded at 600×200, 1000×1000, 4000×300, 8000×1000, 32767×1, 1×32767, and 32767×32767 in about 5 ms each, and a PowerShell child reported 600×200, 4000×300, 32767×50, and 200×32767 as both its window and buffer size. Nothing in ConPTY needed the old cap.
 
-A test resizes to 600×200 and confirms that both `Size` and the child-visible size report it.
+### Tests
 
-### Estimate
+| Test | Covers |
+|---|---|
+| `PtyResizeAppliesSizesUpToThePlatformLimit` | 600×200 applied; the platform maximum applied; above-maximum and non-positive values clamped |
+| `PtyStartAppliesSizesUpToThePlatformLimit` | The same at spawn |
+| `PtyChildSeesWideResizedSize` | The child, not only `Size`, observes 600×200 (PowerShell `WindowSize` on Windows, `stty size` on Unix) |
 
-Small.
+### Lessons Learned
+
+- A clamp is the right failure mode for a size, but its bound must be the platform's, not a guess. The 512 cap predated any GUI embedder and was never measured against ConPTY.
 
 ---
 
@@ -650,24 +656,18 @@ Small.
 
 The README's primary pattern, `ReadOutputAsync` followed by `WaitForExitAsync`, is exactly F1 and F3 when it is placed in an event handler. After G1 the pattern is safe, and on a UI thread it becomes the recommended one. Hosts still need the threading model spelled out.
 
-### Decision
+### Decision (implemented)
 
-- Add a "GUI hosts" section to the core session specification and a short README note. It covers:
-  - the pull pattern on the UI thread (`await foreach` over `ReadOutputAsync`, no copy, no marshaling) as the primary recommendation;
-  - `PtyTerminal` for push-style transports, where handlers run on background threads and must marshal to the UI and copy any retained bytes;
-  - resize from size-change events, which is safe after G2;
-  - exit through `WaitForExitAsync` or `Completion`;
-  - `DisposeAsync` on tab close, with `Dispose` as the non-blocking alternative.
-- Until G1 ships, the README explicitly warns against awaiting session APIs on a UI thread.
+- [core_session.md](../specs/core_session.md) has a "GUI Hosts" section: one table from host concern (output, push transports, input, layout, exit, tab close, many tabs) to the recommended call and why it is safe, with the pull pattern on the UI thread as the primary recommendation and `PtyTerminal` as the push alternative whose handlers must marshal and copy. The README has a short "GUI hosts" paragraph pointing at it.
+- **Sample form: a WinUI 3 app**, [samples/WinUiTerminal](../../../samples/WinUiTerminal), chosen over a framework-neutral console sample because the embedder that motivated this plan is a WinUI host and a real dispatcher is the thing being demonstrated. The window is built in code with no `Task.Run` anywhere; `App.xaml` exists only to load the control styles and to generate `Main`. The Windows App SDK is the sample's dependency, not MiniPty's, and the sample is JIT-only (`PublishAot=false`), since it demonstrates the threading model rather than publishing.
+- Rendering is a text log: chunks are decoded with an incremental `Decoder`, an escape sequence split across chunks is held back until it completes, and `PtyOutput.ToDisplayText` strips the rest. A terminal control would feed the raw bytes to a VT parser instead.
+- `--smoke` runs `cmd /c echo <marker>` and closes the window once the marker has been shown, with exit code 0 when it arrived. CI builds and smoke-tests the sample on the Windows runners (`dotnet publish` with the runner's RID, then run); locally it exits 0 in about 1.1 s.
 
-### Acceptance
+### Lessons Learned
 
-- Specification and README updated.
-- A runnable sample demonstrates the threading model. Its form is an open question (see below).
-
-### Estimate
-
-Small.
+- A code-only `Application` subclass with no `App.xaml` crashed at startup with `0xC000027B` (a stowed XAML exception inside `Microsoft.UI.Xaml.dll`) before any user code ran, even with `XamlControlsResources` added from the constructor and the dispatcher context installed by hand. The standard shape, an `App.xaml` with the generated `Main`, works; the window itself can stay code-only. The cause was not isolated.
+- A WinUI crash code says nothing by itself. The sample registers `Application.UnhandledException` and writes the exception next to the executable, which is how the next failure gets diagnosed; the first one surfaced only through the Application event log.
+- `Environment.ExitCode` set before `Window.Close()` survives `Application.Start` returning, which is what makes a GUI sample checkable from a script.
 
 ---
 
@@ -814,24 +814,42 @@ Hosts such as IDEs start other processes, for example `git` or language servers,
 
 Nothing freezes, so this is P1 rather than P0.
 
-### Decision (proposed)
+### Decision (implemented)
 
-- **Do not rely only on the output pipe breaking.** After the pseudoconsole is closed, end output once the pipe has delivered nothing for a quiet interval, and release the reader from its blocking read with `CancelSynchronousIo`. A normal session still ends when the pipe breaks; only a pipe held open waits for the interval.
-- **Cancel only this session's read.** Reader threads serve several sessions over their lifetime, so the cancel must target only a read issued for this session.
-- **Not fixable at the source.** Making MiniPty's own handles non-inheritable does not help (F12). A library cannot serialize the host's process creation against `CreatePseudoConsole`.
+- **The drain keeps ticking after the close.** Once reads have been quiet for the same 100 ms interval after `ClosePseudoConsole` (counted from the later of the close and the last read, and never while the reader is parked on a full ring), the pump ends output itself. A normal session still ends when the pipe breaks, about 3 ms after the close; only a pipe held open reaches the interval.
+- **The reader is released, not abandoned.** The reader thread opens a handle to itself when it starts, and `PtyReaderThread.CancelRead` calls `CancelSynchronousIo` on it (plus the ordinary wake), under the lock that also guards the pump handover, so a thread that has moved on to another session is never interrupted. A canceled `ReadFile` transfers nothing and reports `ERROR_OPERATION_ABORTED`, which the backend maps to "re-check state". The pump then takes whatever arrived between the quiet check and the cancel with a non-blocking read and reports end of output.
+- **The cancel is repeated every tick** until the reader has finished, because a cancel that lands between two reads cancels nothing.
+- **Disposal issues the same cancel** after the pipe handle is closed, so `DisposeAsync` does not wait for such a process either. Today ConPTY's final frame wakes that read anyway; the cancel covers a console host that writes none.
+- **Not fixable at the source**, as F12 found: MiniPty's handles are all non-inheritable, and a library cannot serialize the host's process creation against `CreatePseudoConsole`.
 
-### Open
+Measured with a raw ConPTY probe on Windows 11 build 26200 (30 sessions per row, `cmd /c echo hi`, closed after 100 ms of post-exit quiet):
 
-Whether `ClosePseudoConsole` can return before the host process has written its final frame. That decides how long the quiet interval must be. On build 26200 it returned within 2 ms in every F12 run. See also the `ClosePseudoConsole` open question.
+| Load | `ClosePseudoConsole` call | Final frame after close | End of output after close |
+|---|---|---|---|
+| none | p50 0.0 ms, max 0.0 ms | within 1 ms, in 30/30 | p50 3.2 ms, max 3.9 ms |
+| 48 `Process.Start` spawners, 1 s children | max 0.0 ms | within 1 ms, in 30/30 | p50 909 ms; 26/30 over 600 ms |
+| 48 spawners, 3 s children | max 0.7 ms | within 1 ms, in 30/30 | 2/30 still blocked after 1.5 s; `CancelSynchronousIo` released them in 0.2 ms |
 
-### Acceptance
+The final frame (`ESC[?9001l ESC[?1004l`, 16 bytes) arrived within 1 ms of the close in every one of the 90 sessions, so the 100 ms interval has two orders of magnitude of margin, and the close itself never blocked. This also answers the question that was open here.
 
-- With concurrent `Process.Start` children that live several seconds, `ReadOutputAsync` ends within the quiet interval plus a margin after exit, and `CompleteAsync` does not time out.
-- No output is lost in the existing drain and capture tests.
+### Tests
 
-### Estimate
+| Test | Covers |
+|---|---|
+| `OutputEndsAfterQuietWhenTheClosedTransportStaysOpen` (fake backend) | `ReadOutputAsync` ends about 200 ms after exit on a transport the close does not end; hangs without the fix |
+| `CompleteAsyncDoesNotTimeOutWhenTheClosedTransportStaysOpen` (fake) | One-shot completion completes instead of failing with `TimeoutException` at `OutputReaderCloseTimeout`; fails without the fix |
+| `OutputStillDrainingAfterTheCloseIsDelivered` (fake) | A slow flush after the close (one byte every 40 ms) is delivered in full before the forced end; measured from the close alone it would be cut short |
+| `PtyWindowsOutputEndsWhileAnotherProcessHoldsTheOutputPipe` (Windows, `[NotInParallel]`) | The real leak: four threads race `Process.Start` of a 3 s `ping` around each `Pty.Start`, and every session's output ends within 2 s. Fails without the fix (sessions end after about 3 s); passes 3 of 3 runs with it |
 
-Small–medium.
+Full suite: Windows 246 pass in 2 runs; Linux 246 pass in 2 runs. NativeAOT: the `Session` sample published and ran on Windows. Allocation (Windows, `PtyIntegrationBenchmarks`): every scenario is within run-to-run jitter of the step 5 numbers and below the tracked baseline, for example `Session_Exit0_Bytes` 1.86 KB, `Session_32KiB_StreamBytes` 1.57 KB, `Session_32KiB_OutputStreamBytes` 1.67 KB, `Capture_32KiB_Text` 114.06 KB; the forced end adds one flag read per transport read and nothing per session.
+
+### Lessons Learned
+
+- **A steady background spawn rate does not reproduce the leak.** The inheritance window is ConPTY's own `CreateProcess` of its console host, a few milliseconds per pseudo-console. At a steady 16 spawns per second (48 spawners with 3 s children) the window was hit in none of 12 sessions; the test therefore races `Process.Start` around `Pty.Start` itself on four dedicated threads and kills those children after each session.
+- **Spawners started together cycle in lockstep.** 48 spawners that each start a 3 s child at once produce three bursts of 48 and nothing in between, which read as "16 per second" over a long window and as zero during a 1.5 s session loop. Stagger them, or race the window directly.
+- **Pool workers blocked in `WaitForExit` starve the consumer under test.** With the spawners on `Task.Run`, the first session's `ReadOutputAsync` continuation (queued to the thread pool, no `SynchronizationContext` in a test) waited 11 s for a worker, which the test misread as a held-open pipe. Test harnesses that block must use dedicated threads; the same effect would hit any console host that blocks its pool.
+- **An exception on a dedicated test thread takes the whole host down.** `ManualResetEventSlim.Wait(token)` throwing on cancellation left two `MiniPty.Tests.exe` processes that could not be terminated and kept the test output directory locked; building to an alternate output directory (`-o`) and running the test executable directly was the way around them.
+- **A cancel aimed at a read must be aimed by identity, not by thread.** Reader threads serve several sessions over their lifetime; `CancelRead` checks the pump under the handover lock, and the pump re-checks its own state after any `-1`, so a stray cancel costs one extra read and never ends another session's output.
 
 ---
 
@@ -876,6 +894,8 @@ flowchart LR
 - **Large pastes through `WriteInputAsync` did not block the UI thread on Windows while the child was idle**, even with output undrained (F9). That is not a property of ConPTY: with a child that keeps writing output nobody reads, ConPTY stops reading input after about 4 KiB (F11). Measure input with output both idle and flowing. Unix tty input queues are small and can block a writer.
 - **On Windows, a closed pseudoconsole does not guarantee end of output.** An unrelated process the host spawned at the wrong moment can hold the output pipe open (F12).
 - **Bound every background load in a measurement.** A first F12 probe started processes in an unbounded loop and accumulated about 16,000 console processes within minutes, because each console child also starts a console host and process creation slows as they pile up. The probe that produced F12 caps concurrency and waits for each child.
+- **Put a test's background load on dedicated threads.** Pool workers blocked in `WaitForExit` starve every thread-pool continuation in the process, including the one the test is timing; in G11 that misread as an 11 s held-open pipe.
+- **A race needs a rate, and a rate needs spread.** Spawners started together run in lockstep waves and create nothing between waves, and a steady 16 spawns per second still missed ConPTY's few-millisecond inheritance window in every session. Race the window directly, or stagger the load.
 - **The in-box ConPTY reorders forwarded sequences relative to text** and consumes several query and graphics sequences. Its behavior must be treated as Windows-build-dependent, and must not be assumed to be a transparent relay.
 - **Measure allocation baselines in the same checkout path as the change.** Spawn allocations grow with the length of the executable and working-directory paths. A baseline measured in a worktree under a long temp path came out about 1.5 KB higher and looked like a stale baseline, but it was not one. Async paths also jitter by roughly 50–400 B between runs, and single runs occasionally double, so compare several runs before attributing a delta.
 
@@ -895,9 +915,9 @@ flowchart LR
 
   Bulk output keeps its chunking: 13 chunks of up to 4096 B for 32 KiB (12–13 before), with ConPTY slices measured 20–45 µs apart at the median and 90th percentile. With coalescing disabled, ConPTY alone still delivers some writes up to about 15 ms late, so the remaining tail is ConPTY's rendering, not the reader.
 - ~~**Unix fallback interval:** the `waitpid` polling interval for the fallback exit watcher on kernels without pidfd.~~ Resolved in step 2: 10 ms, on the single watcher thread, for unregistrable children only.
-- **`ClosePseudoConsole` blocking:** whether `ClosePseudoConsole` can block on older Windows builds when output is not being drained. G1 makes `Dispose` non-blocking, so if it can block, the call must run off the caller's thread. Step 3 still closes on the caller's thread but switches the reader to discarding output first, so the final frame always has a reader. Verify on Windows 10 and Windows 11 builds before 24H2. PR review flagged the same risk for `Dispose` and `DisposeAsync`: if the close can wait, move it off the calling thread and include it in the `DisposeAsync` wait. On build 26200 the close returned within 2 ms, even while an unrelated process held the output pipe open (F12). It is still unverified whether, on builds where the close waits for the host process, such a process keeps the host alive and so makes the close wait for it as well.
+- **`ClosePseudoConsole` blocking:** whether `ClosePseudoConsole` can block on older Windows builds when output is not being drained. G1 makes `Dispose` non-blocking, so if it can block, the call must run off the caller's thread. Step 3 still closes on the caller's thread but switches the reader to discarding output first, so the final frame always has a reader. Verify on Windows 10 and Windows 11 builds before 24H2. PR review flagged the same risk for `Dispose` and `DisposeAsync`: if the close can wait, move it off the calling thread and include it in the `DisposeAsync` wait. On build 26200 the close returned within 1 ms in all 90 G11 probe sessions, including those where an unrelated process held the output pipe open (F12). It is still unverified whether, on builds where the close waits for the host process, such a process keeps the host alive and so makes the close wait for it as well.
 - **G7 API shape:** a `PtyStartInfo` property, a process-wide setting, or a separate start method.
-- **G5 sample form:** a WinUI sample needs the Windows App SDK, which is a third-party dependency in a sample and cannot run in CI. The alternative is a framework-neutral console sample with a single-threaded context.
+- ~~**G5 sample form:** a WinUI sample needs the Windows App SDK, which is a third-party dependency in a sample and cannot run in CI. The alternative is a framework-neutral console sample with a single-threaded context.~~ Resolved: a WinUI 3 sample, with the Windows App SDK as the sample's own dependency. It does run in CI: the Windows runners publish it and run its `--smoke` mode, which exits 0 once the shell's output has been shown on the UI thread.
 
 ## Documentation Touchpoints (after each phase)
 

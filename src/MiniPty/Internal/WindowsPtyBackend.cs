@@ -823,8 +823,8 @@ internal static class WindowsPtyBackend
             if (_hpc.IsClosed)
                 return;
 
-            columns = Math.Clamp(columns, 1, 512);
-            rows = Math.Clamp(rows, 1, 512);
+            columns = PtySizeLimits.Clamp(columns);
+            rows = PtySizeLimits.Clamp(rows);
 
             // The reference keeps the HPCON valid if drain closes the pseudo-console during the call;
             // the deferred ClosePseudoConsole then runs on release instead of under ResizePseudoConsole.
@@ -957,8 +957,10 @@ internal static class WindowsPtyBackend
         }
 
         /// <summary>
-        /// Blocking <c>ReadFile</c> on the ConPTY output pipe. Never woken early: closing the pseudo-console ends
-        /// it, and the drain closes it after exit.
+        /// Blocking <c>ReadFile</c> on the ConPTY output pipe. Closing the pseudo-console normally ends it: ConPTY
+        /// writes its final frame and its host exits, which breaks the pipe. When another process holds the pipe's
+        /// write end open, <see cref="PtyReaderThread.CancelRead"/> releases the read instead, and it reports -1 so
+        /// the pump re-checks its state.
         /// </summary>
         public unsafe int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
         {
@@ -978,6 +980,10 @@ internal static class WindowsPtyBackend
             var error = Marshal.GetLastPInvokeError();
             if (error is ErrorBrokenPipe or ErrorInvalidHandle)
                 return 0;
+
+            // Canceled by CancelRead. A canceled read transfers nothing, so no output is lost.
+            if (error == ErrorOperationAborted)
+                return -1;
 
             throw new IOException($"ReadFile failed (Win32 {error})");
         }
@@ -1030,7 +1036,9 @@ internal static class WindowsPtyBackend
                     }
 
                     var error = Marshal.GetLastPInvokeError();
-                    if (error == WindowsInterop.ErrorNoData)
+                    // ERROR_OPERATION_ABORTED: a CancelRead aimed at the blocking read landed here instead; nothing
+                    // was transferred, and the pump re-checks its state on its next blocking read.
+                    if (error is WindowsInterop.ErrorNoData or ErrorOperationAborted)
                         return 0;
 
                     if (error is ErrorBrokenPipe or ErrorInvalidHandle)

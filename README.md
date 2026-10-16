@@ -149,6 +149,8 @@ static PtyStartInfo CreateTimedOutputStartInfo()
 
 MiniPty is not a sandbox. Processes run with the parent process permissions unless the host application isolates them with OS users, containers, or another security boundary.
 
+**GUI hosts** (WinUI, WPF, WinForms, Avalonia) can await every MiniPty API on the UI thread. Asynchronous members never block the caller, so `await foreach` over `ReadOutputAsync` processes each chunk on the UI thread with no copy and no marshaling, `Resize` from size-changed events is safe at any time (including after the child has exited), and `DisposeAsync` on tab close does not block. Output is read on one dedicated thread per session, never on a thread-pool worker, so idle tabs do not starve the host's pool. See [samples/WinUiTerminal](samples/WinUiTerminal) for a code-only WinUI 3 host and the [GUI hosts](.github/docs/specs/core_session.md#gui-hosts) section of the specification.
+
 **MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`. Try `dotnet samples/README_MiniPty.Capture.cs` to run this sample.
 
 ```csharp
@@ -308,6 +310,7 @@ For custom transports (stdio framing to a VS Code extension, SignalR, …), use 
 | [VsCodeTerminalHelper.cs](samples/VsCodeTerminalHelper.cs) | **MiniPty.Terminal** stdio-framed helper for a VS Code `Pseudoterminal` |
 | [VsCodeExtension](samples/VsCodeExtension) | Dependency-free VS Code extension sample connecting `Pseudoterminal` to the NativeAOT helper |
 | [VsCodePersistentBridge.cs](samples/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |
+| [WinUiTerminal](samples/WinUiTerminal) | WinUI 3 desktop host driving `Pty.Start`, `ReadOutputAsync`, `WriteInputAsync`, `Resize`, and `DisposeAsync` from the UI thread (Windows only) |
 
 See the [VS Code extension sample instructions](samples/VsCodeExtension) for complete Windows and
 macOS reproduction steps, including NativeAOT helper publishing and authenticated reconnect.
@@ -321,6 +324,7 @@ dotnet samples/ConsoleAttach.cs
 dotnet samples/Observe.cs
 dotnet samples/Capture.cs
 dotnet samples/WebTerminal.cs   # then open http://localhost:5170/
+dotnet run --project samples/WinUiTerminal   # Windows only
 ```
 
 NativeAOT publish (same flags as CI):

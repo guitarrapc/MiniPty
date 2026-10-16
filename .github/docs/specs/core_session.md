@@ -14,7 +14,7 @@ Implemented user-facing contract for the **MiniPty** core session API.
 | `Arguments` | Arguments after the executable. Default is empty. |
 | `CommandLine` | Optional pre-escaped Windows argument command line. Mutually exclusive with `Arguments`; unsupported on Unix. |
 | `WorkingDirectory` | Optional child working directory. Null inherits the parent working directory. |
-| `Size` | Initial terminal columns x rows. Default is 80x24; values are clamped to 1-512 per dimension at spawn. |
+| `Size` | Initial terminal columns x rows. Default is 80x24. Each dimension is clamped to the platform limit at spawn and on `Resize`: 1–32767 on Windows (ConPTY's signed 16-bit `COORD`), 1–65535 on Unix (`winsize`). `PtySession.Size` reports the value applied. |
 | `Environment` | Optional child environment overlay. Null inherits the parent environment. Non-null entries override or remove inherited variables. |
 | `TerminalName` | Optional Unix terminal name for `TERM`. Null or empty uses default behavior. Currently ignored on Windows. |
 
@@ -105,6 +105,24 @@ Asynchronous members never block the calling thread and never run library code o
 | `DisposeAsync` | Returns at once and completes when the reader has stopped, for every caller. |
 | `Output.Read`, `Input.Write` | Block, per the `Stream` contract. |
 | `WriteInputAsync` | Completes at once when the terminal takes the bytes; otherwise when the rest has been written in the background. That happens when the terminal's input buffer is full: on Unix when the child has not read the tty input queue, and on Windows when ConPTY has not read the 4 KiB input pipe, which it stops reading while output nobody reads has backed up. A macOS tty in canonical mode holds back a write only while a complete line is queued. Once 1,024 bytes of a line are pending, later bytes are dropped, and the write still completes (see [macOS line limit](../references/pty_crossplatform.md#unix-stdin-eof)). |
+
+## GUI Hosts
+
+A desktop terminal control (WinUI, WPF, WinForms, Avalonia) can drive a session entirely from its UI thread. The caller-context contract above is what makes that safe; this section is the recommended shape.
+
+| Host concern | Recommended pattern | Why |
+|---|---|---|
+| Output | `await foreach (var chunk in session.ReadOutputAsync())` in the UI thread's own async method, decoding each chunk in place with an incremental `Decoder` (a chunk can split a multi-byte sequence) | `MoveNextAsync` never blocks, and when it waits the continuation resumes on the dispatcher, so the chunk is processed on the UI thread with no copy and no marshaling. The chunk is valid until the next `MoveNextAsync`; copy it only if it must outlive that |
+| Push transports | `PtyTerminal` from **MiniPty.Terminal** | Its handlers run on background threads: marshal to the dispatcher and copy any bytes the UI retains |
+| Input | `await session.WriteInputAsync(...)` from key handlers | Completes at once when the terminal takes the bytes, otherwise in the background; never blocks the UI thread |
+| Layout | `session.Resize(...)` from size-changed events, at any time | Dimensions clamp to the platform limit, a zero-sized window before layout clamps to 1×1, and a resize after child exit and transport close is a no-op |
+| Exit | `await session.WaitForExitAsync()` (or `PtyTerminal.Completion`) | Completes from the exit watcher; no polling and no thread |
+| Tab close | `await session.DisposeAsync()`; `Dispose()` when nothing can be awaited | Neither blocks; `DisposeAsync` also completes once the background reader has stopped |
+| Many tabs | Nothing to do | A session holds one dedicated reader thread and no thread-pool worker, so idle tabs do not starve the host's pool |
+
+Hosts that keep sessions in a non-UI context should know that, with no `SynchronizationContext` current, a waiting `MoveNextAsync` resumes through the thread pool like any other `await`; a host that blocks many pool workers (for example in `Process.WaitForExit`) delays those resumptions along with everything else in the process.
+
+[samples/WinUiTerminal](../../../samples/WinUiTerminal) is a code-only WinUI 3 app that follows this table with no `Task.Run`.
 
 ## Lessons Learned
 

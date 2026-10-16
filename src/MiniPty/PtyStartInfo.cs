@@ -40,7 +40,11 @@ public sealed record PtyStartInfo
     /// <summary>
     /// Gets or sets the initial terminal size in character cells (columns × rows).
     /// </summary>
-    /// <value>Default is 80×24. Values are clamped to 1–512 per dimension at spawn time.</value>
+    /// <value>
+    /// Default is 80×24. Each dimension is clamped at spawn time to the platform's limit: 1–32767 on Windows
+    /// (ConPTY's signed 16-bit <c>COORD</c>), 1–65535 on Unix (<c>winsize</c>). <see cref="PtySession.Size"/>
+    /// reports the value applied.
+    /// </value>
     public PtySize Size { get; init; } = new(80, 24);
 
     /// <summary>
@@ -62,7 +66,5 @@ public sealed record PtyStartInfo
     /// </value>
     public string? TerminalName { get; init; }
 
-    internal PtySize ClampedSize => new(
-        Math.Clamp(Size.Columns, 1, 512),
-        Math.Clamp(Size.Rows, 1, 512));
+    internal PtySize ClampedSize => Internal.PtySizeLimits.Clamp(Size);
 }
