@@ -65,6 +65,8 @@ internal static class WindowsPtyBackend
     /// <summary>Sentinel for <see cref="WindowsPtyBackendInstance._inputTailByte"/> when no stdin bytes were written.</summary>
     private const byte InputTailUnset = 0xFF;
     private const int EofDeferPollsEmptyInput = 40;
+    // Value of the deferral count once the EOF chord was written. Counts never go below zero.
+    private const int EofChordWrittenMarker = -1;
     private const int ErrorInvalidHandle = 6;
     private const int ErrorBrokenPipe = 109;
     private const int ErrorNoData = WindowsInterop.ErrorNoData;
@@ -77,8 +79,8 @@ internal static class WindowsPtyBackend
     private const int InputDisposed = 2;
 
     /// <summary>
-    /// The input pipe's buffer, and the most one overlapped write carries. It matches the anonymous pipe's default,
-    /// which ConPTY input was measured against (plan F9, F11).
+    /// The input pipe's buffer, and the most one overlapped write carries. It keeps the anonymous pipe's default
+    /// size.
     /// </summary>
     private const int InputPipeBufferSize = 4096;
     private const string InputPipeNamePrefix = @"\\.\pipe\minipty-input-";
@@ -127,7 +129,13 @@ internal static class WindowsPtyBackend
         var coord = new WindowsCoord((short)size.Columns, (short)size.Rows);
         var hr = WindowsInterop.CreatePseudoConsole(coord, inputRead, outputWrite, 0, out var pseudoConsoleHandle);
         if (hr < 0)
+        {
+            inputRead.Dispose();
+            inputWrite.Dispose();
+            outputRead.Dispose();
+            outputWrite.Dispose();
             throw new Win32Exception(hr, "CreatePseudoConsole failed");
+        }
 
         var hpc = new SafePseudoConsoleHandle(pseudoConsoleHandle);
         inputRead.Dispose();
@@ -290,14 +298,18 @@ internal static class WindowsPtyBackend
         private bool _outputClosed;
         private bool _eofSignaled;
         private bool _eofPending;
-        /// <summary>Last stdin byte written, or <see cref="InputTailUnset"/> when none. Avoids a separate written flag.</summary>
+        /// <summary>Last stdin byte handed to the pipe, or <see cref="InputTailUnset"/> when none. Avoids a separate written flag.</summary>
         private byte _inputTailByte = InputTailUnset;
+        /// <summary>
+        /// Ticks left before an input pipe that never carried bytes is closed, or <see cref="EofChordWrittenMarker"/> once
+        /// the Ctrl+Z / CR chord was written. One field holds both because another field would enlarge every session.
+        /// </summary>
         private int _eofDeferPollsRemaining;
 
         private bool HasInputBytes => _inputTailByte != InputTailUnset;
 
-        /// <summary>Stream Ctrl+Z EOF was written; input pipe must stay open until child exit.</summary>
-        private bool StreamEofSignaled => _eofSignaled && HasInputBytes;
+        /// <summary>The Ctrl+Z / CR chord was written. The input pipe then stays open until the child exits.</summary>
+        private bool EofChordWritten => _eofDeferPollsRemaining == EofChordWrittenMarker;
         private bool _hpcClosed;
         private bool _exited;
         private int _exitCode;
@@ -332,34 +344,21 @@ internal static class WindowsPtyBackend
 
         public Stream Input { get; }
 
-        /// <summary>Blocks until the bytes are written, per the <see cref="Stream"/> contract.</summary>
-        public void WriteInput(ReadOnlySpan<byte> bytes)
-        {
-            var pending = WriteInputAsync(bytes, CancellationToken.None);
-            if (pending.IsCompleted)
-                pending.GetAwaiter().GetResult();
-            else
-                pending.AsTask().GetAwaiter().GetResult();
-        }
-
-        public ValueTask WriteInputAsync(ReadOnlySpan<byte> bytes, CancellationToken cancellationToken)
+        public PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes)
         {
             if (bytes.IsEmpty)
-                return default;
+                return null;
 
-            cancellationToken.ThrowIfCancellationRequested();
-            PtyPendingInput entry;
             lock (this)
             {
                 ThrowIfInputClosedLocked();
-                OnInputWritten(bytes);
                 var input = EnsureInputLocked();
                 var issued = 0;
                 if (input.IsIdle)
                 {
                     issued = WriteNowLocked(input, bytes);
                     if (issued == bytes.Length && !input.WriteInFlight)
-                        return default;
+                        return null;
                 }
 
                 // The caller's span does not outlive this call, so what is left is copied.
@@ -371,45 +370,40 @@ internal static class WindowsPtyBackend
                     rest.CopyTo(owned);
                 }
 
-                entry = EnqueueLocked(input, owned is null ? default : owned.AsMemory(0, rest.Length), owned, ownsStaged: issued > 0);
+                return EnqueueLocked(input, owned is null ? default : owned.AsMemory(0, rest.Length), owned, ownsStaged: issued > 0);
             }
-
-            return entry.ToValueTask(cancellationToken);
         }
 
-        public ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer, CancellationToken cancellationToken)
+        public PtyPendingInput? QueueInput(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer)
         {
             // Returned to the pool here unless a queued entry takes it over.
             var owned = ownedBuffer;
             try
             {
                 if (bytes.IsEmpty)
-                    return default;
+                    return null;
 
-                cancellationToken.ThrowIfCancellationRequested();
-                PtyPendingInput entry;
                 lock (this)
                 {
                     ThrowIfInputClosedLocked();
-                    OnInputWritten(bytes.Span);
                     var input = EnsureInputLocked();
                     var issued = 0;
                     if (input.IsIdle)
                     {
                         issued = WriteNowLocked(input, bytes.Span);
                         if (issued == bytes.Length && !input.WriteInFlight)
-                            return default;
+                            return null;
                     }
 
                     // Bytes already staged no longer need the caller's buffer, so it is kept only for the rest.
                     var rest = bytes[issued..];
                     var keep = rest.IsEmpty ? null : owned;
-                    entry = EnqueueLocked(input, rest, keep, ownsStaged: issued > 0);
+                    var entry = EnqueueLocked(input, rest, keep, ownsStaged: issued > 0);
                     if (keep is not null)
                         owned = null;
-                }
 
-                return entry.ToValueTask(cancellationToken);
+                    return entry;
+                }
             }
             finally
             {
@@ -527,13 +521,24 @@ internal static class WindowsPtyBackend
             while (issued < bytes.Length)
             {
                 var count = Math.Min(bytes.Length - issued, InputPipeBufferSize);
-                StageLocked(input, bytes.Slice(issued, count), owner: null);
+                StageInputLocked(input, bytes.Slice(issued, count), owner: null);
                 issued += count;
                 if (!WriteStagedLocked(input))
                     break;
             }
 
             return issued;
+        }
+
+        /// <summary>
+        /// Stages caller bytes and records their last byte for EOF. Staged bytes always reach the pipe, while a canceled
+        /// write discards what was never staged, so EOF must go by the last byte staged. Caller holds lock (this).
+        /// </summary>
+        private void StageInputLocked(InputState input, ReadOnlySpan<byte> bytes, PtyPendingInput? owner)
+        {
+            StageLocked(input, bytes, owner);
+            if (!bytes.IsEmpty)
+                _inputTailByte = bytes[^1];
         }
 
         /// <summary>Copies bytes into the empty staging buffer. Caller holds lock (this).</summary>
@@ -629,7 +634,7 @@ internal static class WindowsPtyBackend
                     return;
 
                 var count = Math.Min(head.Remaining.Length, InputPipeBufferSize);
-                StageLocked(input, head.Remaining.Span[..count], head);
+                StageInputLocked(input, head.Remaining.Span[..count], head);
                 head.Remaining = head.Remaining[count..];
             }
         }
@@ -674,7 +679,7 @@ internal static class WindowsPtyBackend
                 }
                 catch (Exception ex)
                 {
-                    // ConPTY stopped reading input for good: nothing queued can be written.
+                    // A pipe write that fails does not recover, so the queued writes fail with it instead of waiting.
                     error = ex;
                     failed = input.Head;
                     input.Head = input.Tail = null;
@@ -690,7 +695,8 @@ internal static class WindowsPtyBackend
         /// <summary>
         /// Closes MiniPty's end of the input pipe and fails what is queued: with <see cref="ObjectDisposedException"/>
         /// on disposal, otherwise with <see cref="IOException"/>. A write in flight is canceled, and its completion
-        /// releases the overlapped resources.
+        /// releases the overlapped resources. An EOF close that finds bytes written leaves the pipe open and stages EOF
+        /// again, to be sent as the chord.
         /// </summary>
         private void CloseInputPipe(int reason)
         {
@@ -699,6 +705,15 @@ internal static class WindowsPtyBackend
             {
                 if (_inputClosed)
                     return;
+
+                // A write can land between the unlocked check in CloseInputPipeIfEofSignaled and this lock. Closing the
+                // pipe after bytes is not EOF to the child, so EOF is staged again and sent as the chord.
+                if (reason == InputClosedByEof && HasInputBytes)
+                {
+                    _eofSignaled = false;
+                    _eofPending = true;
+                    return;
+                }
 
                 _inputClosed = true;
                 if (_input is { } input)
@@ -750,10 +765,10 @@ internal static class WindowsPtyBackend
                 : new IOException($"WriteFile failed (Win32 {error})");
 
         /// <summary>
-        /// Input state of a session that has written input (plan G1 step 4b). MiniPty's end of the input pipe is
+        /// Input state of a session that has written input. MiniPty's end of the input pipe is
         /// overlapped: a write the pipe takes at once completes before the call returns, and the rest is queued in
         /// issue order and written by I/O completions, so a write never blocks its caller while ConPTY is not reading
-        /// input (plan F11). Created on the first write, so a session that never writes carries only one reference.
+        /// input. Created on the first write, so a session that never writes carries only one reference.
         /// Guarded by the session's lock.
         /// </summary>
         private sealed class InputState
@@ -873,7 +888,7 @@ internal static class WindowsPtyBackend
         public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState() || _inputClosed || _eofPending || StreamEofSignaled)
+            if (TryRefreshExitState() || _inputClosed || _eofPending || EofChordWritten)
                 return;
 
             if (_eofSignaled)
@@ -932,7 +947,7 @@ internal static class WindowsPtyBackend
             {
                 PromoteEofIfPending();
                 CloseInputPipeIfEofSignaled();
-                if (!_disposed && !_inputClosed && (_eofPending || (_eofSignaled && !StreamEofSignaled)))
+                if (!_disposed && !_inputClosed && (_eofPending || (_eofSignaled && !EofChordWritten)))
                     _eofTimer?.Change(EofTickMs, Timeout.Infinite);
             }
             catch (Exception)
@@ -1098,14 +1113,6 @@ internal static class WindowsPtyBackend
             }
         }
 
-        private void OnInputWritten(ReadOnlySpan<byte> buffer)
-        {
-            if (buffer.IsEmpty)
-                return;
-
-            _inputTailByte = buffer[^1];
-        }
-
         private bool TryRefreshExitState()
         {
             if (_exited)
@@ -1160,8 +1167,17 @@ internal static class WindowsPtyBackend
 
         private void CloseInputPipeIfEofSignaled()
         {
-            if (!_eofSignaled || StreamEofSignaled)
+            if (!_eofSignaled || EofChordWritten)
                 return;
+
+            // Input that never carried bytes ends by closing the pipe after a wait. Bytes written during the wait rule
+            // that out, because closing the pipe after bytes is not EOF to the child, so EOF is sent as the chord.
+            if (HasInputBytes)
+            {
+                _eofSignaled = false;
+                _eofPending = true;
+                return;
+            }
 
             if (_eofDeferPollsRemaining > 0)
             {
@@ -1178,7 +1194,7 @@ internal static class WindowsPtyBackend
         /// </summary>
         private void WriteStreamEofToInputLocked()
         {
-            if (_inputClosed || StreamEofSignaled)
+            if (_inputClosed || EofChordWritten)
                 return;
 
             // Ctrl+Z alone does not end input on ConPTY; CR submits the EOF key chord.
@@ -1192,6 +1208,7 @@ internal static class WindowsPtyBackend
             chord[length++] = InputEofSubmit;
             var input = EnsureInputLocked();
             StageLocked(input, chord[..length], owner: null);
+            _eofDeferPollsRemaining = EofChordWrittenMarker;
             WriteStagedLocked(input);
         }
 
@@ -1218,9 +1235,9 @@ internal static class WindowsPtyBackend
                 PromoteEofIfPending();
                 CloseInputPipeIfEofSignaled();
             }
-            catch (IOException)
+            catch (Exception)
             {
-                // ConPTY already stopped reading input; the pipe closes below either way.
+                // A failed EOF write must not skip the close below, which disposal and the post-exit drain rely on.
             }
 
             CloseInputPipe(inputReason);
@@ -1261,7 +1278,7 @@ internal static class WindowsPtyBackend
 
     /// <summary>
     /// Creates the input pipe. MiniPty's end is the server end of a named pipe opened overlapped, because an
-    /// anonymous pipe cannot be: a write ConPTY is not taking yet then waits without blocking a thread (plan F11).
+    /// anonymous pipe cannot be. A write that ConPTY is not taking yet then waits without blocking a thread.
     /// ConPTY's end is opened synchronously by name, as ConPTY reads it with blocking reads.
     /// </summary>
     /// <remarks>

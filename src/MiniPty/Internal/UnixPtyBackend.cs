@@ -161,8 +161,8 @@ internal static partial class UnixPtyBackend
             _pid = pid;
             _execHold = execHold;
             _size = size;
-            // Non-blocking, so a write takes what the tty input queue accepts and never blocks its caller; the
-            // reader only reads after the master reports readable, so reads are unaffected.
+            // Non-blocking, so a write takes what the tty input queue accepts and never blocks its caller. The reader
+            // reads only after the master reports readable. A read that still finds nothing waits again.
             if (UnixInterop.minipty_set_nonblocking(master) != 0)
                 throw new IOException($"Setting the PTY master non-blocking failed (errno {Marshal.GetLastPInvokeError()})");
 
@@ -175,31 +175,20 @@ internal static partial class UnixPtyBackend
 
         public void SetOutputPump(PtyOutputPump pump) => Volatile.Write(ref _pump, pump);
 
-        /// <summary>Blocks until the bytes are written, per the <see cref="Stream"/> contract.</summary>
-        public void WriteInput(ReadOnlySpan<byte> bytes)
-        {
-            var pending = WriteInputAsync(bytes, CancellationToken.None);
-            if (pending.IsCompleted)
-                pending.GetAwaiter().GetResult();
-            else
-                pending.AsTask().GetAwaiter().GetResult();
-        }
-
-        public ValueTask WriteInputAsync(ReadOnlySpan<byte> bytes, CancellationToken cancellationToken)
+        public PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes)
         {
             if (bytes.IsEmpty)
-                return default;
+                return null;
 
-            cancellationToken.ThrowIfCancellationRequested();
             PtyPendingInput entry;
             lock (this)
             {
-                OnInputWritten(bytes);
+                ThrowIfInputClosedLocked();
                 if (_inputHead is null)
                 {
                     var written = WriteNow(bytes);
                     if (written == bytes.Length)
-                        return default;
+                        return null;
 
                     bytes = bytes[written..];
                 }
@@ -210,28 +199,28 @@ internal static partial class UnixPtyBackend
                 entry = EnqueueLocked(owned.AsMemory(0, bytes.Length), owned);
             }
 
-            return Queued(entry, cancellationToken);
+            WakeReaderForInput();
+            return entry;
         }
 
-        public ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer, CancellationToken cancellationToken)
+        public PtyPendingInput? QueueInput(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer)
         {
             // Returned to the pool here unless a queued entry takes it over.
             var owned = ownedBuffer;
             try
             {
                 if (bytes.IsEmpty)
-                    return default;
+                    return null;
 
-                cancellationToken.ThrowIfCancellationRequested();
                 PtyPendingInput entry;
                 lock (this)
                 {
-                    OnInputWritten(bytes.Span);
+                    ThrowIfInputClosedLocked();
                     if (_inputHead is null)
                     {
                         var written = WriteNow(bytes.Span);
                         if (written == bytes.Length)
-                            return default;
+                            return null;
 
                         bytes = bytes[written..];
                     }
@@ -240,7 +229,8 @@ internal static partial class UnixPtyBackend
                     owned = null;
                 }
 
-                return Queued(entry, cancellationToken);
+                WakeReaderForInput();
+                return entry;
             }
             finally
             {
@@ -250,6 +240,18 @@ internal static partial class UnixPtyBackend
         }
 
         private bool HasPendingInput => Volatile.Read(ref _inputHead) is not null;
+
+        /// <summary>Throws once input can no longer be written. Caller holds lock (this).</summary>
+        private void ThrowIfInputClosedLocked()
+        {
+            switch (_inputState)
+            {
+                case InputDisposed:
+                    throw new ObjectDisposedException(nameof(PtySession));
+                case InputOutputEnded:
+                    throw new IOException("PTY input cannot be written: the child's terminal has closed.");
+            }
+        }
 
         /// <summary>
         /// Writes what the master accepts now. Returns the byte count written; fewer than requested means the tty
@@ -286,6 +288,11 @@ internal static partial class UnixPtyBackend
                         throw new IOException($"write failed (errno {errno})");
                     }
 
+                    // EOT goes by the bytes the terminal took. A canceled write discards the rest, so the caller's
+                    // last byte may never arrive.
+                    if (offset > 0)
+                        OnInputWritten(bytes[..offset]);
+
                     return offset;
                 }
             }
@@ -295,17 +302,9 @@ internal static partial class UnixPtyBackend
             }
         }
 
-        /// <summary>Appends a queued write. Caller holds lock (this).</summary>
+        /// <summary>Appends a queued write. Caller holds lock (this) and has checked that input is open.</summary>
         private PtyPendingInput EnqueueLocked(ReadOnlyMemory<byte> remaining, byte[]? owned)
         {
-            switch (_inputState)
-            {
-                case InputDisposed:
-                    throw new ObjectDisposedException(nameof(PtySession));
-                case InputOutputEnded:
-                    throw new IOException("PTY input cannot be written: the child's terminal has closed.");
-            }
-
             var entry = PtyPendingInput.Rent(this, remaining, owned);
             if (_inputTail is null)
                 _inputHead = entry;
@@ -316,12 +315,8 @@ internal static partial class UnixPtyBackend
             return entry;
         }
 
-        private ValueTask Queued(PtyPendingInput entry, CancellationToken cancellationToken)
-        {
-            // The reader thread may be waiting for output only; this makes it wait for the master to take input too.
-            Volatile.Read(ref _pump)?.WakeReader();
-            return entry.ToValueTask(cancellationToken);
-        }
+        // The reader thread may be waiting for output only. This makes it wait for the master to take input too.
+        private void WakeReaderForInput() => Volatile.Read(ref _pump)?.WakeReader();
 
         /// <summary>Writes queued input until the master is full again. Runs on the reader thread.</summary>
         private void FlushInput()
@@ -403,13 +398,16 @@ internal static partial class UnixPtyBackend
                 entry.Complete(new OperationCanceledException(entry.Token));
         }
 
-        /// <summary>Stops accepting queued input and fails what is queued. The first reason wins.</summary>
+        /// <summary>
+        /// Stops accepting queued input and fails what is queued. Disposal overrides an earlier end of output, such as a
+        /// child that exited before disposal, so that a write after disposal reports the disposal.
+        /// </summary>
         private void CloseInput(int reason)
         {
             PtyPendingInput? queued;
             lock (this)
             {
-                if (_inputState == InputOpen)
+                if (_inputState == InputOpen || reason == InputDisposed)
                     _inputState = reason;
 
                 queued = _inputHead;
@@ -586,7 +584,15 @@ internal static partial class UnixPtyBackend
 
         public long CoalesceBudgetTicks => s_coalesceBudgetTicks;
 
-        public bool TryBeginOutputRead() => TryAcquireMaster(out _);
+        public bool TryBeginOutputRead()
+        {
+            if (TryAcquireMaster(out _))
+                return true;
+
+            // The master closed before the reader began. The reader is what writes queued input, so nothing ever will.
+            CloseInput(InputOutputEnded);
+            return false;
+        }
 
         public void EndOutputRead()
         {
@@ -761,6 +767,9 @@ internal static partial class UnixPtyBackend
                 return;
 
             _disposed = true;
+            // Queued writes fail now, on the disposing thread, without waiting for the reader to stop. This comes before
+            // the kill, which ends output, so a queued write reports the disposal rather than the end of output.
+            CloseInput(InputDisposed);
             var exitObserved = true;
             lock (_pidLock)
             {
@@ -776,8 +785,6 @@ internal static partial class UnixPtyBackend
             if (!exitObserved)
                 _exitSignal.SetDisposedBeforeExit();
 
-            // Queued writes fail now, on the disposing thread, without waiting for the reader to stop.
-            CloseInput(InputDisposed);
             CloseTransport();
             _execHold?.Dispose();
         }

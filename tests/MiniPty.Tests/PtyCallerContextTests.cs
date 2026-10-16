@@ -181,8 +181,8 @@ public sealed class PtyCallerContextTests
     private static async Task AssertWriteInputDoesNotBlockUiThreadAsync(bool textOverload)
     {
         // A Unix tty input queue fills when the child does not read, and a blocking write to the master then
-        // blocks its caller. ConPTY accepts input into its own buffer instead while its output flows (plan F9);
-        // the backed-up-output tests below cover Windows.
+        // blocks its caller. ConPTY accepts input into its own buffer instead while its output flows. The
+        // backed-up-output tests below cover Windows.
         if (OperatingSystem.IsWindows())
             return;
 
@@ -215,23 +215,42 @@ public sealed class PtyCallerContextTests
 
     private static async Task AssertWriteInputDoesNotBlockUiThreadWhileOutputIsBackedUpAsync(bool textOverload)
     {
-        // F11: once output nobody reads has filled the ring and the pipe, ConPTY stops reading input after about
-        // 4 KiB, and a synchronous write then blocks its caller until output is read. On a UI thread that also runs
-        // the output loop, that is a deadlock. On Unix the child never reads, so the tty input queue fills instead.
+        // Once output nobody reads has filled the ring and the pipe, ConPTY stops reading input after about 4 KiB.
+        // A synchronous write would then block its caller until output is read, which deadlocks a UI thread that
+        // also runs the output loop. On Unix the child never reads, so the tty input queue fills instead.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(FloodingChild());
         // Long enough for the flood to fill the ring and the transport behind it.
         await Task.Delay(500);
-        // 64 KiB of short lines: far past both the ConPTY input pipe and a tty input queue.
-        var text = string.Concat(Enumerable.Repeat(new string('x', 63) + LineInput[^1], 1024));
+        // 64 KiB on Windows, far past the 4 KiB ConPTY input pipe. 4 MiB on Unix, far past a tty and its kernel buffers.
+        var lineCount = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 1024 : 65536;
+        var text = string.Concat(Enumerable.Repeat(new string('x', 63) + LineInput[^1], lineCount));
         var bytes = Encoding.ASCII.GetBytes(text);
-        var write = ui.RunAsync(() => textOverload
-            ? session.WriteInputAsync(text).AsTask()
-            : session.WriteInputAsync(bytes).AsTask());
+        var waitedAtIssue = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var write = ui.RunAsync(() =>
+        {
+            var task = textOverload ? session.WriteInputAsync(text).AsTask() : session.WriteInputAsync(bytes).AsTask();
+            waitedAtIssue.TrySetResult(!task.IsCompleted);
+            return task;
+        });
 
         try
         {
             await AssertUiThreadStaysFreeAsync(ui);
+            // The write had to wait, so a free UI thread proves it did not block. A write that completed or failed
+            // at issue would leave the UI thread free for another reason.
+            await Assert.That(await waitedAtIssue.Task.WaitAsync(OperationTimeout)).IsTrue();
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                // ConPTY takes input again once its output drains. The Unix child never reads, so its write stays queued.
+                _ = Task.Run(async () =>
+                {
+                    await foreach (var _ in session.ReadOutputAsync())
+                    {
+                    }
+                });
+                await write.WaitAsync(OperationTimeout);
+            }
         }
         finally
         {

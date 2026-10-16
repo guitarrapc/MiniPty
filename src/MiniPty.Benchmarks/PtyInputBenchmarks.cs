@@ -6,11 +6,14 @@ using BenchmarkDotNet.Jobs;
 namespace MiniPty.Benchmarks;
 
 /// <summary>
-/// Steady-state cost of one stdin write into a live session whose child reads and discards its input.
+/// Cost of one stdin write into a live session whose child reads and discards its input.
 /// </summary>
 /// <remarks>
 /// Spawn is outside the measurement: one session lives for the whole run, and a background reader drains the
-/// terminal's echo so output never backs up into the child. Each operation writes one 64-byte line.
+/// terminal's echo so output never backs up into the child. Each operation writes one 64-byte line. The writes come
+/// faster than the terminal takes input, so some of them wait for room, as on Windows for ConPTY to drain the 4 KiB
+/// input pipe. The mean time is therefore bounded by how fast the terminal takes input. The allocation column measures
+/// the write path, waits included.
 /// </remarks>
 [MemoryDiagnoser]
 [SimpleJob(RuntimeMoniker.Net10_0, warmupCount: 2, iterationCount: 5, launchCount: 1)]

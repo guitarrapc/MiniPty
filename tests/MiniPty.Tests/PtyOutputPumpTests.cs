@@ -369,16 +369,18 @@ public sealed class PtyOutputPumpTests
         }
     }
 
-    /// <summary>A child that never exits on its own; subclasses script the output transport.</summary>
-    private abstract class FakeBackend : IPtyBackend
+    /// <summary>
+    /// A child that never exits on its own. Subclasses script the output transport, and may script span writes to the
+    /// input queue.
+    /// </summary>
+    internal abstract class FakeBackend : IPtyBackend
     {
         private readonly TaskCompletionSource<PtyExitStatus> _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private volatile bool _closed;
 
         public Stream Input => Stream.Null;
-        public void WriteInput(ReadOnlySpan<byte> bytes) { }
-        public ValueTask WriteInputAsync(ReadOnlySpan<byte> bytes, CancellationToken cancellationToken) => default;
-        public ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer, CancellationToken cancellationToken) => default;
+        public virtual PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes) => null;
+        public PtyPendingInput? QueueInput(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer) => null;
         public void SetOutputPump(PtyOutputPump pump) { }
         public void WaitWhileOutputBlocked(PtyReaderThread reader) => reader.WaitForWake(System.Threading.Timeout.Infinite);
         public int ProcessId => 0;

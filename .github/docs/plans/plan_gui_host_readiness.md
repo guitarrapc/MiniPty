@@ -125,7 +125,7 @@ Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a
    - When every slot is full, the pump stops reading, and backpressure flows through the OS pipe to the child as it does today.
    - **Phase 1 driver:** a dedicated background thread per reading session, never a thread-pool worker. Step 3 takes it from a process-wide pool of reader threads that park and serve later sessions, because a thread per spawn allocated about 4.9 KB once pooled buffers were returned on it.
      - Windows uses synchronous `ReadFile`. Shutdown relies on closing the pseudoconsole's write side, which makes the read return.
-     - Unix waits on the master and a wake descriptor together before each read. On Linux, closing an fd does not interrupt a `read` blocked on it in another thread (see close(2)), so the wake descriptor is the reliable way to stop the reader. Step 3 keeps the master in blocking mode instead of the planned non-blocking mode, because input writes share the descriptor and step 4 owns the input path.
+     - Unix waits on the master and a wake descriptor together before each read. On Linux, closing an fd does not interrupt a `read` blocked on it in another thread (see close(2)), so the wake descriptor is the reliable way to stop the reader. Step 3 keeps the master in blocking mode instead of the planned non-blocking mode, because input writes share the descriptor and step 4 owns the input path. Step 4 made the master non-blocking.
    - **Phase 2 driver:** G6 replaces the thread with thread-free async I/O. The public API does not change.
 2. **Exit watcher.**
    - Windows uses process-wide watcher threads, each waiting on up to 63 duplicated process handles with `WaitForMultipleObjects`. A runtime registered wait was the original plan; step 2 replaced it because it allocates about 270 bytes per session.
@@ -159,7 +159,7 @@ Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a
 | `Output` (Stream) | Kept as a view over the pump, with one copy into the caller's buffer. `ReadAsync` never blocks; `Read` blocks, per the Stream contract | Interop: `CopyToAsync`, readers, adapters |
 | `WaitForExitAsync` | **Breaking:** returns `Task<PtyExitStatus>`; `WaitForExitStatusAsync` is removed. Returns the cached exit task when the token cannot be canceled | One exit API, and zero allocation for the common call |
 | `HasExited` / `ExitCode` / `ExitStatus` | Read the watcher's cached state, with no OS call | No reaping race, and polling from UI code is cheap |
-| `WriteInputAsync` / `Input` | Non-blocking fast path with an ordered background slow path. `Input.WriteAsync` goes through the same path | Today `Input.WriteAsync` falls through to the base `Stream` implementation and allocates a pool task per call. Input writes can block the caller: on Unix when the tty input queue is full, on Windows while ConPTY's output is blocked (F11) |
+| `WriteInputAsync` / `Input` | Non-blocking fast path with an ordered background slow path. `Input.WriteAsync` goes through the same path | Before step 4, `Input.WriteAsync` fell through to the base `Stream` implementation and allocated a pool task per call, and input writes could block the caller: on Unix when the tty input queue was full, on Windows while ConPTY's output was blocked (F11) |
 | `CompleteAsync` | Shape unchanged; implemented as a pump consumer plus the exit task | Never blocks the caller |
 | `Dispose` | **Behavior change:** does not block. It kills the child, signals the pump to stop, and returns; pooled slots go back to the pool when the pump stops, so chunk memory is invalid after `Dispose`. `DisposeAsync` awaits pump shutdown and is the deterministic option. Disposing before exit still faults pending `WaitForExitAsync` calls with `ObjectDisposedException` | Closing a tab must not freeze the UI |
 | `PtyOutputChunk` | Unchanged. Read timestamps stay internal, for Capture | Avoids growing the public surface |
@@ -371,11 +371,11 @@ Decision:
   - ConPTY's end is opened synchronously by name right after creation and is handed to `CreatePseudoConsole` as before.
   - The pipe has a random name, allows one instance, must be the first instance of that name, and rejects remote clients. If anything else connects first, the spawn fails instead of sharing the pipe.
   - The buffer stays 4 KiB, as the anonymous pipe's default was. With a zero buffer every write would wait for ConPTY to read.
-- **Writes:** a write completes synchronously when the pipe takes the bytes, which is the usual case and allocates nothing. Otherwise the rest is queued in issue order, and each I/O completion writes the next part, so no thread waits. The queue keeps step 4's semantics:
-  - cancellation discards bytes not yet written;
+- **Writes:** a write completes synchronously when the pipe takes the bytes, which is the usual case and allocates nothing after the session's first write. Otherwise the rest is queued in issue order, and each I/O completion writes the next part, so no thread waits. The queue keeps step 4's semantics, except for cancellation:
+  - cancellation discards the bytes not yet staged. Up to 4 KiB already staged in a pending write still reaches the child, because a pending pipe write cannot be taken back in part;
   - `Dispose` fails queued writes with `ObjectDisposedException` on the disposing thread;
   - end of output fails them with `IOException`;
-  - staged EOF (Ctrl+Z / CR) waits until nothing is queued.
+  - staged EOF (Ctrl+Z / CR) waits until nothing is queued or in flight.
 - **Both pipes are created non-inheritable.** Nothing needs them inheritable, and F12 showed that MiniPty's own handles are not the leak.
 - **No cost for sessions that never write.** The queue, the completion-port binding, the reusable overlapped structure, and a 4 KiB native staging buffer are created on the first write. Every write is issued from the staging buffer, because an overlapped write needs its bytes until it completes, which can be after the caller's span is gone.
 - **Queued-write entries are reused** on both platforms, through one process-wide spare. An entry returns there only after both the completer and the waiter are done with it.
@@ -405,6 +405,82 @@ Lessons:
 - **Every new field on the backend object is paid by every session.** The first version kept the queue and the overlapped state as backend fields, and every integration scenario allocated about 20–30 B more, although none of them writes input. One lazily created object fixed it.
 - **A reused `IValueTaskSource` needs both parties to let go.** Resetting an entry as soon as its waiter has read the result races the completer, which may still be signaling that waiter. The entry is recycled only after `Complete` has returned and the waiter has read the result.
 - **Pin system tools by full path in tests.** A bare `find` resolved to a Unix `find` earlier on `PATH` and walked the file system instead of counting lines.
+
+### Steps 4 and 4b: review fixes
+
+An adversarial review of both steps, with each claim checked by three independent verifiers, found contract gaps, untested branches, and references that kept finished writes reachable. It also found two Windows defects that predate step 4. What changed:
+
+- **Failures go through the task.** A canceled token, closed input, and a failed write now fault or cancel the task returned by `WriteInputAsync` and `Input.WriteAsync`, and are thrown from `EndWrite` after `BeginWrite`. Before, they were thrown from the call, so a host that starts a write and awaits it later, or never, got an exception in its event handler. Disposal still throws. One shared helper applies this rule on both platforms.
+- **Kill on cancellation covers the input step.** `CompleteAsync` and Capture write their input before waiting for exit. A cancellation that lands during that write now kills the child too.
+- **EOF goes by the last byte the terminal took.** A canceled write leaves the bytes the terminal already took, which can end inside a line. EOF now submits that line first. Before, it went by the caller's last byte, so the child could miss EOF with no way to recover, because a second `SendEof` does nothing.
+- **Windows EOF after a write during the empty-input wait.** A write while an input pipe that never carried bytes waits to be closed now switches EOF to Ctrl+Z / CR. Before, EOF was never delivered. This predates step 4.
+- **Blocking writes.** A blocked `Input.Write` waits on its queued write, and the completing thread wakes it directly. On Unix it needs no thread-pool worker. On Windows the I/O completion itself still runs on the runtime's thread pool.
+- **Queued-write entries.** A completed write drops its cancellation registration even when nobody awaits it. The parked spare drops its token, and only the waiter's first read of the result releases an entry.
+- **Unix.** A write after disposal throws `ObjectDisposedException`, as on Windows. A write rejected after the input closed no longer strands a pooled buffer. Queued writes fail when the master closed before the reader began.
+- **Windows.** The transport close completes even when writing EOF fails. `Start` releases the pipes when `CreatePseudoConsole` fails, which predates step 4.
+- **Contract wording.** "Writes, including `SendEof`, reach the child in issue order" was narrowed. `SendEof` takes effect after every write issued before it, and a later write may reach the child first. Cancellation discards only the bytes not yet handed to the terminal. On Windows those handed over include a pending part of up to 4 KiB that ConPTY has not read yet.
+
+Results:
+
+| Check | Result |
+|---|---|
+| New tests on the commit before these fixes | Windows: failures through the task, kill on cancellation during input, EOF after a write during the empty-input wait, and EOF after a canceled partial line all fail. Linux: the same, except the empty-input case, plus `ObjectDisposedException` after disposal |
+| Windows EOF guard removed (mutation) | The new ordering test fails. The earlier delivery test passed without the guard |
+| Full suite | Windows 230 pass, 5 runs. Linux 230 pass, 4 runs |
+| `PtyInputBenchmarks` | 86.7 / 86.1 / 87.7 µs, 0 B |
+| `PtyIntegrationBenchmarks` | Unchanged from step 4b except `Session_Exit0_Bytes`, 1902 B/op. Step 4b itself measures 1902 B/op in the same checkout today, so that run's 1885–1890 B/op was run-to-run variation |
+| NativeAOT | `Session` and `Interactive` samples on Windows and Linux. A Windows probe completed 312 queued writes in 20,000 and a blocking 256 KiB `Input.Write` |
+
+Lessons:
+
+- **A short partial line is needed to test the EOF chord on Windows.** The console hands a line longer than the reader's buffer to the reader without waiting for CR, so the next Ctrl+Z starts a line and ends input anyway. A test with one long line passed without the fix.
+- **A Linux tty can take queued input after the child exits.** "End of output fails queued writes" holds only for writes still queued when output ends. The deterministic test closes the transport while the child is still running.
+- **A wait longer than the child's own lifetime proves nothing.** The first kill-on-cancellation test waited 30 seconds for a child that exits after about 30 seconds, and passed without the fix.
+- **A test must reach the branch it is named for.** The first EOF-ordering test drained output before the first staging tick, so EOF never waited for the queue. A line count also cannot see reordered parts. The ordering test now lets ticks pass while the queue is blocked and compares the copied lines.
+- **A one-byte field can cost every session 8 bytes.** The backend's 1-byte fields fill one 8-byte slot, and one more bool grew every session. The chord state shares the deferral counter instead.
+- **Remove nested checkouts before benchmarking.** BenchmarkDotNet refuses to build when another copy of the benchmark project sits under the repository, as worktrees for parallel reviewers did.
+
+A second review round of the fixed branch, verified the same way, found two narrow races, tests that could pass for the wrong reason, and doc wording. What changed:
+
+- **Windows empty-input EOF.** A write that lands between the unlocked check and the pipe close now switches EOF to Ctrl+Z / CR under the lock. Before, the pipe could close after bytes, which the child sees as `STATUS_CONTROL_C_EXIT`.
+- **Registration after completion.** A full fence orders the registration against the completed check, so an entry that completes while its task is being created always drops the registration.
+- **Unix disposal.** `Dispose` fails queued writes before it kills the child, so they report the disposal rather than the end of output that the kill causes.
+- **Tests.**
+  - Blocked-input payloads are complete short lines, as described in the lessons below.
+  - Both EOF tests assert exit code 0.
+  - Failure routing covers every write overload.
+  - A new test covers `ObjectDisposedException` after output had already ended.
+  - The thread-pool test drives the write helper behind `Input.Write`, checks that the pool cap took effect, and proves saturation with a probe.
+  - The transport close that fails a queued write runs off the test thread.
+- **Docs.** Several statements were corrected:
+  - when a write waits: on Windows whenever writes outpace ConPTY;
+  - what cancellation leaves behind;
+  - the first write's allocation on Windows;
+  - `SendEof` ordering and its switch to the chord;
+  - the macOS EOT deferral.
+
+Results:
+
+| Check | Result |
+|---|---|
+| Full suite | Windows 232 pass, 3 runs. Linux 232 pass, 3 runs |
+| Thread-pool test against the earlier `AsTask` wait (mutation) | Fails |
+| Unix EOT ordering guard removed (mutation) | Both ordering tests pass, 5 runs on Linux. See the lessons |
+| `PtyInputBenchmarks` | 0 B in 14 of 15 rows across five runs. One `WriteInputBytes` row showed 1 B/op. A probe of the same loop, 8 rounds of 20,000 writes, allocated one entry and the first write's state in the first round and no entries after that. The only later bytes were a thread-pool thread being added (1056 B), which the process-wide counter includes. Means ranged 86–139 µs, and the tree before this round measured 97–161 µs in interleaved runs on the same machine |
+| `PtyIntegrationBenchmarks` | Unchanged from the first round, for example `Session_Exit0_Bytes` 1.85 KB. The allocation check passes |
+| NativeAOT | `Session` sample published and run on Windows and Linux. `Interactive` published on Windows |
+
+The two races have no deterministic test, because each window lies between two adjacent steps. The macOS test changes were not run on macOS locally. The CI test jobs on macOS cover them.
+
+Lessons:
+
+- **A macOS tty needs complete lines in tests.** In canonical mode the macOS tty code holds back a write only once a complete line is queued, and it drops input past `MAX_INPUT` (1024 bytes) on a line, EOT included. A test that needs a write to wait, or EOF to arrive after a partial line, uses short complete lines there. This comes from reading the xnu tty code and has not been observed on a Mac yet.
+- **An unlocked check needs repeating under the lock.** The EOF tick read the write state without the lock, so a write could land before the close.
+- **A test that caps the thread pool must prove the pool was busy.** `SetMaxThreads` returns false and changes nothing when the cap is below the minimum, which the first version ignored. Blockers that never saturate the pool let the test pass on the old path.
+- **Count before calling a 1 B/op blip a regression.** BenchmarkDotNet's allocation column counts every thread. On a benchmark that waits, a thread-pool thread being added mid-run shows up as a fraction of a byte per operation.
+- **The Unix EOT guard cannot be tested from outside.** The reader writes queued input as soon as the tty has room, and a full tty refuses EOT anyway, so EOT could only overtake queued input within that short window. Both ordering tests pass without the guard.
+
+Rounds three and four found only comment and doc wording, and round five found nothing. The reference now says Unix EOT also waits for room in the tty input queue. A canceled write can leave the queue full while nothing is queued in MiniPty.
 
 ### Acceptance
 

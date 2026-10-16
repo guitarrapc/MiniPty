@@ -78,7 +78,7 @@ Persistent embedders usually keep **one** output consumer active for the whole `
 | `WaitForExitAsync` | Waiting stops with `OperationCanceledException`; the child continues running. |
 | `WaitForExitStatusAsync` | Same as `WaitForExitAsync`; the child continues running. |
 | `ReadOutputAsync` | Output enumeration stops with `OperationCanceledException`; the child continues running. |
-| `WriteInputAsync` | A write still waiting for the terminal to take it stops with `OperationCanceledException`. Bytes already written stay written; the rest is discarded. The child continues running. |
+| `WriteInputAsync` | A write still waiting for the terminal to take it stops with `OperationCanceledException`. Bytes already handed to the terminal still reach the child, and the rest is discarded. On Windows the bytes handed over include a pending part of up to 4 KiB that ConPTY has not read yet. The child continues running. |
 | `CompleteAsync` | When `KillOnCancellation` is true, the child is killed and `OperationCanceledException` is thrown. |
 | `PtyCapture.RunAsync` | Same as `CompleteAsync`; it uses completion options. |
 
@@ -126,7 +126,7 @@ Interactive hosts (use case 3) keep a single embedder-owned `ReadOutputAsync` re
 | Platform | Behavior |
 |---|---|
 | Windows (bytes written) | Writes Ctrl+Z + CR (`0x1A`, `0x0D`) to the ConPTY input stream after every input byte written before it: while earlier input is still queued because ConPTY stopped reading input, the chord waits for later staging ticks. Keeps the input pipe open until the child exits. Pipe close is not used for this case — it is observed as `STATUS_CONTROL_C_EXIT`, not EOF. |
-| Windows (no bytes) | Closes the ConPTY input pipe after staging (attach deferral). |
+| Windows (no bytes) | Closes the ConPTY input pipe after staging (attach deferral). A write during that wait switches EOF to Ctrl+Z + CR, as when bytes were written. |
 | Unix | Writes EOT (`0x04`, Ctrl-D) to the PTY master after every input byte written before it: while earlier input is still queued for a child that is not reading, EOT waits for later staging ticks. It does not close the master fd. |
 
 Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-mode shell-wrapped one-shot commands, but not for raw-mode TUI programs. Windows stream EOF uses the legacy console Ctrl+Z + CR convention; when input lacks a trailing line terminator, an extra CR is written first to submit the pending line. Raw/TUI programs are not guaranteed.

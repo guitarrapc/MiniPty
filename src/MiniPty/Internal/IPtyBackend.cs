@@ -7,24 +7,25 @@
 /// </summary>
 internal interface IPtyBackend : IDisposable
 {
-    /// <summary>Gets the stdin stream: a <see cref="PtyInputStream"/> over the write members below.</summary>
+    /// <summary>Gets the stdin stream: a <see cref="PtyInputStream"/> over the input queue.</summary>
     public Stream Input { get; }
 
-    // Input. Writes take what the transport accepts now on the calling thread, and the rest is queued in order, so
-    // no write blocks its caller. On Unix the session's reader thread writes the queue when the master can take
-    // more; on Windows I/O completions on the overlapped input pipe do, as ConPTY reads input again.
+    // Input. A write takes what the transport accepts now on the calling thread, and the rest is queued in order.
+    // On Unix the session's reader thread writes the queue when the master can take more. On Windows I/O
+    // completions on the overlapped input pipe write it as ConPTY reads input again. PtyInputWrites turns a queued
+    // write into the caller's task or a blocking wait.
 
     /// <summary>
-    /// Writes <paramref name="bytes"/>, completing once all of them are written. The caller keeps the memory
-    /// unchanged until then; when <paramref name="ownedBuffer"/> is set, the backend owns that pooled array, which
-    /// backs <paramref name="bytes"/>, and returns it to the pool when done. Canceling a queued write discards the
-    /// bytes not yet written.
+    /// Writes what the transport takes now and queues the rest in issue order. Returns the queued write, or null when
+    /// everything was written. The caller keeps the memory unchanged until the write completes. When
+    /// <paramref name="ownedBuffer"/> is set, the backend owns that pooled array, which backs
+    /// <paramref name="bytes"/>, and returns it when done, also when this throws.
     /// </summary>
-    public ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer, CancellationToken cancellationToken);
-    /// <summary>As the memory overload; bytes that cannot be written now are copied into a pooled buffer.</summary>
-    public ValueTask WriteInputAsync(ReadOnlySpan<byte> bytes, CancellationToken cancellationToken);
-    /// <summary>Writes <paramref name="bytes"/>, blocking until all of them are written (the Stream contract).</summary>
-    public void WriteInput(ReadOnlySpan<byte> bytes);
+    /// <exception cref="ObjectDisposedException">The session was disposed.</exception>
+    /// <exception cref="IOException">Input is closed, or the transport failed.</exception>
+    public PtyPendingInput? QueueInput(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer);
+    /// <summary>As the memory overload. Bytes that must wait are copied into a pooled buffer.</summary>
+    public PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes);
     /// <summary>Gives the backend the pump whose reader thread writes queued input.</summary>
     public void SetOutputPump(PtyOutputPump pump);
 

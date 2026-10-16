@@ -98,7 +98,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </summary>
     /// <remarks>
     /// Writes are raw bytes; no line-ending translation is performed. <see cref="Stream.WriteAsync(ReadOnlyMemory{byte}, CancellationToken)"/>
-    /// behaves as <see cref="WriteInputAsync(ReadOnlyMemory{byte}, CancellationToken)"/> and never blocks the calling thread;
+    /// behaves as <see cref="WriteInputAsync(ReadOnlyMemory{byte}, CancellationToken)"/> and never blocks the calling thread.
     /// <see cref="Stream.Write(ReadOnlySpan{byte})"/> blocks until the bytes are written, as the <see cref="Stream"/>
     /// contract requires.
     /// </remarks>
@@ -187,23 +187,31 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </summary>
     /// <param name="bytes">Bytes to write. Empty buffers are ignored. Keep them unchanged until the task completes.</param>
     /// <param name="cancellationToken">
-    /// Token used to cancel a write that is still waiting. Bytes not yet written are discarded; bytes already written
-    /// stay written.
+    /// Token used to cancel a write that is still waiting. Bytes not yet handed to the terminal are discarded, and the
+    /// child still receives the ones already handed over. On Windows those include a pending part of up to 4 KiB that
+    /// ConPTY has not read yet.
     /// </param>
     /// <returns>A task that completes when the bytes are written.</returns>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     /// <remarks>
     /// <para>
     /// Never blocks the calling thread. The bytes the terminal accepts right away are written synchronously, and the
-    /// task is then already complete; this is the usual case and allocates nothing. Otherwise the rest is written in
-    /// order in the background, and the task completes then: on Unix when the child is not reading and the tty input
-    /// queue is full, and on Windows while output nobody reads has backed up and ConPTY has stopped taking input.
+    /// task is then already complete. This is the usual case, and after a session's first write it allocates nothing.
+    /// Otherwise the rest is written in order in the background, and the task completes then. That happens when the
+    /// terminal's input buffer is full: on Unix the tty input queue, which drains as the child reads, and on Windows
+    /// the 4 KiB input pipe, which drains as ConPTY takes input. ConPTY stops taking input while output nobody reads
+    /// has backed up.
     /// </para>
-    /// <para>Writes, including <see cref="SendEof"/>, reach the child in the order they were issued.</para>
+    /// <para>
+    /// A canceled token, a closed input, and a failed write are reported through the returned task, not thrown from the
+    /// call. Writes reach the child in the order they were issued. <see cref="SendEof"/> takes effect after every write
+    /// issued before it, and a write issued after it may reach the child before end of input.
+    /// </para>
     /// </remarks>
     public ValueTask WriteInputAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        return bytes.IsEmpty ? default : _backend.WriteInputAsync(bytes, ownedBuffer: null, cancellationToken);
+        return bytes.IsEmpty ? default : PtyInputWrites.WriteAsync(_backend, bytes, ownedBuffer: null, cancellationToken);
     }
 
     /// <summary>
@@ -214,13 +222,16 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// Encoding used to convert <paramref name="text"/> to bytes. Default is <see cref="Encoding.UTF8"/>.
     /// </param>
     /// <param name="cancellationToken">
-    /// Token used to cancel a write that is still waiting. Bytes not yet written are discarded; bytes already written
-    /// stay written.
+    /// Token used to cancel a write that is still waiting. Bytes not yet handed to the terminal are discarded, and the
+    /// child still receives the ones already handed over. On Windows those include a pending part of up to 4 KiB that
+    /// ConPTY has not read yet.
     /// </param>
     /// <returns>A task that completes when the text is written.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="text"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     /// <remarks>
     /// Never blocks the calling thread; see <see cref="WriteInputAsync(ReadOnlyMemory{byte}, CancellationToken)"/>.
-    /// The encoded bytes live in a pooled buffer until they are written.
+    /// Bytes that must wait are kept in a pooled buffer until they are written.
     /// </remarks>
     public ValueTask WriteInputAsync(
         string text,
@@ -238,7 +249,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         {
             Span<byte> buffer = stackalloc byte[byteCount];
             encoding.GetBytes(text, buffer);
-            return _backend.WriteInputAsync(buffer, cancellationToken);
+            return PtyInputWrites.WriteAsync(_backend, buffer, cancellationToken);
         }
 
         var rented = ArrayPool<byte>.Shared.Rent(byteCount);
@@ -254,16 +265,26 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         }
 
         // The backend owns the rental from here and returns it once the bytes are written.
-        return _backend.WriteInputAsync(rented.AsMemory(0, length), rented, cancellationToken);
+        return PtyInputWrites.WriteAsync(_backend, rented.AsMemory(0, length), rented, cancellationToken);
     }
 
     /// <summary>
     /// Signals end of stdin to the child.
     /// </summary>
     /// <remarks>
-    /// <para>Windows: after bytes were written, writes Ctrl+Z + CR to the ConPTY input stream and leaves the pipe open until the child exits; with no prior bytes, closes the input pipe (deferred when staged).</para>
-    /// <para>Unix: writes EOT (<c>0x04</c>, Ctrl-D) to the PTY master; does not close the master fd.</para>
+    /// <para>
+    /// End of input is staged on a timer that gives the child time to attach, and it takes effect after every write
+    /// issued before it, waiting while earlier input is still queued. A write issued after it may reach the child
+    /// first. Later calls do nothing.
+    /// </para>
+    /// <para>
+    /// Windows: after bytes were written, writes Ctrl+Z + CR to the ConPTY input stream and leaves the pipe open until
+    /// the child exits. With no prior bytes, closes the input pipe after a further wait, unless a write arrives during
+    /// that wait, which switches to Ctrl+Z + CR.
+    /// </para>
+    /// <para>Unix: writes EOT (<c>0x04</c>, Ctrl-D) to the PTY master. It does not close the master fd.</para>
     /// </remarks>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     public void SendEof()
     {
         ThrowIfDisposed();

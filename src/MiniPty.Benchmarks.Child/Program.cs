@@ -3,7 +3,7 @@ using System.Globalization;
 
 if (args is ["--stdin-sink"])
 {
-    // Input benchmarks: read stdin until end of input and discard it, so writes to the PTY never back up.
+    // Input benchmarks: read stdin until end of input and discard it.
     using var stdin = Console.OpenStandardInput();
     var sink = new byte[4096];
     while (stdin.Read(sink, 0, sink.Length) > 0)

@@ -8,7 +8,7 @@ internal interface IPtyInputQueue
 {
     /// <summary>
     /// Removes <paramref name="entry"/> if it is still queued and completes it as canceled. Bytes of it already
-    /// written stay written; the rest is discarded.
+    /// handed to the transport still reach the child, and the rest is discarded.
     /// </summary>
     public void CancelInput(PtyPendingInput entry);
 }
@@ -20,15 +20,16 @@ internal interface IPtyInputQueue
 /// <remarks>
 /// <para>
 /// <see cref="Remaining"/> and <see cref="Next"/> belong to the owning queue and are guarded by its lock. Completion
-/// runs outside that lock, and continuations run asynchronously, so a waiter's continuation never runs while the
-/// queue is held or on the thread that writes the queue.
+/// runs outside that lock and never runs a continuation inline, so no waiter's code runs while the queue is held.
+/// A blocking writer waits in <see cref="Wait"/> instead, and the completing thread wakes it directly, so it does not
+/// need a thread-pool worker to resume.
 /// </para>
 /// <para>
-/// Entries are reused. A host that writes faster than the child reads waits on one write in every pipe-buffer's
-/// worth, and an entry per wait was the only allocation on that path. An entry returns to a process-wide spare slot
-/// once both parties are done with it: the completer when <see cref="Complete"/> has returned, and the waiter when it
-/// has read the result. Recycling at either point alone would let the next write reset the entry while the other
-/// party still uses it. As with any <see cref="ValueTask"/>, the result must be read once.
+/// Entries are reused, because otherwise a host that writes faster than the terminal takes input would allocate one
+/// for each wait. An entry returns to a process-wide spare slot once both parties are done with it: the completer when
+/// <see cref="Complete"/> has returned, and the waiter when it has read the result. Recycling at either point alone
+/// would let the next write reset the entry while the other party still uses it. As with any
+/// <see cref="ValueTask"/>, the result must be read once.
 /// </para>
 /// </remarks>
 internal sealed class PtyPendingInput : IValueTaskSource
@@ -41,6 +42,10 @@ internal sealed class PtyPendingInput : IValueTaskSource
     private int _completed;
     // Parties still using the entry: the completer and the waiter. The last to let go recycles it.
     private int _users;
+    // Set by the waiter's first read of the result, so a second read cannot release the entry again.
+    private int _resultRead;
+    // Set while a thread blocks in Wait, so Complete wakes it directly.
+    private int _blockingWaiter;
     private CancellationTokenRegistration _registration;
 
     private PtyPendingInput(IPtyInputQueue owner)
@@ -76,8 +81,9 @@ internal sealed class PtyPendingInput : IValueTaskSource
         entry.Remaining = remaining;
         entry._owned = owned;
         entry._completed = 0;
+        entry._resultRead = 0;
+        entry._blockingWaiter = 0;
         entry._users = 2;
-        entry.Token = default;
         return entry;
     }
 
@@ -98,9 +104,38 @@ internal sealed class PtyPendingInput : IValueTaskSource
                     entry.Owner.CancelInput(entry);
                 },
                 this);
+
+            // The entry may have completed before the registration existed, so Complete could not drop it. A full fence
+            // keeps the store above from passing the check below, pairing with the exchange in Complete, so one side
+            // always sees the other.
+            Interlocked.MemoryBarrier();
+            if (Volatile.Read(ref _completed) != 0)
+                _registration.Unregister();
         }
 
         return new ValueTask(this, version);
+    }
+
+    /// <summary>
+    /// Blocks until the entry completes, then reads the result: returns, or throws the error that ended the write.
+    /// This is the waiter's one read.
+    /// </summary>
+    internal void Wait()
+    {
+        var version = _core.Version;
+        if (_core.GetStatus(version) == ValueTaskSourceStatus.Pending)
+        {
+            lock (this)
+            {
+                // A full fence before the status check, paired with the one in Complete before it checks for a
+                // waiter: one side always sees the other.
+                Interlocked.Exchange(ref _blockingWaiter, 1);
+                while (_core.GetStatus(version) == ValueTaskSourceStatus.Pending)
+                    Monitor.Wait(this);
+            }
+        }
+
+        ((IValueTaskSource)this).GetResult(version);
     }
 
     /// <summary>Completes the entry once; later calls do nothing. Returns the pooled buffer.</summary>
@@ -109,6 +144,9 @@ internal sealed class PtyPendingInput : IValueTaskSource
         if (Interlocked.Exchange(ref _completed, 1) != 0)
             return;
 
+        // Dropped here, not only when the result is read, so a token cannot keep a write nobody awaits reachable.
+        // It does not wait for a callback that is running, which may be the one completing this entry.
+        _registration.Unregister();
         Remaining = default;
         var owned = _owned;
         _owned = null;
@@ -126,6 +164,13 @@ internal sealed class PtyPendingInput : IValueTaskSource
         }
         catch (Exception)
         {
+        }
+
+        Interlocked.MemoryBarrier();
+        if (Volatile.Read(ref _blockingWaiter) != 0)
+        {
+            lock (this)
+                Monitor.PulseAll(this);
         }
 
         Release();
@@ -149,16 +194,21 @@ internal sealed class PtyPendingInput : IValueTaskSource
             return;
 
         // Nobody uses the entry any more: reset it for the next write, and park it unless a spare is parked already.
-        // Dropping the owner keeps a parked spare from holding a finished session alive.
+        // Dropping the owner and the token keeps a parked spare from holding a finished session or its token alive.
         Owner = null!;
+        Token = default;
+        _registration = default;
         _core.Reset();
         _ = Interlocked.CompareExchange(ref s_spare, this, null);
     }
 
     void IValueTaskSource.GetResult(short token)
     {
-        // Only the waiter's one read of a completed result releases the entry. A stale or early read just throws.
-        if (token != _core.Version || _core.GetStatus(token) == ValueTaskSourceStatus.Pending)
+        // Only the waiter's first read of a completed result releases the entry. A stale, early, or repeated read only
+        // reads the result or throws.
+        if (token != _core.Version
+            || _core.GetStatus(token) == ValueTaskSourceStatus.Pending
+            || Interlocked.Exchange(ref _resultRead, 1) != 0)
         {
             _core.GetResult(token);
             return;
