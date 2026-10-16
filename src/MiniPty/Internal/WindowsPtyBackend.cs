@@ -62,8 +62,6 @@ internal static class WindowsPtyBackend
     private const int EofTickMs = 100;
     private const byte InputEofCtrlZ = 0x1A;
     private const byte InputEofSubmit = 0x0D;
-    /// <summary>Sentinel for <see cref="WindowsPtyBackendInstance._inputTailByte"/> when no stdin bytes were written.</summary>
-    private const byte InputTailUnset = 0xFF;
     private const int EofDeferPollsEmptyInput = 40;
     // Value of the deferral count once the EOF chord was written. Counts never go below zero.
     private const int EofChordWrittenMarker = -1;
@@ -298,15 +296,13 @@ internal static class WindowsPtyBackend
         private bool _outputClosed;
         private bool _eofSignaled;
         private bool _eofPending;
-        /// <summary>Last stdin byte handed to the pipe, or <see cref="InputTailUnset"/> when none. Avoids a separate written flag.</summary>
-        private byte _inputTailByte = InputTailUnset;
         /// <summary>
         /// Ticks left before an input pipe that never carried bytes is closed, or <see cref="EofChordWrittenMarker"/> once
         /// the Ctrl+Z / CR chord was written. One field holds both because another field would enlarge every session.
         /// </summary>
         private int _eofDeferPollsRemaining;
 
-        private bool HasInputBytes => _inputTailByte != InputTailUnset;
+        private bool HasInputBytes => _input is { LastStagedByte: >= 0 };
 
         /// <summary>The Ctrl+Z / CR chord was written. The input pipe then stays open until the child exits.</summary>
         private bool EofChordWritten => _eofDeferPollsRemaining == EofChordWrittenMarker;
@@ -538,7 +534,7 @@ internal static class WindowsPtyBackend
         {
             StageLocked(input, bytes, owner);
             if (!bytes.IsEmpty)
-                _inputTailByte = bytes[^1];
+                input.LastStagedByte = bytes[^1];
         }
 
         /// <summary>Copies bytes into the empty staging buffer. Caller holds lock (this).</summary>
@@ -792,6 +788,13 @@ internal static class WindowsPtyBackend
             /// </summary>
             internal PtyPendingInput? StagedOwner;
             internal bool WriteInFlight;
+
+            /// <summary>
+            /// Last caller byte staged, or -1 before any. EOF goes by it to decide whether a line must be submitted
+            /// first. An int, because every byte value is valid input and none can mark that nothing was written. It
+            /// lives here rather than on the session, so a session that never writes does not pay for it.
+            /// </summary>
+            internal int LastStagedByte = -1;
 
             internal bool IsIdle => Head is null && StagedLength == 0 && !WriteInFlight;
         }
@@ -1197,16 +1200,16 @@ internal static class WindowsPtyBackend
             if (_inputClosed || EofChordWritten)
                 return;
 
-            // Ctrl+Z alone does not end input on ConPTY; CR submits the EOF key chord.
-            // When the caller buffer does not end with a line terminator, submit the pending line first.
+            // Ctrl+Z alone does not end input on ConPTY. A CR submits the EOF key chord. Ctrl+Z ends input only at the
+            // start of a line, so a pending line is submitted first.
+            var input = EnsureInputLocked();
             Span<byte> chord = stackalloc byte[3];
             var length = 0;
-            if (_inputTailByte is not (byte)'\n' and not (byte)'\r')
+            if (input.LastStagedByte is not '\n' and not '\r')
                 chord[length++] = InputEofSubmit;
 
             chord[length++] = InputEofCtrlZ;
             chord[length++] = InputEofSubmit;
-            var input = EnsureInputLocked();
             StageLocked(input, chord[..length], owner: null);
             _eofDeferPollsRemaining = EofChordWrittenMarker;
             WriteStagedLocked(input);

@@ -223,6 +223,35 @@ public sealed class PtyInputTests
         }
     }
 
+    /// <summary>
+    /// Input whose last byte is 0xFF still counts as written, so SendEof ends it the way it ends any partial line. A
+    /// byte value must not double as the mark for no input, or Windows would treat this input as empty and close the
+    /// pipe.
+    /// </summary>
+    [Test]
+    public async Task SendEofEndsInputWhoseLastByteIs0xFF()
+    {
+        var copyFile = Path.GetTempFileName();
+        try
+        {
+            await using var session = Pty.Start(CopyInputChild(copyFile));
+            await session.WriteInputAsync(new byte[] { (byte)'x', 0xFF });
+            session.SendEof();
+
+            var drain = DrainAsync(session);
+            // Exit code 0: closing the input pipe after bytes ends the child with STATUS_CONTROL_C_EXIT instead.
+            await Assert.That(await session.WaitForExitAsync().WaitAsync(Timeout)).IsEqualTo(0);
+            await drain.WaitAsync(Timeout);
+
+            // How the terminal decodes 0xFF differs by platform, so only the byte before it is compared.
+            await Assert.That(ReadLines(copyFile)).StartsWith("x");
+        }
+        finally
+        {
+            DeleteBestEffort(copyFile);
+        }
+    }
+
     /// <summary>Canceling a queued write completes it at once; the child keeps running.</summary>
     [Test]
     public async Task CancelingAQueuedWriteCompletesIt()
