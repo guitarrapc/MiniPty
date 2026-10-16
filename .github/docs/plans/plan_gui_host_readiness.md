@@ -327,7 +327,7 @@ Lessons:
 - **Stamp quiet detection per read, not per slot.** Stamping the last read after the coalescing micro-window let its empty tail postpone the post-exit close by up to a clock tick. Capture runs were about 10 ms slower until the stamp moved to each read that returned bytes.
 - **One-shot consumers belong on the reader thread.** A bounded ring drained by a consumer that only starts after exit would block a bulk-output child before it can exit. Writing into a sink on the reader thread also removed the pump task, the drain polling, and the timeout tasks.
 - **A one-time timeout needs a re-check after arming.** Review found that the drain close timeout, which fires once, could land between the sink's state check and its arming the wait, leaving no wait to signal and the scheduler done with the pump: `CompleteAsync` would have hung instead of throwing. The sink now re-checks after arming, with full fences on both sides. Review also found a full ring spinning against a closed Unix master; that state now ends output. Neither had a failing test.
-- **macOS was not run locally.** The macOS-only native paths (the `select` wait and the pipe wake descriptor) were neither compiled nor exercised in this step; FreeBSD shares the pipe path. They were later run on a Mac after step 4b (see [macOS check](#macos-check)).
+- **macOS was not run locally.** The macOS-only native paths (the `select` wait and the pipe wake descriptor) were compiled and tested only by CI. Its macOS test jobs passed until the review added `ResumingAfterBackpressureDoesNotCloseTheTransport`, which then failed on both macOS runners. FreeBSD shares the pipe path. They were later run on a Mac after step 4b (see [macOS check](#macos-check)).
 
 ### Step 4 result: input path
 
@@ -401,7 +401,7 @@ The integration benchmarks allocate less because the old pipe setup boxed a secu
 
 Lessons:
 
-- **The input benchmark saturates the pipe.** It writes faster than ConPTY reads, so exactly one write in 64 (64 × 64 B = the 4 KiB buffer) waits. Before this step, that write blocked the benchmark thread. With the queue, it first allocated an entry (2 B per write on average) until entries were reused. Read a benchmark's per-operation average with its saturation in mind.
+- **The input benchmark saturates the pipe.** It writes faster than ConPTY reads, so about one write in 64 (64 × 64 B = the 4 KiB buffer) waits. Before this step, that write blocked the benchmark thread. With the queue, it first allocated an entry (2 B per write on average) until entries were reused. Read a benchmark's per-operation average with its saturation in mind.
 - **Every new field on the backend object is paid by every session.** The first version kept the queue and the overlapped state as backend fields, and every integration scenario allocated about 20–30 B more, although none of them writes input. One lazily created object fixed it.
 - **A reused `IValueTaskSource` needs both parties to let go.** Resetting an entry as soon as its waiter has read the result races the completer, which may still be signaling that waiter. The entry is recycled only after `Complete` has returned and the waiter has read the result.
 - **Pin system tools by full path in tests.** A bare `find` resolved to a Unix `find` earlier on `PATH` and walked the file system instead of counting lines.
@@ -465,7 +465,7 @@ Results:
 |---|---|
 | Full suite | Windows 232 pass, 3 runs. Linux 232 pass, 3 runs |
 | Thread-pool test against the earlier `AsTask` wait (mutation) | Fails |
-| Unix EOT ordering guard removed (mutation) | Both ordering tests pass, 5 runs on Linux. See the lessons |
+| Unix EOT ordering guard removed (mutation) | Two ordering tests pass, 5 runs on Linux. See the lessons |
 | `PtyInputBenchmarks` | 0 B in 14 of 15 rows across five runs. One `WriteInputBytes` row showed 1 B/op. A probe of the same loop, 8 rounds of 20,000 writes, allocated one entry and the first write's state in the first round and no entries after that. The only later bytes were a thread-pool thread being added (1056 B), which the process-wide counter includes. Means ranged 86–139 µs, and the tree before this round measured 97–161 µs in interleaved runs on the same machine |
 | `PtyIntegrationBenchmarks` | Unchanged from the first round, for example `Session_Exit0_Bytes` 1.85 KB. The allocation check passes |
 | NativeAOT | `Session` sample published and run on Windows and Linux. `Interactive` published on Windows |
@@ -477,20 +477,20 @@ Lessons:
 - **A macOS tty needs complete lines in tests.** In canonical mode the macOS tty code holds back a write only once a complete line is queued, and it drops input past `MAX_INPUT` (1024 bytes) on a line, EOT included. A test that needs a write to wait, or EOF to arrive after a partial line, uses short complete lines there. This came from reading the xnu tty code, and the [macOS check](#macos-check) later confirmed it on a Mac.
 - **An unlocked check needs repeating under the lock.** The EOF tick read the write state without the lock, so a write could land before the close.
 - **A test that caps the thread pool must prove the pool was busy.** `SetMaxThreads` returns false and changes nothing when the cap is below the minimum, which the first version ignored. Blockers that never saturate the pool let the test pass on the old path.
-- **Count before calling a 1 B/op blip a regression.** BenchmarkDotNet's allocation column counts every thread. On a benchmark that waits, a thread-pool thread being added mid-run shows up as a fraction of a byte per operation.
-- **The Unix EOT guard cannot be tested from outside.** The reader writes queued input as soon as the tty has room, and a full tty refuses EOT anyway, so EOT could only overtake queued input within that short window. Both ordering tests pass without the guard.
+- **Count before calling a 1 B/op blip a regression.** BenchmarkDotNet's allocation column counts every thread. On a benchmark that waits, a thread-pool thread being added mid-run shows up as a fraction of a byte per operation. The [macOS check](#macos-check) later found a steady cost as well: 32 B for each write that waits, under BenchmarkDotNet's wait. At one write in 64 that is about 0.5 B/op here. BenchmarkDotNet rounds bytes per operation half to even, so 0.5 shows as 0 B, and slightly more waiting writes or a thread being added turn a row into 1 B. The share of waiting writes per row was not measured.
+- **The Linux runs did not show whether the EOT guard is tested.** Two ordering tests passed on Linux with the guard removed, in 5 runs. Which two, and which of the guard's two checks were removed, were not recorded. On macOS, removing either check alone passes too. The [macOS check](#macos-check) later found that the tests do notice the whole guard removed on macOS.
 
 Rounds three and four found only comment and doc wording, and round five found nothing. The reference now says Unix EOT also waits for room in the tty input queue. A canceled write can leave the queue full while nothing is queued in MiniPty.
 
 ### macOS check
 
-Steps 3, 4, and 4b were built and tested on Windows and Linux only. This check ran the end of step 4b on macOS 26 (arm64), covering the macOS-only paths: the `select` read and write sets, the pipe wake descriptor, the EOT deferral, and the macOS branches in the tests.
+Steps 4 and 4b were built and tested on Windows and Linux only. Step 3 reached macOS only through CI on its pull request and on its merge to `main`. The native jobs for osx-arm64 and osx-x64 compiled the macOS paths. The macOS test jobs passed until the review commit added `ResumingAfterBackpressureDoesNotCloseTheTransport`, and from then on that test failed on both macOS runners, on the pull request and on `main`. This check ran the end of step 4b on macOS 26 (arm64), covering the macOS-only paths: the `select` read and write sets, the pipe wake descriptor, the EOT deferral, and the macOS branches in the tests.
 
 | Check | Result |
 |---|---|
-| Full suite | 233 pass, no skips, 16 runs |
+| Full suite | 233 pass, no skips, 16 runs. `ResumingAfterBackpressureDoesNotCloseTheTransport` passed in every run here, so its CI failure on macOS is not reproduced and remains open. The test drives the pump with a fake backend and fixed delays |
 | NativeAOT | `Session` and `Interactive` samples published and run against the static native archive. The input probe below gave the same results published as it did under JIT |
-| `PtyInputBenchmarks` | 140.7, 141.4, and 144.9 µs, 2 B/op each. A probe of 8 rounds of 20,000 writes into `cat`, some of them queued, allocated 0 B process-wide in steady state. The only bytes were about 1 KB in rounds where a thread-pool thread was added, as the 1 B/op lesson above describes |
+| `PtyInputBenchmarks` | 140.7, 141.4, and 144.9 µs, 2 B/op each. The bytes are 32 B per write that had to wait, not thread-pool growth. BenchmarkDotNet waits on a pending `ValueTask` through `UnsafeOnCompleted` with an `Action`. A pending write runs its continuation asynchronously, and for an `Action` that queues an allocated thread-pool work item. An `await` queues none: a probe of 8 rounds of 20,000 awaited writes into `cat`, some of them queued, allocated 0 B process-wide after the first round, apart from about 1 KB in rounds where a thread-pool thread was added |
 
 Input probe: the child counts its stdin bytes into a file, and the probe writes once and then calls `SendEof`. The same probe ran against `main` before the input path.
 
@@ -503,8 +503,35 @@ Input probe: the child counts its stdin bytes into a file, and the probe writes 
 
 Lessons:
 
-- **The macOS tty line limit is real and older than the input path.** In canonical mode a line holds at most 1,024 bytes, LF included. The tty takes a longer line without blocking and drops the excess, the LF and later EOT included, so the write reports success while the child waits for a line and an EOF that never arrive. MiniPty cannot detect this. Raw-mode children are not affected. The reference now documents the limit.
-- **Native archives need a deployment target.** `scripts/build-native.sh` builds macOS objects for the host's macOS version, so linking an AOT sample against them warns that they target a newer macOS (26.0) than the app (12.0). This is outside the input path and is left as is.
+- **The macOS tty line limit is real and older than the input path.** In canonical mode a line holds at most 1,024 bytes, LF included. Once 1,024 bytes are pending without an LF, the tty takes later writes without blocking and drops later bytes, LF and EOT included. So the write reports success while the child keeps waiting. Kill, interrupt, quit, and suspend free the line, and the pending bytes are lost then. Erase and word erase free only the bytes they remove, and the rest of the line arrives if its LF comes before that room fills again. Other special characters, such as reprint and status, are processed but free nothing. With the default IMAXBEL setting, the tty answers each dropped byte with a BEL while its output has room, whether echo is on or off, but that looks like a BEL the child prints. MiniPty cannot detect this and sends none of these characters. Raw-mode children are not affected. The reference documents the limit.
+- **A benchmark's wait can allocate where `await` does not.** The 2 B/op above comes from how BenchmarkDotNet waits, not from the write path. macOS shows it because its tty takes about 1 KiB, so about one write in 16 waits there. Windows runs the same code. Its 4 KiB pipe buffer suggests that about one write in 64 waits there, which would be about 0.5 B/op and round to 0 B or 1 B. The cost per waiting write was not measured on Windows.
+- **macOS `poll` is avoided on its documentation, not on observed failure.** poll(2) on macOS says it does not support devices. On macOS 26, probes saw `poll` on a PTY master report input, room for output, and hang-up correctly. The wait keeps `select` because the documented limit still stands.
+- **Native binaries need a deployment target.** `scripts/build-native.sh` passes no `-mmacosx-version-min`, and no workflow sets `MACOSX_DEPLOYMENT_TARGET`. So the archive, `libminipty_unix.dylib`, and `minipty_spawn_helper` all declare the build host's macOS as their minimum (`minos 26.0` in `otool -l` here). Linking an AOT sample against the archive warns about it, and CI builds the packaged binaries the same way on macOS 26 runners. Whether an older macOS refuses them was not tested. This is outside the input path and is left as is.
+
+A review on macOS, with each claim checked by three independent attempts to refute it, found untested paths, two unreliable tests, and a slow cancellation. What changed:
+
+- **Tests.**
+  - Each of these Unix paths passed the suite with its code removed, so each got a test that fails without it:
+    - writing queued input while the output ring is full;
+    - waking the reader after a write is queued;
+    - retrying EOT when a full tty refuses it with nothing queued (macOS only).
+  - `SmallWritesCompleteSynchronously` used a child that exits after one line, so its second write could fail. It now uses a child that never reads.
+  - `ABlockingWriteResumesWithoutTheThreadPool` disposed the event its extra blocker waits on. When that blocker started late, it threw on a pool thread and ended the test process, in 2 of 6 to 5 of 20 full runs. The event is no longer disposed.
+- **Cancellation.** Queued writes are doubly linked, so a canceled one leaves the queue without a walk from the head. Canceling 20,000 queued writes that share one token took 1,441 ms on macOS and now takes 14 ms. Windows uses the same queue code, but it was not run on Windows. A second review round found that no test checked the backward links, so removing their updates passed the suite. A unit test now removes entries after earlier removals and fails without them.
+
+| Check | Result |
+|---|---|
+| Full suite | 237 pass in 20 runs, and in 10 more runs with 12 busy processes on 8 cores. With the backward-link test, 238 pass in 10 runs, and in 15 more after the later test fixes |
+| Full suite with 64 busy processes on 8 cores | One timeout of `SendEofEndsInputAfterACanceledWriteLeftAPartialLine` in 48 runs (see [Open Questions](#open-questions)) |
+| `PtyInputBenchmarks` | 142.9, 145.4, and 147.6 µs, 2 B/op each, against 140.7, 141.4, and 144.9 µs before the fixes |
+
+Lessons:
+
+- **Echo hides a missing wake.** Echo of the part a write takes at once makes the master readable, so the reader waits again with the write set anyway. A test of queued input needs a child with echo off to prove the wake. The echo-off test first waited a fixed 500 ms for `stty -echo`. With `stty` started 0.7 s late and the wake removed, it still passed 9 of 10 runs, so it now writes only after a marker the child prints once echo is off.
+- **Writes that share a token are canceled newest first.** Their callbacks run in reverse registration order, so a removal that walks from the head costs the whole queue for each write.
+- **A disposed `ManualResetEventSlim` throws from `Wait` even when it is set.** A test must not dispose an event that work it queued may still wait on.
+- **The ordering tests do check the EOT guard on macOS.** With both of its checks removed, the one before the lock and the one under it, `QueuedInputIsDeliveredInOrderWithEofAfterIt` failed in most runs of every set. `CancelingAQueuedWriteKeepsTheOthersInOrder` and `QueuedInputIsDeliveredInOrderWithEofAfterItWhileOutputIsBackedUp` failed in no run of some sets and in some or all runs of the rest. The macOS tty, holding about 1 KiB, regains room while input is still queued, and EOT then overtakes it. With either check removed alone, the tests passed every run, because the other check covers it.
+- **A loose assertion can pass for the wrong reason.** The 0xFF test compared only the byte before 0xFF, so it would pass even if 0xFF were lost. A Unix tty passes 0xFF through as data, so the test now requires both bytes there.
 
 ### Acceptance
 
@@ -828,6 +855,8 @@ flowchart LR
 
 ## Open Questions
 
+- **macOS CI failure:** `ResumingAfterBackpressureDoesNotCloseTheTransport` has failed on both macOS CI runners since step 3's review added it, and it passes on macOS 26 locally (see [macOS check](#macos-check)). Whether its fixed delays are too tight for CI runners or it exposes a pump defect is not known.
+- **Rare timeout under heavy load on macOS:** `SendEofEndsInputAfterACanceledWriteLeftAPartialLine` timed out once in 48 full-suite runs with 64 busy processes on 8 cores, and once in 20 such runs before the macOS review fixes. It passed 84 later runs with about 128 busy processes, alone, with its class, or with the suite. The cause is not known.
 - **Slot sizing:** the pump's slot count and size. Step 3 ships 4 × 4 KiB: a 32 KiB Windows child arrives in 12–13 chunks and every allocation benchmark improved. Throughput tuning is still open.
 - ~~**Coalescing micro-window:** whether the ConPTY 1 ms coalescing micro-window is still needed once reads are pipelined into multiple slots.~~ Resolved: still needed. Without it, 32 KiB from ConPTY arrives in about 124 chunks of at most 1755 B instead of 13 full 4 KiB ones.
 - ~~**Windows coalescing budget:** whether ConPTY's unbounded coalescing chain, whose window lasted until the next clock tick, must be bounded like Unix's 2 ms.~~ Resolved: yes. The window is now 500 µs measured with `Stopwatch`, and a slot stops appending 2 ms after its first read, as on Unix. Measured on Windows 11 with 20-byte writes and `ReadOutputAsync`:

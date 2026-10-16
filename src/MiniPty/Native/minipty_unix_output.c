@@ -142,7 +142,7 @@ int minipty_pty_wait(int master, int events, int wake_fd, int timeout_ms)
     int want_write = master >= 0 && (events & MINIPTY_PTY_WRITABLE) != 0;
 #if defined(__APPLE__)
     /*
-     * macOS poll() does not support devices, PTY masters included, so wait with select(). The sets are sized
+     * The macOS poll(2) page says poll() does not support devices, so wait with select(). The sets are sized
      * for the highest descriptor rather than FD_SETSIZE, which unlimited select accepts.
      */
     int max_fd = master > wake_fd ? master : wake_fd;

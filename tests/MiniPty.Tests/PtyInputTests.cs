@@ -11,13 +11,14 @@ public sealed class PtyInputTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
-    /// <summary>A write the terminal takes at once is complete when the call returns.</summary>
+    /// <summary>
+    /// A write the terminal takes at once is complete when the call returns. The child never reads and outlives the
+    /// test, so a write cannot fail because the child exited between the two calls.
+    /// </summary>
     [Test]
     public async Task SmallWritesCompleteSynchronously()
     {
-        await using var session = Pty.Start(OperatingSystem.IsWindows()
-            ? Spawn(Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe", ["/c", "set /p LINE="])
-            : Spawn("sh", ["-c", "IFS= read -r line"]));
+        await using var session = Pty.Start(IdleChild());
 
         var newline = OperatingSystem.IsWindows() ? "\r" : "\n";
         var text = session.WriteInputAsync("hello" + newline);
@@ -99,6 +100,112 @@ public sealed class PtyInputTests
             await drain.WaitAsync(Timeout);
 
             await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, Lines + 1));
+        }
+        finally
+        {
+            DeleteBestEffort(copyFile);
+        }
+    }
+
+    /// <summary>
+    /// A child blocked on output may still read input, so Unix writes queued input while the output ring is full. The
+    /// child floods output in the background while it copies input, and nobody reads output until the write is done,
+    /// so the write finishes only if the parked reader writes the queue. ConPTY stops taking input while its output is
+    /// blocked, so Windows has no such case.
+    /// </summary>
+    [Test]
+    public async Task QueuedInputIsWrittenWhileTheOutputRingIsFull()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var copyFile = Path.GetTempFileName();
+        try
+        {
+            await using var session = Pty.Start(Spawn("sh", ["-c",
+                "( i=0; while [ $i -lt 40000 ]; do echo flood$i; i=$((i+1)); done ) & cat > \"$1\"; wait", "sh", copyFile]));
+            await Task.Delay(BackUpDelay);
+
+            var write = await IssueAsync(() => session.WriteInputAsync(NumberedLines(0, QueueFillingLines)));
+            await Assert.That(write.IsCompleted).IsFalse();
+            await write.AsTask().WaitAsync(Timeout);
+
+            session.SendEof();
+            var drain = DrainAsync(session);
+            await session.WaitForExitAsync().WaitAsync(Timeout);
+            await drain.WaitAsync(Timeout);
+
+            await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, QueueFillingLines));
+        }
+        finally
+        {
+            DeleteBestEffort(copyFile);
+        }
+    }
+
+    /// <summary>
+    /// While nothing is queued, the Unix reader waits for output only. A child with echo off writes nothing back, so a
+    /// queued write reaches it only if queuing wakes the reader to wait for room as well. Windows writes queued input
+    /// from I/O completions instead.
+    /// </summary>
+    [Test]
+    public async Task QueuedInputReachesAChildWithEchoOff()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var copyFile = Path.GetTempFileName();
+        try
+        {
+            await using var session = Pty.Start(Spawn("sh", ["-c", "stty -echo; echo ECHO_OFF; sleep 1; cat > \"$1\"", "sh", copyFile]));
+            // The write waits for the marker, so echo is off and the part the terminal takes at once produces no output
+            // either. A fixed delay could let a slow stty leave echo on, and echo would then wake the reader instead.
+            await Assert.That(await ReadUntilAsync(session, "ECHO_OFF").WaitAsync(Timeout)).Contains("ECHO_OFF");
+            var drain = DrainAsync(session);
+
+            var write = await IssueAsync(() => session.WriteInputAsync(NumberedLines(0, QueueFillingLines)));
+            await Assert.That(write.IsCompleted).IsFalse();
+            await write.AsTask().WaitAsync(Timeout);
+
+            session.SendEof();
+            await session.WaitForExitAsync().WaitAsync(Timeout);
+            await drain.WaitAsync(Timeout);
+
+            await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, QueueFillingLines));
+        }
+        finally
+        {
+            DeleteBestEffort(copyFile);
+        }
+    }
+
+    /// <summary>
+    /// A full tty refuses EOT even when nothing is queued, and EOF must then wait for a later tick instead of being
+    /// lost. 511 two-byte lines fill a macOS tty input queue exactly (1,022 bytes) while the child sleeps, so the write
+    /// completes at once and the first EOT finds no room. Other systems take more input, and an exact fill there
+    /// depends on the kernel's buffering.
+    /// </summary>
+    [Test]
+    public async Task SendEofWaitsForRoomWhenTheTtyIsFull()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return;
+
+        const int Lines = 511;
+        var copyFile = Path.GetTempFileName();
+        try
+        {
+            await using var session = Pty.Start(Spawn("sh", ["-c", "sleep 1.5; cat > \"$1\"", "sh", copyFile]));
+            var drain = DrainAsync(session);
+
+            var write = session.WriteInputAsync(string.Concat(Enumerable.Repeat("x\n", Lines)));
+            await Assert.That(write.IsCompletedSuccessfully).IsTrue();
+
+            session.SendEof();
+            await Assert.That(await session.WaitForExitAsync().WaitAsync(Timeout)).IsEqualTo(0);
+            await drain.WaitAsync(Timeout);
+
+            await Assert.That(File.ReadAllLines(copyFile).Length).IsEqualTo(Lines);
         }
         finally
         {
@@ -243,8 +350,12 @@ public sealed class PtyInputTests
             await Assert.That(await session.WaitForExitAsync().WaitAsync(Timeout)).IsEqualTo(0);
             await drain.WaitAsync(Timeout);
 
-            // How the terminal decodes 0xFF differs by platform, so only the byte before it is compared.
-            await Assert.That(ReadLines(copyFile)).StartsWith("x");
+            // A Unix tty passes 0xFF through as data, so both bytes must arrive. The Windows console decodes 0xFF in its
+            // own way, so there only the byte before it is compared.
+            if (OperatingSystem.IsWindows())
+                await Assert.That(ReadLines(copyFile)).StartsWith("x");
+            else
+                await Assert.That(Convert.ToHexString(File.ReadAllBytes(copyFile))).IsEqualTo("78FF");
         }
         finally
         {

@@ -74,7 +74,9 @@ public sealed class PtyPendingInputTests
         ThreadPool.GetMinThreads(out var minWorkers, out _);
         ThreadPool.GetMaxThreads(out var maxWorkers, out var maxIo);
         var cap = Math.Max(Environment.ProcessorCount, minWorkers);
-        using var release = new ManualResetEventSlim();
+        // Not disposed: the extra blocker can start after the test returns, and Wait on a disposed event throws on a pool
+        // thread, which ends the test process.
+        var release = new ManualResetEventSlim();
         var probeRan = 0;
         bool capped;
         bool resumed;
@@ -106,6 +108,99 @@ public sealed class PtyPendingInputTests
         await Assert.That(capped).IsTrue();
         await Assert.That(poolWasBusy).IsTrue();
         await Assert.That(resumed).IsTrue();
+    }
+
+    /// <summary>
+    /// An entry leaves the queue from the head, the middle, or the tail, and the links of the rest stay whole. An entry
+    /// that already left, alone or with the whole queue, is not removed a second time. Without that check, a late
+    /// cancellation would write a detached entry's links into the live head and tail, and cut the detached chain before
+    /// it is completed.
+    /// </summary>
+    [Test]
+    public async Task QueuedEntriesLeaveFromAnyPositionOnce()
+    {
+        var owner = new RecordingQueue();
+        var entries = new PtyPendingInput[5];
+        for (var i = 0; i < entries.Length; i++)
+            entries[i] = PtyPendingInput.Rent(owner, ReadOnlyMemory<byte>.Empty, owned: null);
+
+        PtyPendingInput? head = null;
+        PtyPendingInput? tail = null;
+        foreach (var entry in entries)
+            PtyPendingInput.Enqueue(ref head, ref tail, entry);
+
+        var middle = PtyPendingInput.Remove(ref head, ref tail, entries[2]);
+        var middleAgain = PtyPendingInput.Remove(ref head, ref tail, entries[2]);
+        var last = PtyPendingInput.Remove(ref head, ref tail, entries[4]);
+        var first = PtyPendingInput.Remove(ref head, ref tail, entries[0]);
+        var afterRemovals = Order(head, tail, entries);
+
+        var dequeued = PtyPendingInput.DequeueHead(ref head, ref tail);
+        var dequeuedAgain = PtyPendingInput.Remove(ref head, ref tail, dequeued);
+        var afterDequeue = Order(head, tail, entries);
+
+        PtyPendingInput.Enqueue(ref head, ref tail, entries[0]);
+        var chain = PtyPendingInput.DetachAll(ref head, ref tail);
+        var detachedAgain = PtyPendingInput.Remove(ref head, ref tail, entries[3]);
+        var chainOrder = Order(chain, null, entries);
+
+        await Assert.That(middle && last && first).IsTrue();
+        await Assert.That(middleAgain).IsFalse();
+        await Assert.That(afterRemovals).IsEqualTo("1,3 tail 3");
+        await Assert.That(dequeued == entries[1]).IsTrue();
+        await Assert.That(dequeuedAgain).IsFalse();
+        await Assert.That(afterDequeue).IsEqualTo("3 tail 3");
+        await Assert.That(detachedAgain).IsFalse();
+        await Assert.That(head is null && tail is null).IsTrue();
+        await Assert.That(chainOrder).IsEqualTo("3,0 tail none");
+    }
+
+    /// <summary>
+    /// Removal relies on each entry's link to the one before it, so every dequeue and removal must update the link of
+    /// the entry behind. A stale link would make removing the new head write into an entry that already left, such as
+    /// one in a chain being completed, and leave the head in place.
+    /// </summary>
+    [Test]
+    public async Task RemovalAfterAnEarlierRemovalKeepsTheQueueWhole()
+    {
+        var owner = new RecordingQueue();
+        var entries = new PtyPendingInput[3];
+        for (var i = 0; i < entries.Length; i++)
+            entries[i] = PtyPendingInput.Rent(owner, ReadOnlyMemory<byte>.Empty, owned: null);
+
+        PtyPendingInput? head = null;
+        PtyPendingInput? tail = null;
+        foreach (var entry in entries)
+            PtyPendingInput.Enqueue(ref head, ref tail, entry);
+
+        // An entry stays behind the removed head, so a stale link would show as the dequeued entry's Next.
+        var dequeued = PtyPendingInput.DequeueHead(ref head, ref tail);
+        var newHeadRemoved = PtyPendingInput.Remove(ref head, ref tail, entries[1]);
+        var afterDequeue = Order(head, tail, entries);
+        var dequeuedNext = dequeued.Next;
+        PtyPendingInput.Remove(ref head, ref tail, entries[2]);
+
+        foreach (var entry in entries)
+            PtyPendingInput.Enqueue(ref head, ref tail, entry);
+
+        var middleRemoved = PtyPendingInput.Remove(ref head, ref tail, entries[1]);
+        var tailRemoved = PtyPendingInput.Remove(ref head, ref tail, entries[2]);
+        var afterRemovals = Order(head, tail, entries);
+
+        await Assert.That(newHeadRemoved && middleRemoved && tailRemoved).IsTrue();
+        await Assert.That(afterDequeue).IsEqualTo("2 tail 2");
+        await Assert.That(dequeuedNext is null).IsTrue();
+        await Assert.That(afterRemovals).IsEqualTo("0 tail 0");
+    }
+
+    /// <summary>Lists a queue by position in <paramref name="entries"/>, following <see cref="PtyPendingInput.Next"/>.</summary>
+    private static string Order(PtyPendingInput? head, PtyPendingInput? tail, PtyPendingInput[] entries)
+    {
+        var positions = new List<int>();
+        for (var entry = head; entry is not null; entry = entry.Next)
+            positions.Add(Array.IndexOf(entries, entry));
+
+        return $"{string.Join(',', positions)} tail {(tail is null ? "none" : Array.IndexOf(entries, tail))}";
     }
 
     private sealed class RecordingQueue : IPtyInputQueue

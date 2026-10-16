@@ -306,12 +306,7 @@ internal static partial class UnixPtyBackend
         private PtyPendingInput EnqueueLocked(ReadOnlyMemory<byte> remaining, byte[]? owned)
         {
             var entry = PtyPendingInput.Rent(this, remaining, owned);
-            if (_inputTail is null)
-                _inputHead = entry;
-            else
-                _inputTail.Next = entry;
-
-            _inputTail = entry;
+            PtyPendingInput.Enqueue(ref _inputHead, ref _inputTail, entry);
             return entry;
         }
 
@@ -338,8 +333,7 @@ internal static partial class UnixPtyBackend
                     {
                         // The child's terminal closed (EIO) or the transport did: nothing queued can be written.
                         error = ex;
-                        failed = head;
-                        _inputHead = _inputTail = null;
+                        failed = PtyPendingInput.DetachAll(ref _inputHead, ref _inputTail);
                         break;
                     }
 
@@ -349,11 +343,7 @@ internal static partial class UnixPtyBackend
                         break;
                     }
 
-                    _inputHead = head.Next;
-                    if (_inputHead is null)
-                        _inputTail = null;
-
-                    head.Next = null;
+                    PtyPendingInput.DequeueHead(ref _inputHead, ref _inputTail);
                     if (doneTail is null)
                         done = head;
                     else
@@ -370,28 +360,9 @@ internal static partial class UnixPtyBackend
 
         public void CancelInput(PtyPendingInput entry)
         {
-            var removed = false;
+            bool removed;
             lock (this)
-            {
-                PtyPendingInput? previous = null;
-                for (var current = _inputHead; current is not null; previous = current, current = current.Next)
-                {
-                    if (current != entry)
-                        continue;
-
-                    if (previous is null)
-                        _inputHead = current.Next;
-                    else
-                        previous.Next = current.Next;
-
-                    if (_inputTail == current)
-                        _inputTail = previous;
-
-                    current.Next = null;
-                    removed = true;
-                    break;
-                }
-            }
+                removed = PtyPendingInput.Remove(ref _inputHead, ref _inputTail, entry);
 
             // Bytes of it already written stay written; the rest is discarded.
             if (removed)
@@ -410,8 +381,7 @@ internal static partial class UnixPtyBackend
                 if (_inputState == InputOpen || reason == InputDisposed)
                     _inputState = reason;
 
-                queued = _inputHead;
-                _inputHead = _inputTail = null;
+                queued = PtyPendingInput.DetachAll(ref _inputHead, ref _inputTail);
             }
 
             if (queued is null)

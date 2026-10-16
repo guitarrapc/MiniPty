@@ -413,28 +413,13 @@ internal static class WindowsPtyBackend
             var removed = false;
             lock (this)
             {
-                var input = _input;
-                PtyPendingInput? previous = null;
-                for (var current = input?.Head; current is not null; previous = current, current = current.Next)
+                if (_input is { } input && PtyPendingInput.Remove(ref input.Head, ref input.Tail, entry))
                 {
-                    if (current != entry)
-                        continue;
-
-                    if (previous is null)
-                        input!.Head = current.Next;
-                    else
-                        previous.Next = current.Next;
-
-                    if (input!.Tail == current)
-                        input.Tail = previous;
-
                     // Its bytes in flight still complete; the queue then moves on without it.
-                    if (input.StagedOwner == current)
+                    if (input.StagedOwner == entry)
                         input.StagedOwner = null;
 
-                    current.Next = null;
                     removed = true;
-                    break;
                 }
             }
 
@@ -494,12 +479,7 @@ internal static class WindowsPtyBackend
         private PtyPendingInput EnqueueLocked(InputState input, ReadOnlyMemory<byte> remaining, byte[]? owned, bool ownsStaged)
         {
             var entry = PtyPendingInput.Rent(this, remaining, owned);
-            if (input.Tail is null)
-                input.Head = entry;
-            else
-                input.Tail.Next = entry;
-
-            input.Tail = entry;
+            PtyPendingInput.Enqueue(ref input.Head, ref input.Tail, entry);
             if (ownsStaged)
                 input.StagedOwner = entry;
 
@@ -612,11 +592,7 @@ internal static class WindowsPtyBackend
                 if (owner is not null && owner.Remaining.IsEmpty)
                 {
                     // The owner of staged bytes is the head, so it leaves the queue from the front.
-                    input.Head = owner.Next;
-                    if (input.Head is null)
-                        input.Tail = null;
-
-                    owner.Next = null;
+                    PtyPendingInput.DequeueHead(ref input.Head, ref input.Tail);
                     if (doneTail is null)
                         done = owner;
                     else
@@ -677,8 +653,7 @@ internal static class WindowsPtyBackend
                 {
                     // A pipe write that fails does not recover, so the queued writes fail with it instead of waiting.
                     error = ex;
-                    failed = input.Head;
-                    input.Head = input.Tail = null;
+                    failed = PtyPendingInput.DetachAll(ref input.Head, ref input.Tail);
                     input.StagedOwner = null;
                 }
             }
@@ -714,8 +689,7 @@ internal static class WindowsPtyBackend
                 _inputClosed = true;
                 if (_input is { } input)
                 {
-                    queued = input.Head;
-                    input.Head = input.Tail = null;
+                    queued = PtyPendingInput.DetachAll(ref input.Head, ref input.Tail);
                     input.StagedOwner = null;
                     if (input.WriteInFlight)
                         _ = WindowsInterop.CancelIoEx(_inputWriteHandle, IntPtr.Zero);

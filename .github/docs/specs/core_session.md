@@ -105,7 +105,7 @@ Asynchronous members never block the calling thread and never run library code o
 | `CompleteAsync`, `PtyCapture.RunAsync` | Output is collected on the session's reader thread; the caller awaits the input write, exit, and end of output. `Input`, when set, is written as by `WriteInputAsync`. |
 | `DisposeAsync` | Returns at once and completes when the reader has stopped, for every caller. |
 | `Output.Read`, `Input.Write` | Block, per the `Stream` contract. |
-| `WriteInputAsync` | Completes at once when the terminal takes the bytes; otherwise when the rest has been written in the background. That happens when the terminal's input buffer is full: on Unix when the child has not read the tty input queue, and on Windows when ConPTY has not read the 4 KiB input pipe, which it stops reading while output nobody reads has backed up. |
+| `WriteInputAsync` | Completes at once when the terminal takes the bytes; otherwise when the rest has been written in the background. That happens when the terminal's input buffer is full: on Unix when the child has not read the tty input queue, and on Windows when ConPTY has not read the 4 KiB input pipe, which it stops reading while output nobody reads has backed up. A macOS tty in canonical mode holds back a write only while a complete line is queued. Once 1,024 bytes of a line are pending, later bytes are dropped, and the write still completes (see [macOS line limit](../references/pty_crossplatform.md#unix-stdin-eof)). |
 
 ## Lessons Learned
 

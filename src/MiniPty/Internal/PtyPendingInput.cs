@@ -19,7 +19,7 @@ internal interface IPtyInputQueue
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="Remaining"/> and <see cref="Next"/> belong to the owning queue and are guarded by its lock. Completion
+/// <see cref="Remaining"/> and the queue links belong to the owning queue and are guarded by its lock. Completion
 /// runs outside that lock and never runs a continuation inline, so no waiter's code runs while the queue is held.
 /// A blocking writer waits in <see cref="Wait"/> instead, and the completing thread wakes it directly, so it does not
 /// need a thread-pool worker to resume.
@@ -63,6 +63,14 @@ internal sealed class PtyPendingInput : IValueTaskSource
     /// <summary>Next queued write, or the next entry of a chain being completed. Guarded by the owner's lock.</summary>
     internal PtyPendingInput? Next;
 
+    // Previous queued write, so a canceled entry leaves the queue without a walk from the head. Writes that share one
+    // token are canceled newest first, and a walk would make canceling them quadratic. Guarded by the owner's lock.
+    private PtyPendingInput? _previous;
+
+    // Whether the entry is in its owner's queue. A detached chain keeps its links until it is completed outside the
+    // lock, so the links alone cannot tell a cancellation that the entry already left. Guarded by the owner's lock.
+    private bool _queued;
+
     /// <summary>Token whose cancellation removes this entry; reported by the cancellation exception.</summary>
     internal CancellationToken Token { get; private set; }
 
@@ -79,6 +87,9 @@ internal sealed class PtyPendingInput : IValueTaskSource
             entry.Owner = owner;
 
         entry.Remaining = remaining;
+        entry.Next = null;
+        entry._previous = null;
+        entry._queued = false;
         entry._owned = owned;
         entry._completed = 0;
         entry._resultRead = 0;
@@ -174,6 +185,77 @@ internal sealed class PtyPendingInput : IValueTaskSource
         }
 
         Release();
+    }
+
+    /// <summary>Appends <paramref name="entry"/> to the queue from <paramref name="head"/> to <paramref name="tail"/>. Caller holds the owner's lock.</summary>
+    internal static void Enqueue(ref PtyPendingInput? head, ref PtyPendingInput? tail, PtyPendingInput entry)
+    {
+        entry._previous = tail;
+        entry.Next = null;
+        entry._queued = true;
+        if (tail is null)
+            head = entry;
+        else
+            tail.Next = entry;
+
+        tail = entry;
+    }
+
+    /// <summary>Removes and returns the head of the queue. Caller holds the owner's lock.</summary>
+    internal static PtyPendingInput DequeueHead(ref PtyPendingInput? head, ref PtyPendingInput? tail)
+    {
+        var entry = head!;
+        head = entry.Next;
+        if (head is null)
+            tail = null;
+        else
+            head._previous = null;
+
+        entry.Next = null;
+        entry._queued = false;
+        return entry;
+    }
+
+    /// <summary>
+    /// Removes <paramref name="entry"/> from the queue if it is still there. Returns <see langword="false"/> when it
+    /// has already left. Caller holds the owner's lock.
+    /// </summary>
+    internal static bool Remove(ref PtyPendingInput? head, ref PtyPendingInput? tail, PtyPendingInput entry)
+    {
+        if (!entry._queued)
+            return false;
+
+        if (entry._previous is null)
+            head = entry.Next;
+        else
+            entry._previous.Next = entry.Next;
+
+        if (entry.Next is null)
+            tail = entry._previous;
+        else
+            entry.Next._previous = entry._previous;
+
+        entry.Next = null;
+        entry._previous = null;
+        entry._queued = false;
+        return true;
+    }
+
+    /// <summary>
+    /// Empties the queue and returns its entries as a chain linked through <see cref="Next"/>, for
+    /// <see cref="CompleteChain"/>. Caller holds the owner's lock.
+    /// </summary>
+    internal static PtyPendingInput? DetachAll(ref PtyPendingInput? head, ref PtyPendingInput? tail)
+    {
+        var chain = head;
+        for (var entry = chain; entry is not null; entry = entry.Next)
+        {
+            entry._previous = null;
+            entry._queued = false;
+        }
+
+        head = tail = null;
+        return chain;
     }
 
     /// <summary>Completes every entry of a chain linked through <see cref="Next"/>. Call outside the owner's lock.</summary>
