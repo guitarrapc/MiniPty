@@ -208,6 +208,8 @@ Staged EOT writes are best-effort: if the slave is already closed (for example a
 
 **Does not work reliably for:** raw-mode readers, full-screen TUIs (`vim`, `less`), REPLs, or apps that bind Ctrl-D to another action.
 
+**macOS line limit:** in canonical mode a macOS tty holds at most 1,024 bytes on one line, LF included (`MAX_INPUT`). It takes a longer line without blocking and drops the excess, the LF and any later EOT included. The write reports success, but the child waits for a line and an EOF that never arrive. MiniPty cannot detect this. Send longer input as shorter lines, or to a child in raw mode. Verified on macOS 26 (arm64); see [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md#macos-check).
+
 **Windows vs Unix asymmetry:** `SendEof()` signals EOF differently—Windows writes Ctrl+Z + CR when bytes were written (pipe close only for empty stdin); Unix writes Ctrl-D only (does **not** close the PTY master fd). Both use the same **staged** rule below for empty stdin.
 
 ### Staged stdin EOF (`SendEof`)

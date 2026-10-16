@@ -52,6 +52,7 @@ These are verification choices, not API requirements, but they document pitfalls
 | Linux | GNU `stty rows` / `stty columns` without arguments set size instead of printing it. | Query via `stty size`. |
 | macOS | Spawn paths that do not attach a controlling terminal make `stty` and resize probes unreliable. | macOS uses `posix_spawn` + `minipty_spawn_helper` (controlling TTY via slave `open`); Linux/FreeBSD use `forkpty`. |
 | macOS ARM | Variadic `ioctl` for `TIOCSWINSZ` is unsafe to P/Invoke directly. | Resize runs in `libminipty_unix`. |
+| macOS | In canonical mode the tty drops a line past 1,024 bytes (LF included) without blocking, along with its LF and any later EOT, so the child waits forever. | Tests that need a write to wait, or EOF after a partial line, use short complete lines (`PtyInputTests`). |
 | Windows | Closing ConPTY stdin while a child is still attaching can yield `STATUS_CONTROL_C_EXIT`. | Empty-stdin EOF is staged; one-shot writes use Ctrl+Z + CR stream EOF instead of wait-loop pipe close. |
 | Windows | Input pipe close after bytes were written yields `STATUS_CONTROL_C_EXIT` for direct stdin readers (`sort`, `more`). | `SendEof` writes Ctrl+Z + CR and keeps the pipe open until exit; tests assert ExitCode 0 for `sort`. |
 | Windows | `pwsh` is optional on runners. | Prefer built-in Windows PowerShell unless pwsh-only behavior is needed. |

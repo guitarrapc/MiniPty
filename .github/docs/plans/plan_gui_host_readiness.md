@@ -327,7 +327,7 @@ Lessons:
 - **Stamp quiet detection per read, not per slot.** Stamping the last read after the coalescing micro-window let its empty tail postpone the post-exit close by up to a clock tick. Capture runs were about 10 ms slower until the stamp moved to each read that returned bytes.
 - **One-shot consumers belong on the reader thread.** A bounded ring drained by a consumer that only starts after exit would block a bulk-output child before it can exit. Writing into a sink on the reader thread also removed the pump task, the drain polling, and the timeout tasks.
 - **A one-time timeout needs a re-check after arming.** Review found that the drain close timeout, which fires once, could land between the sink's state check and its arming the wait, leaving no wait to signal and the scheduler done with the pump: `CompleteAsync` would have hung instead of throwing. The sink now re-checks after arming, with full fences on both sides. Review also found a full ring spinning against a closed Unix master; that state now ends output. Neither had a failing test.
-- **macOS was not run locally.** The macOS-only native paths (the `select` wait and the pipe wake descriptor) were neither compiled nor exercised here; FreeBSD shares the pipe path. CI on macOS is the first real check.
+- **macOS was not run locally.** The macOS-only native paths (the `select` wait and the pipe wake descriptor) were neither compiled nor exercised in this step; FreeBSD shares the pipe path. They were later run on a Mac after step 4b (see [macOS check](#macos-check)).
 
 ### Step 4 result: input path
 
@@ -359,7 +359,7 @@ Lessons:
 
 - **The reader thread is the natural input writer on Unix.** It already waits on the master, so write readiness joins the same wait. A separate writer would cost a thread per session or a pool worker, and step 1 showed that a pool worker blocked on a full tty can outlive cleanup.
 - **EOF is ordered input too.** Staged EOT must not overtake input still queued for a child that is not reading. The ordering test writes 20,000 numbered lines plus EOF at once and checks that the child saw every line.
-- **macOS was not run locally.** Its write wait uses the `select` write set, which only macOS compiles; CI on macOS is the first real check.
+- **macOS was not run locally.** Its write wait uses the `select` write set, which only macOS compiles. It was later run on a Mac after step 4b (see [macOS check](#macos-check)).
 
 ### Step 4b result: Windows input path
 
@@ -470,17 +470,41 @@ Results:
 | `PtyIntegrationBenchmarks` | Unchanged from the first round, for example `Session_Exit0_Bytes` 1.85 KB. The allocation check passes |
 | NativeAOT | `Session` sample published and run on Windows and Linux. `Interactive` published on Windows |
 
-The two races have no deterministic test, because each window lies between two adjacent steps. The macOS test changes were not run on macOS locally. The CI test jobs on macOS cover them.
+The two races have no deterministic test, because each window lies between two adjacent steps. The macOS test changes were not run on macOS in this round. The [macOS check](#macos-check) below ran them later.
 
 Lessons:
 
-- **A macOS tty needs complete lines in tests.** In canonical mode the macOS tty code holds back a write only once a complete line is queued, and it drops input past `MAX_INPUT` (1024 bytes) on a line, EOT included. A test that needs a write to wait, or EOF to arrive after a partial line, uses short complete lines there. This comes from reading the xnu tty code and has not been observed on a Mac yet.
+- **A macOS tty needs complete lines in tests.** In canonical mode the macOS tty code holds back a write only once a complete line is queued, and it drops input past `MAX_INPUT` (1024 bytes) on a line, EOT included. A test that needs a write to wait, or EOF to arrive after a partial line, uses short complete lines there. This came from reading the xnu tty code, and the [macOS check](#macos-check) later confirmed it on a Mac.
 - **An unlocked check needs repeating under the lock.** The EOF tick read the write state without the lock, so a write could land before the close.
 - **A test that caps the thread pool must prove the pool was busy.** `SetMaxThreads` returns false and changes nothing when the cap is below the minimum, which the first version ignored. Blockers that never saturate the pool let the test pass on the old path.
 - **Count before calling a 1 B/op blip a regression.** BenchmarkDotNet's allocation column counts every thread. On a benchmark that waits, a thread-pool thread being added mid-run shows up as a fraction of a byte per operation.
 - **The Unix EOT guard cannot be tested from outside.** The reader writes queued input as soon as the tty has room, and a full tty refuses EOT anyway, so EOT could only overtake queued input within that short window. Both ordering tests pass without the guard.
 
 Rounds three and four found only comment and doc wording, and round five found nothing. The reference now says Unix EOT also waits for room in the tty input queue. A canceled write can leave the queue full while nothing is queued in MiniPty.
+
+### macOS check
+
+Steps 3, 4, and 4b were built and tested on Windows and Linux only. This check ran the end of step 4b on macOS 26 (arm64), covering the macOS-only paths: the `select` read and write sets, the pipe wake descriptor, the EOT deferral, and the macOS branches in the tests.
+
+| Check | Result |
+|---|---|
+| Full suite | 233 pass, no skips, 16 runs |
+| NativeAOT | `Session` and `Interactive` samples published and run against the static native archive. The input probe below gave the same results published as it did under JIT |
+| `PtyInputBenchmarks` | 140.7, 141.4, and 144.9 µs, 2 B/op each. A probe of 8 rounds of 20,000 writes into `cat`, some of them queued, allocated 0 B process-wide in steady state. The only bytes were about 1 KB in rounds where a thread-pool thread was added, as the 1 B/op lesson above describes |
+
+Input probe: the child counts its stdin bytes into a file, and the probe writes once and then calls `SendEof`. The same probe ran against `main` before the input path.
+
+| Input | Input path | Before |
+|---|---|---|
+| 1 MiB of 64-byte lines while the child sleeps 1 s | Every byte arrives, exit 0, in 2–3.5 s | The write completes, but the child has not exited 10 s later |
+| One line of 1,023 bytes plus LF | Arrives | Same |
+| One line of 1,024 bytes or more plus LF, with the child reading or asleep, or 3,000 bytes without LF | The write completes at once; the child never gets the line or EOF and is still running 10 s later | Same |
+| 64 KiB of short lines to a raw-mode child | Arrives | Same |
+
+Lessons:
+
+- **The macOS tty line limit is real and older than the input path.** In canonical mode a line holds at most 1,024 bytes, LF included. The tty takes a longer line without blocking and drops the excess, the LF and later EOT included, so the write reports success while the child waits for a line and an EOF that never arrive. MiniPty cannot detect this. Raw-mode children are not affected. The reference now documents the limit.
+- **Native archives need a deployment target.** `scripts/build-native.sh` builds macOS objects for the host's macOS version, so linking an AOT sample against them warns that they target a newer macOS (26.0) than the app (12.0). This is outside the input path and is left as is.
 
 ### Acceptance
 
