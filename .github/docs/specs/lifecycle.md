@@ -76,7 +76,6 @@ Persistent embedders usually keep **one** output consumer active for the whole `
 | API | On cancellation |
 |---|---|
 | `WaitForExitAsync` | Waiting stops with `OperationCanceledException`; the child continues running. |
-| `WaitForExitStatusAsync` | Same as `WaitForExitAsync`; the child continues running. |
 | `ReadOutputAsync` | Output enumeration stops with `OperationCanceledException`; the child continues running. |
 | `WriteInputAsync` | A write still waiting for the terminal to take it stops with `OperationCanceledException`. Bytes already handed to the terminal still reach the child, and the rest is discarded. On Windows the bytes handed over include a pending part of up to 4 KiB that ConPTY has not read yet. The child continues running. |
 | `CompleteAsync` | When `KillOnCancellation` is true, the child is killed and `OperationCanceledException` is thrown. |

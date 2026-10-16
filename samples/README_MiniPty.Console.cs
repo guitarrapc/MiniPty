@@ -35,7 +35,7 @@ _ = exitTask.ContinueWith(
     TaskScheduler.Default);
 
 consoleInput.PumpInputUntil(attachCts.Token);
-var exitCode = await exitTask;
+var exitCode = (await exitTask).ExitCode;
 await pumpTask;
 ResetHostCursorColumnIfNeeded();
 Console.Error.WriteLine($"[MiniPty] shell exit={exitCode}, chunks={outputStats.Chunks}, bytes={outputStats.Bytes}");

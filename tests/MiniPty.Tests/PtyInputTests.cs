@@ -202,7 +202,7 @@ public sealed class PtyInputTests
             await Assert.That(write.IsCompletedSuccessfully).IsTrue();
 
             session.SendEof();
-            await Assert.That(await session.WaitForExitAsync().WaitAsync(Timeout)).IsEqualTo(0);
+            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
             await drain.WaitAsync(Timeout);
 
             await Assert.That(File.ReadAllLines(copyFile).Length).IsEqualTo(Lines);
@@ -292,7 +292,7 @@ public sealed class PtyInputTests
         session.SendEof();
         var drain = DrainAsync(session);
         // Exit code 0: a child that ended because input was closed instead, or that never started, exits otherwise.
-        await Assert.That(await session.WaitForExitAsync().WaitAsync(Timeout)).IsEqualTo(0);
+        await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
         await drain.WaitAsync(Timeout);
     }
 
@@ -319,7 +319,7 @@ public sealed class PtyInputTests
 
             var drain = DrainAsync(session);
             // Exit code 0: closing the input pipe after bytes ends the child with STATUS_CONTROL_C_EXIT instead.
-            await Assert.That(await session.WaitForExitAsync().WaitAsync(Timeout)).IsEqualTo(0);
+            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
             await drain.WaitAsync(Timeout);
 
             await Assert.That(ReadLines(copyFile)).IsEqualTo("x");
@@ -347,7 +347,7 @@ public sealed class PtyInputTests
 
             var drain = DrainAsync(session);
             // Exit code 0: closing the input pipe after bytes ends the child with STATUS_CONTROL_C_EXIT instead.
-            await Assert.That(await session.WaitForExitAsync().WaitAsync(Timeout)).IsEqualTo(0);
+            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
             await drain.WaitAsync(Timeout);
 
             // A Unix tty passes 0xFF through as data, so both bytes must arrive. The Windows console decodes 0xFF in its

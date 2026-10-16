@@ -62,7 +62,7 @@ static int RunInteractiveShell()
 
         consoleInput.PumpInputUntil(attachCts.Token);
 
-        exitCode = exitTask.IsCompletedSuccessfully ? exitTask.Result : session.ExitCode ?? -1;
+        exitCode = exitTask.IsCompletedSuccessfully ? exitTask.Result.ExitCode : session.ExitCode ?? -1;
         pumpTask.GetAwaiter().GetResult();
     }
 

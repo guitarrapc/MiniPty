@@ -264,7 +264,7 @@ public sealed class PtyTerminal : IAsyncDisposable
 
             // Enumeration completes only after child exit and post-exit drain, so every handler
             // invocation has finished before the exit status is observed and published.
-            return await _session.WaitForExitStatusAsync(CancellationToken.None).ConfigureAwait(false);
+            return await _session.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch
         {

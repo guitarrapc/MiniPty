@@ -366,43 +366,34 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// Asynchronously waits until the child process exits.
+    /// Asynchronously waits until the child process exits and returns its <see cref="PtyExitStatus"/>.
     /// </summary>
     /// <param name="cancellationToken">
     /// When canceled, waiting stops and <see cref="OperationCanceledException"/> is thrown.
     /// The child process continues running.
     /// </param>
-    /// <returns>A task that completes with the child exit code.</returns>
+    /// <returns>
+    /// A task that completes with the child's exit code and, on Unix, the signal that terminated it.
+    /// </returns>
     /// <remarks>
+    /// <para>
+    /// Without a cancelable token every call returns the same task, so waiting allocates nothing beyond the first
+    /// call. Nothing polls or blocks: the task completes when the operating system reports the exit.
+    /// </para>
+    /// <para>
     /// Waiting does not affect output: a concurrent output reader keeps receiving output until end of output,
-    /// which follows shortly after exit once output has gone quiet.
+    /// which follows shortly after exit once output has gone quiet. Disposing the session before the child exits
+    /// fails the wait with <see cref="ObjectDisposedException"/>. A wait started earlier still reports the status of
+    /// a child that exited before the session was disposed.
+    /// </para>
     /// </remarks>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     /// <exception cref="OperationCanceledException">Waiting was canceled.</exception>
-    public Task<int> WaitForExitAsync(CancellationToken cancellationToken = default)
+    public Task<PtyExitStatus> WaitForExitAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        return WaitForExitCodeAsync(cancellationToken);
-    }
-
-    private async Task<int> WaitForExitCodeAsync(CancellationToken cancellationToken)
-    {
-        var status = await WaitForExitStatusCoreAsync(cancellationToken).ConfigureAwait(false);
-        return status.ExitCode;
-    }
-
-    /// <summary>
-    /// Asynchronously waits until the child process exits and returns its <see cref="PtyExitStatus"/>.
-    /// </summary>
-    /// <param name="cancellationToken">
-    /// When canceled, waiting stops and <see cref="OperationCanceledException"/> is thrown.
-    /// The child process continues running, identical to <see cref="WaitForExitAsync"/>.
-    /// </param>
-    /// <returns>A task that completes with the child exit code and Unix termination signal.</returns>
-    /// <exception cref="OperationCanceledException">Waiting was canceled.</exception>
-    public Task<PtyExitStatus> WaitForExitStatusAsync(CancellationToken cancellationToken = default)
-    {
-        ThrowIfDisposed();
-        return WaitForExitStatusCoreAsync(cancellationToken);
+        // WaitAsync returns the exit task itself when the token cannot be canceled.
+        return _backend.Exited.WaitAsync(cancellationToken);
     }
 
     /// <summary>
@@ -476,18 +467,6 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         // Idempotent teardown; disposal having started does not mean the reader has stopped.
         Dispose();
         return _pump.WaitForStopAsync();
-    }
-
-    /// <summary>
-    /// Public exit wait. Awaits the backend's OS-driven exit task: nothing here polls or blocks, so awaiting
-    /// it from a UI <see cref="SynchronizationContext"/> leaves that thread free; only the caller's own
-    /// continuation resumes there.
-    /// </summary>
-    private async Task<PtyExitStatus> WaitForExitStatusCoreAsync(CancellationToken cancellationToken)
-    {
-        var status = await _backend.Exited.WaitAsync(cancellationToken).ConfigureAwait(false);
-        ThrowIfDisposed();
-        return status;
     }
 
     /// <summary>

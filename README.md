@@ -40,7 +40,7 @@ macOS
 - Persistent bytes-only output streaming (`ReadOutputAsync`)
 - One-shot run with optional stdin and drained output (`CompleteAsync`)
 - Resize the terminal after spawn (`PtySession.Resize`)
-- Exit status with Unix termination signal (`WaitForExitStatusAsync`, `ExitStatus`) and signal kill (`Kill(PtySignal)`)
+- Exit status with Unix termination signal (`WaitForExitAsync`, `ExitStatus`) and signal kill (`Kill(PtySignal)`)
 - Per-read timestamps for observation or recording (**MiniPty.Capture**, `PtyCapture.RunAsync`)
 - Host terminal input attach for interactive programs (**MiniPty.Console**, `PtyConsoleInput.Attach`)
 - Backend PTY for xterm.js / editor terminals: push facade, pause/resume flow control, WebSocket bridge (**MiniPty.Terminal**, `PtyTerminal`, `PtyWebSocketBridge`)
@@ -107,7 +107,7 @@ static async Task RunStreamModeAsync()
     await foreach (var chunk in session.ReadOutputAsync())
         Console.WriteLine($"+{sw.Elapsed.TotalSeconds,4:F1}s chunk#{++chunks} ({chunk.Data.Length} bytes)");
 
-    Console.WriteLine($"stream exit={await session.WaitForExitAsync()}, chunks={chunks}");
+    Console.WriteLine($"stream exit={(await session.WaitForExitAsync()).ExitCode}, chunks={chunks}");
 }
 
 static async Task RunCompleteModeAsync()
@@ -220,7 +220,7 @@ _ = exitTask.ContinueWith(
     TaskScheduler.Default);
 
 consoleInput.PumpInputUntil(attachCts.Token);
-var exitCode = await exitTask;
+var exitCode = (await exitTask).ExitCode;
 await pumpTask;
 ResetHostCursorColumnIfNeeded();
 Console.Error.WriteLine($"[MiniPty] shell exit={exitCode}, chunks={outputStats.Chunks}, bytes={outputStats.Bytes}");

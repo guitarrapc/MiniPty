@@ -63,7 +63,7 @@ static async Task RunPersistentCommandLoopAsync()
     Console.Error.WriteLine($"marker {finalMarker}");
 
     await pumpTask.ConfigureAwait(false);
-    var exitCode = await session.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+    var exitCode = (await session.WaitForExitAsync(cts.Token).ConfigureAwait(false)).ExitCode;
 
     var text = GetOutputText(output, outputLock);
     Console.Error.WriteLine($"pid={session.ProcessId} exit={exitCode}");
