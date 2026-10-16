@@ -49,7 +49,26 @@ internal static class PtyCompletion
             return;
 
         if (options.Input.Length > 0)
-            await session.WriteInputAsync(options.Input, options.OutputEncoding, cancellationToken).ConfigureAwait(false);
+        {
+            try
+            {
+                await session.WriteInputAsync(options.Input, options.OutputEncoding, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (options.KillOnCancellation && cancellationToken.IsCancellationRequested)
+            {
+                // A write can wait for the terminal to take input, so cancellation can land here before the exit wait,
+                // which is where the kill otherwise happens.
+                try
+                {
+                    session.Kill();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+
+                throw;
+            }
+        }
 
         if (options.SendEofAfterInput)
             session.SendEof();

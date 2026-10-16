@@ -24,17 +24,21 @@
 /*
  * Output reader primitives.
  *
- * Each MiniPty output reader thread owns one wake descriptor and blocks in minipty_output_wait on the PTY
+ * Each MiniPty output reader thread owns one wake descriptor and blocks in minipty_pty_wait on the PTY
  * master and that descriptor together. Closing a descriptor does not interrupt a read or poll blocked on it in
  * another thread (see close(2)), so the wake descriptor is how a reader is stopped, or told that its session
- * changed state, without closing the master underneath it.
+ * changed state, without closing the master underneath it. The same wait reports when the master can take
+ * input again: the master is non-blocking, and stdin the tty input queue could not take at once is written by
+ * the reader thread when it becomes writable.
  *
  * Linux uses one eventfd for both ends; macOS and FreeBSD use a pipe. Every descriptor is close-on-exec and
  * non-blocking, so a signal never blocks the signaler and a drain never blocks the reader.
  */
 
-#define MINIPTY_OUTPUT_READY 1
-#define MINIPTY_OUTPUT_WOKEN 2
+/* minipty_pty_wait events and results. */
+#define MINIPTY_PTY_READABLE 1
+#define MINIPTY_PTY_WOKEN 2
+#define MINIPTY_PTY_WRITABLE 4
 
 #if !defined(__linux__)
 static int minipty_output_set_cloexec_nonblock(int fd)
@@ -123,11 +127,22 @@ void minipty_wake_close(int read_fd, int write_fd)
         close(write_fd);
 }
 
-int minipty_output_wait(int master, int wake_fd, int timeout_ms)
+int minipty_set_nonblocking(int fd)
 {
+    int flags = fcntl(fd, F_GETFL);
+
+    if (flags < 0)
+        return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+int minipty_pty_wait(int master, int events, int wake_fd, int timeout_ms)
+{
+    int want_read = master >= 0 && (events & MINIPTY_PTY_READABLE) != 0;
+    int want_write = master >= 0 && (events & MINIPTY_PTY_WRITABLE) != 0;
 #if defined(__APPLE__)
     /*
-     * macOS poll() does not support devices, PTY masters included, so wait with select(). The sets are sized
+     * The macOS poll(2) page says poll() does not support devices, so wait with select(). The sets are sized
      * for the highest descriptor rather than FD_SETSIZE, which unlimited select accepts.
      */
     int max_fd = master > wake_fd ? master : wake_fd;
@@ -137,7 +152,7 @@ int minipty_output_wait(int master, int wake_fd, int timeout_ms)
     int ready;
     int result = 0;
 
-    if (max_fd < 0) {
+    if (max_fd < 0 || (!want_read && !want_write && wake_fd < 0)) {
         errno = EINVAL;
         return -1;
     }
@@ -151,21 +166,27 @@ int minipty_output_wait(int master, int wake_fd, int timeout_ms)
     words = (size_t)max_fd / __DARWIN_NFDBITS + 1;
     {
         __int32_t read_set[words];
+        __int32_t write_set[words];
 
         memset(read_set, 0, words * sizeof(__int32_t));
-        if (master >= 0)
+        memset(write_set, 0, words * sizeof(__int32_t));
+        if (want_read)
             read_set[master / __DARWIN_NFDBITS] |= (__int32_t)(1u << (master % __DARWIN_NFDBITS));
+        if (want_write)
+            write_set[master / __DARWIN_NFDBITS] |= (__int32_t)(1u << (master % __DARWIN_NFDBITS));
         if (wake_fd >= 0)
             read_set[wake_fd / __DARWIN_NFDBITS] |= (__int32_t)(1u << (wake_fd % __DARWIN_NFDBITS));
 
-        ready = select(max_fd + 1, (fd_set *)read_set, NULL, NULL, timeout_ptr);
+        ready = select(max_fd + 1, (fd_set *)read_set, want_write ? (fd_set *)write_set : NULL, NULL, timeout_ptr);
         if (ready < 0)
             return errno == EINTR ? 0 : -1;
 
-        if (master >= 0 && (read_set[master / __DARWIN_NFDBITS] & (__int32_t)(1u << (master % __DARWIN_NFDBITS))) != 0)
-            result |= MINIPTY_OUTPUT_READY;
+        if (want_read && (read_set[master / __DARWIN_NFDBITS] & (__int32_t)(1u << (master % __DARWIN_NFDBITS))) != 0)
+            result |= MINIPTY_PTY_READABLE;
+        if (want_write && (write_set[master / __DARWIN_NFDBITS] & (__int32_t)(1u << (master % __DARWIN_NFDBITS))) != 0)
+            result |= MINIPTY_PTY_WRITABLE;
         if (wake_fd >= 0 && (read_set[wake_fd / __DARWIN_NFDBITS] & (__int32_t)(1u << (wake_fd % __DARWIN_NFDBITS))) != 0)
-            result |= MINIPTY_OUTPUT_WOKEN;
+            result |= MINIPTY_PTY_WOKEN;
     }
 
     return result;
@@ -177,9 +198,9 @@ int minipty_output_wait(int master, int wake_fd, int timeout_ms)
     int ready;
     int result = 0;
 
-    if (master >= 0) {
+    if (want_read || want_write) {
         fds[count].fd = master;
-        fds[count].events = POLLIN;
+        fds[count].events = (short)((want_read ? POLLIN : 0) | (want_write ? POLLOUT : 0));
         fds[count].revents = 0;
         master_index = (int)count++;
     }
@@ -200,11 +221,19 @@ int minipty_output_wait(int master, int wake_fd, int timeout_ms)
     if (ready < 0)
         return errno == EINTR ? 0 : -1;
 
-    /* Hang-up and errors count as ready: the following read reports them as end of output. */
-    if (master_index >= 0 && fds[master_index].revents != 0)
-        result |= MINIPTY_OUTPUT_READY;
+    if (master_index >= 0) {
+        short revents = fds[master_index].revents;
+        /* Hang-up and errors count as ready either way: the following read or write reports them. */
+        int failed = (revents & (POLLHUP | POLLERR | POLLNVAL)) != 0;
+
+        if (want_read && ((revents & POLLIN) != 0 || failed))
+            result |= MINIPTY_PTY_READABLE;
+        if (want_write && ((revents & POLLOUT) != 0 || failed))
+            result |= MINIPTY_PTY_WRITABLE;
+    }
+
     if (wake_index >= 0 && fds[wake_index].revents != 0)
-        result |= MINIPTY_OUTPUT_WOKEN;
+        result |= MINIPTY_PTY_WOKEN;
 
     return result;
 #endif

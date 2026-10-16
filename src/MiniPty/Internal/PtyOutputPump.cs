@@ -259,7 +259,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
             && !_backend.IsOutputClosed
             && Volatile.Read(ref _sink) is null)
         {
-            reader.WaitForWake(Timeout.Infinite);
+            // Unix also writes queued input meanwhile; a return without a wake is re-checked by the loop.
+            _backend.WaitWhileOutputBlocked(reader);
         }
 
         // Time parked on a full ring is not transport silence. Restart the quiet interval before the drain can see
@@ -591,7 +592,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     void IValueTaskSource.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
         _stopped.OnCompleted(continuation, state, token, flags);
 
-    private void WakeReader() => Volatile.Read(ref _reader)?.Wake(this);
+    /// <summary>Wakes the reader thread to re-check state; the Unix backend uses it when input is queued.</summary>
+    internal void WakeReader() => Volatile.Read(ref _reader)?.Wake(this);
 
     private void ReleaseRing()
     {

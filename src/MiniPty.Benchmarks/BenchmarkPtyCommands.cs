@@ -31,6 +31,9 @@ internal static class BenchmarkPtyCommands
     internal static PtyStartInfo SmallStdout(int byteCount) =>
         Spawn(ResolveBenchmarkChildPath(), ["--bytes", byteCount.ToString(CultureInfo.InvariantCulture)]);
 
+    /// <summary>Child that reads stdin until end of input and discards it, for input-path benchmarks.</summary>
+    internal static PtyStartInfo StdinSink() => Spawn(ResolveBenchmarkChildPath(), ["--stdin-sink"]);
+
     private static string ResolveBenchmarkChildPath()
     {
         var baseDir = AppContext.BaseDirectory;

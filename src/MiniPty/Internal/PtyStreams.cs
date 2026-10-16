@@ -1,14 +1,18 @@
-﻿using Microsoft.Win32.SafeHandles;
+﻿using System.Buffers;
 
 namespace MiniPty.Internal;
 
-/// <summary>Write stream over a PTY input handle. Does not close the underlying handle.</summary>
-internal sealed class PtyHandleWriteStream : Stream
+/// <summary>
+/// <see cref="PtySession.Input"/>: a write-only stream over the backend's input queue, shared by both platforms.
+/// </summary>
+/// <remarks>
+/// Every asynchronous overload goes through <see cref="PtyInputWrites"/>: Stream's defaults would run the blocking
+/// write on a thread-pool worker and allocate a task per call. <see cref="Write(ReadOnlySpan{byte})"/> blocks until
+/// the bytes are written, per the <see cref="Stream"/> contract. The stream does not own the transport, so disposing
+/// it does nothing.
+/// </remarks>
+internal sealed class PtyInputStream(IPtyBackend backend) : Stream
 {
-    private readonly SafeFileHandle _handle;
-
-    public PtyHandleWriteStream(SafeFileHandle handle) => _handle = handle;
-
     public override bool CanRead => false;
     public override bool CanSeek => false;
     public override bool CanWrite => true;
@@ -17,108 +21,98 @@ internal sealed class PtyHandleWriteStream : Stream
 
     public override void Flush() { }
 
-    public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    public override Task FlushAsync(CancellationToken cancellationToken) =>
+        cancellationToken.IsCancellationRequested ? Task.FromCanceled(cancellationToken) : Task.CompletedTask;
 
+    public override void Write(byte[] buffer, int offset, int count)
+    {
+        ValidateBufferArguments(buffer, offset, count);
+        PtyInputWrites.Write(backend, buffer.AsSpan(offset, count));
+    }
+
+    public override void Write(ReadOnlySpan<byte> buffer) => PtyInputWrites.Write(backend, buffer);
+
+    public override void WriteByte(byte value)
+    {
+        Span<byte> one = [value];
+        PtyInputWrites.Write(backend, one);
+    }
+
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+        PtyInputWrites.WriteAsync(backend, buffer, ownedBuffer: null, cancellationToken);
+
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    {
+        ValidateBufferArguments(buffer, offset, count);
+        return PtyInputWrites.WriteAsync(backend, buffer.AsMemory(offset, count), ownedBuffer: null, cancellationToken).AsTask();
+    }
+
+    public override IAsyncResult BeginWrite(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state) =>
+        TaskToAsyncResult.Begin(WriteAsync(buffer, offset, count, CancellationToken.None), callback, state);
+
+    public override void EndWrite(IAsyncResult asyncResult) => TaskToAsyncResult.End(asyncResult);
+
+    public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
     public override void SetLength(long value) => throw new NotSupportedException();
-
-    public override void Write(byte[] buffer, int offset, int count) =>
-        Write(buffer.AsSpan(offset, count));
-
-    public override void Write(ReadOnlySpan<byte> buffer) => PtyIo.WriteAll(_handle, buffer);
 
     protected override void Dispose(bool disposing)
     {
-        // Handle lifetime is owned by the session backend.
+        // The session owns the transport.
     }
 }
 
-/// <summary>Reference-counted access to a Unix PTY master, so a close never lands while the descriptor is in use.</summary>
-internal interface IPtyMasterLease
+/// <summary>
+/// The caller's side of a stdin write into the backend's input queue, shared by
+/// <see cref="PtySession"/> and <see cref="PtyInputStream"/> so both report the same way on every platform.
+/// </summary>
+/// <remarks>
+/// A canceled token and a failed write are reported through the returned task, not thrown from the call: a caller
+/// that starts a write and awaits it later, or never, still finds the failure in the task. Disposal is a usage error
+/// and still throws.
+/// </remarks>
+internal static class PtyInputWrites
 {
-    /// <summary>Pins the master for one use. Fails once the transport is closed.</summary>
-    bool TryAcquireMaster(out int master);
-
-    void ReleaseMaster();
-}
-
-/// <summary>Write stream over a Unix PTY master. Does not close the master.</summary>
-internal sealed class PtyFdWriteStream : Stream
-{
-    private readonly IPtyMasterLease _master;
-
-    public PtyFdWriteStream(IPtyMasterLease master) => _master = master;
-
-    public override bool CanRead => false;
-    public override bool CanSeek => false;
-    public override bool CanWrite => true;
-    public override long Length => throw new NotSupportedException();
-    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-
-    public override void Flush() { }
-
-    public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-    public override void SetLength(long value) => throw new NotSupportedException();
-
-    public override void Write(byte[] buffer, int offset, int count) =>
-        Write(buffer.AsSpan(offset, count));
-
-    public override void Write(ReadOnlySpan<byte> buffer)
+    /// <summary>
+    /// Writes <paramref name="bytes"/>. The task completes once all of them are written. The write owns
+    /// <paramref name="ownedBuffer"/>, the pooled array behind the bytes when set, and returns it.
+    /// </summary>
+    internal static ValueTask WriteAsync(IPtyBackend backend, ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer, CancellationToken cancellationToken)
     {
-        if (!_master.TryAcquireMaster(out var master))
-            throw new IOException("The PTY transport is closed.");
+        if (cancellationToken.IsCancellationRequested)
+        {
+            if (ownedBuffer is not null)
+                ArrayPool<byte>.Shared.Return(ownedBuffer);
+
+            return ValueTask.FromCanceled(cancellationToken);
+        }
 
         try
         {
-            PtyIo.WriteAll(master, buffer);
+            return backend.QueueInput(bytes, ownedBuffer) is { } entry ? entry.ToValueTask(cancellationToken) : default;
         }
-        finally
+        catch (Exception ex) when (ex is not ObjectDisposedException)
         {
-            _master.ReleaseMaster();
+            return ValueTask.FromException(ex);
         }
     }
 
-    protected override void Dispose(bool disposing) { }
-}
-
-/// <summary>Notifies on each non-empty stdin write (EOF staging and line-ending tracking).</summary>
-internal sealed class InputTrackingWriteStream : Stream
-{
-    private readonly Stream _inner;
-    private readonly Action<ReadOnlySpan<byte>> _onWrite;
-
-    public InputTrackingWriteStream(Stream inner, Action<ReadOnlySpan<byte>> onWrite)
+    /// <summary>As the memory overload. Bytes that must wait are copied first, so the span need not outlive the call.</summary>
+    internal static ValueTask WriteAsync(IPtyBackend backend, ReadOnlySpan<byte> bytes, CancellationToken cancellationToken)
     {
-        _inner = inner;
-        _onWrite = onWrite;
+        if (cancellationToken.IsCancellationRequested)
+            return ValueTask.FromCanceled(cancellationToken);
+
+        try
+        {
+            return backend.QueueInput(bytes) is { } entry ? entry.ToValueTask(cancellationToken) : default;
+        }
+        catch (Exception ex) when (ex is not ObjectDisposedException)
+        {
+            return ValueTask.FromException(ex);
+        }
     }
 
-    public override bool CanRead => _inner.CanRead;
-    public override bool CanSeek => _inner.CanSeek;
-    public override bool CanWrite => _inner.CanWrite;
-    public override long Length => _inner.Length;
-    public override long Position { get => _inner.Position; set => _inner.Position = value; }
-
-    public override void Flush() => _inner.Flush();
-
-    public override int Read(byte[] buffer, int offset, int count) =>
-        _inner.Read(buffer, offset, count);
-
-    public override long Seek(long offset, SeekOrigin origin) =>
-        _inner.Seek(offset, origin);
-
-    public override void SetLength(long value) => _inner.SetLength(value);
-
-    public override void Write(byte[] buffer, int offset, int count) =>
-        Write(buffer.AsSpan(offset, count));
-
-    public override void Write(ReadOnlySpan<byte> buffer)
-    {
-        if (!buffer.IsEmpty)
-            _onWrite(buffer);
-        _inner.Write(buffer);
-    }
-
-    protected override void Dispose(bool disposing) { }
+    /// <summary>Writes <paramref name="bytes"/> and blocks until all of them are written, per the Stream contract.</summary>
+    internal static void Write(IPtyBackend backend, ReadOnlySpan<byte> bytes) => backend.QueueInput(bytes)?.Wait();
 }

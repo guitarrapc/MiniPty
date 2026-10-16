@@ -7,7 +7,28 @@
 /// </summary>
 internal interface IPtyBackend : IDisposable
 {
+    /// <summary>Gets the stdin stream: a <see cref="PtyInputStream"/> over the input queue.</summary>
     public Stream Input { get; }
+
+    // Input. A write takes what the transport accepts now on the calling thread, and the rest is queued in order.
+    // On Unix the session's reader thread writes the queue when the master can take more. On Windows I/O
+    // completions on the overlapped input pipe write it as ConPTY reads input again. PtyInputWrites turns a queued
+    // write into the caller's task or a blocking wait.
+
+    /// <summary>
+    /// Writes what the transport takes now and queues the rest in issue order. Returns the queued write, or null when
+    /// everything was written. The caller keeps the memory unchanged until the write completes. When
+    /// <paramref name="ownedBuffer"/> is set, the backend owns that pooled array, which backs
+    /// <paramref name="bytes"/>, and returns it when done, also when this throws.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The session was disposed.</exception>
+    /// <exception cref="IOException">Input is closed, or the transport failed.</exception>
+    public PtyPendingInput? QueueInput(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer);
+    /// <summary>As the memory overload. Bytes that must wait are copied into a pooled buffer.</summary>
+    public PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes);
+    /// <summary>Gives the backend the pump whose reader thread writes queued input.</summary>
+    public void SetOutputPump(PtyOutputPump pump);
+
     public int ProcessId { get; }
     public bool HasExited { get; }
     public int ExitCode { get; }
@@ -57,6 +78,11 @@ internal interface IPtyBackend : IDisposable
     /// the last read filled. Returns 0 when none arrived; <paramref name="endOfOutput"/> reports end of output.
     /// </summary>
     public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput);
+    /// <summary>
+    /// Parks the reader while the ring is full, until <paramref name="reader"/> is woken. On Unix it keeps
+    /// writing queued input meanwhile, and may return after doing so; the pump re-checks its state either way.
+    /// </summary>
+    public void WaitWhileOutputBlocked(PtyReaderThread reader);
     /// <summary>
     /// Longest time, in <see cref="System.Diagnostics.Stopwatch"/> ticks, that one slot keeps appending
     /// <see cref="ReadMoreOutput"/> results after its first read; 0 or less appends until the slot fills or a
