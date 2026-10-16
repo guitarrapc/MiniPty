@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** G2 implemented (2026-10-15). G1 design agreed; delivery steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), and 4b (Windows non-blocking input, F11) are done. F12 is tracked as G11. The other items are proposed.
+**Status:** G2 implemented (2026-10-15). G1 design agreed; delivery steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`) are done. F12 is tracked as G11. The other items are proposed.
 
 ## Background
 
@@ -168,7 +168,7 @@ Fixing only the `Task.Yield` sites would remove the freezes, but it would keep a
 
 - **Managed buffering bound:** from "one in-flight chunk" to "slot count × slot size", in [core_session.md](../specs/core_session.md) (`ReadOutputAsync`) and [terminal.md](../specs/terminal.md) (`Pause`). Done in step 3.
 - **Output is read from spawn:** output is read into the bounded ring before any consumer attaches. Early output is never stranded, and a child no longer stalls on its first writes while nobody is reading. Done in step 3.
-- **Exit API merged:** as described in the table above. Step 5.
+- **Exit API merged:** as described in the table above. Done in step 5.
 - **Dispose versus DisposeAsync:** the new semantics above. Done in step 3.
 - **Capture timestamps:** they become pump read-completion times, which are closer to the transport than consumer receipt times. Done in step 3.
 - **Exit waits no longer close the transport** (step 3): the post-exit drain closes it for every consumer after output has gone quiet, in [lifecycle.md](../specs/lifecycle.md).
@@ -533,6 +533,31 @@ Lessons:
 - **A disposed `ManualResetEventSlim` throws from `Wait` even when it is set.** A test must not dispose an event that work it queued may still wait on.
 - **The ordering tests do check the EOT guard on macOS.** With both of its checks removed, the one before the lock and the one under it, `QueuedInputIsDeliveredInOrderWithEofAfterIt` failed in most runs of every set. `CancelingAQueuedWriteKeepsTheOthersInOrder` and `QueuedInputIsDeliveredInOrderWithEofAfterItWhileOutputIsBackedUp` failed in no run of some sets and in some or all runs of the rest. The macOS tty, holding about 1 KiB, regains room while input is still queued, and EOT then overtakes it. With either check removed alone, the tests passed every run, because the other check covers it.
 - **A loose assertion can pass for the wrong reason.** The 0xFF test compared only the byte before 0xFF, so it would pass even if 0xFF were lost. A Unix tty passes 0xFF through as data, so the test now requires both bytes there.
+
+### Step 5 result: exit API
+
+What changed:
+
+- `WaitForExitAsync` returns `Task<PtyExitStatus>`, and `WaitForExitStatusAsync` is removed. Callers that need only the code read `ExitCode`.
+- Without a cancelable token every call returns the session's one exit task. With one, the wait is `Task.WaitAsync` over that task.
+- Disposal before exit still fails the wait with `ObjectDisposedException`, through the exit task itself. The wait no longer checks disposal again after the exit. Before, a wait whose continuation ran after disposal reported `ObjectDisposedException` even though the child had already exited. Now such a wait reports the exit status.
+- `PtyTerminal`, the samples, the README, the specifications, and the reference use the merged API.
+
+Results:
+
+| Check | Result |
+|---|---|
+| New test: calls without a token return the same task | Fails when each call returns a new task (mutation). The disposal test now also covers a wait with a cancelable token |
+| Full suite | Windows 239 pass, 2 runs. Linux 239 pass, 2 runs |
+| New `Session_Exit0_WaitForExit` benchmark | 1.46 KB before, 1.22 KB after, in 3 runs each. About 24 ms both |
+| `PtyIntegrationBenchmarks`, other scenarios | Unchanged. The allocation check passes |
+| NativeAOT | `Session` and `Interactive` published on Windows, and `Session` run |
+
+The old wait ran two async methods, one returning the code over one returning the status, and each allocated a state machine when it had to wait. The new wait runs none.
+
+Lessons:
+
+- **The README samples pin a released package.** `README_MiniPty.cs` and `README_MiniPty.Console.cs` mirror the README and compile against `MiniPty@1.2.0`, so they fail to build until the pin moves to a release with the merged API. CI does not build them.
 
 ### Acceptance
 

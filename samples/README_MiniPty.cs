@@ -25,7 +25,7 @@ static async Task RunStreamModeAsync()
     await foreach (var chunk in session.ReadOutputAsync())
         Console.WriteLine($"+{sw.Elapsed.TotalSeconds,4:F1}s chunk#{++chunks} ({chunk.Data.Length} bytes)");
 
-    Console.WriteLine($"stream exit={await session.WaitForExitAsync()}, chunks={chunks}");
+    Console.WriteLine($"stream exit={(await session.WaitForExitAsync()).ExitCode}, chunks={chunks}");
 }
 
 static async Task RunCompleteModeAsync()

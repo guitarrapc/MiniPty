@@ -46,8 +46,7 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 | `WriteInputAsync` | Writes UTF-8 text by default, or raw bytes. Does not close stdin. Never blocks the calling thread: bytes the terminal accepts at once are written synchronously (the usual case, allocation-free after the session's first write), and the rest is written in order in the background: on Unix by the session's reader thread as the child reads, on Windows by I/O completions as ConPTY takes input again. Writes reach the child in issue order, and `SendEof` takes effect after every write issued before it. A canceled token, a closed input, and a failed write are reported through the returned task rather than thrown from the call. Canceling a waiting write discards the bytes not yet handed to the terminal. Those already handed over still arrive, which on Windows include a pending part of up to 4 KiB that ConPTY has not read yet. |
 | `SendEof()` | Signals end of stdin using platform-specific behavior. See [Lifecycle](lifecycle.md). |
 | `Resize(PtySize)` / `Resize(PtySize, PtyPixelSize?)` | Resizes after spawn; Unix also reports optional pixel dimensions, while Windows ignores pixels. Child exit never makes it fail: while the transport is open the size is applied, and once the transport has been closed after exit the call is a no-op that keeps `Size`. Only disposal (`ObjectDisposedException`), invalid pixel dimensions, and an OS failure while the child is running throw. |
-| `WaitForExitAsync` | Waits for child exit. Cancellation stops waiting only; the child keeps running. |
-| `WaitForExitStatusAsync` | Same wait/cancellation semantics as `WaitForExitAsync`; returns `PtyExitStatus` (exit code plus Unix termination signal). |
+| `WaitForExitAsync` | Waits for child exit and returns `PtyExitStatus` (exit code plus Unix termination signal). Cancellation stops waiting only; the child keeps running. Without a cancelable token every call returns the same task, so repeated waits allocate nothing. Disposal before exit fails the wait with `ObjectDisposedException`; a child that exited first still reports its status. |
 | `CompleteAsync` | Convenience API for one-shot input, wait, drain, and result materialization. See [Completion](completion.md). |
 | `Kill()` | Terminates the child process without releasing handles. |
 | `Kill(PtySignal)` | Sends a signal on Unix (`kill(2)`; the child may handle or ignore catchable signals). On Windows the signal is advisory and the child is terminated (node-pty parity). Undefined enum values throw `ArgumentOutOfRangeException` on both platforms. |
@@ -101,7 +100,7 @@ Asynchronous members never block the calling thread and never run library code o
 | Member | Behavior on the caller's thread |
 |---|---|
 | `ReadOutputAsync`, `Output.ReadAsync` | Complete synchronously while output is buffered; otherwise resume when output arrives. |
-| `WaitForExitAsync`, `WaitForExitStatusAsync` | Await the exit watcher's notification. |
+| `WaitForExitAsync` | Awaits the exit watcher's notification. |
 | `CompleteAsync`, `PtyCapture.RunAsync` | Output is collected on the session's reader thread; the caller awaits the input write, exit, and end of output. `Input`, when set, is written as by `WriteInputAsync`. |
 | `DisposeAsync` | Returns at once and completes when the reader has stopped, for every caller. |
 | `Output.Read`, `Input.Write` | Block, per the `Stream` contract. |

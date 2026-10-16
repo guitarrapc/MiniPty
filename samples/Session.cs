@@ -42,7 +42,7 @@ static async Task RunStdinPipelineWithManualPumpAsync()
     await session.WriteInputAsync(CreateStdinPipelineInput());
     session.SendEof();
 
-    var exitCode = await session.WaitForExitAsync(cts.Token);
+    var exitCode = (await session.WaitForExitAsync(cts.Token)).ExitCode;
     await pump;
 
     Console.Error.WriteLine($"pid={session.ProcessId} size={session.Size.Columns}x{session.Size.Rows} exit={exitCode}");
@@ -94,7 +94,7 @@ static async Task RunResizeAsync()
     await session.WriteInputAsync(CreateResizeWakeInput());
     session.SendEof();
 
-    var exitCode = await session.WaitForExitAsync(cts.Token);
+    var exitCode = (await session.WaitForExitAsync(cts.Token)).ExitCode;
     await pump;
 
     Console.Error.WriteLine($"exit={exitCode}");

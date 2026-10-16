@@ -200,7 +200,7 @@ public sealed class PtyTests
             : UnixShell($"printf {marker}"));
 
         var text = await ReadOutputTextAsync(session, marker);
-        var exitCode = await session.WaitForExitAsync();
+        var exitCode = (await session.WaitForExitAsync()).ExitCode;
 
         await Assert.That(exitCode).IsEqualTo(0);
         await Assert.That(text).Contains(marker);
@@ -428,7 +428,7 @@ public sealed class PtyTests
         await session.WriteInputAsync("beta" + newline);
 
         var text = await outputTask;
-        var exitCode = await session.WaitForExitAsync();
+        var exitCode = (await session.WaitForExitAsync()).ExitCode;
 
         await Assert.That(exitCode).IsEqualTo(0);
         await Assert.That(text).Contains("first:alpha");
@@ -502,7 +502,7 @@ public sealed class PtyTests
         var outputTask = ReadOutputTextAsync(session, "after:restart");
         await session.WriteInputAsync("restart" + newline);
         var text = await outputTask;
-        var exitCode = await session.WaitForExitAsync();
+        var exitCode = (await session.WaitForExitAsync()).ExitCode;
 
         await Assert.That(exitCode).IsEqualTo(0);
         await Assert.That(text).Contains("after:restart");
@@ -536,7 +536,7 @@ public sealed class PtyTests
         await foreach (var chunk in session.ReadOutputAsync())
             length += chunk.Data.Length;
 
-        var exitCode = await session.WaitForExitAsync();
+        var exitCode = (await session.WaitForExitAsync()).ExitCode;
 
         await Assert.That(exitCode).IsEqualTo(0);
         await Assert.That(length).IsGreaterThanOrEqualTo(minimumLength);
@@ -597,7 +597,7 @@ public sealed class PtyTests
         await foreach (var chunk in session.ReadOutputAsync())
             length += chunk.Data.Length;
 
-        var exitCode = await session.WaitForExitAsync();
+        var exitCode = (await session.WaitForExitAsync()).ExitCode;
 
         await Assert.That(exitCode).IsEqualTo(0);
         await Assert.That(length).IsGreaterThanOrEqualTo(minimumLength);
@@ -631,14 +631,14 @@ public sealed class PtyTests
     }
 
     [Test]
-    public async Task PtyWaitForExitStatusAsyncReportsSignalOnUnix()
+    public async Task PtyWaitForExitAsyncReportsSignalOnUnix()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
 
         await using var session = Pty.Start(UnixShell("kill -TERM $$"));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var status = await session.WaitForExitStatusAsync(cts.Token);
+        var status = await session.WaitForExitAsync(cts.Token);
 
         await Assert.That(status.ExitCode).IsEqualTo(143);
         await Assert.That(status.Signal).IsEqualTo(15);
@@ -649,13 +649,13 @@ public sealed class PtyTests
     }
 
     [Test]
-    public async Task PtyWaitForExitStatusAsyncHasNoSignalOnNormalExit()
+    public async Task PtyWaitForExitAsyncHasNoSignalOnNormalExit()
     {
         await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? WindowsCommand("exit /b 42")
             : UnixShell("exit 42"));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var status = await session.WaitForExitStatusAsync(cts.Token);
+        var status = await session.WaitForExitAsync(cts.Token);
 
         await Assert.That(status.ExitCode).IsEqualTo(42);
         await Assert.That(status.Signal).IsNull();
@@ -673,7 +673,7 @@ public sealed class PtyTests
         {
             session.Kill(PtySignal.Terminate);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            var status = await session.WaitForExitStatusAsync(cts.Token);
+            var status = await session.WaitForExitAsync(cts.Token);
 
             await Assert.That(status.ExitCode).IsEqualTo(143);
             await Assert.That(status.Signal).IsEqualTo(15);
@@ -683,7 +683,7 @@ public sealed class PtyTests
         {
             session.Kill(PtySignal.Kill);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            var status = await session.WaitForExitStatusAsync(cts.Token);
+            var status = await session.WaitForExitAsync(cts.Token);
 
             await Assert.That(status.ExitCode).IsEqualTo(137);
             await Assert.That(status.Signal).IsEqualTo(9);
@@ -699,7 +699,7 @@ public sealed class PtyTests
         await using var session = Pty.Start(WindowsCommand("set /p DUMMY="));
         session.Kill(PtySignal.Terminate);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var status = await session.WaitForExitStatusAsync(cts.Token);
+        var status = await session.WaitForExitAsync(cts.Token);
 
         // Windows terminate is advisory-signal: TerminateProcess(h, 1) and never a signal report.
         await Assert.That(status.ExitCode).IsEqualTo(1);
@@ -718,18 +718,36 @@ public sealed class PtyTests
     }
 
     [Test]
-    public async Task PtyWaitForExitStatusAsyncCancellationDoesNotKillChild()
+    public async Task PtyWaitForExitAsyncCancellationDoesNotKillChild()
     {
         await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? WindowsCommand("set /p DUMMY=")
             : UnixShell("IFS= read -r _"));
 
         using var cts = new CancellationTokenSource();
-        var waitTask = session.WaitForExitStatusAsync(cts.Token);
+        var waitTask = session.WaitForExitAsync(cts.Token);
         await cts.CancelAsync();
 
         await Assert.ThrowsAsync<OperationCanceledException>(async () => await waitTask);
         await Assert.That(session.HasExited).IsFalse();
+    }
+
+    /// <summary>
+    /// Without a cancelable token every call returns the session's one exit task, so waiting repeatedly allocates
+    /// nothing per call. Both calls come before exit, so the task cannot be shared merely because it completed.
+    /// </summary>
+    [Test]
+    public async Task PtyWaitForExitAsyncWithoutATokenReturnsTheSameTask()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("set /p DUMMY=")
+            : UnixShell("IFS= read -r _"));
+
+        var first = session.WaitForExitAsync();
+        var second = session.WaitForExitAsync(CancellationToken.None);
+
+        await Assert.That(ReferenceEquals(first, second)).IsTrue();
+        await Assert.That(first.IsCompleted).IsFalse();
     }
 
     [Test]
@@ -1401,11 +1419,15 @@ public sealed class PtyTests
             ? WindowsCommand("set /p DUMMY=")
             : UnixShell("IFS= read -r _"));
 
+        using var cts = new CancellationTokenSource();
         var waitTask = session.WaitForExitAsync();
+        // A cancelable token takes a separate path, a wait over the exit task, which must fail the same way.
+        var cancelableWaitTask = session.WaitForExitAsync(cts.Token);
         await Task.Delay(50);
         session.Dispose();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(async () => await waitTask);
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await cancelableWaitTask);
     }
 
     [Test]
@@ -1432,9 +1454,9 @@ public sealed class PtyTests
 
         var waitTask = session.WaitForExitAsync();
         var text = await ReadOutputTextAsync(session, marker);
-        var exitCode = await waitTask;
+        var status = await waitTask;
 
-        await Assert.That(exitCode).IsEqualTo(0);
+        await Assert.That(status.ExitCode).IsEqualTo(0);
         await Assert.That(text).Contains(marker);
     }
 
@@ -1599,7 +1621,7 @@ public sealed class PtyTests
 
         await using var session = Pty.Start(WindowsCommand("exit /b 0"));
         session.SendEof();
-        var exitCode = await session.WaitForExitAsync();
+        var exitCode = (await session.WaitForExitAsync()).ExitCode;
 
         await Assert.That(exitCode).IsEqualTo(0);
     }
@@ -1616,7 +1638,7 @@ public sealed class PtyTests
         await using var session = Pty.Start(UnixShell("exit 0"));
         session.SendEof();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var exitCode = await session.WaitForExitAsync(cts.Token);
+        var exitCode = (await session.WaitForExitAsync(cts.Token)).ExitCode;
 
         await Assert.That(exitCode).IsEqualTo(0);
     }

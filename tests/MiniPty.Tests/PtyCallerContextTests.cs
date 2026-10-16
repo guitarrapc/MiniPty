@@ -106,13 +106,13 @@ public sealed class PtyCallerContextTests
         {
             await Assert.That(await SeenWithinAsync(ready, drain)).IsTrue();
 
-            var exitCode = ui.RunAsync(() => session.WaitForExitAsync());
-            exit = exitCode;
+            var status = ui.RunAsync(() => session.WaitForExitAsync());
+            exit = status;
             await AssertUiThreadStaysFreeAsync(ui);
 
             await session.WriteInputAsync(LineInput);
-            await Assert.That(await CompletesWithinAsync(exitCode, OperationTimeout)).IsTrue();
-            await Assert.That(await exitCode).IsEqualTo(0);
+            await Assert.That(await CompletesWithinAsync(status, OperationTimeout)).IsTrue();
+            await Assert.That((await status).ExitCode).IsEqualTo(0);
         }
         finally
         {
