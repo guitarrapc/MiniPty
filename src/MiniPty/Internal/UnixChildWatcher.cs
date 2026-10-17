@@ -96,13 +96,6 @@ internal static partial class UnixPtyBackend
             }
         }
 
-        /// <summary>Kills every child that disposal hung up and that is still waiting out its grace.</summary>
-        internal static void KillChildrenInHangupGrace()
-        {
-            lock (s_lock)
-                KillChildrenInHangupGraceLocked();
-        }
-
         /// <summary>
         /// Kills every hung-up child now, and makes later disposals kill at once. A deadline that has not passed when
         /// the process exits would otherwise never be acted on, and a child that ignores the hang-up would outlive
@@ -113,17 +106,12 @@ internal static partial class UnixPtyBackend
             lock (s_lock)
             {
                 s_exiting = true;
-                KillChildrenInHangupGraceLocked();
+                // Same lock order as the reap: this lock, then the child's pid lock.
+                foreach (var child in s_hangups)
+                    child.KillAfterHangup();
+
+                s_hangups.Clear();
             }
-        }
-
-        private static void KillChildrenInHangupGraceLocked()
-        {
-            // Same lock order as the reap: this lock, then the child's pid lock.
-            foreach (var child in s_hangups)
-                child.KillAfterHangup();
-
-            s_hangups.Clear();
         }
 
         private static void EnsureStarted()

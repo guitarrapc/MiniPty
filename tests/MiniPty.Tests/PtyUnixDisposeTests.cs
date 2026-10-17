@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using MiniPty.Internal;
 using MiniPty.Terminal;
@@ -11,16 +12,14 @@ namespace MiniPty.Tests;
 /// session for long. The hang-up is sent on the disposing thread and does not block. The kill comes from the
 /// child watcher, or at once when the process exits normally.
 /// </summary>
-/// <remarks>
-/// The process-exit kill test kills every child in its grace across the test process. The class runs its tests one at a
-/// time so that it never cuts short the grace another test here is measuring.
-/// </remarks>
-[NotInParallel(nameof(PtyUnixDisposeTests))]
 public sealed class PtyUnixDisposeTests
 {
     private const int ESRCH = 3;
     private const int SigHup = 1;
     private const int SigKill = 9;
+    // Set on a copy of this test executable to make it the host that HostExitKillsAChildStillInItsHangupGrace starts.
+    // The value names how the host exits.
+    private const string DisposeHostVariable = "MINIPTY_TESTS_DISPOSE_HOST";
 
     [Test]
     public async Task DisposeHangsUpAChildThatExitsOnHangup()
@@ -130,13 +129,16 @@ public sealed class PtyUnixDisposeTests
     }
 
     /// <summary>
-    /// The host disposes a session whose child ignores the hang-up and loops for about 30 s, then exits at once:
-    /// returning from Main, calling Environment.Exit, or disposing from its own exit handler, which runs after
-    /// MiniPty's. The child watcher dies with the host, so only the kill sent at exit can end the child within the
-    /// wait.
+    /// The host disposes a session whose child ignores the hang-up and loops for about 30 s, then exits at once, either
+    /// right after the disposal or by disposing from its own exit handler, which runs after MiniPty's. The child watcher
+    /// dies with the host, so only the kill sent at exit can end the child within the wait.
     /// </summary>
+    /// <remarks>
+    /// Only a process that really exits can show that MiniPty subscribed to the exit, so the host is this test
+    /// executable started again (see <see cref="RunAsDisposeHostWhenAsked"/>). Both modes exit through
+    /// <see cref="Environment.Exit(int)"/>, which raises the same exit event as returning from <c>Main</c>.
+    /// </remarks>
     [Test]
-    [Arguments("return")]
     [Arguments("exit")]
     [Arguments("exit-handler")]
     public async Task HostExitKillsAChildStillInItsHangupGrace(string mode)
@@ -144,13 +146,14 @@ public sealed class PtyUnixDisposeTests
         if (OperatingSystem.IsWindows())
             return;
 
-        var hostPath = Path.Combine(AppContext.BaseDirectory, "MiniPty.Tests.DisposeHost");
+        var hostPath = Path.Combine(AppContext.BaseDirectory, "MiniPty.Tests");
         await Assert.That(File.Exists(hostPath)).IsTrue();
 
-        using var host = Process.Start(new ProcessStartInfo(hostPath, mode)
+        using var host = Process.Start(new ProcessStartInfo(hostPath)
         {
             RedirectStandardOutput = true,
             UseShellExecute = false,
+            Environment = { [DisposeHostVariable] = mode },
         })!;
         var pidLine = await host.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(30));
         await host.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
@@ -228,30 +231,59 @@ public sealed class PtyUnixDisposeTests
         await Assert.That(session.ExitStatus).IsEqualTo(new PtyExitStatus(3, null));
     }
 
-    [Test]
-    public async Task KillChildrenInHangupGraceKillsOnlyDisposedChildrenAtOnce()
+    /// <summary>
+    /// Makes this test executable the host of <see cref="HostExitKillsAChildStillInItsHangupGrace"/> when
+    /// <see cref="DisposeHostVariable"/> is set. It runs before the test framework starts and exits the process, so no
+    /// test runs in the host. In a test run the variable is unset and this returns at once.
+    /// </summary>
+    /// <remarks>
+    /// The host code is synchronous and runs on this thread only. A module initializer runs inside the module's type
+    /// initializer, so code from this assembly on another thread, such as an <c>await</c> continuation, could wait for it
+    /// to finish and deadlock.
+    /// </remarks>
+    [ModuleInitializer]
+    internal static void RunAsDisposeHostWhenAsked()
     {
-        if (OperatingSystem.IsWindows())
-            return;
+        var mode = Environment.GetEnvironmentVariable(DisposeHostVariable);
+        if (mode is not null)
+            Environment.Exit(RunDisposeHost(mode));
+    }
 
-        // This is the kill the process-exit hook sends, called directly. The host can exit before the deadline, and the
-        // watcher stops with the process, so the kill must not wait for the grace. It must also spare a session that was
-        // never disposed, which the host may still be using.
-        using var running = Pty.Start(HangupScript("trap '' HUP"));
-        using var disposed = Pty.Start(HangupScript("trap '' HUP"));
-        var disposedPid = disposed.ProcessId;
-        await WaitForReadyAsync(running);
-        await WaitForReadyAsync(disposed);
+    /// <summary>
+    /// Starts a session whose child ignores the hang-up, prints the child's pid once the child is ready, and disposes
+    /// the session either now or from an exit handler. Returns the exit code for the host.
+    /// </summary>
+    private static int RunDisposeHost(string mode)
+    {
+        var session = Pty.Start(HangupScript("trap '' HUP"));
+        var output = new MemoryStream();
+        var buffer = new byte[256];
+        while (output.GetBuffer().AsSpan(0, checked((int)output.Length)).IndexOf("ready"u8) < 0)
+        {
+            var read = session.Output.Read(buffer);
+            if (read == 0)
+                return 3;
 
-        var sw = Stopwatch.StartNew();
-        disposed.Dispose();
-        UnixPtyBackend.KillChildrenInHangupGrace();
+            output.Write(buffer, 0, read);
+        }
 
-        await Assert.That(await WaitForProcessGoneAsync(disposedPid)).IsTrue();
-        await Assert.That(sw.ElapsedMilliseconds).IsLessThan(UnixPtyBackend.DisposeHangupGraceMs);
-        await Assert.That((await WaitForExitStatusAsync(disposed))?.Signal).IsEqualTo(SigKill);
-        await Assert.That(IsRunning(running.ProcessId)).IsTrue();
-        await Assert.That(running.HasExited).IsFalse();
+        System.Console.WriteLine(session.ProcessId);
+        System.Console.Out.Flush();
+
+        switch (mode)
+        {
+            case "exit":
+                session.Dispose();
+                return 0;
+            case "exit-handler":
+                // Subscribed after Pty.Start, so it runs after MiniPty's own exit handler. The disposal then has to kill
+                // at once, because the deadline it would otherwise wait for never comes.
+                AppDomain.CurrentDomain.ProcessExit += (_, _) => session.Dispose();
+                return 0;
+            default:
+                System.Console.Error.WriteLine($"Unknown mode '{mode}'.");
+                return 2;
+        }
     }
 
     private static bool IsRunning(int pid) => UnixInterop.kill(pid, 0) == 0;

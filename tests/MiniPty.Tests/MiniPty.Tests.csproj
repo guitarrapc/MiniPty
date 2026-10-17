@@ -14,28 +14,7 @@
     <ProjectReference Include="..\..\src\MiniPty.Capture\MiniPty.Capture.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Console\MiniPty.Console.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Terminal\MiniPty.Terminal.csproj" />
-    <ProjectReference Include="..\MiniPty.Tests.DisposeHost\MiniPty.Tests.DisposeHost.csproj">
-      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
-    </ProjectReference>
   </ItemGroup>
-
-  <!-- PtyUnixDisposeTests starts the dispose host from this output directory, where MiniPty and its native shim already are. -->
-  <Target Name="CopyDisposeHost" AfterTargets="Build">
-    <MSBuild Projects="$(MSBuildThisFileDirectory)..\MiniPty.Tests.DisposeHost\MiniPty.Tests.DisposeHost.csproj"
-             Targets="GetTargetPath"
-             Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework)">
-      <Output TaskParameter="TargetOutputs" ItemName="_DisposeHostTargetPaths" />
-    </MSBuild>
-    <ItemGroup>
-      <_DisposeHostOutputDirs Include="@(_DisposeHostTargetPaths->'%(RootDir)%(Directory)')" />
-      <_DisposeHostOutputFiles Include="%(_DisposeHostOutputDirs.Identity)MiniPty.Tests.DisposeHost"
-                               Condition="Exists('%(_DisposeHostOutputDirs.Identity)MiniPty.Tests.DisposeHost')" />
-      <_DisposeHostOutputFiles Include="%(_DisposeHostOutputDirs.Identity)MiniPty.Tests.DisposeHost.*" />
-    </ItemGroup>
-    <Copy SourceFiles="@(_DisposeHostOutputFiles)"
-          DestinationFolder="$(OutDir)"
-          SkipUnchangedFiles="true" />
-  </Target>
 
   <!--
     The terminal emulator core shared by the WinUI and Avalonia samples has no UI dependency, so its sources are

@@ -23,12 +23,6 @@ internal static partial class UnixPtyBackend
     private const int CoalesceBudgetMs = 2;
     private static readonly long s_coalesceBudgetTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceBudgetMs / 1000;
 
-    /// <summary>
-    /// Test entry point for the kill that the child watcher sends when the host process exits. It kills every child
-    /// that disposal hung up and that is still waiting out its grace, without marking the process as exiting.
-    /// </summary>
-    internal static void KillChildrenInHangupGrace() => ChildWatcher.KillChildrenInHangupGrace();
-
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
         var size = startInfo.ClampedSize;
