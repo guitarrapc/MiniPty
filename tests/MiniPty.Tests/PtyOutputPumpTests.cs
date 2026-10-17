@@ -171,9 +171,9 @@ public sealed class PtyOutputPumpTests
         // No consumer: the ring fills and the reader parks. Exit is then observed, and the stall outlasts the quiet period.
         await Task.Delay(200);
         session.OutputPump.OnChildExited();
-        await Task.Delay(300);
+        await Task.Delay(PacedQuietMs + 200);
 
-        // Each read after the stall takes 50 ms, below the quiet period, so the transport must stay open.
+        // Each read after the stall takes a tenth of the quiet period, so the transport must stay open.
         await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
         for (var i = 0; i < PtyOutputPump.SlotCount + 4; i++)
             await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
@@ -258,7 +258,7 @@ public sealed class PtyOutputPumpTests
 
         await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
         // Quiet after exit closes the transport, and quiet after the close ends output: two intervals, no OS event.
-        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(1500);
+        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(ForcedEndBoundMs);
         await Assert.That(backend.IsOutputClosed).IsTrue();
     }
 
@@ -272,14 +272,15 @@ public sealed class PtyOutputPumpTests
         var backend = new HeldOpenBackend();
         await using var session = new PtySession(backend);
         await backend.Reading.WaitAsync(Timeout);
-        var completion = session.CompleteAsync(new PtyCompleteOptions { OutputReaderCloseTimeout = TimeSpan.FromSeconds(3) });
+        // The close timeout outlasts the bound below, so an end that waited for it cannot pass as the forced end.
+        var completion = session.CompleteAsync(new PtyCompleteOptions { OutputReaderCloseTimeout = TimeSpan.FromMilliseconds(ForcedEndBoundMs * 2) });
 
         var stopwatch = Stopwatch.StartNew();
         backend.Exit(7);
 
         var result = await completion.WaitAsync(Timeout);
         await Assert.That(result.ExitCode).IsEqualTo(7);
-        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(1500);
+        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(ForcedEndBoundMs);
     }
 
     /// <summary>
@@ -291,7 +292,7 @@ public sealed class PtyOutputPumpTests
     public async Task OutputStillDrainingAfterTheCloseIsDelivered()
     {
         const int FlushReads = 8;
-        var backend = new SlowFlushAfterCloseBackend(FlushReads, intervalMs: 40);
+        var backend = new SlowFlushAfterCloseBackend(FlushReads, intervalMs: PacedQuietMs / 10);
         await using var session = new PtySession(backend);
         await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
         var next = enumerator.MoveNextAsync().AsTask();
@@ -310,8 +311,50 @@ public sealed class PtyOutputPumpTests
         await Assert.That(bytes).IsEqualTo(FlushReads);
     }
 
+    /// <summary>
+    /// The transport may still hold output when the post-exit close finds the ring full. The pump must park until
+    /// the consumer frees a slot and then read on, not end output with that output unread.
+    /// </summary>
+    [Test]
+    public async Task FullRingAfterTheCloseDoesNotEndOutput()
+    {
+        const int FlushReads = 8;
+        var backend = new SlowFlushAfterCloseBackend(FlushReads, intervalMs: 0);
+        await using var session = new PtySession(backend);
+        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+        var next = enumerator.MoveNextAsync().AsTask();
+        await backend.Reading.WaitAsync(Timeout);
+
+        backend.Exit(0);
+        // The flush fills the ring while the consumer holds its first chunk; the reader is parked, not finished.
+        await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
+        await backend.OutputClosed.WaitAsync(Timeout);
+        await Task.Delay(PacedQuietMs + 200);
+        await Assert.That(session.OutputPump.IsProducerFinished).IsFalse();
+
+        var bytes = enumerator.Current.Data.Length;
+        while (await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout))
+            bytes += enumerator.Current.Data.Length;
+
+        await Assert.That(bytes).IsEqualTo(FlushReads);
+    }
+
     private const string ReaderThreadName = "MiniPty output reader";
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Quiet period of the scripted backends whose reads are paced by sleeps. The default 100 ms left a 50 ms sleep a
+    /// 2× margin, which loaded hosted runners (3–4 cores running the suite in parallel) exceeded on every macOS run:
+    /// a reader delayed past the period looked quiet, and the transport was closed or output ended early.
+    /// </summary>
+    private const int PacedQuietMs = 500;
+
+    /// <summary>
+    /// Upper bound for an end that takes two default quiet intervals (about 200 ms) with no OS event. A starved runner
+    /// stretched it past the former 1.5 s bound, so it is wide: it only has to tell the forced end apart from a reader
+    /// that never ends, which hangs until <see cref="Timeout"/> or the close timeout.
+    /// </summary>
+    private const int ForcedEndBoundMs = 5000;
 
     private static T RunUnder<T>(SynchronizationContext context, Func<T> action)
     {
@@ -414,12 +457,14 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
-    /// Fills the ring at once, then answers each read after 50 ms, as a transport that still holds output but
-    /// produces it more slowly than the reader polls.
+    /// Fills the ring at once, then answers each read after a tenth of the quiet period, as a transport that still
+    /// holds output but produces it more slowly than the reader polls.
     /// </summary>
     private sealed class StallThenSlowBackend : FakeBackend
     {
         private int _fastReads = PtyOutputPump.SlotCount;
+
+        public override int PostExitQuietMs => PacedQuietMs;
 
         public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
         {
@@ -427,7 +472,7 @@ public sealed class PtyOutputPumpTests
                 return 0;
 
             if (Interlocked.Decrement(ref _fastReads) < 0)
-                Thread.Sleep(50);
+                Thread.Sleep(PacedQuietMs / 10);
 
             buffer[0] = (byte)'x';
             return 1;
@@ -476,9 +521,15 @@ public sealed class PtyOutputPumpTests
     private sealed class SlowFlushAfterCloseBackend(int flushReads, int intervalMs) : FakeBackend
     {
         private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _remaining = flushReads;
 
         public Task Reading => _reading.Task;
+
+        /// <summary>Completes once the post-exit drain has closed the transport.</summary>
+        public Task OutputClosed => _closed.Task;
+
+        public override int PostExitQuietMs => PacedQuietMs;
 
         public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
         {
@@ -488,7 +539,8 @@ public sealed class PtyOutputPumpTests
             if (IsOutputClosed && _remaining > 0)
             {
                 _remaining--;
-                Thread.Sleep(intervalMs);
+                if (intervalMs > 0)
+                    Thread.Sleep(intervalMs);
                 buffer[0] = (byte)'x';
                 return 1;
             }
@@ -496,6 +548,12 @@ public sealed class PtyOutputPumpTests
             _reading.TrySetResult();
             reader.WaitForWake(System.Threading.Timeout.Infinite);
             return -1;
+        }
+
+        public override void CloseOutputTransport()
+        {
+            base.CloseOutputTransport();
+            _closed.TrySetResult();
         }
 
         public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
@@ -532,6 +590,7 @@ public sealed class PtyOutputPumpTests
         public bool IsOutputClosed => _closed;
         public bool IsDisposed => _disposed;
         public long CoalesceBudgetTicks => Stopwatch.Frequency * 2 / 1000;
+        public virtual int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
         /// <summary>Reports child exit the way the exit watcher does: records it, then notifies the session's listener.</summary>
         public void Exit(int exitCode)
@@ -549,7 +608,7 @@ public sealed class PtyOutputPumpTests
         public void SetExitListener(IPtyExitListener listener) => Volatile.Write(ref _listener, listener);
         public bool TryBeginOutputRead() => !_closed;
         public void EndOutputRead() { }
-        public void CloseOutputTransport() => _closed = true;
+        public virtual void CloseOutputTransport() => _closed = true;
 
         public abstract int ReadOutput(Span<byte> buffer, PtyReaderThread reader);
         public abstract int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput);

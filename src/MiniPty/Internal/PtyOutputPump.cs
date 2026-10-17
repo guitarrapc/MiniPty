@@ -35,7 +35,7 @@ internal interface IPtyOutputWaiter
 /// <b>End of output.</b> Unix PTYs report end of output once every slave descriptor closes. ConPTY reports it
 /// only after the pseudo-console closes, and a Linux grandchild can hold the slave open, so after child exit
 /// <see cref="PtyOutputDrainScheduler"/> closes the transport once reads have been quiet for
-/// <see cref="PostExitQuietMs"/> (one-shot completion also bounds this by its grace and close timeouts). When
+/// <see cref="DefaultPostExitQuietMs"/> (one-shot completion also bounds this by its grace and close timeouts). When
 /// even the close does not end the transport, because another process holds ConPTY's output pipe open, the
 /// pump ends output itself once reads have been quiet for the same interval after the close
 /// (<see cref="OnDrainTick"/>).
@@ -51,9 +51,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal const int SlotCount = 4;
     internal const int SlotSize = PtyReadBuffer.Size;
 
-    /// <summary>Post-exit silence after which the transport is closed so the reader sees end of output.</summary>
-    internal const int PostExitQuietMs = 100;
-
+    /// <summary>
+    /// Post-exit silence after which the transport is closed so the reader sees end of output, and after which a
+    /// close that did not end it is given up on. Backends report it through <see cref="IPtyBackend.PostExitQuietMs"/>.
+    /// </summary>
+    internal const int DefaultPostExitQuietMs = 100;
 
     private const int FlagProducerFinished = 1;
     private const int FlagSessionDisposed = 2;
@@ -164,10 +166,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
                 // an unread slot.
                 if (Volatile.Read(ref _count) == SlotCount)
                 {
-                    // A closed Unix master reports end of output without a read; the ring keeps what it holds.
-                    if (_backend.IsOutputClosed)
-                        return;
-
+                    // Also after the close. The transport may still hold output then (ConPTY flushes its final
+                    // frame after ClosePseudoConsole), and ending here would drop it. A consumer that is slow to
+                    // release a slot only delays the end: parked time is not silence (see IsQuietSince), so the
+                    // forced end waits for it too, and the next read reports end of output once the transport has
+                    // nothing left.
                     WaitForFreeSlot(reader);
                     continue;
                 }
@@ -274,7 +277,6 @@ internal sealed class PtyOutputPump : IValueTaskSource
         // Re-checked after publishing the flag: a consumer that released a slot before seeing it does not wake us.
         if (Volatile.Read(ref _count) == SlotCount
             && !IsSessionDisposed
-            && !_backend.IsOutputClosed
             && Volatile.Read(ref _sink) is null)
         {
             // Unix also writes queued input meanwhile; a return without a wake is re-checked by the loop.
@@ -521,14 +523,17 @@ internal sealed class PtyOutputPump : IValueTaskSource
         return sink is not null && sink.CheckCloseTimeout(now, closeRequestedTick, this);
     }
 
-    /// <summary>Whether the reader has read nothing for <see cref="PostExitQuietMs"/>, counted from the later of its last read and <paramref name="since"/>.</summary>
+    /// <summary>
+    /// Whether the reader has read nothing for the backend's <see cref="IPtyBackend.PostExitQuietMs"/>, counted from
+    /// the later of its last read and <paramref name="since"/>.
+    /// </summary>
     private bool IsQuietSince(long now, long since)
     {
         // A pump parked on a full ring is not reading, so silence says nothing about the transport.
         if (Volatile.Read(ref _producerWaiting) != 0)
             return false;
 
-        return now - Math.Max(Volatile.Read(ref _lastReadTick), since) >= PostExitQuietMs;
+        return now - Math.Max(Volatile.Read(ref _lastReadTick), since) >= _backend.PostExitQuietMs;
     }
 
     /// <summary>
