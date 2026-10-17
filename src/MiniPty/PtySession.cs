@@ -28,7 +28,9 @@ namespace MiniPty;
 /// on <see cref="Output"/>, still block.
 /// </para>
 /// <para>
-/// Disposing or awaiting <see cref="DisposeAsync"/> kills the child if it is still running, then releases handles.
+/// Disposing or awaiting <see cref="DisposeAsync"/> ends a child that is still running, then releases handles. On
+/// Unix the child is hung up first (<c>SIGHUP</c>), so a shell can save its history, and killed after a short grace
+/// period if it is still running; on Windows it is terminated.
 /// </para>
 /// </remarks>
 public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
@@ -432,12 +434,18 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// Releases PTY and process handles, killing the child if it is still running. Does not block.
+    /// Releases PTY and process handles, ending the child if it is still running. Does not block.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// On Unix a running child is hung up (<c>SIGHUP</c>, what a terminal emulator sends when its window closes) and
+    /// killed one second later if it has not exited; both happen off the calling thread. On Windows it is terminated.
+    /// </para>
+    /// <para>
     /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. The background
     /// reader stops on its own shortly afterwards; output chunk memory must not be used after this call. Use
     /// <see cref="DisposeAsync"/> to also wait until the reader has stopped.
+    /// </para>
     /// </remarks>
     public void Dispose()
     {
@@ -454,13 +462,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// Releases PTY and process handles, killing the child if it is still running, and completes once the
-    /// background output reader has stopped.
+    /// Releases PTY and process handles, ending the child if it is still running as <see cref="Dispose"/> does, and
+    /// completes once the background output reader has stopped.
     /// </summary>
     /// <returns>A value task that completes when the reader has released the transport.</returns>
     /// <remarks>
-    /// Does not wait for the reader on the calling thread. Every call waits for the same shutdown, including calls
-    /// after <see cref="Dispose"/> and concurrent ones.
+    /// Does not wait for the reader on the calling thread, and does not wait for the child to exit. Every call waits
+    /// for the same shutdown, including calls after <see cref="Dispose"/> and concurrent ones.
     /// </remarks>
     public ValueTask DisposeAsync()
     {

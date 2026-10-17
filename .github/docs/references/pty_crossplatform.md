@@ -49,7 +49,7 @@ Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps th
 | `WaitForExitAsync` / `ExitStatus` | Report the exit code together with the Unix termination signal (`waitpid` `WTERMSIG`); decoding is fully managed (identical exited/signaled status layout on Linux/macOS/FreeBSD). Windows always reports a null signal. |
 | `PtyCompleteOptions.OutputDrainGrace` | Default 1s—post-exit drain before closing transport. |
 | `PtyCompleteOptions.OutputReaderCloseTimeout` | Default 5s—wait after transport close for the reader to finish. |
-| `Dispose()` | If the child is still running, **kills** it, then closes ConPTY/pipes/process handles without blocking; the output pump stops on its own (see [Disposal](#disposal)). The exit watcher reaps the killed child, so `Dispose` never waits for it and leaves no zombie. `DisposeAsync` also waits for the pump to stop. |
+| `Dispose()` | If the child is still running, ends it (**Unix:** `SIGHUP`, then `SIGKILL` one second later if it has not exited, on a timer; **Windows:** `TerminateProcess`), then closes ConPTY/pipes/process handles without blocking; the output pump stops on its own (see [Disposal](#disposal)). The exit watcher reaps the child, so `Dispose` never waits for it and leaves no zombie. `DisposeAsync` also waits for the pump to stop. |
 | `PtyCapture.RunAsync` | `Pty.Start` + timestamping completion sink. Returns `PtyCaptureResult` with `Chunks`. |
 
 ## Windows: ConPTY
@@ -200,7 +200,7 @@ PTY master fds are **not** sockets. `shutdown(master, SHUT_WR)` is invalid (`ENO
 |---|---|---|
 | **EOT (`0x04`, Ctrl-D)** | One-shot / line-discipline programs (`cat`, shells) | `SendEof()` writes EOT to the master |
 | **Leave master open** | TUI / no stdin (`matrix`, `cmatrix`) | `CompleteAsync` with `Input: null`—no `SendEof()` |
-| **`Kill()` / `close(master)` on dispose** | Forced teardown | `Dispose()` kills if still running, then `close(master)` |
+| **Hang-up / `close(master)` on dispose** | Teardown | `Dispose()` sends `SIGHUP` if still running, then `close(master)`; `SIGKILL` follows after the grace period |
 
 EOT is a **terminal convention**, not a kernel EOF like closing a pipe. It is reliable for shell-wrapped one-shot commands when the line discipline is in **canonical mode**.
 
@@ -272,7 +272,14 @@ The close does not always end the transport. ConPTY's `CreatePseudoConsole` dupl
 
 ### Disposal
 
-`Dispose` switches the pump to discarding output, kills the child, closes the transport, and returns. On Windows the pump keeps reading until the pipe ends, because closing a pseudo-console can wait until its final frame fits in the pipe; on Unix the wake descriptor stops it at once. The ring returns to the pool when both the session and the pump have released it, so the reader never writes into an array that another renter owns. `DisposeAsync` additionally completes once the pump has stopped.
+`Dispose` switches the pump to discarding output, ends the child, closes the transport, and returns. On Windows the pump keeps reading until the pipe ends, because closing a pseudo-console can wait until its final frame fits in the pipe; on Unix the wake descriptor stops it at once. The ring returns to the pool when both the session and the pump have released it, so the reader never writes into an array that another renter owns. `DisposeAsync` additionally completes once the pump has stopped.
+
+How the child is ended differs by platform:
+
+| Platform | On dispose | Why |
+|---|---|---|
+| Unix | `kill(pid, SIGHUP)`, then `close(master)`; a one-shot timer sends `SIGKILL` one second later unless the watcher has reaped the child by then (the kill and the reap share the pid lock, so the signal never reaches a reused pid) | `SIGHUP` is what a terminal emulator delivers when its window closes: a shell saves its history and runs its exit hooks, and a program that catches it can clean up. Closing the master hangs the tty up as well (Linux signals the session leader, BSD the foreground process group), so the explicit signal covers a shell that is not in the foreground. The timer bounds a child that ignores the hang-up, and runs the kill off the disposing thread. `Kill()` stays `SIGKILL`; only disposal is graceful. |
+| Windows | `TerminateProcess`, then `ClosePseudoConsole` | ConPTY has no hang-up signal to send first. |
 
 ## Child exit observation
 
@@ -310,6 +317,10 @@ PTY output is a **byte stream**, not lines or Unicode strings:
 Initial size comes from `PtyStartInfo.Size` (character cells, not pixels). Windows: `COORD` for `CreatePseudoConsole` and `ResizePseudoConsole`. Unix: `winsize` in `forkpty` and `TIOCSWINSZ` via `minipty_set_winsize` (`PtySession.Resize`).
 
 Dimensions are clamped to what those structures encode: 1–32767 on Windows (`COORD` is two signed 16-bit values), 1–65535 on Unix. ConPTY accepts the full range: on Windows 11 build 26200, `CreatePseudoConsole` and `ResizePseudoConsole` succeeded at 32767×32767 in about 5 ms, and a PowerShell child reported 600×200, 4000×300, 32767×50, and 200×32767 as its window and buffer size. An earlier 512-cell cap silently disagreed with wide frontends.
+
+### Unix line discipline
+
+The child's termios is set at spawn (`forkpty`'s termios argument on Linux and FreeBSD; `tcsetattr` on the slave before `posix_spawn` on macOS), not left to the kernel default, which differs by platform. The settings are the ones a terminal emulator gives a new shell: input `ICRNL IXON IXANY IMAXBEL BRKINT IUTF8`, output `OPOST ONLCR`, control `CREAD CS8 HUPCL`, local `ICANON ISIG IEXTEN ECHO ECHOE ECHOK ECHOKE ECHOCTL`, the usual control characters (`VERASE` = DEL, `VEOF` = ^D, …), and 38400 baud. The one that changes behavior against the Linux default is `IUTF8`: without it, a canonical-mode erase removes one byte of a multibyte character, so a shell that reads a line containing Japanese and a backspace receives invalid UTF-8. A program that wants raw mode still changes the termios itself, as it would on any terminal.
 
 ### Environment variables
 

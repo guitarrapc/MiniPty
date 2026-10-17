@@ -69,7 +69,7 @@ stateDiagram-v2
 
 Persistent embedders usually keep **one** output consumer active for the whole `Active` phase (`ReadOutputAsync` or raw `Output`). One-shot callers use `CompleteAsync` or `PtyCapture.RunAsync` instead. See [Output consumer exclusivity](#output-consumer-exclusivity).
 
-`Dispose` / `DisposeAsync` may run from any state. If the child is still running, disposal kills it before releasing handles.
+`Dispose` / `DisposeAsync` may run from any state. If the child is still running, disposal ends it before releasing handles: on Unix a hang-up (`SIGHUP`) followed by a kill after a one-second grace period, on Windows termination. See [Disposal](../references/pty_crossplatform.md#disposal).
 
 ## Cancellation
 
@@ -145,7 +145,7 @@ EOF staging advances on a per-session 100 ms timer, so it gives the child time t
 | `ReadOutputAsync` after `Kill()` | Same as exit: drain remaining output, then complete normally (EOF). |
 | `CompleteAsync` after child exit | Drains output; the transport closes once output has been quiet, and at `OutputDrainGrace` after exit at the latest. |
 | Output reader close (one-shot) | Waits up to `OutputReaderCloseTimeout`. |
-| `Dispose` / `DisposeAsync` while child running | Kills the child and releases handles without blocking. The background output reader discards remaining output and stops on its own; `DisposeAsync` completes once it has stopped. |
+| `Dispose` / `DisposeAsync` while child running | Ends the child (Unix: `SIGHUP`, then `SIGKILL` after a one-second grace period; Windows: `TerminateProcess`) and releases handles without blocking; neither waits for the child to exit. The background output reader discards remaining output and stops on its own; `DisposeAsync` completes once it has stopped. |
 | `Dispose` while operations are in flight | All in-flight `ReadOutputAsync`, `WaitForExitAsync`, and `WriteInputAsync` operations fail immediately with `ObjectDisposedException`. |
 | `Kill()` | Terminates the child but does not release handles. Call `Dispose` afterward. |
 | `Kill(PtySignal)` | Unix: delivers the mapped native signal via `kill(2)`; catchable signals may be handled or ignored, so exit is not guaranteed. Windows: validates the enum, then terminates unconditionally (node-pty parity). Drain-after-kill behavior is unchanged. |

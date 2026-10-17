@@ -44,7 +44,7 @@ All on the UI thread and without `Task.Run`:
 | Key, paste, mouse report, terminal reply | `await session.WriteInputAsync(text)` | Completes at once when ConPTY takes the bytes, otherwise in the background |
 | Window resized | `session.Resize(new PtySize(cols, rows))` | Dimensions are clamped to the platform limit, and a resize after child exit is a no-op |
 | Child exits | `await session.WaitForExitAsync()` | Completes from the exit watcher; no polling, no thread |
-| Window closed | `await session.DisposeAsync()` | Kills the child if needed and does not block the UI thread |
+| Window closed | `await session.DisposeAsync()` | Ends the child if needed and does not block the UI thread |
 
 The child gets `COLORTERM=truecolor`, which is how programs decide to use 24-bit color.
 

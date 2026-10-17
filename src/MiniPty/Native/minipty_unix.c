@@ -42,6 +42,58 @@
 #include <sys/user.h>
 #endif
 
+/*
+ * The line discipline every child starts with. The kernel default differs by platform, and on Linux it lacks
+ * IUTF8, so erasing a multibyte character in canonical mode removed one byte and left invalid UTF-8 on the
+ * line. Pinning the whole termios makes a MiniPty terminal behave the same on every Unix: the flags and
+ * control characters below are what a terminal emulator sets up for a new shell, and a program that wants
+ * raw mode changes them itself.
+ */
+static void minipty_default_termios(struct termios *term)
+{
+    memset(term, 0, sizeof(*term));
+
+    term->c_iflag = ICRNL | IXON | IXANY | IMAXBEL | BRKINT;
+#if defined(IUTF8)
+    term->c_iflag |= IUTF8;
+#endif
+    term->c_oflag = OPOST | ONLCR;
+    term->c_cflag = CREAD | CS8 | HUPCL;
+    term->c_lflag = ICANON | ISIG | IEXTEN | ECHO | ECHOE | ECHOK;
+#if defined(ECHOKE)
+    term->c_lflag |= ECHOKE;
+#endif
+#if defined(ECHOCTL)
+    term->c_lflag |= ECHOCTL;
+#endif
+
+    term->c_cc[VEOF] = 4;       /* ^D */
+    term->c_cc[VEOL] = _POSIX_VDISABLE;
+    term->c_cc[VEOL2] = _POSIX_VDISABLE;
+    term->c_cc[VERASE] = 0x7f;  /* DEL */
+    term->c_cc[VWERASE] = 23;   /* ^W */
+    term->c_cc[VKILL] = 21;     /* ^U */
+    term->c_cc[VREPRINT] = 18;  /* ^R */
+    term->c_cc[VINTR] = 3;      /* ^C */
+    term->c_cc[VQUIT] = 0x1c;   /* ^\ */
+    term->c_cc[VSUSP] = 26;     /* ^Z */
+    term->c_cc[VSTART] = 17;    /* ^Q */
+    term->c_cc[VSTOP] = 19;     /* ^S */
+    term->c_cc[VLNEXT] = 22;    /* ^V */
+    term->c_cc[VDISCARD] = 15;  /* ^O */
+    term->c_cc[VMIN] = 1;
+    term->c_cc[VTIME] = 0;
+#if defined(VDSUSP)
+    term->c_cc[VDSUSP] = 25;    /* ^Y */
+#endif
+#if defined(VSTATUS)
+    term->c_cc[VSTATUS] = 20;   /* ^T */
+#endif
+
+    cfsetispeed(term, B38400);
+    cfsetospeed(term, B38400);
+}
+
 #if !defined(__APPLE__)
 
 #ifndef NSIG
@@ -129,6 +181,7 @@ static int spawn_pty_child_forkpty(
     pid_t pid;
     sigset_t newmask;
     sigset_t oldmask;
+    struct termios term;
     char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
     int inherited_fd_scan_limit = 0;
 
@@ -141,10 +194,12 @@ static int spawn_pty_child_forkpty(
     inherited_fd_scan_limit = minipty_compute_inherited_fd_scan_limit();
 #endif
 
+    minipty_default_termios(&term);
+
     sigfillset(&newmask);
     pthread_sigmask(SIG_BLOCK, &newmask, &oldmask);
 
-    pid = forkpty(master, NULL, NULL, (struct winsize *)winp);
+    pid = forkpty(master, NULL, &term, (struct winsize *)winp);
 
     if (pid == 0)
         minipty_reset_child_signals();
@@ -266,6 +321,7 @@ static int minipty_spawn_darwin_once(
 {
     char helper_path[PATH_MAX];
     char slave_name[128];
+    struct termios term;
     char **spawn_envp = NULL;
     char **owned_inherited = NULL;
     char **helper_argv = NULL;
@@ -336,6 +392,13 @@ static int minipty_spawn_darwin_once(
     }
 
     if (winp != NULL && ioctl(slave, TIOCSWINSZ, winp) != 0) {
+        err = errno > 0 ? errno : EINVAL;
+        goto done;
+    }
+
+    /* forkpty takes the termios as an argument; here the slave is open in the parent, so it is set directly. */
+    minipty_default_termios(&term);
+    if (tcsetattr(slave, TCSANOW, &term) != 0) {
         err = errno > 0 ? errno : EINVAL;
         goto done;
     }

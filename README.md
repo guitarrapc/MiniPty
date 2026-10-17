@@ -85,7 +85,7 @@ dotnet add package MiniPty.Terminal
 - **Persistent stream**: `ReadOutputAsync` + `WriteInputAsync` + `WaitForExitAsync`
 - **One-shot run**: `CompleteAsync`
 
-Disposing a session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that. Try `dotnet samples/SingleFiles/README_MiniPty.cs` to run this sample.
+Disposing a session ends the child if it is still running: on Unix it is hung up first (`SIGHUP`, so a shell can save its history) and killed after a one-second grace period if it has not exited; on Windows it is terminated. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that. Try `dotnet samples/SingleFiles/README_MiniPty.cs` to run this sample.
 
 ```csharp
 using System.Diagnostics;

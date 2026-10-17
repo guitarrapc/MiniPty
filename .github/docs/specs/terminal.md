@@ -47,7 +47,7 @@ PtyTerminal.Attach(PtySession session, PtyTerminalOptions options)    // transfe
 | `Kill()` | SIGHUP on Unix (node-pty default); process termination on Windows. Core `PtySession.Kill()` remains forceful. |
 | `Clear()` | Safe compatibility no-op pending a public in-box ConPTY clear API. |
 | `ProcessId` / `Size` / `ActiveProcessName` / `HasExited` / `ExitStatus` | Session state. `ActiveProcessName` is polled by the embedder (typically 200 ms on Unix); no library polling task is created. |
-| `DisposeAsync` | Stops the pump, kills the child if running, releases the PTY. |
+| `DisposeAsync` | Stops the pump, ends the child if running (Unix: hang-up, then kill after a grace period; Windows: termination), releases the PTY. |
 
 Design decisions (WHY):
 

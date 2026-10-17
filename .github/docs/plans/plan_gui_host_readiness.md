@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phases C and D (G6, G9, G10, G7, G8) are proposed.
+**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phase C: G9 (explicit Unix termios with `IUTF8`) and G10 (hang-up before kill on Unix dispose) are implemented (2026-10-17); G6 is deferred until an embedder needs dozens of concurrent sessions, since G1 already removed every observed failure. Phase D (G7, G8) is proposed.
 
 ## Background
 
@@ -82,12 +82,12 @@ Causes 1–3 share one structure:
 | G3 | **P1** | Idle sessions park thread-pool workers (F8) | [Merged into G1](#g3-thread-pool-independence-merged-into-g1) |
 | G4 | **P1** | Terminal size clamped to 512 (F7) | [Platform size limits](#g4-platform-size-limits-p1) |
 | G5 | **P1** | No guidance for GUI hosts; README patterns are unsafe on a UI thread | [GUI host guidance](#g5-gui-host-guidance-p1) |
-| G6 | **P2** | After G1, each session still holds one dedicated reader thread, and a pending read cannot be canceled at the OS level | [Thread-free async I/O](#g6-thread-free-async-io-p2) |
+| G6 | **P2** | After G1, each session still holds one dedicated reader thread, and a pending read cannot be canceled at the OS level | [Thread-free async I/O](#g6-thread-free-async-io-p2); deferred until an embedder needs it |
 | G7 | **P2** | Windows is limited to the in-box ConPTY (F10); `PtyTerminal.Clear()` is a no-op | [Opt-in out-of-band ConPTY](#g7-opt-in-out-of-band-conpty-p2) |
 | G8 | **P2** | No process-tree cleanup on Windows | [Opt-in job object](#g8-opt-in-process-tree-cleanup-p2) |
-| G9 | **P2** | Unix termios relies on kernel defaults; `IUTF8` is missing | [Explicit termios](#g9-explicit-unix-termios-p2) |
+| G9 | **P2** | Unix termios relies on kernel defaults; `IUTF8` is missing | [Explicit termios](#g9-explicit-unix-termios-p2) (implemented) |
 | G11 | **P1** | On Windows, end of output can wait for an unrelated process the host spawned (F12) | [Bounded end of output after close](#g11-bounded-end-of-output-on-windows-p1) |
-| G10 | **P2** | Unix `Dispose` kills with `SIGKILL` immediately | [Graceful Unix termination](#g10-graceful-unix-termination-on-dispose-p2) |
+| G10 | **P2** | Unix `Dispose` kills with `SIGKILL` immediately | [Graceful Unix termination](#g10-graceful-unix-termination-on-dispose-p2) (implemented) |
 
 ---
 
@@ -767,18 +767,22 @@ Small–medium.
 
 Linux spawns with the kernel default termios, which lacks `IUTF8`. In canonical mode, erasing a multibyte character such as Japanese input then removes only one byte and leaves invalid UTF-8 in the line.
 
-### Decision
+### Decision (implemented)
 
-- Set termios explicitly at spawn. This includes `IUTF8`, and pins the output and input flags that are currently implied by kernel defaults (`ONLCR`, `ICRNL`, and so on).
-- Apply this consistently to the Linux, macOS, and FreeBSD spawn paths.
+- The native shim builds one `struct termios` for every child: input `ICRNL IXON IXANY IMAXBEL BRKINT IUTF8`, output `OPOST ONLCR`, control `CREAD CS8 HUPCL`, local `ICANON ISIG IEXTEN ECHO ECHOE ECHOK ECHOKE ECHOCTL`, the usual control characters (`VERASE` = DEL, `VEOF` = ^D, `VWERASE` = ^W, …, plus `VDSUSP` and `VSTATUS` where the platform has them), and 38400 baud. These are the settings a terminal emulator gives a new shell; `IUTF8`, `IXANY`, `IMAXBEL`, and `BRKINT` are the ones the Linux default lacks.
+- Linux and FreeBSD pass it as `forkpty`'s termios argument. macOS, whose spawn opens the slave in the parent, applies it with `tcsetattr` on the slave before `posix_spawn`. Flags a platform does not define (`IUTF8` on some BSDs, `ECHOKE`/`ECHOCTL` under strict feature macros) are guarded and simply left out.
+- Recorded in [pty_crossplatform.md](../references/pty_crossplatform.md) → Unix line discipline.
 
-### Acceptance
+### Tests
 
-A canonical-mode read of multibyte input followed by an erase yields valid UTF-8.
+| Test | Covers |
+|---|---|
+| `PtyUnixLineDisciplineTests.CanonicalEraseRemovesAWholeUtf8Character` (Unix) | `sh` reads a line with echo off after U+3042, DEL, `b`: the child receives `[b]`, never `[\xE3\x81b]`. Fails with the kernel default termios |
+| `PtyUnixLineDisciplineTests.LinuxReportsTheExplicitInputFlags` (Linux) | `stty -a` in the child reports `iutf8`, `imaxbel`, and `onlcr` set, which the Linux default does not |
 
-### Estimate
+### Lessons Learned
 
-Small.
+- **The erase happens when the input is written, not when the child reads.** The line discipline processes canonical editing as bytes enter the tty, so the test's `stty -echo` only keeps echoed bytes out of the output; it does not have to run before the input arrives for the assertion to hold.
 
 ---
 
@@ -795,21 +799,28 @@ Unix `Dispose` used to have several teardown hazards. Most of them are removed b
 | A transport close races a `read` blocked in another thread, and EBADF reported as EOF ([PtyStreams.cs:399](../../../src/MiniPty/Internal/PtyStreams.cs)) masks it | The pump stops through its wake descriptor and closes the master only after leaving the read |
 | macOS toggles `O_NONBLOCK` on the shared master description ([minipty_unix.c:731](../../../src/MiniPty/Native/minipty_unix.c)), so a concurrent write can fail with `EAGAIN` | The master is permanently non-blocking, and writes handle `EAGAIN` through the slow path |
 
-What remains is the termination policy itself. `Dispose` sends `SIGKILL` immediately, so shells cannot save history or clean up.
+What remained was the termination policy itself. `Dispose` sent `SIGKILL` immediately, so shells could not save history or clean up.
 
-### Decision
+### Decision (implemented)
 
-On `Dispose`, hang up first and escalate to kill after a bounded grace period. Both steps run off the caller's thread.
+- `Dispose` sends `SIGHUP` to the child, closes the master as before, and arms a one-shot timer that sends `SIGKILL` one second later unless the watcher has reaped the child by then. The kill takes the same lock as the reap, so it is skipped for a reaped child rather than sent to a reused pid. Nothing waits on the disposing thread, and `DisposeAsync` still waits only for the reader, not for the exit.
+- `SIGHUP` is what a terminal emulator delivers when its window closes; a shell saves its history and runs its exit hooks on it. Closing the master hangs the tty up as well (Linux signals the session leader, BSD the foreground process group), so the explicit signal covers a shell that is not in the foreground.
+- `Kill()` stays `SIGKILL`, and `PtyTerminal.Kill()` stays `SIGHUP` without escalation; only disposal is graceful with a bound. The grace is a constant (`UnixPtyBackend.DisposeHangupGraceMs`), long enough for a shell on a loaded machine and short enough that a closed tab leaves nothing behind for long; it can become an option if an embedder needs one.
+- Windows is unchanged: `TerminateProcess`, then `ClosePseudoConsole`. ConPTY offers no hang-up to send first.
 
-### Acceptance
+### Tests
 
-- An interactive shell observes the hangup and can exit cleanly.
-- A child that ignores hangup is still killed within the bound.
-- `Dispose` returns promptly.
+| Test | Covers |
+|---|---|
+| `PtyUnixDisposeTests.DisposeHangsUpAChildThatExitsOnHangup` | A `sh` whose `HUP` trap writes a file and exits: the file appears, so the trap ran and the child was not killed outright; the pid is gone afterwards; `Dispose` returned in less than the grace |
+| `PtyUnixDisposeTests.DisposeKillsAChildThatIgnoresHangupAfterTheGrace` | A `sh` whose `HUP` trap writes the file but keeps running: the file appears (hang-up first), and the pid is gone within the grace plus a margin (the kill followed) |
 
-### Estimate
+Both are red with the previous `SIGKILL`-first disposal: the trap never runs and the file never appears. With G9 and G10 together: Linux 278 pass in 2 full-suite runs (WSL, Ubuntu 24.04), Windows 278 pass, and the `Session` sample published and ran as NativeAOT on Linux. No benchmark scenario disposes a running child, and the only new allocation is the one-shot timer of such a disposal, so the allocation baselines are unaffected.
 
-Small, after G1.
+### Lessons Learned
+
+- **A shell runs a trap only when the foreground command returns.** The test child loops on `sleep 0.1` rather than blocking in `read` or a long `sleep`, so the trap runs within about 100 ms of the hang-up, well inside the grace, and the test does not depend on how a given `sh` interrupts a builtin.
+- **A killed child is a zombie until it is reaped, and `kill(pid, 0)` succeeds on a zombie.** "The pid is gone" therefore also asserts that the watcher reaped the child after disposal, which is the zombie guarantee G1 introduced.
 
 ---
 
@@ -915,7 +926,7 @@ flowchart LR
 |---|---|---|
 | **Phase A** | G1 (including G3), G2 | A WinUI host can use any MiniPty API from its UI thread without freezes or resize crashes, and idle tabs do not starve the thread pool |
 | **Phase B** | G4, G5, G11 | Wide windows work, the threading model is documented with the pull pattern as the GUI recommendation, and Windows output ends even while the host spawns other processes |
-| **Phase C** | G6, G9, G10 | Reads hold no thread, and Unix input and teardown are correct |
+| **Phase C** | G9, G10 (G6 deferred) | Unix canonical editing handles UTF-8, and closing a tab lets the shell exit cleanly before it is killed |
 | **Phase D** | G7, G8 | Optional Windows VT fidelity and process-tree cleanup for hosts that opt in |
 
 ## Lessons Learned

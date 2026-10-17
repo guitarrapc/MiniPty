@@ -53,7 +53,7 @@ MiniPty environment inheritance follows normal process-spawn behavior and is not
 | `HasExited` / `ExitCode?` | Reports the exit observed by the process-wide exit watcher; reading it never blocks or reaps. `ExitCode` is null until the child has exited. |
 | `ExitStatus?` | `PtyExitStatus` after exit; null before. |
 | `ActiveProcessName` | Foreground process name for editor title polling on Unix; null when unavailable and on Windows. |
-| `Dispose` / `DisposeAsync` | Kills the child if still running and releases handles without blocking; in-flight output reads and exit waits fail with `ObjectDisposedException`. `DisposeAsync` also completes once the background output reader has stopped; every call waits, including one after `Dispose` and concurrent ones. Output chunk memory is invalid after either. |
+| `Dispose` / `DisposeAsync` | Ends the child if still running and releases handles without blocking. On Unix the child is hung up first (`SIGHUP`, what a terminal emulator sends when its window closes, so a shell saves its history) and killed after a one-second grace period if it has not exited, both off the disposing thread; on Windows it is terminated. In-flight output reads and exit waits fail with `ObjectDisposedException`. `DisposeAsync` also completes once the background output reader has stopped; every call waits, including one after `Dispose` and concurrent ones. Output chunk memory is invalid after either. |
 
 ## Exit Status
 

@@ -8,6 +8,10 @@ namespace MiniPty.Internal;
 internal static partial class UnixPtyBackend
 {
     private const byte InputEot = 0x04;
+    // Disposal hangs the child up first, so a shell can save its history and run its exit hooks, and kills what is
+    // still running this long afterwards. A shell exits on SIGHUP within milliseconds; the bound is for a child
+    // that ignores it, and short enough that a closed tab never leaves a process behind for long.
+    internal const int DisposeHangupGraceMs = 1000;
     // EOF staging advances one step per tick, matching the cadence of the exit-wait poll loop it replaced.
     private const int EofTickMs = 100;
     // macOS posix_spawn children can still be running short -c scripts when the first EOF tick fires.
@@ -135,6 +139,8 @@ internal static partial class UnixPtyBackend
         // Mutable struct: used only through this field, never copied.
         private PtyExitSignal _exitSignal;
         private Timer? _eofTimer;
+        // Armed by Dispose while the child is still running; kills it once the hang-up grace has passed.
+        private Timer? _hangupKillTimer;
         private bool _eofSent;
         private bool _eofPending;
         private int _eofAttachPollsRemaining;
@@ -745,20 +751,49 @@ internal static partial class UnixPtyBackend
             var exitObserved = true;
             lock (_pidLock)
             {
-                // The watcher reaps the killed child, so disposal never waits for it on the caller's thread.
+                // Hang up rather than kill: a shell saves its history and runs its exit hooks on SIGHUP, which is
+                // also what a terminal emulator sends when its window closes. The grace timer below kills a child
+                // that ignores it, and the watcher reaps either way, so disposal never waits on the caller's thread.
                 if (!_exited)
                 {
                     exitObserved = false;
-                    KillCore();
+                    UnixInterop.kill(_pid, UnixInterop.SigHup);
                 }
             }
 
             _eofTimer?.Dispose();
             if (!exitObserved)
+            {
                 _exitSignal.SetDisposedBeforeExit();
+                ArmHangupKill();
+            }
 
             CloseTransport();
             _execHold?.Dispose();
+        }
+
+        /// <summary>Schedules the kill that backs the hang-up sent by <see cref="Dispose"/>.</summary>
+        private void ArmHangupKill()
+        {
+            // Created disarmed and armed afterwards, so the callback never runs before the field holds the timer it
+            // disposes. One timer per disposed-while-running session; it is the only allocation disposal makes.
+            var timer = new Timer(static state => ((UnixPtyBackendInstance)state!).OnHangupGraceElapsed(), this, Timeout.Infinite, Timeout.Infinite);
+            _hangupKillTimer = timer;
+            timer.Change(DisposeHangupGraceMs, Timeout.Infinite);
+        }
+
+        private void OnHangupGraceElapsed()
+        {
+            // A timer callback must never throw; kill(2) reports failure by its return value, so nothing here can.
+            lock (_pidLock)
+            {
+                // The lock orders this with the watcher's reap: a reaped child has released its pid, and the signal
+                // is skipped rather than sent to whatever reused it.
+                if (!_exited)
+                    KillCore();
+            }
+
+            _hangupKillTimer?.Dispose();
         }
 
         /// <summary>
