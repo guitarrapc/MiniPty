@@ -142,6 +142,7 @@ EOF staging advances on a per-session 100 ms timer, so it gives the child time t
 |---|---|
 | `ReadOutputAsync` / `Output` after child exit | Drains remaining output and then completes normally. Where the transport stays open after exit (ConPTY always, Linux when a grandchild holds the slave; macOS revokes the tty when the child exits, so output a grandchild writes afterwards is lost), the post-exit drain closes it once output has been quiet for 100 ms. Where even the close does not end it (Windows, when another process holds ConPTY's output pipe open), output ends once reads have been quiet for another 100 ms after the close; end of output never waits for an unrelated process. |
 | `WaitForExitAsync` | Observes exit only. It does not close the transport, so a concurrent reader keeps receiving output until end of output. |
+| Output ends before exit | Unix, when the child closes the terminal and keeps running: output ends, the child is not hung up, and its own exit status is reported when it exits. ConPTY cannot end output first, because it ends output only when the pseudo-console closes, which MiniPty does after exit. |
 | `ReadOutputAsync` after `Kill()` | Same as exit: drain remaining output, then complete normally (EOF). |
 | `CompleteAsync` after child exit | Drains output; the transport closes once output has been quiet, and at `OutputDrainGrace` after exit at the latest. |
 | Output reader close (one-shot) | Waits up to `OutputReaderCloseTimeout`. |
@@ -157,7 +158,8 @@ EOF staging advances on a per-session 100 ms timer, so it gives the child time t
 | Condition | Behavior |
 |---|---|
 | Unsupported OS | `PlatformNotSupportedException` from `Pty.Start`. |
-| Spawn, ConPTY, `openpty`, or `forkpty` failure | OS exception with error code; run aborts. |
+| Program not found, or working directory missing | Windows: `Win32Exception` from `Pty.Start` (`ERROR_FILE_NOT_FOUND` 2, `ERROR_DIRECTORY` 267), because `CreateProcess` fails. Unix: `Pty.Start` succeeds, because the fork has already happened when `exec` or `chdir` fails in the child; the child exits with 127 or 126, the shell convention. |
+| Spawn, ConPTY, `openpty`, or `forkpty` failure | OS exception with error code; run aborts. What the start had created is released, and a child it had already started is killed (and reaped on Unix). |
 | Child non-zero exit | Returned as `ExitCode`; MiniPty does not throw for non-zero child exits. |
 | Second output consumer | `InvalidOperationException`. |
 | Session disposed while output streaming | `ObjectDisposedException`. |
@@ -165,6 +167,32 @@ EOF staging advances on a per-session 100 ms timer, so it gives the child time t
 | Output drain or reader close timeout (one-shot) | `TimeoutException`. |
 
 MiniPty does not fall back to pipe redirect when PTY creation fails.
+
+## Descendants
+
+MiniPty ends only the child; it has no process-tree cleanup. What disposal, or the child's own exit, does to the processes the child started follows from the terminal:
+
+| Platform | Descendant ends | Descendant keeps running |
+|---|---|---|
+| Unix | One in the terminal's foreground process group: when the child (the session leader) exits, the system hangs that group up. An interactive shell also hangs up its jobs. | One that ignores `SIGHUP` (`nohup`), was disowned, or started its own session. |
+| Windows | One attached to the pseudo-console: closing it, at disposal or by the post-exit drain, ends every attached process. | One in a console of its own, or a GUI process. Opt-in job-object cleanup is planned (G8 in [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md)). |
+
+A surviving descendant belongs to the host from then on. It never holds end of output: output ends shortly after the child exits even while a descendant keeps the terminal open (see [Drain, kill, and disposal](#drain-kill-and-disposal)).
+
+## Baseline guarantees
+
+Every session, on every platform, guarantees:
+
+1. A start that fails leaks no handle or descriptor.
+2. A child that exits by itself is reported, and disposing the session then releases every handle and descriptor (and on Unix, the child has been reaped).
+3. Teardown can be repeated, in any order and from several threads.
+4. Output ending before exit, or exit before output is read, breaks neither.
+5. Output nobody reads blocks the child instead of growing a buffer (one-shot results excepted).
+6. A resize reaches the running child as a notification.
+7. What teardown does to descendants is fixed per platform ([Descendants](#descendants)).
+8. Start failure, exit, and cancellation behave as documented above on Windows and Unix alike.
+
+`PtyBaselineTests` checks each of them with real children through the public API only; other test classes go deeper into each area.
 
 ## Lessons Learned
 
@@ -182,5 +210,7 @@ MiniPty does not fall back to pipe redirect when PTY creation fails.
 - **Post-exit drain uses quiet heuristics, not completion truth.** Closing the ConPTY or Unix PTY master after quiet unblocks end of output when nothing else would end it; it does not detect shell command completion. One-shot completion bounds it by `OutputDrainGrace` and never quiet-closes before the first read, because ConPTY can emit its first frame after a fast child has already exited.
 - **Read output on a thread the library owns, from spawn.** A caller-side wait for a pump to start starved the thread pool under parallel CI and could throw cancellation before `KillOnCancellation` ran, and a pump queued to the thread pool could start too late for fast children (the macOS-only scheduling workaround). The output reader now starts at spawn on a dedicated thread on every platform; see [pty_crossplatform.md](../references/pty_crossplatform.md) → Output pump.
 - **Disposal must be admitted once, and a handle must outlive every concurrent user.** Hosts race disposal on purpose (an exit handler disposing while the main thread does), and library threads race it on their own (exit watcher, EOF timer). A check-then-set guard let two disposals both tear down: the session dropped its reference to the output buffer twice, returning it to the shared pool while the reader could still write into it, and the backends closed handles and freed native memory twice. Separately, the Windows process handle was a raw value that exit queries, kills, the watcher, and the timer kept using after disposal closed it. Windows hands a released handle's value to the next object the process opens, so a disposed session reported another child's exit code (reproduced by duplicating a handle right after disposal). Disposal is now admitted with an atomic exchange, and the process handle is a `SafeHandle` pinned for each native call.
+- **A descendant must finish setting up before the test ends its parent.** A Unix child that ran `nohup` and exited at once sometimes exited before `nohup` had ignored `SIGHUP`, so the hang-up of the foreground group killed the descendant, and the test reported a policy change that was only a race. Descendants now record their own pid once they are set up, and the child exits only when the test tells it to.
+- **A start that fails after the child exists leaves a child no watcher knows.** The session registers its child with the exit watcher last, so a failure before that point left a running child and, on Unix, a zombie. The failed start now kills it, and reaps it on Unix.
 - **A non-blocking `Dispose` still lets ConPTY finish closing.** Closing a pseudo-console can wait until its final frame fits in the output pipe, so disposal switches the reader to discarding output before it closes the transport, and the reader keeps draining until the pipe ends.
 - **Linux `forkpty` exec payloads must outlive the pre-exec child.** The parent must keep `file`, `argv`, `envp`, and `cwd` pointers valid until the child has `chdir`/`execve` or exited. Freeing managed UTF-8 allocations immediately after `forkpty` returns races the child and flakes as exit **127** or wrong working-directory lookup under parallel CI load. Hold the payload until session/backend disposal; the fork child uses its copy-on-write mapping for `chdir` (no child-side copy when the parent holds — see [pty_crossplatform.md](../references/pty_crossplatform.md) → `forkpty()` safety). `posix_spawn` paths copy env/cwd in the kernel before returning.

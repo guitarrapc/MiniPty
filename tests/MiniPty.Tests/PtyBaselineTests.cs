@@ -1,0 +1,754 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace MiniPty.Tests;
+
+/// <summary>
+/// The minimum a PTY session guarantees, one test per guarantee, on Windows (ConPTY) and Unix alike:
+/// <list type="number">
+/// <item>A start that fails leaks no handle or descriptor.</item>
+/// <item>A child that exits by itself is reported, and disposing the session then releases everything.</item>
+/// <item>Teardown can be repeated, in any order and from several threads.</item>
+/// <item>Output ending before exit, or exit before output is read, breaks neither.</item>
+/// <item>Output nobody reads blocks the child instead of growing a buffer.</item>
+/// <item>A resize reaches the running child as a notification.</item>
+/// <item>What teardown does to the child's descendants is fixed per platform.</item>
+/// <item>Start failure, exit, and cancellation behave as documented on every platform.</item>
+/// </list>
+/// </summary>
+/// <remarks>
+/// The tests use the public API and real children, because every guarantee concerns operating-system resources:
+/// handles and descriptors, processes, signals, and the terminal. Other test classes cover the same areas in more
+/// depth. Tests that count handles, descriptors, or allocations run alone (<c>[NotInParallel]</c> without a key),
+/// since any other test changes those counts.
+/// </remarks>
+public sealed class PtyBaselineTests
+{
+    private const int ErrorFileNotFound = 2;
+    private const int ErrorDirectory = 267;
+    private const int ESRCH = 3;
+    private const int SigKill = 9;
+    // Set on this test executable to make it the child of ResizeReachesTheRunningChild on Windows.
+    private const string ResizeChildVariable = "MINIPTY_TESTS_RESIZE_CHILD";
+
+    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
+
+    // ---------------------------------------------------------------- 1. Start failure
+
+    /// <summary>
+    /// A missing program and a missing working directory fail the start. Windows reports them from
+    /// <see cref="Pty.Start"/>, because <c>CreateProcess</c> fails. On Unix the fork has already succeeded when the exec
+    /// or <c>chdir</c> fails, so the session starts and the child exits with the shell convention: 127 and 126.
+    /// </summary>
+    [Test]
+    public async Task StartFailureIsReported()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var missing = await Assert.ThrowsAsync<Win32Exception>(() => StartAndDispose(MissingProgram()));
+            await Assert.That(missing!.NativeErrorCode).IsEqualTo(ErrorFileNotFound);
+            var badDirectory = await Assert.ThrowsAsync<Win32Exception>(() => StartAndDispose(InMissingDirectory()));
+            await Assert.That(badDirectory!.NativeErrorCode).IsEqualTo(ErrorDirectory);
+            return;
+        }
+
+        await using (var missing = Pty.Start(MissingProgram()))
+            await Assert.That((await missing.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(127);
+
+        await using (var badDirectory = Pty.Start(InMissingDirectory()))
+            await Assert.That((await badDirectory.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(126);
+
+        static Task StartAndDispose(PtyStartInfo startInfo)
+        {
+            Pty.Start(startInfo).Dispose();
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// A start that fails releases what it had already created. On Windows that is the pseudo-console, its pipes, and
+    /// the attribute list; on Unix the session of a child whose exec failed.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task StartFailureLeaksNothing()
+    {
+        await AssertNoLeakAsync(async () =>
+        {
+            await FailToStartAsync(MissingProgram());
+            await FailToStartAsync(InMissingDirectory());
+        });
+
+        static async Task FailToStartAsync(PtyStartInfo startInfo)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    Pty.Start(startInfo).Dispose();
+                }
+                catch (Win32Exception)
+                {
+                    return;
+                }
+
+                throw new InvalidOperationException("The start did not fail.");
+            }
+
+            await using var session = Pty.Start(startInfo);
+            await session.WaitForExitAsync().WaitAsync(Timeout);
+        }
+    }
+
+    // ---------------------------------------------------------------- 2. Natural exit
+
+    /// <summary>
+    /// A child that exits by itself reports its exit code, its output ends, and disposing the session releases every
+    /// handle and descriptor. On Unix the child is also reaped, so no zombie remains.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task NaturalExitIsReportedAndDisposeReleasesEverything()
+    {
+        var pid = 0;
+        await AssertNoLeakAsync(async () =>
+        {
+            await using var session = Pty.Start(Exits(7));
+            var output = ReadAllTextAsync(session);
+            var status = await session.WaitForExitAsync().WaitAsync(Timeout);
+            await output.WaitAsync(Timeout);
+
+            await Assert.That(status.ExitCode).IsEqualTo(7);
+            pid = session.ProcessId;
+        });
+
+        if (!OperatingSystem.IsWindows())
+            await Assert.That(UnixProcessExists(pid)).IsFalse();
+    }
+
+    // ---------------------------------------------------------------- 3. Repeated teardown
+
+    /// <summary>
+    /// Every teardown call can be repeated: kill before and after exit, dispose after kill, dispose and dispose-async
+    /// in any order, and disposal from several threads at once. Only a kill after disposal is refused.
+    /// </summary>
+    [Test]
+    public async Task TeardownCanBeRepeated()
+    {
+        var session = Pty.Start(Blocks());
+        session.Kill();
+        session.Kill();
+        await session.WaitForExitAsync().WaitAsync(Timeout);
+        session.Kill();
+        session.Dispose();
+        session.Dispose();
+        await session.DisposeAsync().AsTask().WaitAsync(Timeout);
+        await session.DisposeAsync().AsTask().WaitAsync(Timeout);
+        session.Dispose();
+
+        await Assert.That(session.HasExited).IsTrue();
+        Assert.Throws<ObjectDisposedException>(() => session.Kill());
+
+        var raced = Pty.Start(Blocks());
+        using var start = new ManualResetEventSlim();
+        var disposals = new Task[4];
+        for (var i = 0; i < disposals.Length; i++)
+        {
+            disposals[i] = Task.Factory.StartNew(
+                () =>
+                {
+                    start.Wait();
+                    raced.Dispose();
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+        }
+
+        start.Set();
+        await Task.WhenAll(disposals).WaitAsync(Timeout);
+        await raced.DisposeAsync().AsTask().WaitAsync(Timeout);
+    }
+
+    // ---------------------------------------------------------------- 4. Order of exit and end of output
+
+    /// <summary>
+    /// The child stops using the terminal and exits a second later, so output ends first. Ending output must not end
+    /// the child: hanging the terminal up there would report 129 instead of its own 3. Windows has no such order, because
+    /// ConPTY ends output only when the pseudo-console closes, and MiniPty closes it after exit.
+    /// </summary>
+    [Test]
+    public async Task OutputEndingBeforeExitStillReportsTheExit()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        await using var session = Pty.Start(Shell("printf ready; exec >/dev/null 2>&1 </dev/null; sleep 1; exit 3"));
+        var text = await ReadAllTextAsync(session).WaitAsync(Timeout);
+        var exitedWhenOutputEnded = session.HasExited;
+        var status = await session.WaitForExitAsync().WaitAsync(Timeout);
+
+        await Assert.That(text).Contains("ready");
+        await Assert.That(status).IsEqualTo(new PtyExitStatus(3, null));
+        // Linux ends output once no process holds the terminal, so the order is known there.
+        if (OperatingSystem.IsLinux())
+            await Assert.That(exitedWhenOutputEnded).IsFalse();
+    }
+
+    /// <summary>
+    /// The child exits and its output ends before anyone reads; a reader started afterwards still gets all of it.
+    /// </summary>
+    [Test]
+    public async Task ExitBeforeOutputIsReadStillDeliversTheOutput()
+    {
+        const string Marker = "baseline-exit-before-read";
+        await using var session = Pty.Start(OperatingSystem.IsWindows() ? Cmd($"echo {Marker}") : Shell($"printf {Marker}"));
+        await session.WaitForExitAsync().WaitAsync(Timeout);
+        // Past the post-exit drain, which closes the transport after 100 ms of quiet.
+        await Task.Delay(500);
+
+        await Assert.That(await ReadAllTextAsync(session).WaitAsync(Timeout)).Contains(Marker);
+    }
+
+    /// <summary>
+    /// A descendant that outlives the child and keeps the terminal open does not hold end of output: it ends shortly
+    /// after the child exits, not when the descendant does. On Unix the descendant ignores the hang-up and holds the
+    /// terminal as its output, so it is still running when output ends; on Windows it shares the pseudo-console.
+    /// </summary>
+    [Test]
+    public async Task OutputEndsWithoutWaitingForADescendant()
+    {
+        int[] descendants = [];
+        try
+        {
+            await using var session = StartWithDescendants([Descendant.HoldsTerminal], out var pids);
+            var output = ReadAllTextAsync(session);
+            descendants = await pids.WaitAsync(Timeout);
+
+            var stopwatch = Stopwatch.StartNew();
+            await EndChildAsync(session);
+            var text = await output.WaitAsync(Timeout);
+            var elapsed = stopwatch.Elapsed;
+
+            await Assert.That(text).Contains("ready");
+            // The descendant lives 30 s; the bound is loose for a loaded runner.
+            await Assert.That(elapsed).IsLessThan(TimeSpan.FromSeconds(15));
+            if (!OperatingSystem.IsWindows())
+                await Assert.That(IsRunning(descendants[0])).IsTrue();
+        }
+        finally
+        {
+            KillAll(descendants);
+        }
+    }
+
+    // ---------------------------------------------------------------- 5. Bounded output buffer
+
+    /// <summary>
+    /// While nobody reads, a session holds a few kilobytes and the child blocks on its next write, as on a terminal
+    /// nobody reads. The child here writes megabytes and then exits; it is still running after seconds of no reader, and
+    /// the session allocated nothing meanwhile. Reading then delivers every byte.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="PtySession.CompleteAsync"/> and <c>PtyCapture</c> are the exception: a one-shot result keeps all
+    /// output by design.
+    /// </remarks>
+    [Test]
+    [NotInParallel]
+    public async Task OutputNobodyReadsBlocksTheChild()
+    {
+        var size = OperatingSystem.IsWindows() ? 4_000_000 : 16_000_000;
+        PtyStartInfo flood;
+        if (OperatingSystem.IsWindows())
+        {
+            if (!TryGetWindowsPowerShell(out var powershell))
+                return;
+
+            flood = new PtyStartInfo { FileName = powershell, Arguments = ["-NoLogo", "-NoProfile", "-Command", $"[Console]::Out.Write(('x' * {size})); exit 0"] };
+        }
+        else
+        {
+            flood = Shell($"head -c {size} /dev/zero | tr '\\0' x; exit 0");
+        }
+
+        await using var session = Pty.Start(flood);
+        var allocated = GC.GetTotalAllocatedBytes(precise: true);
+        // Draining takes under a second on either platform, so a child still running after this has been blocked.
+        await Task.Delay(TimeSpan.FromSeconds(OperatingSystem.IsWindows() ? 4 : 2));
+        var allocatedWhileBlocked = GC.GetTotalAllocatedBytes(precise: true) - allocated;
+
+        await Assert.That(session.HasExited).IsFalse();
+        await Assert.That(allocatedWhileBlocked).IsLessThan(size / 16);
+
+        long length = 0;
+        using var cts = new CancellationTokenSource(Timeout);
+        await foreach (var chunk in session.ReadOutputAsync(cts.Token))
+            length += chunk.Data.Length;
+
+        await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
+        await Assert.That(length).IsGreaterThanOrEqualTo(size);
+    }
+
+    // ---------------------------------------------------------------- 6. Resize
+
+    /// <summary>
+    /// A resize notifies the running child, which TUI programs redraw on: <c>SIGWINCH</c> on Unix, a
+    /// <c>WINDOW_BUFFER_SIZE_EVENT</c> input record on Windows. The child reports the size it reads in response.
+    /// </summary>
+    [Test]
+    public async Task ResizeReachesTheRunningChild()
+    {
+        var child = OperatingSystem.IsWindows()
+            ? new PtyStartInfo
+            {
+                FileName = Path.Combine(AppContext.BaseDirectory, "MiniPty.Tests.exe"),
+                Environment = new Dictionary<string, string?> { [ResizeChildVariable] = "1" },
+            }
+            : Shell("trap 'set -- $(stty size); printf \"SIZE:%s:%s;\" \"$1\" \"$2\"' WINCH; printf ready; " + UnixWaitLoop);
+        var expected = OperatingSystem.IsWindows() ? "SIZE:100:30;" : "SIZE:30:100;";
+
+        await using var session = Pty.Start(child);
+        using var cts = new CancellationTokenSource(Timeout);
+        await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
+        var output = new StringBuilder();
+        await ReadUntilAsync(reader, output, "ready");
+
+        session.Resize(new PtySize(100, 30));
+
+        await ReadUntilAsync(reader, output, expected);
+    }
+
+    /// <summary>
+    /// Reports each <c>WINDOW_BUFFER_SIZE_EVENT</c> as <c>SIZE:columns:rows;</c> when <see cref="ResizeChildVariable"/>
+    /// is set, as the child of <see cref="ResizeReachesTheRunningChild"/>. Runs before the test framework starts, ends
+    /// by itself after 30 s, and exits the process; in a test run the variable is unset and this returns at once.
+    /// </summary>
+    [ModuleInitializer]
+    internal static void RunAsResizeChildWhenAsked()
+    {
+        if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable(ResizeChildVariable) is not null)
+            Environment.Exit(RunWindowsResizeChild());
+    }
+
+    private static unsafe int RunWindowsResizeChild()
+    {
+        var input = CreateFileW("CONIN$", GenericRead | GenericWrite, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
+        if (input == new IntPtr(-1) || !GetConsoleMode(input, out var mode) || !SetConsoleMode(input, mode | EnableWindowInput))
+            return 2;
+
+        System.Console.Out.Write("ready");
+        System.Console.Out.Flush();
+        var records = stackalloc InputRecord[16];
+        var deadline = Environment.TickCount64 + 30_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (WaitForSingleObject(input, 100) != 0)
+                continue;
+
+            if (!ReadConsoleInputW(input, records, 16, out var read))
+                return 3;
+
+            for (var i = 0; i < read; i++)
+            {
+                if (records[i].EventType == WindowBufferSizeEvent)
+                {
+                    System.Console.Out.Write($"SIZE:{records[i].SizeX}:{records[i].SizeY};");
+                    System.Console.Out.Flush();
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    // ---------------------------------------------------------------- 7. Descendants at teardown
+
+    /// <summary>
+    /// What disposal, or the child's own exit, does to the descendants it started. MiniPty signals only the child.
+    /// On Unix the system hangs up the terminal's foreground process group when the child exits, so a descendant in
+    /// that group ends, and one that ignores the hang-up (<c>nohup</c>) keeps running. On Windows closing the
+    /// pseudo-console ends the descendants attached to it, and one in its own console keeps running. A descendant
+    /// that survives belongs to the host from then on.
+    /// </summary>
+    [Test]
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task TeardownEndsOnlyTheDescendantsOnTheTerminal(bool dispose)
+    {
+        int[] descendants = [];
+        try
+        {
+            var session = StartWithDescendants([Descendant.OnTerminal, Descendant.Detached], out var pids);
+            await using (session)
+            {
+                descendants = await pids.WaitAsync(Timeout);
+                if (dispose)
+                {
+                    await session.DisposeAsync().AsTask().WaitAsync(Timeout);
+                }
+                else
+                {
+                    await EndChildAsync(session);
+                    await ReadAllTextAsync(session).WaitAsync(Timeout);
+                }
+            }
+
+            var onTerminal = descendants[0];
+            var detached = descendants[1];
+            await Assert.That(await WaitUntilAsync(() => !IsRunning(onTerminal), Timeout)).IsTrue();
+            // Past the Unix disposal's one-second grace kill, which reaches only the child in any case.
+            await Task.Delay(1500);
+            await Assert.That(IsRunning(detached)).IsTrue();
+        }
+        finally
+        {
+            KillAll(descendants);
+        }
+    }
+
+    // ---------------------------------------------------------------- 8. Cancellation
+
+    /// <summary>
+    /// Canceling a wait or a read stops only that operation, and the child keeps running. Canceling one-shot
+    /// completion kills the child by default (<see cref="PtyCompleteOptions.KillOnCancellation"/>).
+    /// </summary>
+    [Test]
+    public async Task CancellationStopsOnlyTheCanceledOperation()
+    {
+        await using var session = Pty.Start(Blocks());
+
+        using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
+            await Assert.ThrowsAsync<OperationCanceledException>(() => session.WaitForExitAsync(cts.Token));
+
+        using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
+        {
+            await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            {
+                await foreach (var _ in session.ReadOutputAsync(cts.Token))
+                {
+                }
+            });
+        }
+
+        await Assert.That(session.HasExited).IsFalse();
+
+        using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
+            await Assert.ThrowsAsync<OperationCanceledException>(() => session.CompleteAsync(cancellationToken: cts.Token));
+
+        await session.WaitForExitAsync().WaitAsync(Timeout);
+        await Assert.That(session.HasExited).IsTrue();
+    }
+
+    // ---------------------------------------------------------------- Children
+
+    private static string ComSpec => Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+
+    /// <summary>Waits about 30 s, in short sleeps so that a shell runs its traps promptly.</summary>
+    private const string UnixWaitLoop = "i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done";
+
+    private static PtyStartInfo Shell(string script) => new() { FileName = "sh", Arguments = ["-c", script] };
+
+    private static PtyStartInfo Cmd(string command) => new() { FileName = ComSpec, Arguments = ["/c", command] };
+
+    private static PtyStartInfo MissingProgram() => new() { FileName = "minipty-baseline-no-such-program" };
+
+    private static PtyStartInfo InMissingDirectory()
+    {
+        var startInfo = OperatingSystem.IsWindows() ? Cmd("exit 0") : Shell("exit 0");
+        return startInfo with { WorkingDirectory = Path.Combine(Path.GetTempPath(), "minipty-baseline-missing-" + Guid.NewGuid().ToString("N")) };
+    }
+
+    private static PtyStartInfo Exits(int code) => OperatingSystem.IsWindows() ? Cmd($"exit {code}") : Shell($"exit {code}");
+
+    /// <summary>Waits on stdin, which nobody writes, so only teardown ends it.</summary>
+    private static PtyStartInfo Blocks() => OperatingSystem.IsWindows() ? Cmd("set /p DUMMY=") : Shell("IFS= read -r _");
+
+    /// <summary>A long-lived descendant the child starts; each lives about 30 s unless teardown ends it.</summary>
+    private enum Descendant
+    {
+        /// <summary>Unix: in the terminal's foreground process group. Windows: attached to the pseudo-console.</summary>
+        OnTerminal,
+
+        /// <summary>
+        /// Unix: as <see cref="OnTerminal"/>, but ignores the hang-up, so it outlives the child with the terminal as its
+        /// output. Windows: attached to the pseudo-console.
+        /// </summary>
+        HoldsTerminal,
+
+        /// <summary>Unix: started with <c>nohup</c>. Windows: in a console of its own.</summary>
+        Detached,
+    }
+
+    /// <summary>
+    /// Starts a child that starts <paramref name="descendants"/>, prints <c>ready</c>, and waits for a line on stdin,
+    /// on which it exits by itself (<see cref="EndChildAsync"/>). The pids complete in the order given, once each
+    /// descendant is set up. They come through a file, so the output keeps a single consumer, the test.
+    /// </summary>
+    /// <remarks>
+    /// A Unix descendant records its own pid after it has set up how it treats the hang-up. Recorded by the child
+    /// instead, a <c>nohup</c> descendant could still be starting when the child exits, and the hang-up killed it.
+    /// </remarks>
+    private static PtySession StartWithDescendants(Descendant[] descendants, out Task<int[]> pids)
+    {
+        var pidFile = Path.Combine(Path.GetTempPath(), "minipty-baseline-" + Guid.NewGuid().ToString("N"));
+        PtyStartInfo child;
+        if (OperatingSystem.IsWindows())
+        {
+            if (!TryGetWindowsPowerShell(out var powershell))
+                throw new InvalidOperationException("Windows PowerShell is not installed.");
+
+            var script = new StringBuilder("$lines = @(); ");
+            foreach (var descendant in descendants)
+            {
+                var window = descendant == Descendant.Detached ? "-WindowStyle Hidden" : "-NoNewWindow";
+                script.Append($"$lines += '{descendant} ' + (Start-Process ping.exe -ArgumentList '-n','30','127.0.0.1' {window} -PassThru).Id; ");
+            }
+
+            script.Append($"[IO.File]::WriteAllLines('{pidFile}', [string[]]$lines); ");
+            script.Append("[Console]::Out.Write('ready'); [Console]::In.ReadLine() | Out-Null; exit 0");
+            child = new PtyStartInfo { FileName = powershell, Arguments = ["-NoLogo", "-NoProfile", "-Command", script.ToString()] };
+        }
+        else
+        {
+            var script = new StringBuilder();
+            foreach (var descendant in descendants)
+            {
+                var record = $"echo \"{descendant} $$\" >> \"{pidFile}\"; exec sleep 30";
+                script.Append(descendant switch
+                {
+                    Descendant.OnTerminal => $"sh -c '{record}' & ",
+                    Descendant.HoldsTerminal => $"sh -c 'trap \"\" HUP; {record}' & ",
+                    _ => $"nohup sh -c '{record}' >/dev/null 2>&1 & ",
+                });
+            }
+
+            script.Append("printf ready; IFS= read -r _; exit 0");
+            child = Shell(script.ToString());
+        }
+
+        var session = Pty.Start(child);
+        pids = ReadPidFileAsync(pidFile, descendants);
+        return session;
+    }
+
+    /// <summary>Sends the line on which a child from <see cref="StartWithDescendants"/> exits by itself.</summary>
+    private static Task EndChildAsync(PtySession session) =>
+        session.WriteInputAsync(OperatingSystem.IsWindows() ? "\r\n" : "\n").AsTask().WaitAsync(Timeout);
+
+    /// <summary>Waits until <paramref name="pidFile"/> has a <c>name pid</c> line for each descendant, then deletes it.</summary>
+    private static async Task<int[]> ReadPidFileAsync(string pidFile, Descendant[] descendants)
+    {
+        try
+        {
+            var pids = new int[descendants.Length];
+            var found = await WaitUntilAsync(() =>
+            {
+                if (!File.Exists(pidFile))
+                    return false;
+
+                var lines = File.ReadAllLines(pidFile);
+                for (var i = 0; i < descendants.Length; i++)
+                {
+                    pids[i] = 0;
+                    foreach (var line in lines)
+                    {
+                        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length == 2 && parts[0] == descendants[i].ToString())
+                            pids[i] = int.Parse(parts[1]);
+                    }
+
+                    if (pids[i] == 0)
+                        return false;
+                }
+
+                return true;
+            }, Timeout);
+
+            return found ? pids : throw new TimeoutException("The descendants did not record their pids.");
+        }
+        finally
+        {
+            File.Delete(pidFile);
+        }
+    }
+
+    private static bool TryGetWindowsPowerShell(out string path)
+    {
+        path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+        return File.Exists(path);
+    }
+
+    // ---------------------------------------------------------------- Observation
+
+    /// <summary>
+    /// Runs <paramref name="iteration"/> often enough that a handle or descriptor leaked on each run stands out from the
+    /// runtime's own threads coming and going, after a warm-up that fills the pools of reader and watcher threads.
+    /// </summary>
+    private static async Task AssertNoLeakAsync(Func<Task> iteration)
+    {
+        const int WarmUp = 10;
+        const int Iterations = 50;
+        const int Slack = 20;
+
+        for (var i = 0; i < WarmUp; i++)
+            await iteration();
+
+        var before = CountOpenHandles();
+        for (var i = 0; i < Iterations; i++)
+            await iteration();
+
+        await Assert.That(CountOpenHandles() - before).IsLessThan(Slack);
+    }
+
+    /// <summary>Handles on Windows, descriptors on Unix, of this process.</summary>
+    private static int CountOpenHandles()
+    {
+        if (OperatingSystem.IsWindows())
+            return GetProcessHandleCount(new IntPtr(-1), out var count) ? (int)count : throw new Win32Exception();
+
+        return Directory.GetFileSystemEntries(OperatingSystem.IsLinux() ? "/proc/self/fd" : "/dev/fd").Length;
+    }
+
+    private static async Task<string> ReadAllTextAsync(PtySession session)
+    {
+        using var output = new MemoryStream();
+        await foreach (var chunk in session.ReadOutputAsync())
+            output.Write(chunk.Data.Span);
+
+        return Encoding.UTF8.GetString(output.GetBuffer(), 0, checked((int)output.Length));
+    }
+
+    private static async Task ReadUntilAsync(IAsyncEnumerator<PtyOutputChunk> reader, StringBuilder output, string text)
+    {
+        while (output.ToString().IndexOf(text, StringComparison.Ordinal) < 0)
+        {
+            if (!await reader.MoveNextAsync())
+                throw new InvalidOperationException($"Output ended before '{text}': {output}");
+
+            output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
+        }
+    }
+
+    private static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+        while (!condition())
+        {
+            if (Stopwatch.GetTimestamp() >= deadline)
+                return false;
+
+            await Task.Delay(50);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether the process is still running. A Unix descendant that ended stays a zombie until init reaps it, which
+    /// counts as ended.
+    /// </summary>
+    private static bool IsRunning(int pid)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                using var process = Process.GetProcessById(pid);
+                return !process.HasExited;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        if (!UnixProcessExists(pid))
+            return false;
+
+        if (!OperatingSystem.IsLinux())
+            return true;
+
+        try
+        {
+            // The state follows the parenthesized command name: "pid (comm) S ...".
+            var stat = File.ReadAllText($"/proc/{pid}/stat");
+            return !stat[(stat.LastIndexOf(')') + 2)..].StartsWith('Z');
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    private static bool UnixProcessExists(int pid) => kill(pid, 0) == 0 || Marshal.GetLastPInvokeError() != ESRCH;
+
+    private static void KillAll(int[] pids)
+    {
+        foreach (var pid in pids)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    using var process = Process.GetProcessById(pid);
+                    process.Kill();
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception)
+                {
+                    // Already gone.
+                }
+            }
+            else if (IsRunning(pid))
+            {
+                kill(pid, SigKill);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- Interop
+
+    private const uint GenericRead = 0x80000000;
+    private const uint GenericWrite = 0x40000000;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint OpenExisting = 3;
+    private const uint EnableWindowInput = 0x0008;
+    private const ushort WindowBufferSizeEvent = 0x0004;
+
+    /// <summary><c>INPUT_RECORD</c>, read only as a <c>WINDOW_BUFFER_SIZE_RECORD</c>.</summary>
+    [StructLayout(LayoutKind.Explicit, Size = 20)]
+    private struct InputRecord
+    {
+        [FieldOffset(0)] public ushort EventType;
+        [FieldOffset(4)] public short SizeX;
+        [FieldOffset(6)] public short SizeY;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessHandleCount(IntPtr hProcess, out uint pdwHandleCount);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern unsafe bool ReadConsoleInputW(IntPtr hConsoleInput, InputRecord* lpBuffer, uint nLength, out uint lpNumberOfEventsRead);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int kill(int pid, int sig);
+}

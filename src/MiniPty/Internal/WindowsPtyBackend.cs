@@ -231,7 +231,13 @@ internal static class WindowsPtyBackend
                 WindowsInterop.CloseHandle(processInfo.hThread);
             if (processInfo.hProcess != IntPtr.Zero)
                 WindowsInterop.CloseHandle(processInfo.hProcess);
-            process?.Dispose();
+            if (process is not null)
+            {
+                // The child started but the session could not be built around it: end it now rather than when closing
+                // the pseudo-console below detaches it.
+                WindowsInterop.TerminateProcess(process.DangerousGetHandle(), 1);
+                process.Dispose();
+            }
             if (attrList != IntPtr.Zero)
             {
                 WindowsInterop.DeleteProcThreadAttributeList(attrList);

@@ -48,6 +48,13 @@ internal static partial class UnixPtyBackend
         }
         catch
         {
+            // The child runs, but no watcher will reap it, because the instance registers with the watcher last. It is
+            // killed and reaped here, so a failed start leaves neither a running child nor a zombie.
+            UnixInterop.kill(pid, UnixInterop.SigKill);
+            while (UnixInterop.waitpid(pid, out _, 0) < 0 && Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
+            {
+            }
+
             exec.Dispose();
             if (master >= 0)
                 UnixInterop.close(master);
