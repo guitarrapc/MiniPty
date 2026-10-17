@@ -12,7 +12,7 @@ jobs:
     uses: guitarrapc/actions/.github/workflows/pr-harness.yaml@ecc29fa73a78e0061e4d686bf61c8eb23260ca49 # v1.3.4
     with:
       license-check: true
-      allow-dependencies-licenses: "pkg:Microsoft.Graphics.Win2D,pkg:Microsoft.Windows.SDK.BuildTools,pkg:Microsoft.WindowsAppSDK"
+      allow-dependencies-licenses: "pkg:nuget/Microsoft.Graphics.Win2D,pkg:nuget/Microsoft.Windows.SDK.BuildTools,pkg:nuget/Microsoft.WindowsAppSDK"
       exclude-license-input-paths: |
         samples/
         scripts/
