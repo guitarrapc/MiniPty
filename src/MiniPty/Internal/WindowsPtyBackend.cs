@@ -142,6 +142,7 @@ internal static class WindowsPtyBackend
         var attrList = IntPtr.Zero;
         var environmentBlock = IntPtr.Zero;
         var processInfo = new WindowsProcessInformation();
+        SafeChildProcessHandle? process = null;
         try
         {
             nuint attrListSize = 0;
@@ -202,6 +203,13 @@ internal static class WindowsPtyBackend
                 throw new Win32Exception(Marshal.GetLastPInvokeError(), "CreateProcess failed");
             }
 
+            // Nothing uses the primary thread's handle. The process handle moves into a SafeHandle, which exit queries
+            // and kills pin while they use it.
+            WindowsInterop.CloseHandle(processInfo.hThread);
+            processInfo.hThread = IntPtr.Zero;
+            process = new SafeChildProcessHandle(processInfo.hProcess);
+            processInfo.hProcess = IntPtr.Zero;
+
             if (environmentBlock != IntPtr.Zero)
             {
                 Marshal.FreeHGlobal(environmentBlock);
@@ -213,7 +221,8 @@ internal static class WindowsPtyBackend
                 outputReadHandle,
                 hpc,
                 attrList,
-                processInfo,
+                process,
+                processInfo.dwProcessId,
                 size);
         }
         catch
@@ -222,6 +231,7 @@ internal static class WindowsPtyBackend
                 WindowsInterop.CloseHandle(processInfo.hThread);
             if (processInfo.hProcess != IntPtr.Zero)
                 WindowsInterop.CloseHandle(processInfo.hProcess);
+            process?.Dispose();
             if (attrList != IntPtr.Zero)
             {
                 WindowsInterop.DeleteProcThreadAttributeList(attrList);
@@ -287,7 +297,10 @@ internal static class WindowsPtyBackend
         private readonly SafeFileHandle _outputReadHandle;
         private readonly SafePseudoConsoleHandle _hpc;
         private readonly IntPtr _attrList;
-        private readonly WindowsProcessInformation _processInfo;
+        // Pinned for every native call (see TryPinProcess), because Dispose can release it while the exit watcher, the
+        // EOF timer, or a caller is still using it.
+        private readonly SafeChildProcessHandle _process;
+        private readonly int _processId;
         // Mutable struct: used only through this field, never copied.
         private PtyExitSignal _exitSignal;
         private Timer? _eofTimer;
@@ -323,19 +336,21 @@ internal static class WindowsPtyBackend
             SafeFileHandle outputReadHandle,
             SafePseudoConsoleHandle hpc,
             IntPtr attrList,
-            WindowsProcessInformation processInfo,
+            SafeChildProcessHandle process,
+            int processId,
             PtySize size)
         {
             _inputWriteHandle = inputWriteHandle;
             _outputReadHandle = outputReadHandle;
             _hpc = hpc;
             _attrList = attrList;
-            _processInfo = processInfo;
+            _process = process;
+            _processId = processId;
             _size = size;
             Input = new PtyInputStream(this);
 
-            // Last, so the watcher never observes a partially constructed instance.
-            WindowsExitWatcher.Register(processInfo.hProcess, this);
+            // Last, so the watcher never observes a partially constructed instance. Nothing can release the handle yet.
+            WindowsExitWatcher.Register(process.DangerousGetHandle(), this);
         }
 
         public Stream Input { get; }
@@ -774,7 +789,7 @@ internal static class WindowsPtyBackend
         }
 
         public void WaitWhileOutputBlocked(PtyReaderThread reader) => reader.WaitForWake(Timeout.Infinite);
-        public int ProcessId => _processInfo.dwProcessId;
+        public int ProcessId => _processId;
 
         public Task<PtyExitStatus> Exited => _exitSignal.GetTask();
 
@@ -880,7 +895,7 @@ internal static class WindowsPtyBackend
 
         public void Kill()
         {
-            if (_disposed || TryRefreshExitState() || _processInfo.hProcess == IntPtr.Zero)
+            if (_disposed || TryRefreshExitState())
                 return;
 
             KillCore();
@@ -899,9 +914,46 @@ internal static class WindowsPtyBackend
             Kill();
         }
 
+        /// <summary>
+        /// Terminates the child unless Dispose has released its handle, in which case Dispose has already ended it.
+        /// </summary>
         private void KillCore()
         {
-            WindowsInterop.TerminateProcess(_processInfo.hProcess, 1);
+            if (!TryPinProcess())
+                return;
+
+            try
+            {
+                WindowsInterop.TerminateProcess(_process.DangerousGetHandle(), 1);
+            }
+            finally
+            {
+                _process.DangerousRelease();
+            }
+        }
+
+        /// <summary>
+        /// Pins the process handle for a native call, so a Dispose on another thread defers the close until the
+        /// matching <see cref="SafeHandle.DangerousRelease"/>. Returns <see langword="false"/> once Dispose has
+        /// released it. A raw handle would let the call reach whatever object reused the released value.
+        /// </summary>
+        private bool TryPinProcess()
+        {
+            // Checked first, so polling exit after disposal does not throw.
+            if (_process.IsClosed)
+                return false;
+
+            var pinned = false;
+            try
+            {
+                _process.DangerousAddRef(ref pinned);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Released by a Dispose on another thread since the check.
+            }
+
+            return pinned;
         }
 
         public void OnProcessExited()
@@ -1083,10 +1135,8 @@ internal static class WindowsPtyBackend
             CloseTransport(InputDisposed);
             CloseOutputPipe();
 
-            if (_processInfo.hThread != IntPtr.Zero)
-                WindowsInterop.CloseHandle(_processInfo.hThread);
-            if (_processInfo.hProcess != IntPtr.Zero)
-                WindowsInterop.CloseHandle(_processInfo.hProcess);
+            // Closes at once, or when a concurrent exit query or kill unpins it.
+            _process.Dispose();
             if (_attrList != IntPtr.Zero)
             {
                 WindowsInterop.DeleteProcThreadAttributeList(_attrList);
@@ -1100,25 +1150,39 @@ internal static class WindowsPtyBackend
             }
         }
 
+        /// <summary>
+        /// Records the exit if the child has exited. The exit watcher, the EOF timer, and callers all get here, also
+        /// while or after Dispose releases the process handle; once it is released, a child that Dispose saw running
+        /// never reports its exit.
+        /// </summary>
         private bool TryRefreshExitState()
         {
             if (_exited)
                 return true;
 
-            if (_processInfo.hProcess == IntPtr.Zero)
-                return false;
+            if (!TryPinProcess())
+                return _exited;
 
-            var waitResult = WindowsInterop.WaitForSingleObject(_processInfo.hProcess, 0);
-            if (waitResult == WindowsInterop.WaitTimeout)
-                return false;
-            if (waitResult == WindowsInterop.WaitFailed)
-                return false;
+            try
+            {
+                var process = _process.DangerousGetHandle();
+                var waitResult = WindowsInterop.WaitForSingleObject(process, 0);
+                if (waitResult == WindowsInterop.WaitTimeout)
+                    return false;
+                if (waitResult == WindowsInterop.WaitFailed)
+                    return false;
 
-            if (!WindowsInterop.GetExitCodeProcess(_processInfo.hProcess, out var exitCode))
-                return false;
+                if (!WindowsInterop.GetExitCodeProcess(process, out var exitCode))
+                    return false;
 
-            _exitCode = unchecked((int)exitCode);
-            _exited = true;
+                _exitCode = unchecked((int)exitCode);
+                _exited = true;
+            }
+            finally
+            {
+                _process.DangerousRelease();
+            }
+
             // Whichever path observes exit first (the watcher, HasExited, Kill, a tick) records it.
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, null));
             return true;
@@ -1463,6 +1527,16 @@ internal static class WindowsPtyBackend
             WindowsInterop.ClosePseudoConsole(handle);
             return true;
         }
+    }
+
+    /// <summary>The child's process handle; see <c>WindowsPtyBackendInstance.TryPinProcess</c>.</summary>
+    private sealed class SafeChildProcessHandle : SafeHandle
+    {
+        public SafeChildProcessHandle(IntPtr value) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(value);
+
+        public override bool IsInvalid => handle == IntPtr.Zero;
+
+        protected override bool ReleaseHandle() => WindowsInterop.CloseHandle(handle);
     }
 
 }

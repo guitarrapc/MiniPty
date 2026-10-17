@@ -49,7 +49,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     private PtyOutputReader? _outputReader;
     private PtyOutputStream? _outputStream;
     private int _outputReaderActive;
-    private bool _disposed;
+    // Nonzero once disposal has started. Taken with Interlocked.Exchange so exactly one Dispose tears down: the backend
+    // and the ring reference this session holds are each released once.
+    private int _disposed;
 
     internal PtySession(IPtyBackend backend)
     {
@@ -127,7 +129,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
 
     internal PtyOutputPump OutputPump => _pump;
 
-    internal bool IsDisposed => Volatile.Read(ref _disposed);
+    internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
     /// <summary>
     /// Reads persistent PTY output as raw byte chunks.
@@ -350,7 +352,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </summary>
     /// <remarks>
     /// Uses <c>TerminateProcess</c> on Windows and <c>SIGKILL</c> on Unix.
-    /// Call <see cref="Dispose"/> afterward to release resources.
+    /// Call <see cref="Dispose"/> afterward to release resources. A kill that races disposal on another thread either
+    /// ends the child or throws <see cref="ObjectDisposedException"/>; either way disposal ends the child.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     public void Kill()
@@ -462,13 +465,16 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// reader stops on its own shortly afterwards; output chunk memory must not be used after this call. Use
     /// <see cref="DisposeAsync"/> to also wait until the reader has stopped.
     /// </para>
+    /// <para>
+    /// Safe to call more than once, also from several threads at once, such as a host's exit handler racing its main
+    /// thread. The first call tears the session down; a call that finds disposal already started returns at once.
+    /// </para>
     /// </remarks>
     public void Dispose()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
 
-        Volatile.Write(ref _disposed, true);
         Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
 
         // Discard mode first: closing the pseudo-console waits for ConPTY to flush, which needs a reader.
@@ -532,7 +538,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
 
     internal void ThrowIfDisposed()
     {
-        if (Volatile.Read(ref _disposed))
+        if (Volatile.Read(ref _disposed) != 0)
             throw new ObjectDisposedException(nameof(PtySession));
     }
 

@@ -5,6 +5,12 @@
 /// <c>WindowsPtyBackend.Start</c> or <c>UnixPtyBackend.Start</c>; <see cref="PtySession"/> is the sole
 /// public coordinator. Not a launch plugin point—keep members mapped to session operations only.
 /// </summary>
+/// <remarks>
+/// <see cref="IDisposable.Dispose"/> is called at most once, by the session, which admits only the first of
+/// concurrent disposals. Other members can still run on other threads during and after it: caller threads, the
+/// exit watcher, timers, and the output reader. So a backend must never use a native handle after Dispose has
+/// released it; Windows hands a released handle's value to the next object the process opens.
+/// </remarks>
 internal interface IPtyBackend : IDisposable
 {
     /// <summary>Gets the stdin stream: a <see cref="PtyInputStream"/> over the input queue.</summary>
