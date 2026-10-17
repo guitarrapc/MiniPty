@@ -258,7 +258,7 @@ public sealed class PtyOutputPumpTests
 
         await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
         // Quiet after exit closes the transport, and quiet after the close ends output: two intervals, no OS event.
-        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(1500);
+        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(ForcedEndBoundMs);
         await Assert.That(backend.IsOutputClosed).IsTrue();
     }
 
@@ -272,14 +272,15 @@ public sealed class PtyOutputPumpTests
         var backend = new HeldOpenBackend();
         await using var session = new PtySession(backend);
         await backend.Reading.WaitAsync(Timeout);
-        var completion = session.CompleteAsync(new PtyCompleteOptions { OutputReaderCloseTimeout = TimeSpan.FromSeconds(3) });
+        // The close timeout outlasts the bound below, so an end that waited for it cannot pass as the forced end.
+        var completion = session.CompleteAsync(new PtyCompleteOptions { OutputReaderCloseTimeout = TimeSpan.FromMilliseconds(ForcedEndBoundMs * 2) });
 
         var stopwatch = Stopwatch.StartNew();
         backend.Exit(7);
 
         var result = await completion.WaitAsync(Timeout);
         await Assert.That(result.ExitCode).IsEqualTo(7);
-        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(1500);
+        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(ForcedEndBoundMs);
     }
 
     /// <summary>
@@ -347,6 +348,13 @@ public sealed class PtyOutputPumpTests
     /// a reader delayed past the period looked quiet, and the transport was closed or output ended early.
     /// </summary>
     private const int PacedQuietMs = 500;
+
+    /// <summary>
+    /// Upper bound for an end that takes two default quiet intervals (about 200 ms) with no OS event. A starved runner
+    /// stretched it past the former 1.5 s bound, so it is wide: it only has to tell the forced end apart from a reader
+    /// that never ends, which hangs until <see cref="Timeout"/> or the close timeout.
+    /// </summary>
+    private const int ForcedEndBoundMs = 5000;
 
     private static T RunUnder<T>(SynchronizationContext context, Func<T> action)
     {
