@@ -48,6 +48,8 @@ All on the UI thread and without `Task.Run`:
 
 The child gets `COLORTERM=truecolor`, which is how programs decide to use 24-bit color.
 
+When the program exits with code 0 (`exit` in the shell) the window closes, as Windows Terminal does by default. Any other exit code prints `[process exited with code N]` in the terminal and the window stays until a key is pressed, so the reason can be read.
+
 ## Code-only WinUI 3 pitfalls
 
 Three details crash the process with `0xC000027B` before any window appears. Two are in `Program.cs`: the `Application` must implement `IXamlMetadataProvider` (delegating to `XamlControlsXamlMetaDataProvider`), and `XamlControlsResources` must be merged in `OnLaunched`, not in the constructor. The third is in the project file: `EnableMsixTooling` must be `true`, or `dotnet publish` leaves out the project's PRI file and `new XamlControlsResources()` cannot find `Microsoft.UI.Xaml/Themes/themeresources.xaml` in the published app (`dotnet build` output is unaffected).

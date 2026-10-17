@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.UI.Xaml;
 using MiniPty;
 using WinUiTerminal.Terminal;
@@ -20,6 +21,7 @@ internal sealed class TerminalWindow : Window
     private readonly string? _dumpPath;
     private readonly TerminalControl _terminal;
     private PtySession? _session;
+    private bool _exited;
 
     public TerminalWindow(bool smoke, string[] command, string? dumpPath)
     {
@@ -30,6 +32,12 @@ internal sealed class TerminalWindow : Window
 
         _terminal = new TerminalControl(columns: 120, rows: 30);
         _terminal.InputRequested += OnInputRequested;
+        _terminal.UserInput += () =>
+        {
+            // After a failed exit the window stays up to show why; the next keystroke dismisses it.
+            if (_exited)
+                Close();
+        };
         _terminal.GridSizeChanged += (columns, rows) => _session?.Resize(new PtySize(columns, rows));
         _terminal.TitleChanged += title => Title = title.Length == 0 ? "MiniPty WinUI terminal" : title;
         Content = _terminal;
@@ -59,6 +67,7 @@ internal sealed class TerminalWindow : Window
         var status = await _session.WaitForExitAsync();
         await pump;
 
+        _exited = true;
         Title = $"MiniPty WinUI terminal — exited with {status.ExitCode}";
         if (_dumpPath is not null)
         {
@@ -69,6 +78,19 @@ internal sealed class TerminalWindow : Window
         {
             Environment.ExitCode = _terminal.VisibleText().Contains(SmokeMarker, StringComparison.Ordinal) ? 0 : 1;
             Close();
+        }
+        else if (status.ExitCode == 0)
+        {
+            // The shell ended normally (`exit`), so the window has nothing left to show. Same default as Windows
+            // Terminal's "graceful" close.
+            Close();
+        }
+        else
+        {
+            // A failure is worth reading. The message goes through the emulator like any output, and UserInput
+            // closes the window on the next keystroke.
+            _terminal.Feed(Encoding.UTF8.GetBytes(
+                $"\r\n\u001b[1;7m [process exited with code {status.ExitCode}] \u001b[0m Press any key to close this window.\r\n"));
         }
     }
 

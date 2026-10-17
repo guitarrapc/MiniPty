@@ -105,6 +105,12 @@ internal sealed class TerminalControl : Grid, IDisposable
     /// <summary>Text to send to the program: keystrokes, pasted text, mouse reports, and terminal replies.</summary>
     public event Action<string>? InputRequested;
 
+    /// <summary>
+    /// The user typed or pasted. Raised alongside <see cref="InputRequested"/> but not for mouse reports, focus
+    /// events, or terminal replies, so a host can react to deliberate input alone (a "press any key" prompt).
+    /// </summary>
+    public event Action? UserInput;
+
     /// <summary>The grid now fits a different number of cells; the PTY should be resized to match.</summary>
     public event Action<int, int>? GridSizeChanged;
 
@@ -397,6 +403,7 @@ internal sealed class TerminalControl : Grid, IDisposable
     private void Send(string text)
     {
         _screen.ScrollViewToBottom();
+        UserInput?.Invoke();
         InputRequested?.Invoke(text);
         if (_screen.Dirty)
             _canvas.Invalidate();
