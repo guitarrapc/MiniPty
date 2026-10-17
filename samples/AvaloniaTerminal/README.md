@@ -42,8 +42,8 @@ All on the UI thread and without `Task.Run`, exactly as in the WinUI sample:
 | Window loaded | `Pty.Start`, then `await foreach (var chunk in session.ReadOutputAsync())` feeding the parser | `MoveNextAsync` never blocks; each chunk arrives on the UI thread and is parsed in place |
 | Key, paste, mouse report, terminal reply | `await session.WriteInputAsync(text)` | Completes at once when the PTY takes the bytes, otherwise in the background |
 | Window resized | `session.Resize(new PtySize(cols, rows))` | Dimensions are clamped to the platform limit, and a resize after child exit is a no-op |
-| Child exits | `await session.WaitForExitAsync()` | Completes from the exit watcher; no polling, no thread |
-| Window closed | `await session.DisposeAsync()` | Ends the child if needed (hang-up first on Unix, so the shell saves its history) and does not block the UI thread |
+| Child exits | `await session.WaitForExitAsync()` | Completes from the exit watcher, and the wait holds no thread |
+| Window closed | `await session.DisposeAsync()` | Ends the child if needed and does not block the UI thread. On Unix it hangs the shell up first, but closing the last window also ends the app, and the shell's grace ends with it |
 
 Nothing in the window is platform-specific: the same `Pty.Start` runs a ConPTY on Windows, a `forkpty` child on Linux, and a `posix_spawn` child on macOS. The child gets `COLORTERM=truecolor`, which is how programs decide to use 24-bit color.
 

@@ -6,4 +6,5 @@
   <Project Path="src/MiniPty.Console/MiniPty.Console.csproj" />
   <Project Path="src/MiniPty.Terminal/MiniPty.Terminal.csproj" />
   <Project Path="tests/MiniPty.Tests/MiniPty.Tests.csproj" />
+  <Project Path="tests/MiniPty.Tests.DisposeHost/MiniPty.Tests.DisposeHost.csproj" />
 </Solution>

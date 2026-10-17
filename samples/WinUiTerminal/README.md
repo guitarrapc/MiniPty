@@ -43,7 +43,7 @@ All on the UI thread and without `Task.Run`:
 | Window loaded | `Pty.Start`, then `await foreach (var chunk in session.ReadOutputAsync())` feeding the parser | `MoveNextAsync` never blocks; each chunk arrives on the UI thread and is parsed in place |
 | Key, paste, mouse report, terminal reply | `await session.WriteInputAsync(text)` | Completes at once when ConPTY takes the bytes, otherwise in the background |
 | Window resized | `session.Resize(new PtySize(cols, rows))` | Dimensions are clamped to the platform limit, and a resize after child exit is a no-op |
-| Child exits | `await session.WaitForExitAsync()` | Completes from the exit watcher; no polling, no thread |
+| Child exits | `await session.WaitForExitAsync()` | Completes from the exit watcher, and the wait holds no thread |
 | Window closed | `await session.DisposeAsync()` | Ends the child if needed and does not block the UI thread |
 
 The child gets `COLORTERM=truecolor`, which is how programs decide to use 24-bit color.

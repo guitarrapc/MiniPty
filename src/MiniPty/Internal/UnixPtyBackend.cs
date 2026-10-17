@@ -8,9 +8,8 @@ namespace MiniPty.Internal;
 internal static partial class UnixPtyBackend
 {
     private const byte InputEot = 0x04;
-    // Disposal hangs the child up first, so a shell can save its history and run its exit hooks, and kills what is
-    // still running this long afterwards. The bound is for a child that ignores the hang-up. It is short so that a
-    // closed tab never leaves a process behind for long.
+    // Disposal hangs the child up and kills it only this long afterwards, because a shell needs time to save its
+    // history and run its exit hooks. The bound is for a child that ignores the hang-up.
     internal const int DisposeHangupGraceMs = 1000;
     // EOF staging advances one step per tick, matching the cadence of the exit-wait poll loop it replaced.
     private const int EofTickMs = 100;
@@ -25,8 +24,8 @@ internal static partial class UnixPtyBackend
     private static readonly long s_coalesceBudgetTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceBudgetMs / 1000;
 
     /// <summary>
-    /// Test entry point for the kill that the child watcher runs when the host process exits. It kills every child
-    /// that disposal hung up and that is still waiting out its grace, without marking the host as exiting.
+    /// Test entry point for the kill that the child watcher sends when the host process exits. It kills every child
+    /// that disposal hung up and that is still waiting out its grace, without marking the process as exiting.
     /// </summary>
     internal static void KillChildrenInHangupGrace() => ChildWatcher.KillChildrenInHangupGrace();
 
@@ -145,9 +144,8 @@ internal static partial class UnixPtyBackend
         // Mutable struct: used only through this field, never copied.
         private PtyExitSignal _exitSignal;
         private Timer? _eofTimer;
-        // Armed by Dispose while the child is still running, and guarded by _pidLock. It kills the child once the
-        // hang-up grace has passed.
-        private Timer? _hangupKillTimer;
+        // Zero until Dispose hangs up a running child. Written under _pidLock.
+        private long _hangupKillDeadline;
         private bool _eofSent;
         private bool _eofPending;
         private int _eofAttachPollsRemaining;
@@ -759,70 +757,43 @@ internal static partial class UnixPtyBackend
             var exitObserved = true;
             lock (_pidLock)
             {
-                // Hang up rather than kill. A shell saves its history and runs its exit hooks on SIGHUP, which is also
-                // what a terminal emulator sends when its window closes. The timer kills a child that ignores it. It is
-                // armed under the lock, so its callback and the reap always see it, and a racing second Dispose finds
-                // it and arms no other.
-                if (!_exited && _hangupKillTimer is null)
+                // A hang-up rather than a kill, so a shell can save its history and run its exit hooks. Closing the
+                // master below hangs the tty up too, but only once no other process holds a copy of the master, so
+                // the signal is sent explicitly. The deadline is set under the lock, so a racing second Dispose finds
+                // it and schedules no other kill.
+                if (!_exited && _hangupKillDeadline == 0)
                 {
                     exitObserved = false;
                     UnixInterop.kill(_pid, UnixInterop.SigHup);
-                    // A timer never fires once the host is exiting, so a Dispose that runs from an exit handler kills
-                    // the child itself.
-                    if (ChildWatcher.IsHostExiting)
-                        KillCore();
-                    else
-                        _hangupKillTimer = new Timer(
-                            static state => ((UnixPtyBackendInstance)state!).OnHangupGraceElapsed(), this, DisposeHangupGraceMs, Timeout.Infinite);
+                    _hangupKillDeadline = Environment.TickCount64 + DisposeHangupGraceMs;
                 }
             }
 
             _eofTimer?.Dispose();
             if (!exitObserved)
+            {
                 _exitSignal.SetDisposedBeforeExit();
+                // The watcher kills a child that ignores the hang-up and reaps it either way, so disposal never waits.
+                ChildWatcher.ScheduleHangupKill(this);
+            }
 
             CloseTransport();
             _execHold?.Dispose();
         }
 
-        private void OnHangupGraceElapsed()
+        /// <summary>The tick count at which <see cref="ChildWatcher"/> kills this child if a disposal hung it up.</summary>
+        internal long HangupKillDeadline => _hangupKillDeadline;
+
+        /// <summary>Sends the kill that backs a disposal's hang-up. Called only by <see cref="ChildWatcher"/>.</summary>
+        internal void KillAfterHangup()
         {
-            // A timer callback must never throw. kill(2) reports failure by its return value, so nothing here can.
-            Timer? timer;
+            // Under the reap's lock, so a child the watcher has already reaped is skipped and its released pid is
+            // never signaled.
             lock (_pidLock)
             {
-                // The lock orders this with the watcher's reap. A reaped child has released its pid, so the signal is
-                // skipped rather than sent to whatever reused it.
                 if (!_exited)
                     KillCore();
-
-                timer = TakeHangupKillTimerLocked();
             }
-
-            timer?.Dispose();
-        }
-
-        /// <summary>
-        /// Kills the child at once if disposal hung it up and its grace has not run out. Called only by
-        /// <see cref="ChildWatcher"/> when the host process exits.
-        /// </summary>
-        internal void KillIfInHangupGrace()
-        {
-            lock (_pidLock)
-            {
-                if (_hangupKillTimer is not null && !_exited)
-                    KillCore();
-            }
-        }
-
-        /// <summary>
-        /// Detaches the grace timer once the child is reaped or killed, so the timer stops rooting this instance.
-        /// </summary>
-        private Timer? TakeHangupKillTimerLocked()
-        {
-            var timer = _hangupKillTimer;
-            _hangupKillTimer = null;
-            return timer;
         }
 
         /// <summary>
@@ -831,7 +802,6 @@ internal static partial class UnixPtyBackend
         /// <returns><see langword="true"/> once the child has been reaped.</returns>
         internal bool TryReapExitedChild()
         {
-            Timer? hangupKillTimer;
             lock (_pidLock)
             {
                 if (_exited)
@@ -852,10 +822,8 @@ internal static partial class UnixPtyBackend
 
                 // ECHILD: something outside MiniPty reaped the child, so its status is lost; report exit 0.
                 Volatile.Write(ref _exited, true);
-                hangupKillTimer = TakeHangupKillTimerLocked();
             }
 
-            hangupKillTimer?.Dispose();
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, _termSignal != 0 ? _termSignal : null));
             return true;
         }
@@ -867,17 +835,14 @@ internal static partial class UnixPtyBackend
         /// </summary>
         internal void OnReapedElsewhere()
         {
-            Timer? hangupKillTimer;
             lock (_pidLock)
             {
                 if (_exited)
                     return;
 
                 Volatile.Write(ref _exited, true);
-                hangupKillTimer = TakeHangupKillTimerLocked();
             }
 
-            hangupKillTimer?.Dispose();
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, null));
         }
 

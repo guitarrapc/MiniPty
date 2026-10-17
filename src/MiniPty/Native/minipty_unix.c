@@ -43,17 +43,19 @@
 #endif
 
 /*
- * The line discipline every child starts with. The kernel default differs by platform, and neither the Linux
- * nor the macOS default sets IUTF8. Without it, erasing a multibyte character in canonical mode removes one
- * byte and leaves invalid UTF-8 on the line. Pinning the whole termios makes a MiniPty terminal behave the
- * same on every Unix. The flags and control characters below are what a terminal emulator sets up for a new
- * shell, and a program that wants raw mode changes them itself.
+ * The line discipline every child starts with, set explicitly rather than taken from the kernel default. The
+ * Linux and macOS defaults lack IUTF8, so erasing a multibyte character in canonical mode removed one byte and
+ * left invalid UTF-8 on the line. Flags and control characters that a platform does not define are left out,
+ * so ^T (VSTATUS) and ^Y (VDSUSP) work only where the kernel has them. A program that wants raw mode changes
+ * the termios itself.
  */
 static void minipty_default_termios(struct termios *term)
 {
     memset(term, 0, sizeof(*term));
-    /* A zero control character is NUL, not "disabled", wherever _POSIX_VDISABLE is not 0. Every slot not set
-     * below, such as FreeBSD's VERASE2, stays disabled rather than making NUL an editing key. */
+    /*
+     * Zero is a valid control character on BSD, where _POSIX_VDISABLE is 0xff, so a slot left at zero would
+     * make NUL act as that character. Every slot starts disabled and only the ones named below are enabled.
+     */
     memset(term->c_cc, _POSIX_VDISABLE, sizeof(term->c_cc));
 
     term->c_iflag = ICRNL | IXON | IXANY | IMAXBEL | BRKINT;
@@ -71,9 +73,10 @@ static void minipty_default_termios(struct termios *term)
 #endif
 
     term->c_cc[VEOF] = 4;       /* ^D */
-    term->c_cc[VEOL] = _POSIX_VDISABLE;
-    term->c_cc[VEOL2] = _POSIX_VDISABLE;
     term->c_cc[VERASE] = 0x7f;  /* DEL */
+#if defined(VERASE2)
+    term->c_cc[VERASE2] = 8;    /* ^H, the FreeBSD default second erase character */
+#endif
     term->c_cc[VWERASE] = 23;   /* ^W */
     term->c_cc[VKILL] = 21;     /* ^U */
     term->c_cc[VREPRINT] = 18;  /* ^R */

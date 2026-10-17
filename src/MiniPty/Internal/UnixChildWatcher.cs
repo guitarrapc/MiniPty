@@ -21,6 +21,12 @@ internal static partial class UnixPtyBackend
     /// exactly once, and reaping a disposed session's child prevents zombies without blocking the
     /// thread that disposed it.
     /// </para>
+    /// <para>
+    /// It also sends the kill that follows a disposal's hang-up. The deadline joins this thread's wait timeout
+    /// rather than getting a timer of its own, so disposal allocates no timer. When the process exits normally,
+    /// hung-up children are killed at once, and so is a child disposed after that, because the process may end
+    /// before any deadline passes.
+    /// </para>
     /// </remarks>
     private static partial class ChildWatcher
     {
@@ -31,12 +37,11 @@ internal static partial class UnixPtyBackend
         private static readonly object s_lock = new();
         private static readonly Dictionary<int, UnixPtyBackendInstance> s_children = [];
         private static readonly List<int> s_polled = [];
+        // Children hung up by disposal and not yet reaped, each killed at its HangupKillDeadline.
+        private static readonly List<UnixPtyBackendInstance> s_hangups = [];
         private static bool s_started;
         private static bool s_nativeWatch;
-        private static volatile bool s_hostExiting;
-
-        /// <summary>True once the host process has started exiting, when a grace timer can no longer fire.</summary>
-        internal static bool IsHostExiting => s_hostExiting;
+        private static bool s_exiting;
 
         /// <summary>Starts watching <paramref name="child"/>; its exit task completes once the child is reaped.</summary>
         internal static void Register(UnixPtyBackendInstance child)
@@ -50,8 +55,10 @@ internal static partial class UnixPtyBackend
                 if (s_children.TryGetValue(child.ProcessId, out var stale) && stale != child)
                 {
                     stale.OnReapedElsewhere();
-                    // Its polling entry would otherwise outlive the new child and keep this thread polling.
+                    // Its polling entry would otherwise outlive the new child and keep this thread polling, and its
+                    // hang-up entry would keep waking this thread for a kill that its exit already cancels.
                     s_polled.Remove(child.ProcessId);
+                    s_hangups.Remove(stale);
                 }
 
                 s_children[child.ProcessId] = child;
@@ -63,23 +70,60 @@ internal static partial class UnixPtyBackend
             }
         }
 
-        /// <summary>Kills every registered child still in the hang-up grace that disposal started.</summary>
-        internal static void KillChildrenInHangupGrace()
+        /// <summary>
+        /// Kills <paramref name="child"/> at its <see cref="UnixPtyBackendInstance.HangupKillDeadline"/> unless it is
+        /// reaped first.
+        /// </summary>
+        internal static void ScheduleHangupKill(UnixPtyBackendInstance child)
         {
             lock (s_lock)
             {
-                // Same lock order as the reap: the watcher lock, then the child's pid lock.
-                foreach (var child in s_children.Values)
-                    child.KillIfInHangupGrace();
+                // A child reaped after the hang-up was sent has nothing left to kill.
+                if (!s_children.TryGetValue(child.ProcessId, out var registered) || registered != child)
+                    return;
+
+                // The process is exiting and may end before the deadline. A disposal gets here from a host exit handler
+                // subscribed after the first Pty.Start, which runs after this class's, or from another thread during exit.
+                if (s_exiting)
+                {
+                    child.KillAfterHangup();
+                    return;
+                }
+
+                s_hangups.Add(child);
+                // The new deadline may come before the timeout the thread is waiting with.
+                WakeLocked();
             }
         }
 
-        private static void OnHostExiting()
+        /// <summary>Kills every child that disposal hung up and that is still waiting out its grace.</summary>
+        internal static void KillChildrenInHangupGrace()
         {
-            // Set before the children are visited. A Dispose that takes a child's pid lock after this visit then sees
-            // the flag and kills the child itself, which covers an exit handler that runs after this one.
-            s_hostExiting = true;
-            KillChildrenInHangupGrace();
+            lock (s_lock)
+                KillChildrenInHangupGraceLocked();
+        }
+
+        /// <summary>
+        /// Kills every hung-up child now, and makes later disposals kill at once. A deadline that has not passed when
+        /// the process exits would otherwise never be acted on, and a child that ignores the hang-up would outlive
+        /// its host.
+        /// </summary>
+        private static void OnProcessExit()
+        {
+            lock (s_lock)
+            {
+                s_exiting = true;
+                KillChildrenInHangupGraceLocked();
+            }
+        }
+
+        private static void KillChildrenInHangupGraceLocked()
+        {
+            // Same lock order as the reap: this lock, then the child's pid lock.
+            foreach (var child in s_hangups)
+                child.KillAfterHangup();
+
+            s_hangups.Clear();
         }
 
         private static void EnsureStarted()
@@ -88,15 +132,14 @@ internal static partial class UnixPtyBackend
                 return;
 
             s_nativeWatch = minipty_child_watch_init() == 0;
-            // A grace timer never fires once the host exits. Without this, a disposed child that ignores the hang-up
-            // would outlive a host that exits within the grace.
-            AppDomain.CurrentDomain.ProcessExit += static (_, _) => OnHostExiting();
             var thread = new Thread(Run)
             {
                 IsBackground = true,
                 Name = "MiniPty child watcher",
             };
             thread.Start();
+            // This thread stops with the process, so the exit itself must send the pending kills.
+            AppDomain.CurrentDomain.ProcessExit += static (_, _) => OnProcessExit();
             s_started = true;
         }
 
@@ -119,15 +162,57 @@ internal static partial class UnixPtyBackend
                     Reap(signaled[i]);
 
                 PollFallbackChildren(polledSnapshot);
+                KillExpiredHangups();
             }
         }
 
-        /// <summary>Blocks in the native watcher until a child exits, the polling interval elapses, or a wake-up.</summary>
+        /// <summary>
+        /// The longest the thread may wait: forever, the polling interval while any child is polled, or until the
+        /// earliest hang-up deadline. Caller holds <see cref="s_lock"/>.
+        /// </summary>
+        private static int WaitTimeoutLocked()
+        {
+            var timeout = s_polled.Count > 0 ? PollIntervalMs : Timeout.Infinite;
+            if (s_hangups.Count == 0)
+                return timeout;
+
+            var now = Environment.TickCount64;
+            foreach (var child in s_hangups)
+            {
+                var remaining = (int)Math.Clamp(child.HangupKillDeadline - now, 0, int.MaxValue);
+                if (timeout == Timeout.Infinite || remaining < timeout)
+                    timeout = remaining;
+            }
+
+            return timeout;
+        }
+
+        private static void KillExpiredHangups()
+        {
+            lock (s_lock)
+            {
+                if (s_hangups.Count == 0)
+                    return;
+
+                var now = Environment.TickCount64;
+                for (var i = s_hangups.Count - 1; i >= 0; i--)
+                {
+                    var child = s_hangups[i];
+                    if (child.HangupKillDeadline > now)
+                        continue;
+
+                    child.KillAfterHangup();
+                    s_hangups.RemoveAt(i);
+                }
+            }
+        }
+
+        /// <summary>Blocks in the native watcher until a child exits, the wait timeout elapses, or a wake-up.</summary>
         private static unsafe int WaitNative(Span<int> signaled)
         {
             int timeout;
             lock (s_lock)
-                timeout = s_polled.Count > 0 ? PollIntervalMs : Timeout.Infinite;
+                timeout = WaitTimeoutLocked();
 
             int count;
             fixed (int* pids = signaled)
@@ -150,11 +235,11 @@ internal static partial class UnixPtyBackend
             return 0;
         }
 
-        /// <summary>Polling-only mode: sleeps until a registration or the next polling interval.</summary>
+        /// <summary>Polling-only mode: sleeps until a registration, a hang-up deadline, or the next polling interval.</summary>
         private static int WaitManaged()
         {
             lock (s_lock)
-                Monitor.Wait(s_lock, s_polled.Count > 0 ? PollIntervalMs : Timeout.Infinite);
+                Monitor.Wait(s_lock, WaitTimeoutLocked());
 
             return 0;
         }
@@ -170,6 +255,7 @@ internal static partial class UnixPtyBackend
                 {
                     s_children.Remove(pid);
                     s_polled.Remove(pid);
+                    s_hangups.Remove(child);
                 }
                 else if (!s_polled.Contains(pid))
                 {

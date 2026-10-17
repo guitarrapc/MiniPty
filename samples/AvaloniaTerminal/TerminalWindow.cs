@@ -250,7 +250,7 @@ internal sealed class TerminalWindow : Window
         if (_session is { } session)
         {
             _session = null;
-            // Ends the child if it is still running, with a hang-up first on Unix. Does not block, and completes once the
+            // Ends the child if it is still running, hanging it up first on Unix. Does not block, and completes once the
             // reader has stopped.
             await session.DisposeAsync();
         }

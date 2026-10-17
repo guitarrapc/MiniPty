@@ -3,10 +3,9 @@ using System.Text;
 namespace MiniPty.Tests;
 
 /// <summary>
-/// The termios a Unix child starts with is set by MiniPty at spawn rather than left to the kernel default,
-/// so canonical-mode editing behaves the same on every Unix. The visible difference from the Linux and macOS
-/// defaults is <c>IUTF8</c>: without it, erasing a multibyte character removes one byte and leaves invalid
-/// UTF-8 on the line the child reads.
+/// The termios a Unix child starts with is set by MiniPty at spawn rather than left to the kernel default. The
+/// Linux and macOS defaults lack <c>IUTF8</c>, and without it erasing a multibyte character removes one byte and
+/// leaves invalid UTF-8 on the line the child reads.
 /// </summary>
 public sealed class PtyUnixLineDisciplineTests
 {
@@ -16,8 +15,8 @@ public sealed class PtyUnixLineDisciplineTests
         if (OperatingSystem.IsWindows())
             return;
 
-        // Echo is turned off so that the only bracketed text in the output is the line the child read; the erase
-        // itself happens in the line discipline when the input is written, whether or not echo is on yet.
+        // Echo is off, so the only bracketed text in the output is the line the child read. The erase happens in the
+        // line discipline as the input is written, so it does not depend on when echo was turned off.
         await using var session = Pty.Start(new PtyStartInfo
         {
             FileName = "sh",
@@ -47,7 +46,8 @@ public sealed class PtyUnixLineDisciplineTests
             return;
 
         // stty prints each flag as "name" or "-name". iutf8 and imaxbel are both absent from the Linux kernel
-        // default, so seeing them set shows the spawn-time termios took effect rather than the default.
+        // default, so seeing them set shows the spawn-time termios took effect rather than the default. onlcr is in
+        // the default too, so it only checks that the explicit termios keeps output translation.
         await using var session = Pty.Start(new PtyStartInfo { FileName = "sh", Arguments = ["-c", "stty -a"] });
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using var output = new MemoryStream();
