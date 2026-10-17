@@ -9,10 +9,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    uses: guitarrapc/actions/.github/workflows/pr-harness.yaml@main
+    uses: guitarrapc/actions/.github/workflows/pr-harness.yaml@ecc29fa73a78e0061e4d686bf61c8eb23260ca49 # v1.3.4
     with:
       license-check: true
-      allow-dependencies-licenses: "LicenseRef-github-OTHER,LicenseRef-scancode-unknown,LGPL-2.1-or-later,LicenseRef-scancode-ms-dxsdk-d3dx-9.29.952.3"
+      allow-dependencies-licenses: "pkg:Microsoft.Graphics.Win2D,pkg:Microsoft.Windows.SDK.BuildTools,pkg:Microsoft.WindowsAppSDK"
       exclude-license-input-paths: |
         samples/
         scripts/
