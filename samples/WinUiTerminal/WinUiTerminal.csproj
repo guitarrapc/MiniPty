@@ -14,6 +14,14 @@
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!--
+      Required for `dotnet publish` to include the project's PRI file (WinUiTerminal.pri) next to the executable.
+      `dotnet build` always writes it, but publish adds it only with the MSIX tooling enabled, which the Windows App
+      SDK templates turn on for unpackaged apps too. A code-only app needs it: `new XamlControlsResources()` resolves
+      ms-appx:///Microsoft.UI.Xaml/Themes/themeresources.xaml through the app's resource map and fails without the
+      file (an App.xaml-based app gets the same dictionary through the XAML parser and does not).
+    -->
+    <EnableMsixTooling>true</EnableMsixTooling>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
