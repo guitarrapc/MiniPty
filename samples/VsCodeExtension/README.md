@@ -24,7 +24,7 @@ esac
 bash scripts/build-native.sh "$rid"
 
 out="$PWD/artifacts/vscode-helper/$rid"
-dotnet publish samples/VsCodeTerminalHelper.cs \
+dotnet publish samples/SingleFiles/VsCodeTerminalHelper.cs \
   -c Release -r "$rid" --self-contained true \
   -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None \
   -o "$out"
@@ -85,7 +85,7 @@ service:
 ```bash
 export MINIPTY_BRIDGE_ACCESS_TOKEN="$(openssl rand -hex 32)"
 printf 'Copy this token into the VS Code prompt if needed: %s\n' "$MINIPTY_BRIDGE_ACCESS_TOKEN"
-dotnet samples/VsCodePersistentBridge.cs
+dotnet samples/SingleFiles/VsCodePersistentBridge.cs
 ```
 
 The listener is intentionally fixed to `127.0.0.1`. This sample is not a TLS-enabled remote shell
@@ -135,5 +135,5 @@ disconnects after acknowledged output, reconnects from that absolute offset, ver
 shell state, and exits normally:
 
 ```bash
-dotnet samples/VsCodePersistentBridge.cs --smoke
+dotnet samples/SingleFiles/VsCodePersistentBridge.cs --smoke
 ```

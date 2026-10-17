@@ -3,15 +3,15 @@
 #:property Nullable=enable
 #:property ImplicitUsings=enable
 #:property PublishAot=true
-#:project ../src/MiniPty/MiniPty.csproj
-#:project ../src/MiniPty.Terminal/MiniPty.Terminal.csproj
+#:project ../../src/MiniPty/MiniPty.csproj
+#:project ../../src/MiniPty.Terminal/MiniPty.Terminal.csproj
 
 // Long-lived loopback service for the VS Code persistent-terminal sample.
 //
 // Interactive:
-//   MINIPTY_BRIDGE_ACCESS_TOKEN=<64 hex characters> dotnet samples/VsCodePersistentBridge.cs
+//   MINIPTY_BRIDGE_ACCESS_TOKEN=<64 hex characters> dotnet samples/SingleFiles/VsCodePersistentBridge.cs
 // Smoke:
-//   dotnet samples/VsCodePersistentBridge.cs --smoke
+//   dotnet samples/SingleFiles/VsCodePersistentBridge.cs --smoke
 
 using System.Net;
 using System.Net.Http.Headers;

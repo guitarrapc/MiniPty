@@ -150,7 +150,7 @@ Each session has one fixed `ReplayBufferSize` allocation. Output continues while
 
 `PtyStdioBridge.RunAsync` provides the same raw data, resize, ACK, and exit semantics over readable/writable streams. Each frame is a one-byte type (`1` output, `2` input, `3` control), a little-endian unsigned 32-bit payload length, then the payload. This fixed header lets a VS Code extension host a NativeAOT helper without HTTP, WebSocket, JSON-wrapped data, or base64.
 
-Control payloads are the same UTF-8 JSON used by the WebSocket bridge. Output is fully delivered before the exit control frame, and ACK watermarks apply identically. See [VS Code Pseudoterminal reference](../references/vscode_pseudoterminal.md), [VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs), the runnable [VsCodeExtension sample](../../../samples/VsCodeExtension), and its long-lived [persistent bridge service](../../../samples/VsCodePersistentBridge.cs).
+Control payloads are the same UTF-8 JSON used by the WebSocket bridge. Output is fully delivered before the exit control frame, and ACK watermarks apply identically. See [VS Code Pseudoterminal reference](../references/vscode_pseudoterminal.md), [VsCodeTerminalHelper.cs](../../../samples/SingleFiles/VsCodeTerminalHelper.cs), the runnable [VsCodeExtension sample](../../../samples/VsCodeExtension), and its long-lived [persistent bridge service](../../../samples/SingleFiles/VsCodePersistentBridge.cs).
 
 ## VS Code integration pattern
 
@@ -167,7 +167,7 @@ VS Code cannot swap its internal node-pty; integration is a **`vscode.Pseudoterm
 
 ## Embedder Pattern (Use Case 4)
 
-Browser (xterm.js) host flow — see [samples/WebTerminal.cs](../../../samples/WebTerminal.cs) for the complete version:
+Browser (xterm.js) host flow — see [samples/SingleFiles/WebTerminal.cs](../../../samples/SingleFiles/WebTerminal.cs) for the complete version:
 
 1. Accept a WebSocket (`HttpListenerContext.AcceptWebSocketAsync`, Kestrel `UseWebSockets`, …)
 2. `var status = await PtyWebSocketBridge.RunAsync(shellStartInfo, webSocket, ct);`
@@ -213,7 +213,7 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 - [spec.md](../spec.md) — four use cases and package map
 - [core_session.md](core_session.md) — `ReadOutputAsync` bounded buffering, chunk lifetime, backpressure
 - [lifecycle.md](lifecycle.md) — exit, kill, disposal semantics the facade builds on
-- [samples/WebTerminal.cs](../../../samples/WebTerminal.cs) — browser demo with the client-side protocol
-- [samples/VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs) — stdio-framed helper entry point
-- [samples/VsCodePersistentBridge.cs](../../../samples/VsCodePersistentBridge.cs) — authenticated loopback service and reconnect E2E smoke
+- [samples/SingleFiles/WebTerminal.cs](../../../samples/SingleFiles/WebTerminal.cs) — browser demo with the client-side protocol
+- [samples/SingleFiles/VsCodeTerminalHelper.cs](../../../samples/SingleFiles/VsCodeTerminalHelper.cs) — stdio-framed helper entry point
+- [samples/SingleFiles/VsCodePersistentBridge.cs](../../../samples/SingleFiles/VsCodePersistentBridge.cs) — authenticated loopback service and reconnect E2E smoke
 - [samples/VsCodeExtension](../../../samples/VsCodeExtension) — runnable one-shot and persistent VS Code `Pseudoterminal` clients

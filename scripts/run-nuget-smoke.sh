@@ -58,7 +58,7 @@ cat > "$tmp/NuGetSmoke.csproj" <<EOF
     <PackageReference Include="MiniPty.Capture" Version="$version" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="$root/samples/NuGetSmoke.cs" Link="NuGetSmoke.cs" />
+    <Compile Include="$root/samples/SingleFiles/NuGetSmoke.cs" Link="NuGetSmoke.cs" />
   </ItemGroup>
 </Project>
 EOF

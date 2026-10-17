@@ -98,7 +98,7 @@ Small (API surface + bridge + docs + tests). No native change.
 
 - Add **`PtyStdioBridge`** in **MiniPty.Terminal**: same control messages as the WebSocket bridge (`resize`, `ack`, `exit`), with a fixed one-byte type plus little-endian 32-bit length header on stdin/stdout.
 - Reuse `BridgeJson`, `BridgeFlowControl`, and the `PtyTerminal` pump; only framing differs.
-- Add **`samples/VsCodeTerminalHelper.cs`** (or similar): stdin/stdout bridge entry point an extension can spawn.
+- Add **`samples/SingleFiles/VsCodeTerminalHelper.cs`** (or similar): stdin/stdout bridge entry point an extension can spawn.
 - Add a minimal **`.github/docs`** integration note and a dependency-free runnable VS Code extension sample showing `handleInput` → binary frame, incremental `TextDecoder`, `onDidWrite` flush before `onDidClose`, ACK counting, and resize.
 
 ### Non-goals

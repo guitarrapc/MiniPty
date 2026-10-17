@@ -85,7 +85,7 @@ dotnet add package MiniPty.Terminal
 - **Persistent stream**: `ReadOutputAsync` + `WriteInputAsync` + `WaitForExitAsync`
 - **One-shot run**: `CompleteAsync`
 
-Disposing a session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that. Try `dotnet samples/README_MiniPty.cs` to run this sample.
+Disposing a session kills the child if it is still running. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that. Try `dotnet samples/SingleFiles/README_MiniPty.cs` to run this sample.
 
 ```csharp
 using System.Diagnostics;
@@ -151,7 +151,7 @@ MiniPty is not a sandbox. Processes run with the parent process permissions unle
 
 **GUI hosts** (WinUI, WPF, WinForms, Avalonia) can await every MiniPty API on the UI thread. Asynchronous members never block the caller, so `await foreach` over `ReadOutputAsync` processes each chunk on the UI thread with no copy and no marshaling, `Resize` from size-changed events is safe at any time (including after the child has exited), and `DisposeAsync` on tab close does not block. Output is read on one dedicated thread per session, never on a thread-pool worker, so idle tabs do not starve the host's pool. See [samples/WinUiTerminal](samples/WinUiTerminal), a code-only WinUI 3 terminal emulator built this way, and the [GUI hosts](.github/docs/specs/core_session.md#gui-hosts) section of the specification.
 
-**MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`. Try `dotnet samples/README_MiniPty.Capture.cs` to run this sample.
+**MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`. Try `dotnet samples/SingleFiles/README_MiniPty.Capture.cs` to run this sample.
 
 ```csharp
 using System.Runtime.InteropServices;
@@ -191,7 +191,7 @@ static PtyStartInfo CreateCaptureStartInfo()
 }
 ```
 
-**MiniPty.Console** attaches the host terminal to a running session for interactive programs (vim, etc.). It forwards raw keyboard bytes to the PTY and syncs host resize events. It does **not** read PTY output — the embedder remains the sole output consumer via `ReadOutputAsync` and writes bytes to host `stdout`. Try `dotnet samples/README_MiniPty.Console.cs` to run this sample.
+**MiniPty.Console** attaches the host terminal to a running session for interactive programs (vim, etc.). It forwards raw keyboard bytes to the PTY and syncs host resize events. It does **not** read PTY output — the embedder remains the sole output consumer via `ReadOutputAsync` and writes bytes to host `stdout`. Try `dotnet samples/SingleFiles/README_MiniPty.Console.cs` to run this sample.
 
 ```csharp
 using System.Runtime.InteropServices;
@@ -279,9 +279,9 @@ sealed class OutputStats
 }
 ```
 
-On Unix, write status messages to **stderr before** `Attach` and emit `\r\n` on **stdout after** dispose if the parent shell prompt drifts (see [ConsoleAttach.cs](samples/ConsoleAttach.cs)).
+On Unix, write status messages to **stderr before** `Attach` and emit `\r\n` on **stdout after** dispose if the parent shell prompt drifts (see [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs)).
 
-**MiniPty.Terminal** turns MiniPty into a backend PTY for frontend terminals (xterm.js, editor integrations) — the role node-pty plays behind VS Code. `PtyWebSocketBridge` serves one-shot browser sessions, while `PtyWebSocketSessionManager` adds authenticated reconnect, bounded replay, one-active-client enforcement, explicit termination, and detached-session expiry. `PtyStdioBridge` uses length-prefixed raw frames for helper processes. `PtyTerminal` also exposes node-pty-style graceful kill, foreground process names, attach, pixel resize, and a safe `Clear` compatibility no-op. Try `dotnet samples/WebTerminal.cs` for a browser shell; [VsCodeTerminalHelper.cs](samples/VsCodeTerminalHelper.cs) is the stdio helper entry point, and [VsCodeExtension](samples/VsCodeExtension) runs it in a real VS Code integrated terminal.
+**MiniPty.Terminal** turns MiniPty into a backend PTY for frontend terminals (xterm.js, editor integrations) — the role node-pty plays behind VS Code. `PtyWebSocketBridge` serves one-shot browser sessions, while `PtyWebSocketSessionManager` adds authenticated reconnect, bounded replay, one-active-client enforcement, explicit termination, and detached-session expiry. `PtyStdioBridge` uses length-prefixed raw frames for helper processes. `PtyTerminal` also exposes node-pty-style graceful kill, foreground process names, attach, pixel resize, and a safe `Clear` compatibility no-op. Try `dotnet samples/SingleFiles/WebTerminal.cs` for a browser shell; [VsCodeTerminalHelper.cs](samples/SingleFiles/VsCodeTerminalHelper.cs) is the stdio helper entry point, and [VsCodeExtension](samples/VsCodeExtension) runs it in a real VS Code integrated terminal.
 
 ```csharp
 using MiniPty;
@@ -301,15 +301,15 @@ For custom transports (stdio framing to a VS Code extension, SignalR, …), use 
 
 | Sample | Shows |
 |--------|-------|
-| [Capture.cs](samples/Capture.cs) | Minimal `MiniPty.Capture` smoke |
-| [Session.cs](samples/Session.cs) | `Pty.Start`, background `Output` reads, `WriteInputAsync` / `SendEof`, `CompleteAsync`, `Resize` |
-| [Interactive.cs](samples/Interactive.cs) | `ReadOutputAsync` persistent loop, marker-driven writes, mid-session `Resize`, natural child exit |
-| [ConsoleAttach.cs](samples/ConsoleAttach.cs) | **MiniPty.Console** host attach: keyboard → PTY, `ReadOutputAsync` → host display (requires interactive TTY) |
-| [Observe.cs](samples/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
-| [WebTerminal.cs](samples/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner |
-| [VsCodeTerminalHelper.cs](samples/VsCodeTerminalHelper.cs) | **MiniPty.Terminal** stdio-framed helper for a VS Code `Pseudoterminal` |
+| [Capture.cs](samples/SingleFiles/Capture.cs) | Minimal `MiniPty.Capture` smoke |
+| [Session.cs](samples/SingleFiles/Session.cs) | `Pty.Start`, background `Output` reads, `WriteInputAsync` / `SendEof`, `CompleteAsync`, `Resize` |
+| [Interactive.cs](samples/SingleFiles/Interactive.cs) | `ReadOutputAsync` persistent loop, marker-driven writes, mid-session `Resize`, natural child exit |
+| [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) | **MiniPty.Console** host attach: keyboard → PTY, `ReadOutputAsync` → host display (requires interactive TTY) |
+| [Observe.cs](samples/SingleFiles/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
+| [WebTerminal.cs](samples/SingleFiles/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner |
+| [VsCodeTerminalHelper.cs](samples/SingleFiles/VsCodeTerminalHelper.cs) | **MiniPty.Terminal** stdio-framed helper for a VS Code `Pseudoterminal` |
 | [VsCodeExtension](samples/VsCodeExtension) | Dependency-free VS Code extension sample connecting `Pseudoterminal` to the NativeAOT helper |
-| [VsCodePersistentBridge.cs](samples/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |
+| [VsCodePersistentBridge.cs](samples/SingleFiles/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |
 | [WinUiTerminal](samples/WinUiTerminal) | Code-only WinUI 3 terminal emulator (VT parser, screen buffer, Win2D grid, mouse copy/paste) driving `Pty.Start`, `ReadOutputAsync`, `WriteInputAsync`, `Resize`, and `DisposeAsync` from the UI thread (Windows only) |
 
 See the [VS Code extension sample instructions](samples/VsCodeExtension) for complete Windows and
@@ -318,19 +318,19 @@ macOS reproduction steps, including NativeAOT helper publishing and authenticate
 Run a sample locally (JIT):
 
 ```bash
-dotnet samples/Session.cs
-dotnet samples/Interactive.cs
-dotnet samples/ConsoleAttach.cs
-dotnet samples/Observe.cs
-dotnet samples/Capture.cs
-dotnet samples/WebTerminal.cs   # then open http://localhost:5170/
+dotnet samples/SingleFiles/Session.cs
+dotnet samples/SingleFiles/Interactive.cs
+dotnet samples/SingleFiles/ConsoleAttach.cs
+dotnet samples/SingleFiles/Observe.cs
+dotnet samples/SingleFiles/Capture.cs
+dotnet samples/SingleFiles/WebTerminal.cs   # then open http://localhost:5170/
 dotnet run --project samples/WinUiTerminal   # Windows only
 ```
 
 NativeAOT publish (same flags as CI):
 
 ```bash
-dotnet samples/Session.cs -c Release --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
+dotnet samples/SingleFiles/Session.cs -c Release --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
 ```
 
 ## Development

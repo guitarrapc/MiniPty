@@ -65,7 +65,7 @@ jobs:
         run: |
           for sample in Capture Session Observe Interactive ConsoleAttach WebTerminal VsCodeTerminalHelper VsCodePersistentBridge; do
             out="$RUNNER_TEMP/minipty-${sample}-aot"
-            dotnet publish "samples/${sample}.cs" -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
+            dotnet publish "samples/SingleFiles/${sample}.cs" -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
             exe="$out/${sample}"
             if [[ "${{ matrix.rid }}" == win-* ]]; then
               exe="$out/${sample}.exe"

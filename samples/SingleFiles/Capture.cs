@@ -4,8 +4,8 @@
 #:property ImplicitUsings=enable
 #:property AllowUnsafeBlocks=true
 #:property PublishAot=true
-#:project ../src/MiniPty/MiniPty.csproj
-#:project ../src/MiniPty.Capture/MiniPty.Capture.csproj
+#:project ../../src/MiniPty/MiniPty.csproj
+#:project ../../src/MiniPty.Capture/MiniPty.Capture.csproj
 
 using System.Runtime.InteropServices;
 using MiniPty;
