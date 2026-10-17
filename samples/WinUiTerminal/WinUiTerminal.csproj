@@ -34,6 +34,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.251106002" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
+    <!-- Immediate-mode drawing for the terminal grid; XAML text elements cannot repaint a full screen per frame. -->
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.2" />
   </ItemGroup>
 
   <ItemGroup>

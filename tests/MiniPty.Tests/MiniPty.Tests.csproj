@@ -14,4 +14,16 @@
     <ProjectReference Include="..\..\src\MiniPty.Terminal\MiniPty.Terminal.csproj" />
   </ItemGroup>
 
+  <!--
+    The WinUI sample's terminal emulator core has no UI dependency, so its sources are compiled here and tested
+    on every platform (WinUiTerminalVtTests). The sample project itself builds only on Windows.
+  -->
+  <ItemGroup>
+    <Compile Include="..\..\samples\WinUiTerminal\Terminal\Cell.cs" Link="WinUiTerminal\Cell.cs" />
+    <Compile Include="..\..\samples\WinUiTerminal\Terminal\CharWidth.cs" Link="WinUiTerminal\CharWidth.cs" />
+    <Compile Include="..\..\samples\WinUiTerminal\Terminal\Palette.cs" Link="WinUiTerminal\Palette.cs" />
+    <Compile Include="..\..\samples\WinUiTerminal\Terminal\ScreenBuffer.cs" Link="WinUiTerminal\ScreenBuffer.cs" />
+    <Compile Include="..\..\samples\WinUiTerminal\Terminal\VtParser.cs" Link="WinUiTerminal\VtParser.cs" />
+  </ItemGroup>
+
 </Project>

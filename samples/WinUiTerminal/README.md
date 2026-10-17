@@ -1,27 +1,62 @@
-# WinUI 3 host sample
+# WinUI 3 terminal sample
 
-A code-only WinUI 3 desktop app that runs `cmd.exe` in a MiniPty session and drives **every** MiniPty call from the UI thread. It exists to show the threading model a GUI host needs; it is not a terminal emulator (escape sequences are stripped and the output is shown as a text log).
+A code-only WinUI 3 desktop app (no XAML file; `Main`, the `Application`, the window, and the terminal control are all C#) that runs a shell in a MiniPty session and drives **every** MiniPty call from the UI thread. It is a small but real terminal emulator: a VT parser and screen buffer behind a Win2D-drawn grid, so full-screen programs such as `matrix`, editors, and colored CLI output render as they would in Windows Terminal.
 
-What it demonstrates, all on the UI thread and without `Task.Run`:
+```bash
+dotnet run --project samples/WinUiTerminal              # cmd.exe
+dotnet run --project samples/WinUiTerminal -- pwsh      # any program and arguments
+dotnet run --project samples/WinUiTerminal -- matrix --duration 0 --mode movie
+```
+
+Windows only. The Windows App SDK and Win2D are dependencies of this sample, not of MiniPty. NativeAOT is disabled here; the sample is about the UI threading model, not publishing.
+
+## What the terminal supports
+
+| Area | Supported |
+|---|---|
+| Text | UTF-8 with sequences split across chunks, East Asian wide characters (two cells), combining marks, DEC line-drawing charset |
+| Colors and styles | 16 ANSI colors (Campbell scheme), 256-color palette, 24-bit color (`38;2` and `38:2::` forms), bold (bright), dim, italic, underline (`4:n` styles drawn plain), inverse, hidden, strikethrough |
+| Cursor and editing | CUU/CUD/CUF/CUB, CUP/HVP, CHA, VPA, CNL/CPL, CHT/CBT, ED/EL, ICH/DCH/ECH, IL/DL, SU/SD, REP, DECSTBM scroll region, DECSC/DECRC, tab stops (HTS/TBC) |
+| Modes | DECCKM application cursor keys, DECOM, DECAWM with deferred wrap, insert mode, DECTCEM cursor visibility, alternate screen (47/1047/1049), bracketed paste (2004), focus events (1004), synchronized output (2026), mouse tracking (9/1000/1002/1003) with SGR encoding (1006) |
+| Reports | DSR cursor position and status, DA1/DA2; window title from OSC 0/2 |
+| Scrollback | 5,000 lines on the main screen; mouse wheel scrolls, any input or output snaps back to the bottom; in a full-screen program the wheel sends arrow keys |
+
+Not a goal: a scrollbar, cursor shapes and blinking, double-width lines, Sixel or Kitty graphics, Win32 input mode (`9001`), reflow on resize (the PTY repaints instead), or an IME candidate window placed at the cursor.
+
+## Keys and mouse
+
+| Action | Binding |
+|---|---|
+| Select | left drag; double-click selects a word |
+| Copy | Ctrl+Shift+C, Ctrl+Insert, right-click with a selection, Ctrl+C with a selection |
+| Paste | Ctrl+Shift+V, Shift+Insert, Ctrl+V, right-click with no selection (line breaks become CR; wrapped in `ESC[200~` … `ESC[201~` when the program asked for bracketed paste) |
+| Interrupt | Ctrl+C with no selection sends `^C`; other Ctrl+letter chords send their control characters |
+| Keys | arrows, Home/End, Insert/Delete, PgUp/PgDn, F1–F12 with xterm modifier encoding; Tab/Shift+Tab; Backspace sends DEL (Ctrl+Backspace sends BS); Alt+key sends ESC+key |
+| Mouse to the program | when a program enables mouse tracking, clicks, drags, and the wheel are reported to it; hold Shift to select locally instead |
+
+## What it demonstrates about MiniPty
+
+All on the UI thread and without `Task.Run`:
 
 | Host event | MiniPty call | Why it is safe |
 |---|---|---|
-| Window loaded | `Pty.Start`, then `await foreach (var chunk in session.ReadOutputAsync())` | `MoveNextAsync` never blocks; each chunk arrives on the UI thread and is decoded in place |
-| Enter in the input box | `await session.WriteInputAsync(line + "\r")` | Completes at once when ConPTY takes the bytes, otherwise in the background |
-| Output area resized | `session.Resize(new PtySize(cols, rows))` | Dimensions are clamped to the platform limit, and a resize after child exit is a no-op |
+| Window loaded | `Pty.Start`, then `await foreach (var chunk in session.ReadOutputAsync())` feeding the parser | `MoveNextAsync` never blocks; each chunk arrives on the UI thread and is parsed in place |
+| Key, paste, mouse report, terminal reply | `await session.WriteInputAsync(text)` | Completes at once when ConPTY takes the bytes, otherwise in the background |
+| Window resized | `session.Resize(new PtySize(cols, rows))` | Dimensions are clamped to the platform limit, and a resize after child exit is a no-op |
 | Child exits | `await session.WaitForExitAsync()` | Completes from the exit watcher; no polling, no thread |
 | Window closed | `await session.DisposeAsync()` | Kills the child if needed and does not block the UI thread |
 
-Run it (Windows only; the Windows App SDK is a dependency of this sample, not of MiniPty):
+The child gets `COLORTERM=truecolor`, which is how programs decide to use 24-bit color.
 
-```bash
-dotnet run --project samples/WinUiTerminal
-```
+## Code-only WinUI 3 pitfalls
 
-Smoke mode starts `cmd /c echo …` and closes the window once the output has been shown; the exit code is 0 when the output arrived:
+Three details crash the process with `0xC000027B` before any window appears. Two are in `Program.cs`: the `Application` must implement `IXamlMetadataProvider` (delegating to `XamlControlsXamlMetaDataProvider`), and `XamlControlsResources` must be merged in `OnLaunched`, not in the constructor. The third is in the project file: `EnableMsixTooling` must be `true`, or `dotnet publish` leaves out the project's PRI file and `new XamlControlsResources()` cannot find `Microsoft.UI.Xaml/Themes/themeresources.xaml` in the published app (`dotnet build` output is unaffected).
+
+## Checks
+
+`--smoke` runs `cmd /c echo <marker>` and exits 0 once the marker is on screen; `--dump <file>` writes the visible screen as text when the program exits. The VT parser and screen buffer are also covered by `WinUiTerminalVtTests` in the test project, which compiles these sources directly.
 
 ```bash
 dotnet run --project samples/WinUiTerminal -- --smoke
+dotnet run --project samples/WinUiTerminal -- --dump out.txt cmd /c "echo あいう漢字"
 ```
-
-For Windows on ARM pass `-r win-arm64`. NativeAOT is disabled for this sample.
