@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace WinUiTerminal.Terminal;
+namespace TerminalEmulator;
 
 /// <summary>
 /// Decodes the UTF-8 byte stream from the PTY and drives a <see cref="ScreenBuffer"/>: printable text (with

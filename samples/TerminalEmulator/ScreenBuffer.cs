@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace WinUiTerminal.Terminal;
+namespace TerminalEmulator;
 
 internal enum MouseTracking
 {

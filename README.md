@@ -149,7 +149,7 @@ static PtyStartInfo CreateTimedOutputStartInfo()
 
 MiniPty is not a sandbox. Processes run with the parent process permissions unless the host application isolates them with OS users, containers, or another security boundary.
 
-**GUI hosts** (WinUI, WPF, WinForms, Avalonia) can await every MiniPty API on the UI thread. Asynchronous members never block the caller, so `await foreach` over `ReadOutputAsync` processes each chunk on the UI thread with no copy and no marshaling, `Resize` from size-changed events is safe at any time (including after the child has exited), and `DisposeAsync` on tab close does not block. Output is read on one dedicated thread per session, never on a thread-pool worker, so idle tabs do not starve the host's pool. See [samples/WinUiTerminal](samples/WinUiTerminal), a code-only WinUI 3 terminal emulator built this way, and the [GUI hosts](.github/docs/specs/core_session.md#gui-hosts) section of the specification.
+**GUI hosts** (WinUI, WPF, WinForms, Avalonia) can await every MiniPty API on the UI thread. Asynchronous members never block the caller, so `await foreach` over `ReadOutputAsync` processes each chunk on the UI thread with no copy and no marshaling, `Resize` from size-changed events is safe at any time (including after the child has exited), and `DisposeAsync` on tab close does not block. Output is read on one dedicated thread per session, never on a thread-pool worker, so idle tabs do not starve the host's pool. See [samples/WinUiTerminal](samples/WinUiTerminal) (code-only WinUI 3, Windows) and [samples/AvaloniaTerminal](samples/AvaloniaTerminal) (Avalonia; Windows, Linux, macOS), two terminal emulators built this way on a shared VT core, and the [GUI hosts](.github/docs/specs/core_session.md#gui-hosts) section of the specification.
 
 **MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`. Try `dotnet samples/SingleFiles/README_MiniPty.Capture.cs` to run this sample.
 
@@ -311,6 +311,7 @@ For custom transports (stdio framing to a VS Code extension, SignalR, …), use 
 | [VsCodeExtension](samples/VsCodeExtension) | Dependency-free VS Code extension sample connecting `Pseudoterminal` to the NativeAOT helper |
 | [VsCodePersistentBridge.cs](samples/SingleFiles/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |
 | [WinUiTerminal](samples/WinUiTerminal) | Code-only WinUI 3 terminal emulator (VT parser, screen buffer, Win2D grid, mouse copy/paste) driving `Pty.Start`, `ReadOutputAsync`, `WriteInputAsync`, `Resize`, and `DisposeAsync` from the UI thread (Windows only) |
+| [AvaloniaTerminal](samples/AvaloniaTerminal) | The same terminal emulator as an Avalonia desktop app (Windows, Linux, macOS): `DrawingContext` grid, the same key, mouse, and clipboard handling, the same UI-thread MiniPty calls |
 
 See the [VS Code extension sample instructions](samples/VsCodeExtension) for complete Windows and
 macOS reproduction steps, including NativeAOT helper publishing and authenticated reconnect.
@@ -325,6 +326,7 @@ dotnet samples/SingleFiles/Observe.cs
 dotnet samples/SingleFiles/Capture.cs
 dotnet samples/SingleFiles/WebTerminal.cs   # then open http://localhost:5170/
 dotnet run --project samples/WinUiTerminal   # Windows only
+dotnet run --project samples/AvaloniaTerminal   # Windows, Linux, macOS
 ```
 
 NativeAOT publish (same flags as CI):

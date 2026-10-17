@@ -1,4 +1,4 @@
-namespace WinUiTerminal.Terminal;
+namespace TerminalEmulator;
 
 [Flags]
 internal enum CellFlags : ushort

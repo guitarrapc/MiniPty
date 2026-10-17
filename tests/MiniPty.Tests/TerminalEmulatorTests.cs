@@ -1,15 +1,15 @@
 using System.Text;
-using WinUiTerminal.Terminal;
+using TerminalEmulator;
 
 namespace MiniPty.Tests;
 
 /// <summary>
-/// The WinUI sample's VT parser and screen buffer, driven headlessly. These found a real defect before the sample
+/// The samples' shared terminal emulator core (VT parser, screen buffer, key encoding), driven headlessly. These found a real defect before the sample
 /// was first used interactively: the first CSI parameter slot kept the previous sequence's digits, so
 /// <c>ESC[2J</c> after <c>ESC[4;1H</c> arrived as <c>ESC[42J</c>, which broke every one-parameter sequence and
 /// every 24-bit color.
 /// </summary>
-public sealed class WinUiTerminalVtTests
+public sealed class TerminalEmulatorTests
 {
     private static (ScreenBuffer Screen, VtParser Parser) Create(int columns, int rows)
     {
@@ -181,6 +181,64 @@ public sealed class WinUiTerminalVtTests
         screen.Resize(4, 3);
         await Assert.That(screen.Columns).IsEqualTo(4);
         await Assert.That(Row(screen, 0)).IsEqualTo("a");
+    }
+
+    [Test]
+    public async Task KeyEncodingFollowsXterm()
+    {
+        await Assert.That(KeyEncoder.Encode(TermKey.Up, false, false, false, false)).IsEqualTo("\u001b[A");
+        await Assert.That(KeyEncoder.Encode(TermKey.Up, false, false, false, true)).IsEqualTo("\u001bOA");
+        await Assert.That(KeyEncoder.Encode(TermKey.Right, false, true, false, false)).IsEqualTo("\u001b[1;5C");
+        await Assert.That(KeyEncoder.Encode(TermKey.Tab, true, false, false, false)).IsEqualTo("\u001b[Z");
+        await Assert.That(KeyEncoder.Encode(TermKey.Backspace, false, false, false, false)).IsEqualTo("\u007f");
+        await Assert.That(KeyEncoder.Encode(TermKey.Backspace, false, true, false, false)).IsEqualTo("\b");
+        await Assert.That(KeyEncoder.Encode(TermKey.C, false, true, false, false)).IsEqualTo("\u0003");
+        await Assert.That(KeyEncoder.Encode(TermKey.X, false, false, true, false)).IsEqualTo("\u001bx");
+        await Assert.That(KeyEncoder.Encode(TermKey.F1, false, false, false, false)).IsEqualTo("\u001bOP");
+        await Assert.That(KeyEncoder.Encode(TermKey.F5, false, false, false, false)).IsEqualTo("\u001b[15~");
+        await Assert.That(KeyEncoder.Encode(TermKey.Delete, true, false, false, false)).IsEqualTo("\u001b[3;2~");
+        await Assert.That(KeyEncoder.Encode(TermKey.Space, false, true, false, false)).IsEqualTo("\0");
+        await Assert.That(KeyEncoder.Encode(TermKey.A, false, false, false, false)).IsNull();
+        await Assert.That(KeyEncoder.ScrollArrow(up: true, applicationCursorKeys: true)).IsEqualTo("\u001bOA");
+    }
+
+    [Test]
+    public async Task MouseReportsAndPaste()
+    {
+        await Assert.That(MouseReport.Encode(MouseTracking.Normal, sgr: true, MouseReport.LeftButton, row: 4, column: 9, release: false, motion: false, false, false, false))
+            .IsEqualTo("\u001b[<0;10;5M");
+        await Assert.That(MouseReport.Encode(MouseTracking.Normal, sgr: true, MouseReport.LeftButton, 4, 9, release: true, motion: false, shift: true, false, false))
+            .IsEqualTo("\u001b[<4;10;5m");
+        await Assert.That(MouseReport.Encode(MouseTracking.Normal, sgr: false, MouseReport.RightButton, 0, 0, release: false, motion: false, false, false, false))
+            .IsEqualTo("\u001b[M" + '"' + "!!");
+        await Assert.That(MouseReport.Encode(MouseTracking.Normal, sgr: true, MouseReport.LeftButton, 0, 0, release: false, motion: true, false, false, false)).IsNull();
+        await Assert.That(MouseReport.Encode(MouseTracking.X10, sgr: true, MouseReport.LeftButton, 0, 0, release: true, motion: false, false, false, false)).IsNull();
+        await Assert.That(MouseReport.Encode(MouseTracking.None, sgr: true, MouseReport.LeftButton, 0, 0, false, false, false, false, false)).IsNull();
+
+        await Assert.That(PasteText.Normalize("a\r\nb\nc", bracketedPaste: false)).IsEqualTo("a\rb\rc");
+        await Assert.That(PasteText.Normalize("x", bracketedPaste: true)).IsEqualTo("\u001b[200~x\u001b[201~");
+    }
+
+    [Test]
+    public async Task SelectionCopiesRowsAndJoinsWrappedOnes()
+    {
+        var (screen, parser) = Create(5, 4);
+        Feed(parser, "abcdefg\r\nhi");
+        var selection = new TerminalSelection();
+
+        selection.Begin(0, 1);
+        await Assert.That(selection.HasSelection).IsFalse();
+        await Assert.That(selection.Extend(2, 0)).IsTrue();
+        selection.EndDrag();
+        // Row 0 wrapped into row 1, so no newline between them; row 1 to row 2 is a real line break.
+        await Assert.That(selection.GetText(screen)).IsEqualTo("bcdefg\r\nh");
+        await Assert.That(selection.TryGetRowRange(1, 5, out var from, out var to)).IsTrue();
+        await Assert.That((from, to)).IsEqualTo((0, 5));
+
+        selection.SelectWord(screen, 2, 1);
+        await Assert.That(selection.GetText(screen)).IsEqualTo("hi");
+        selection.Clear();
+        await Assert.That(selection.GetText(screen)).IsEqualTo("");
     }
 
     [Test]

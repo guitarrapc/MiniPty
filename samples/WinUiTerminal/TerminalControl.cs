@@ -7,6 +7,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using TerminalEmulator;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.System;
@@ -14,13 +15,14 @@ using Windows.UI;
 using Windows.UI.Core;
 using Windows.UI.Text;
 
-namespace WinUiTerminal.Terminal;
+namespace WinUiTerminal;
 
 /// <summary>
 /// A terminal view: feeds PTY bytes to a <see cref="VtParser"/>, draws the <see cref="ScreenBuffer"/> with Win2D,
 /// and turns keyboard, IME text, mouse, and clipboard actions into the bytes a program expects. It knows nothing
 /// about MiniPty: bytes come in through <see cref="Feed"/> and go out through <see cref="InputRequested"/>, and the
-/// window owning the session wires the two.
+/// window owning the session wires the two. The emulator itself lives in <c>samples/TerminalEmulator</c>, shared
+/// with the Avalonia sample; this file is the WinUI-specific rendering and input layer.
 /// </summary>
 /// <remarks>
 /// Mouse: drag selects by cell (double-click selects a word), Ctrl+Shift+C / Ctrl+Insert copy, Ctrl+Shift+V /
@@ -38,18 +40,13 @@ internal sealed class TerminalControl : Grid, IDisposable
     private readonly CanvasControl _canvas;
     private readonly ScreenBuffer _screen;
     private readonly VtParser _parser;
+    private readonly TerminalSelection _selection = new();
     private readonly CanvasTextFormat[] _formats = new CanvasTextFormat[4];
     private readonly StringBuilder _runText = new();
     private float _cellWidth;
     private float _cellHeight;
     private bool _focused;
     private bool _disposed;
-
-    // Selection in absolute line coordinates, so it stays put while the view scrolls.
-    private (int Row, int Column) _selectionAnchor;
-    private (int Row, int Column) _selectionFocus;
-    private bool _hasSelection;
-    private bool _selecting;
     private bool _mouseButtonDown;
     private (int Row, int Column) _lastReportedCell = (-1, -1);
     private DateTime _lastPressTime;
@@ -170,7 +167,7 @@ internal sealed class TerminalControl : Grid, IDisposable
             return;
 
         _screen.Resize(columns, rows);
-        ClearSelection();
+        _selection.Clear();
         GridSizeChanged?.Invoke(columns, rows);
         _canvas.Invalidate();
     }
@@ -185,7 +182,6 @@ internal sealed class TerminalControl : Grid, IDisposable
         session.Clear(ToColor(Palette.DefaultBackground));
         _screen.Dirty = false;
 
-        var (selectionStart, selectionEnd) = NormalizedSelection();
         var rows = _screen.Rows;
         var columns = _screen.Columns;
         for (var row = 0; row < rows; row++)
@@ -193,7 +189,6 @@ internal sealed class TerminalControl : Grid, IDisposable
             var line = _screen.ViewLine(row);
             var cells = line.Cells;
             var y = row * _cellHeight;
-            var absoluteRow = _screen.ViewRowToAbsolute(row);
 
             // Backgrounds first, merged over runs of the same color, so glyph overhang never covers a neighbor.
             var runStart = 0;
@@ -259,14 +254,8 @@ internal sealed class TerminalControl : Grid, IDisposable
                 column = end;
             }
 
-            // Selection overlay.
-            if (_hasSelection && absoluteRow >= selectionStart.Row && absoluteRow <= selectionEnd.Row)
-            {
-                var from = absoluteRow == selectionStart.Row ? selectionStart.Column : 0;
-                var to = absoluteRow == selectionEnd.Row ? selectionEnd.Column + 1 : columns;
-                if (to > from)
-                    session.FillRectangle(from * _cellWidth, y, (to - from) * _cellWidth, _cellHeight, Color.FromArgb(0x60, 0x80, 0xB0, 0xFF));
-            }
+            if (_selection.TryGetRowRange(_screen.ViewRowToAbsolute(row), columns, out var from, out var to))
+                session.FillRectangle(from * _cellWidth, y, (to - from) * _cellWidth, _cellHeight, Color.FromArgb(0x60, 0x80, 0xB0, 0xFF));
         }
 
         // Cursor: a solid block with focus, a hollow one without; hidden while scrolled back.
@@ -321,7 +310,7 @@ internal sealed class TerminalControl : Grid, IDisposable
     {
         _focused = true;
         if (_screen.FocusEvents)
-            Send("\u001b[I");
+            InputRequested?.Invoke("\u001b[I");
         _canvas.Invalidate();
     }
 
@@ -329,7 +318,7 @@ internal sealed class TerminalControl : Grid, IDisposable
     {
         _focused = false;
         if (_screen.FocusEvents)
-            Send("\u001b[O");
+            InputRequested?.Invoke("\u001b[O");
         _canvas.Invalidate();
     }
 
@@ -372,14 +361,14 @@ internal sealed class TerminalControl : Grid, IDisposable
             return;
         }
 
-        if (ctrl && !shift && e.Key == VirtualKey.C && _hasSelection)
+        if (ctrl && !shift && e.Key == VirtualKey.C && _selection.HasSelection)
         {
             CopySelection();
             e.Handled = true;
             return;
         }
 
-        var sequence = KeyEncoder.Encode(e.Key, shift, ctrl, alt, _screen.ApplicationCursorKeys);
+        var sequence = KeyEncoder.Encode(WinUiKeys.ToTermKey(e.Key), shift, ctrl, alt, _screen.ApplicationCursorKeys);
         if (sequence is null)
             return;
 
@@ -413,7 +402,7 @@ internal sealed class TerminalControl : Grid, IDisposable
 
     private void CopySelection()
     {
-        var text = SelectedText();
+        var text = _selection.GetText(_screen);
         if (text.Length == 0)
             return;
 
@@ -421,7 +410,7 @@ internal sealed class TerminalControl : Grid, IDisposable
         package.SetText(text);
         Clipboard.SetContent(package);
         Clipboard.Flush();
-        ClearSelection();
+        _selection.Clear();
         _canvas.Invalidate();
     }
 
@@ -442,15 +431,8 @@ internal sealed class TerminalControl : Grid, IDisposable
             return;
         }
 
-        if (string.IsNullOrEmpty(text))
-            return;
-
-        // Terminals receive CR for a line break. Bracketed paste lets the program tell a paste from typing.
-        text = text.Replace("\r\n", "\r").Replace('\n', '\r');
-        if (_screen.BracketedPaste)
-            text = "\u001b[200~" + text + "\u001b[201~";
-
-        Send(text);
+        if (!string.IsNullOrEmpty(text))
+            Send(PasteText.Normalize(text, _screen.BracketedPaste));
     }
 
     // ---------------------------------------------------------------- Mouse
@@ -472,7 +454,7 @@ internal sealed class TerminalControl : Grid, IDisposable
 
         if (_screen.Mouse != MouseTracking.None && !shift)
         {
-            var button = point.Properties.IsLeftButtonPressed ? 0 : point.Properties.IsMiddleButtonPressed ? 1 : 2;
+            var button = point.Properties.IsLeftButtonPressed ? MouseReport.LeftButton : point.Properties.IsMiddleButtonPressed ? MouseReport.MiddleButton : MouseReport.RightButton;
             _mouseButtonDown = true;
             _lastReportedCell = (row, column);
             ReportMouse(button, row, column, release: false, motion: false);
@@ -482,7 +464,7 @@ internal sealed class TerminalControl : Grid, IDisposable
         if (point.Properties.IsRightButtonPressed)
         {
             // Windows Terminal's convention: right click copies a selection, or pastes when there is none.
-            if (_hasSelection)
+            if (_selection.HasSelection)
                 CopySelection();
             else
                 _ = PasteAsync();
@@ -500,15 +482,11 @@ internal sealed class TerminalControl : Grid, IDisposable
 
         if (doubleClick)
         {
-            SelectWord(absoluteRow, column);
-            _selecting = false;
+            _selection.SelectWord(_screen, absoluteRow, column);
         }
         else
         {
-            _selectionAnchor = (absoluteRow, column);
-            _selectionFocus = _selectionAnchor;
-            _hasSelection = false;
-            _selecting = true;
+            _selection.Begin(absoluteRow, column);
             CapturePointer(e.Pointer);
         }
 
@@ -520,16 +498,10 @@ internal sealed class TerminalControl : Grid, IDisposable
         var point = e.GetCurrentPoint(this);
         var (row, column) = CellAt(point.Position);
 
-        if (_selecting)
+        if (_selection.IsDragging)
         {
-            var focus = (_screen.ViewRowToAbsolute(row), column);
-            if (focus != _selectionFocus)
-            {
-                _selectionFocus = focus;
-                _hasSelection = true;
+            if (_selection.Extend(_screen.ViewRowToAbsolute(row), column))
                 _canvas.Invalidate();
-            }
-
             e.Handled = true;
             return;
         }
@@ -539,7 +511,10 @@ internal sealed class TerminalControl : Grid, IDisposable
             if (_mouseButtonDown || _screen.Mouse == MouseTracking.Any)
             {
                 _lastReportedCell = (row, column);
-                var button = point.Properties.IsLeftButtonPressed ? 0 : point.Properties.IsMiddleButtonPressed ? 1 : point.Properties.IsRightButtonPressed ? 2 : 3;
+                var button = point.Properties.IsLeftButtonPressed ? MouseReport.LeftButton
+                    : point.Properties.IsMiddleButtonPressed ? MouseReport.MiddleButton
+                    : point.Properties.IsRightButtonPressed ? MouseReport.RightButton
+                    : MouseReport.NoButton;
                 ReportMouse(button, row, column, release: false, motion: true);
             }
         }
@@ -547,9 +522,9 @@ internal sealed class TerminalControl : Grid, IDisposable
 
     private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        if (_selecting)
+        if (_selection.IsDragging)
         {
-            _selecting = false;
+            _selection.EndDrag();
             ReleasePointerCapture(e.Pointer);
             e.Handled = true;
             return;
@@ -560,7 +535,7 @@ internal sealed class TerminalControl : Grid, IDisposable
             _mouseButtonDown = false;
             var point = e.GetCurrentPoint(this);
             var (row, column) = CellAt(point.Position);
-            ReportMouse(0, row, column, release: true, motion: false);
+            ReportMouse(MouseReport.LeftButton, row, column, release: true, motion: false);
             e.Handled = true;
         }
     }
@@ -577,16 +552,14 @@ internal sealed class TerminalControl : Grid, IDisposable
         if (_screen.Mouse != MouseTracking.None && !IsDown(VirtualKey.Shift))
         {
             for (var i = 0; i < Math.Abs(notches); i++)
-                ReportMouse(notches > 0 ? 64 : 65, row, column, release: false, motion: false);
+                ReportMouse(notches > 0 ? MouseReport.WheelUp : MouseReport.WheelDown, row, column, release: false, motion: false);
             return;
         }
 
         if (_screen.IsAlternateScreen)
         {
             // A full-screen program has no scrollback; arrow keys are what it expects from a wheel.
-            var key = notches > 0 ? "\u001b[A" : "\u001b[B";
-            if (_screen.ApplicationCursorKeys)
-                key = notches > 0 ? "\u001bOA" : "\u001bOB";
+            var key = KeyEncoder.ScrollArrow(notches > 0, _screen.ApplicationCursorKeys);
             for (var i = 0; i < Math.Abs(notches) * WheelLinesPerNotch; i++)
                 InputRequested?.Invoke(key);
             return;
@@ -597,88 +570,50 @@ internal sealed class TerminalControl : Grid, IDisposable
             _canvas.Invalidate();
     }
 
-    /// <summary>X10/normal (CSI M with offset bytes) or SGR (CSI &lt; b;x;y M/m) mouse report.</summary>
     private void ReportMouse(int button, int row, int column, bool release, bool motion)
     {
-        if (_screen.Mouse == MouseTracking.X10 && (release || motion || button > 2))
-            return;
+        var report = MouseReport.Encode(
+            _screen.Mouse, _screen.MouseSgr, button, row, column, release, motion,
+            IsDown(VirtualKey.Shift), IsDown(VirtualKey.Menu), IsDown(VirtualKey.Control));
+        if (report is not null)
+            InputRequested?.Invoke(report);
+    }
+}
 
-        var code = button + (IsDown(VirtualKey.Shift) ? 4 : 0) + (IsDown(VirtualKey.Menu) ? 8 : 0) + (IsDown(VirtualKey.Control) ? 16 : 0) + (motion ? 32 : 0);
-        if (_screen.MouseSgr)
+/// <summary>Maps WinUI virtual keys onto the framework-neutral <see cref="TermKey"/>.</summary>
+internal static class WinUiKeys
+{
+    public static TermKey ToTermKey(VirtualKey key)
+    {
+        if (key is >= VirtualKey.A and <= VirtualKey.Z)
+            return TermKey.A + (key - VirtualKey.A);
+        if (key is >= VirtualKey.Number0 and <= VirtualKey.Number9)
+            return TermKey.D0 + (key - VirtualKey.Number0);
+        if (key is >= VirtualKey.F1 and <= VirtualKey.F12)
+            return TermKey.F1 + (key - VirtualKey.F1);
+
+        return key switch
         {
-            InputRequested?.Invoke($"\u001b[<{code};{column + 1};{row + 1}{(release ? 'm' : 'M')}");
-            return;
-        }
-
-        if (release)
-            code = 3 + (code & ~3);
-        if (column > 222 || row > 222)
-            return;
-
-        InputRequested?.Invoke($"\u001b[M{(char)(32 + code)}{(char)(33 + column)}{(char)(33 + row)}");
-    }
-
-    // ---------------------------------------------------------------- Selection
-
-    private ((int Row, int Column) Start, (int Row, int Column) End) NormalizedSelection()
-    {
-        var a = _selectionAnchor;
-        var f = _selectionFocus;
-        return a.Row < f.Row || (a.Row == f.Row && a.Column <= f.Column) ? (a, f) : (f, a);
-    }
-
-    private void ClearSelection()
-    {
-        _hasSelection = false;
-        _selecting = false;
-    }
-
-    private void SelectWord(int absoluteRow, int column)
-    {
-        var line = _screen.AbsoluteLine(absoluteRow);
-        if (line is null)
-            return;
-
-        var cells = line.Cells;
-        if (cells[column].IsBlank)
-            return;
-
-        var start = column;
-        while (start > 0 && !cells[start - 1].IsBlank)
-            start--;
-        var end = column;
-        while (end + 1 < cells.Length && !cells[end + 1].IsBlank)
-            end++;
-
-        _selectionAnchor = (absoluteRow, start);
-        _selectionFocus = (absoluteRow, end);
-        _hasSelection = true;
-    }
-
-    private string SelectedText()
-    {
-        if (!_hasSelection)
-            return string.Empty;
-
-        var (start, end) = NormalizedSelection();
-        var text = new StringBuilder();
-        for (var row = start.Row; row <= end.Row; row++)
-        {
-            var line = _screen.AbsoluteLine(row);
-            if (line is null)
-                continue;
-
-            var rowText = line.ToText();
-            var from = row == start.Row ? start.Column : 0;
-            var to = row == end.Row ? end.Column + 1 : int.MaxValue;
-            from = Math.Min(from, rowText.Length);
-            to = Math.Min(to, rowText.Length);
-            text.Append(rowText, from, Math.Max(0, to - from));
-            // A soft-wrapped row continues on the next one; a hard line break becomes a Windows newline.
-            if (row < end.Row && !line.Wrapped)
-                text.Append("\r\n");
-        }
-
-        return text.ToString();
+            VirtualKey.Up => TermKey.Up,
+            VirtualKey.Down => TermKey.Down,
+            VirtualKey.Right => TermKey.Right,
+            VirtualKey.Left => TermKey.Left,
+            VirtualKey.Home => TermKey.Home,
+            VirtualKey.End => TermKey.End,
+            VirtualKey.Insert => TermKey.Insert,
+            VirtualKey.Delete => TermKey.Delete,
+            VirtualKey.PageUp => TermKey.PageUp,
+            VirtualKey.PageDown => TermKey.PageDown,
+            VirtualKey.Enter => TermKey.Enter,
+            VirtualKey.Tab => TermKey.Tab,
+            VirtualKey.Back => TermKey.Backspace,
+            VirtualKey.Escape => TermKey.Escape,
+            VirtualKey.Space => TermKey.Space,
+            (VirtualKey)0xDB => TermKey.BracketLeft,
+            (VirtualKey)0xDC => TermKey.Backslash,
+            (VirtualKey)0xDD => TermKey.BracketRight,
+            (VirtualKey)0xBD => TermKey.Minus,
+            _ => TermKey.None,
+        };
     }
 }

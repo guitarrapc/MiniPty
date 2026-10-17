@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Avalonia host sample for MiniPty: the same terminal emulator as the WinUI sample, on Windows, Linux, and
+    macOS. Avalonia is a dependency of this sample only; the MiniPty packages stay dependency-free. NativeAOT is
+    off here: the sample demonstrates the UI threading model, not AOT publishing.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <IsAotCompatible>false</IsAotCompatible>
+    <PublishAot>false</PublishAot>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>AvaloniaTerminal</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
+  </ItemGroup>
+
+  <!-- The emulator core (parser, screen buffer, key encoding, selection) is shared with the WinUI sample. -->
+  <ItemGroup>
+    <Compile Include="..\TerminalEmulator\*.cs" Link="TerminalEmulator\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

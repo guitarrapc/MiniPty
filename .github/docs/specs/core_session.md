@@ -122,7 +122,7 @@ A desktop terminal control (WinUI, WPF, WinForms, Avalonia) can drive a session 
 
 Hosts that keep sessions in a non-UI context should know that, with no `SynchronizationContext` current, a waiting `MoveNextAsync` resumes through the thread pool like any other `await`; a host that blocks many pool workers (for example in `Process.WaitForExit`) delays those resumptions along with everything else in the process.
 
-[samples/WinUiTerminal](../../../samples/WinUiTerminal) is a code-only WinUI 3 terminal emulator (VT parser, screen buffer, Win2D grid) that follows this table with no `Task.Run`.
+[samples/WinUiTerminal](../../../samples/WinUiTerminal) (code-only WinUI 3, Windows) and [samples/AvaloniaTerminal](../../../samples/AvaloniaTerminal) (Avalonia; Windows, Linux, macOS) are terminal emulators on one shared VT parser and screen buffer, [samples/TerminalEmulator](../../../samples/TerminalEmulator), that follow this table with no `Task.Run`; only the drawing and input layer differs between them.
 
 ## Lessons Learned
 

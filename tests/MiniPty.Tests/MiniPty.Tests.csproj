@@ -15,15 +15,12 @@
   </ItemGroup>
 
   <!--
-    The WinUI sample's terminal emulator core has no UI dependency, so its sources are compiled here and tested
-    on every platform (WinUiTerminalVtTests). The sample project itself builds only on Windows.
+    The terminal emulator core shared by the WinUI and Avalonia samples has no UI dependency, so its sources are
+    compiled here and tested on every platform (TerminalEmulatorTests). The GUI sample projects build only where
+    their frameworks do.
   -->
   <ItemGroup>
-    <Compile Include="..\..\samples\WinUiTerminal\Terminal\Cell.cs" Link="WinUiTerminal\Cell.cs" />
-    <Compile Include="..\..\samples\WinUiTerminal\Terminal\CharWidth.cs" Link="WinUiTerminal\CharWidth.cs" />
-    <Compile Include="..\..\samples\WinUiTerminal\Terminal\Palette.cs" Link="WinUiTerminal\Palette.cs" />
-    <Compile Include="..\..\samples\WinUiTerminal\Terminal\ScreenBuffer.cs" Link="WinUiTerminal\ScreenBuffer.cs" />
-    <Compile Include="..\..\samples\WinUiTerminal\Terminal\VtParser.cs" Link="WinUiTerminal\VtParser.cs" />
+    <Compile Include="..\..\samples\TerminalEmulator\*.cs" Link="TerminalEmulator\%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

@@ -1,4 +1,4 @@
-namespace WinUiTerminal.Terminal;
+namespace TerminalEmulator;
 
 /// <summary>
 /// Resolves terminal colors to 24-bit values: the 16 ANSI colors (Windows Terminal's "Campbell" scheme), the

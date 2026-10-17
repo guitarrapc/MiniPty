@@ -8,7 +8,7 @@ dotnet run --project samples/WinUiTerminal -- pwsh      # any program and argume
 dotnet run --project samples/WinUiTerminal -- matrix --duration 0 --mode movie
 ```
 
-Windows only. The Windows App SDK and Win2D are dependencies of this sample, not of MiniPty. NativeAOT is disabled here; the sample is about the UI threading model, not publishing.
+Windows only; the same emulator runs on Windows, Linux, and macOS as the Avalonia app in [samples/AvaloniaTerminal](../AvaloniaTerminal). The Windows App SDK and Win2D are dependencies of this sample, not of MiniPty. NativeAOT is disabled here; the sample is about the UI threading model, not publishing.
 
 ## What the terminal supports
 
@@ -58,7 +58,7 @@ Three details crash the process with `0xC000027B` before any window appears. Two
 
 ## Checks
 
-`--smoke` runs `cmd /c echo <marker>` and exits 0 once the marker is on screen; `--dump <file>` writes the status line and then the visible screen as text when the program exits. The VT parser and screen buffer are also covered by `WinUiTerminalVtTests` in the test project, which compiles these sources directly.
+`--smoke` runs `cmd /c echo <marker>` and exits 0 once the marker is on screen; `--dump <file>` writes the status line and then the visible screen as text when the program exits. The emulator core lives in [`samples/TerminalEmulator`](../TerminalEmulator), shared with the Avalonia sample and covered by `TerminalEmulatorTests` in the test project, which compiles those sources directly.
 
 ```bash
 dotnet run --project samples/WinUiTerminal -- --smoke

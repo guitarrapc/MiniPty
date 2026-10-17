@@ -97,6 +97,25 @@ jobs:
           dotnet publish samples/WinUiTerminal/WinUiTerminal.csproj -c Release -r "${{ matrix.rid }}" -o "$out"
           "$out/WinUiTerminal.exe" --smoke
 
+      # The Avalonia host sample is the same emulator on Windows, Linux, and macOS, JIT-only like the WinUI one.
+      # Smoke mode needs a display: the Windows and macOS runners have one, Linux gets a virtual one from Xvfb.
+      - name: Build and smoke-test the Avalonia sample
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/minipty-avalonia"
+          dotnet publish samples/AvaloniaTerminal/AvaloniaTerminal.csproj -c Release -r "${{ matrix.rid }}" -o "$out"
+          exe="$out/AvaloniaTerminal"
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            exe="$out/AvaloniaTerminal.exe"
+          fi
+          test -f "$exe"
+          if [[ "${{ matrix.rid }}" == linux-* ]]; then
+            command -v xvfb-run >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb)
+            xvfb-run -a "$exe" --smoke
+          else
+            "$exe" --smoke
+          fi
+
   build-unix-native:
     name: Native (${{ matrix.rid }})
     timeout-minutes: 5

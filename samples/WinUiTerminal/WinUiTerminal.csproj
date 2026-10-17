@@ -42,4 +42,9 @@
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
   </ItemGroup>
 
+  <!-- The emulator core (parser, screen buffer, key encoding, selection) is shared with the Avalonia sample. -->
+  <ItemGroup>
+    <Compile Include="..\TerminalEmulator\*.cs" Link="TerminalEmulator\%(Filename)%(Extension)" />
+  </ItemGroup>
+
 </Project>

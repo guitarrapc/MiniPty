@@ -1,6 +1,6 @@
 using System.Globalization;
 
-namespace WinUiTerminal.Terminal;
+namespace TerminalEmulator;
 
 /// <summary>
 /// Terminal cell width of a code point: 0 for marks that attach to the previous cell, 2 for East Asian wide and

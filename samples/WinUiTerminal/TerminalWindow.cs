@@ -3,8 +3,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using MiniPty;
+using TerminalEmulator;
 using Windows.UI;
-using WinUiTerminal.Terminal;
 
 namespace WinUiTerminal;
 
