@@ -92,6 +92,14 @@ internal interface IPtyBackend : IDisposable
     /// micro-window passes with no output.
     /// </summary>
     public long CoalesceBudgetTicks { get; }
+    /// <summary>
+    /// Reader silence, in milliseconds, that the post-exit drain takes to mean the transport has nothing more:
+    /// counted after child exit before the transport is closed, and again after the close before output is ended
+    /// without it. Platform backends return <see cref="PtyOutputPump.DefaultPostExitQuietMs"/>; a scripted backend
+    /// whose reads are paced by sleeps lengthens it, so that a test's timing margin does not depend on how promptly
+    /// a loaded host schedules its threads.
+    /// </summary>
+    public int PostExitQuietMs { get; }
     /// <summary>Gets whether the transport was closed, after which reads report end of output without blocking.</summary>
     public bool IsOutputClosed { get; }
     /// <summary>

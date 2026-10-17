@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 
 namespace MiniPty.Tests;
@@ -9,7 +10,12 @@ namespace MiniPty.Tests;
 /// </summary>
 public sealed class PtyInputTests
 {
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
+    /// <summary>
+    /// Bound on every wait. A flooding child drains through the console host at an erratic pace under CPU
+    /// oversubscription (100 KB took 0.6–11 s on the desktop with 48 busy processes), so the bound is well above
+    /// the seconds a loaded run needs, and it only sets how long a genuine hang takes to fail.
+    /// </summary>
+    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// A write the terminal takes at once is complete when the call returns. The child never reads and outlives the
@@ -68,22 +74,23 @@ public sealed class PtyInputTests
     /// child in issue order once output is read, and EOF follows the last queued byte.
     /// </summary>
     [Test]
+    [NotInParallel(FloodedConsole)]
     public async Task QueuedInputIsDeliveredInOrderWithEofAfterItWhileOutputIsBackedUp()
     {
-        const int Lines = 3000;
         var copyFile = Path.GetTempFileName();
         try
         {
             await using var session = Pty.Start(FloodThenCopyInputChild(copyFile));
-            await Task.Delay(BackUpDelay);
 
-            // 21 KB of numbered lines: more than the ConPTY input pipe or a tty input queue takes while the child is
-            // blocked writing output, and more than one 4 KiB pipe write, so the queued parts must keep their order.
-            var queued = await IssueAsync(() => session.WriteInputAsync(NumberedLines(0, Lines)));
-            await Assert.That(queued.IsCompleted).IsFalse();
+            // A block of numbered lines (30 KB on Windows, 21 KB on Unix): more than the ConPTY input pipe or a tty
+            // input queue takes while the child is blocked writing output, and more than one 4 KiB pipe write, so
+            // the queued parts must keep their order. Blocks the terminal still took whole went out before the
+            // output had backed up.
+            var (queued, taken) = await IssueUntilPendingAsync(block => session.WriteInputAsync(NumberedLines(block * BlockLines, BlockLines)));
+            var written = (taken + 1) * BlockLines;
 
             // A blocking write issued behind the queue waits its turn.
-            var last = Task.Run(() => session.Input.Write(Encoding.ASCII.GetBytes(NumberedLines(Lines, 1))));
+            var last = Task.Run(() => session.Input.Write(Encoding.ASCII.GetBytes(NumberedLines(written, 1))));
             await Task.Delay(IssueDelay);
             await Assert.That(last.IsCompleted).IsFalse();
 
@@ -99,7 +106,7 @@ public sealed class PtyInputTests
             await session.WaitForExitAsync().WaitAsync(Timeout);
             await drain.WaitAsync(Timeout);
 
-            await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, Lines + 1));
+            await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, written + 1));
         }
         finally
         {
@@ -218,19 +225,20 @@ public sealed class PtyInputTests
     /// the child in order.
     /// </summary>
     [Test]
+    [NotInParallel(FloodedConsole)]
     public async Task CancelingAQueuedWriteKeepsTheOthersInOrder()
     {
         var copyFile = Path.GetTempFileName();
         try
         {
             await using var session = Pty.Start(FloodThenCopyInputChild(copyFile));
-            await Task.Delay(BackUpDelay);
 
             // The first write stays partly unwritten, so the canceled one behind it has handed nothing over yet.
-            var first = await IssueAsync(() => session.WriteInputAsync(NumberedLines(0, QueueFillingLines)));
+            var (first, taken) = await IssueUntilPendingAsync(block => session.WriteInputAsync(NumberedLines(block * QueueFillingLines, QueueFillingLines)));
+            var written = (taken + 1) * QueueFillingLines;
             using var cts = new CancellationTokenSource();
-            var middle = session.WriteInputAsync(Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("BBBBBB" + Newline, 1000))), cts.Token);
-            var third = session.WriteInputAsync(NumberedLines(QueueFillingLines, 1000));
+            var middle = session.WriteInputAsync(Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("BBBBBB" + Newline, TailLines))), cts.Token);
+            var third = session.WriteInputAsync(NumberedLines(written, TailLines));
             await Assert.That(first.IsCompleted).IsFalse();
             await Assert.That(third.IsCompleted).IsFalse();
 
@@ -244,7 +252,7 @@ public sealed class PtyInputTests
             await session.WaitForExitAsync().WaitAsync(Timeout);
             await drain.WaitAsync(Timeout);
 
-            await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, QueueFillingLines + 1000));
+            await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, written + TailLines));
         }
         finally
         {
@@ -257,20 +265,20 @@ public sealed class PtyInputTests
     /// has to go by the last byte the terminal took, not the last byte of the caller's buffer.
     /// </summary>
     [Test]
+    [NotInParallel(FloodedConsole)]
     public async Task SendEofEndsInputAfterACanceledWriteLeftAPartialLine()
     {
         await using var session = Pty.Start(FloodThenReadToEndChild());
-        await Task.Delay(BackUpDelay);
 
         // The terminal takes only the start of the write, and that start must end inside a line, while the caller's
         // buffer ends with a line terminator. On Linux one 4 MiB line puts the cut inside it. Windows takes whole 4 KiB
-        // parts and macOS about 1 KiB, so both get short lines whose length divides neither amount. A long line would
-        // not work there: the Windows console hands a line longer than its read buffer to the reader without waiting
-        // for the CR, and a macOS tty drops the rest of an overlong line, EOT included.
+        // parts and macOS about 1 KiB, so both get short lines whose length (101 and 9 bytes) divides neither amount.
+        // A long line would not work there: the Windows console hands a line longer than its read buffer to the
+        // reader without waiting for the CR, and a macOS tty drops the rest of an overlong line, EOT included.
         byte[] input;
         if (OperatingSystem.IsWindows())
         {
-            input = Encoding.ASCII.GetBytes(NumberedLines(0, 100000));
+            input = Encoding.ASCII.GetBytes(NumberedLines(0, 7000));
         }
         else if (OperatingSystem.IsMacOS())
         {
@@ -284,8 +292,7 @@ public sealed class PtyInputTests
         }
 
         using var cts = new CancellationTokenSource();
-        var write = await IssueAsync(() => session.WriteInputAsync(input, cts.Token));
-        await Assert.That(write.IsCompleted).IsFalse();
+        var (write, _) = await IssueUntilPendingAsync(_ => session.WriteInputAsync(input, cts.Token));
         await cts.CancelAsync();
         await Assert.ThrowsAsync<OperationCanceledException>(async () => await write.AsTask().WaitAsync(Timeout));
 
@@ -367,11 +374,10 @@ public sealed class PtyInputTests
     [Test]
     public async Task CancelingAQueuedWriteCompletesIt()
     {
-        await using var session = await StartWithInputBlockedAsync();
+        await using var session = StartWithInputBlocked();
         using var cts = new CancellationTokenSource();
 
-        var write = await IssueAsync(() => session.WriteInputAsync(BlockingPayload(), cts.Token));
-        await Assert.That(write.IsCompleted).IsFalse();
+        var (write, _) = await IssueUntilPendingAsync(_ => session.WriteInputAsync(BlockingPayload(), cts.Token));
 
         await cts.CancelAsync();
         await Assert.ThrowsAsync<OperationCanceledException>(async () => await write.AsTask().WaitAsync(Timeout));
@@ -382,11 +388,10 @@ public sealed class PtyInputTests
     [Test]
     public async Task DisposeFailsAQueuedWrite()
     {
-        var session = await StartWithInputBlockedAsync();
+        var session = StartWithInputBlocked();
         try
         {
-            var write = await IssueAsync(() => session.WriteInputAsync(BlockingPayload()));
-            await Assert.That(write.IsCompleted).IsFalse();
+            var (write, _) = await IssueUntilPendingAsync(_ => session.WriteInputAsync(BlockingPayload()));
 
             session.Dispose();
 
@@ -405,9 +410,8 @@ public sealed class PtyInputTests
     [Test]
     public async Task QueuedWriteFailsWhenOutputEnds()
     {
-        await using var session = await StartWithInputBlockedAsync();
-        var write = await IssueAsync(() => session.WriteInputAsync(BlockingPayload()));
-        await Assert.That(write.IsCompleted).IsFalse();
+        await using var session = StartWithInputBlocked();
+        var (write, _) = await IssueUntilPendingAsync(_ => session.WriteInputAsync(BlockingPayload()));
 
         // Closed off the test thread, because closing the pseudo-console while its output is backed up may wait for a
         // reader on older Windows builds. The queued write fails before that close, and draining then lets it finish.
@@ -425,9 +429,8 @@ public sealed class PtyInputTests
     [Test]
     public async Task QueuedWriteFinishesWhenTheChildExits()
     {
-        await using var session = await StartWithInputBlockedAsync();
-        var write = await IssueAsync(() => session.WriteInputAsync(BlockingPayload()));
-        await Assert.That(write.IsCompleted).IsFalse();
+        await using var session = StartWithInputBlocked();
+        var (write, _) = await IssueUntilPendingAsync(_ => session.WriteInputAsync(BlockingPayload()));
 
         session.Kill();
         var drain = DrainAsync(session);
@@ -530,25 +533,23 @@ public sealed class PtyInputTests
 
     /// <summary>
     /// Starts a child whose input is not taken: on Unix it never reads, so the tty input queue fills. On Windows
-    /// ConPTY takes input while its output flows, so the child floods output nobody reads instead.
+    /// ConPTY takes input while its output flows, so the child floods output nobody reads instead, and a write is
+    /// left pending once that output has backed up (see <see cref="IssueUntilPendingAsync"/>).
     /// </summary>
-    private static async Task<PtySession> StartWithInputBlockedAsync()
-    {
-        if (!OperatingSystem.IsWindows())
-            return Pty.Start(Spawn("sleep", ["30"]));
-
-        var session = Pty.Start(Spawn(ComSpec, ["/c", "for /L %i in (1,1,100000000) do @echo %i"]));
-        await Task.Delay(BackUpDelay);
-        return session;
-    }
+    private static PtySession StartWithInputBlocked() =>
+        OperatingSystem.IsWindows()
+            ? Pty.Start(Spawn(ComSpec, ["/c", "for /L %i in (1,1,100000000) do @echo %i"]))
+            : Pty.Start(Spawn("sleep", ["30"]));
 
     /// <summary>
-    /// Floods 20,000 lines of output, then copies stdin to <paramref name="copyFile"/> until end of input. Until
-    /// somebody reads the output, the child is blocked and reads no input.
+    /// Floods output, then copies stdin to <paramref name="copyFile"/> until end of input. Until somebody reads the
+    /// output, the child is blocked and reads no input: on Windows the console host stopped taking the flood after
+    /// about 20 KB on top of the 16 KiB ring, so 100 KB backs it up several times over. The lines are wide because
+    /// the drain costs a console frame per line, about 8 ms each under CPU oversubscription, whatever the width.
     /// </summary>
     private static PtyStartInfo FloodThenCopyInputChild(string copyFile) =>
         OperatingSystem.IsWindows()
-            ? WindowsCommandLine($"(for /L %i in (1,1,20000) do @echo flood%i) & \"{WindowsFind}\" /v \"\" > \"{copyFile}\"")
+            ? WindowsCommandLine($"{WindowsFloodFile.TypeCommand(FloodLines, FloodLineWidth)} & \"{WindowsFind}\" /v \"\" > \"{copyFile}\"")
             : Spawn("sh", ["-c", "i=0; while [ $i -lt 20000 ]; do echo flood$i; i=$((i+1)); done; cat > \"$1\"", "sh", copyFile]);
 
     /// <summary>
@@ -558,8 +559,18 @@ public sealed class PtyInputTests
     /// </summary>
     private static PtyStartInfo FloodThenReadToEndChild() =>
         OperatingSystem.IsWindows()
-            ? WindowsCommandLine($"(for /L %i in (1,1,20000) do @echo flood%i) & \"{WindowsPowerShell}\" -NoLogo -NoProfile -NonInteractive -Command \"$null = [Console]::In.ReadToEnd()\"")
+            ? WindowsCommandLine($"{WindowsFloodFile.TypeCommand(FloodLines, FloodLineWidth)} & \"{WindowsPowerShell}\" -NoLogo -NoProfile -NonInteractive -Command \"$null = [Console]::In.ReadToEnd()\"")
             : Spawn("sh", ["-c", "i=0; while [ $i -lt 20000 ]; do echo flood$i; i=$((i+1)); done; cat > /dev/null"]);
+
+    private const int FloodLines = 1000;
+    private const int FloodLineWidth = 100;
+
+    /// <summary>
+    /// Tests that flood a console and then wait for the child to drain it and exit run one at a time. Three such
+    /// drains at once, under the load of the rest of the suite, outlasted their wait on a loaded desktop and on
+    /// hosted runners; alone, each takes about a second.
+    /// </summary>
+    private const string FloodedConsole = "flooded-console";
 
     /// <summary>Copies stdin to <paramref name="copyFile"/> until end of input.</summary>
     private static PtyStartInfo CopyInputChild(string copyFile) =>
@@ -577,9 +588,24 @@ public sealed class PtyInputTests
         new() { FileName = ComSpec, CommandLine = $"/s /c \"{command}\"", Size = new PtySize(80, 24) };
 
     /// <summary>
-    /// Lines enough that a write of them stays partly unwritten while the child is blocked.
+    /// Lines enough that a write of them stays partly unwritten while the child is blocked: 30 KB on Windows, where
+    /// ConPTY takes about 4 KiB more once it is blocked, and 140 KB on Unix.
     /// </summary>
-    private static int QueueFillingLines => OperatingSystem.IsWindows() ? 3000 : 20000;
+    private static int QueueFillingLines => OperatingSystem.IsWindows() ? 300 : 20000;
+
+    /// <summary>One block of numbered lines for the ordering tests: 30 KB on Windows, 21 KB on Unix.</summary>
+    private static int BlockLines => OperatingSystem.IsWindows() ? 300 : 3000;
+
+    /// <summary>Lines written behind the queue in the ordering tests.</summary>
+    private static int TailLines => OperatingSystem.IsWindows() ? 100 : 1000;
+
+    /// <summary>
+    /// Width of a numbered line. A child that copies console input pays one console read and one echo frame per
+    /// line, and under CPU oversubscription each costs a scheduling wait: 3,000 seven-byte lines took 66 s to copy
+    /// on a loaded desktop. Windows lines are therefore long, so the same bytes are fewer lines; a Unix tty's
+    /// canonical line limit keeps those lines short.
+    /// </summary>
+    private static int InputLineWidth => OperatingSystem.IsWindows() ? 100 : 6;
 
     /// <summary>
     /// 4 MiB of short complete lines for a child whose input is not taken. A canonical-mode tty may hold back a write
@@ -594,15 +620,17 @@ public sealed class PtyInputTests
 
     private static string NumberedLines(int start, int count)
     {
-        var text = new StringBuilder(count * 7);
+        var text = new StringBuilder(count * (InputLineWidth + 1));
         for (var i = start; i < start + count; i++)
-            text.Append(i.ToString("D6")).Append(Newline);
+            text.Append(NumberedLine(i)).Append(Newline);
 
         return text.ToString();
     }
 
     private static string ExpectedLines(int start, int count) =>
-        string.Join('\n', Enumerable.Range(start, count).Select(i => i.ToString("D6")));
+        string.Join('\n', Enumerable.Range(start, count).Select(NumberedLine));
+
+    private static string NumberedLine(int i) => i.ToString("D6").PadRight(InputLineWidth, 'x');
 
     private static string ReadLines(string path) => string.Join('\n', File.ReadAllLines(path));
 
@@ -626,6 +654,36 @@ public sealed class PtyInputTests
     /// instead of hanging it.
     /// </summary>
     private static Task<ValueTask> IssueAsync(Func<ValueTask> write) => Task.Run(write).WaitAsync(TimeSpan.FromSeconds(5));
+
+    /// <summary>
+    /// Issues <paramref name="write"/> until one stays pending, and returns it with the count of writes the terminal
+    /// took before it. A flooding child is blocked by its unread output only once that output has backed up through
+    /// the ring and the pipe, which a hosted runner reaches at its own pace: a fixed delay found the child still
+    /// flooding there, and the write went out at once. A write pending for a moment proves nothing either, since the
+    /// pipe is also full while the terminal is merely busy; one still pending after <see cref="BackUpDelay"/> is
+    /// behind a terminal that has stopped reading input. Each call must return promptly either way.
+    /// </summary>
+    private static async Task<(ValueTask Write, int Taken)> IssueUntilPendingAsync(Func<int, ValueTask> write)
+    {
+        var started = Stopwatch.StartNew();
+        await Task.Delay(BackUpDelay);
+        for (var taken = 0; ; taken++)
+        {
+            var issued = await IssueAsync(() => write(taken));
+            if (!issued.IsCompleted)
+            {
+                await Task.Delay(BackUpDelay);
+                if (!issued.IsCompleted)
+                    return (issued, taken);
+            }
+
+            await issued;
+            if (started.Elapsed > BackUpTimeout)
+                throw new TimeoutException($"The terminal kept taking input for {BackUpTimeout.TotalSeconds} s; the child's output never backed up.");
+
+            await Task.Delay(IssueDelay);
+        }
+    }
 
     /// <summary>Issues a call that must neither block nor throw: its outcome belongs in the returned task.</summary>
     private static Task Issue(Func<ValueTask> write)
@@ -661,6 +719,9 @@ public sealed class PtyInputTests
 
     /// <summary>Long enough for a flooding child to fill the output ring and the transport behind it.</summary>
     private static readonly TimeSpan BackUpDelay = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>Bound on waiting for a flooding child's output to back up; the test's own timeout is 30 s.</summary>
+    private static readonly TimeSpan BackUpTimeout = TimeSpan.FromSeconds(15);
 
     /// <summary>Long enough for a write started on another thread to be issued.</summary>
     private static readonly TimeSpan IssueDelay = TimeSpan.FromMilliseconds(100);

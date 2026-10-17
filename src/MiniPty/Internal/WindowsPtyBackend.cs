@@ -948,6 +948,8 @@ internal static class WindowsPtyBackend
 
         public long CoalesceBudgetTicks => s_coalesceBudgetTicks;
 
+        public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
+
         // The output pipe handle is pinned by each ReadFile call (SafeHandle reference counting), so a concurrent
         // Dispose defers the close until the read returns, and later reads see ObjectDisposedException.
         public bool TryBeginOutputRead() => true;

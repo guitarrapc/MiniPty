@@ -332,17 +332,28 @@ public sealed class PtyTerminalTests
     private static PtyStartInfo UnixHangupHandlerChild() =>
         Spawn("sh", ["-c", "trap 'exit 0' HUP; printf 'READY\\n'; IFS= read -r _"]);
 
-    /// <summary>Child that emits one line immediately, then sustained bulk output (256 KiB) and exits 0.</summary>
+    /// <summary>
+    /// Child that emits one line immediately, then sustained bulk output (256 KiB) and exits 0. Windows types a
+    /// file: echoing the lines one by one outlasted the test's 30 s on a loaded hosted ARM64 runner.
+    /// </summary>
     private static PtyStartInfo PauseFlowTestChild() =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? Spawn(WindowsComSpec(), ["/c", "echo PAUSE_FLOW_START & for /l %i in (1,1,2048) do @echo 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"])
+            ? WindowsCommandLine($"echo PAUSE_FLOW_START & {WindowsFloodFile.TypeCommand(BulkOutputLines, BulkOutputLineWidth)}")
             : Spawn("sh", ["-c", "printf 'PAUSE_FLOW_START\\n'; i=0; while [ $i -lt 2048 ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
 
     /// <summary>Child that emits sustained bulk output (256 KiB) then exits 0.</summary>
     private static PtyStartInfo BulkOutputChild() =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? Spawn(WindowsComSpec(), ["/c", "for /l %i in (1,1,2048) do @echo 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"])
+            ? WindowsCommandLine(WindowsFloodFile.TypeCommand(BulkOutputLines, BulkOutputLineWidth))
             : Spawn("sh", ["-c", "i=0; while [ $i -lt 2048 ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
+
+    // 256 KiB in few lines: a drain costs a console frame per line, about 8 ms each under CPU oversubscription.
+    private const int BulkOutputLines = 512;
+    private const int BulkOutputLineWidth = 512;
+
+    /// <summary>A cmd.exe child given a pre-escaped command line, so a quoted path inside it reaches cmd intact.</summary>
+    private static PtyStartInfo WindowsCommandLine(string command) =>
+        new() { FileName = WindowsComSpec(), CommandLine = $"/s /c \"{command}\"", Size = new(80, 24) };
 
     private static string WindowsComSpec() =>
         Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";

@@ -207,10 +207,17 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// Bulk stdout on Windows ConPTY used to produce ~125 handoff-sized chunks; coalescing should batch to far fewer.
+    /// Bulk stdout on Windows ConPTY arrives whole, in chunks no larger than a ring slot.
     /// </summary>
+    /// <remarks>
+    /// This used to assert that coalescing batched the 32 KiB into fewer than 40 chunks (about 13 on an idle
+    /// desktop, against about 125 uncoalesced). The count is a measurement of the host, not of the reader: ConPTY's
+    /// slices arrive further apart than the coalescing window on GitHub-hosted runners (42–94 chunks on x64 and
+    /// ARM64) and on the same desktop under CPU oversubscription (63–123), so no bound separates a slow host from a
+    /// reader that does not coalesce. The benchmarks track the chunking.
+    /// </remarks>
     [Test]
-    public async Task PtyReadOutputAsyncCoalescesBulkStdoutOnWindows()
+    public async Task PtyReadOutputAsyncDeliversBulkStdoutOnWindows()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
@@ -233,9 +240,8 @@ public sealed class PtyTests
         }
 
         await Assert.That(totalBytes).IsGreaterThanOrEqualTo(32_768);
-        await Assert.That(chunks).IsLessThan(40);
+        await Assert.That(chunks).IsGreaterThan(0);
         await Assert.That(maxChunk).IsLessThanOrEqualTo(4096);
-        await Assert.That(maxChunk).IsGreaterThan(1024);
     }
 
     /// <summary>Binary bulk stdout on Unix should remain few large chunks (coalesce must not regress large reads).</summary>
