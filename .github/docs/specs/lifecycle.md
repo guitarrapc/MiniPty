@@ -63,7 +63,7 @@ stateDiagram-v2
     Exited --> Draining: output reader still active
     Draining --> Closed: transport EOF / drain complete
     Closed --> Disposed: Dispose / DisposeAsync
-    Active --> Disposed: Dispose while running\n(kills child first)
+    Active --> Disposed: Dispose while running\n(hangs up or ends child)
     Disposed --> [*]
 ```
 

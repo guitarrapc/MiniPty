@@ -4,9 +4,9 @@ namespace MiniPty.Tests;
 
 /// <summary>
 /// The termios a Unix child starts with is set by MiniPty at spawn rather than left to the kernel default,
-/// so canonical-mode editing behaves the same on every Unix. The visible difference from the Linux default
-/// is <c>IUTF8</c>: without it, erasing a multibyte character removes one byte and leaves invalid UTF-8 on
-/// the line the child reads.
+/// so canonical-mode editing behaves the same on every Unix. The visible difference from the Linux and macOS
+/// defaults is <c>IUTF8</c>: without it, erasing a multibyte character removes one byte and leaves invalid
+/// UTF-8 on the line the child reads.
 /// </summary>
 public sealed class PtyUnixLineDisciplineTests
 {

@@ -33,6 +33,10 @@ internal static partial class UnixPtyBackend
         private static readonly List<int> s_polled = [];
         private static bool s_started;
         private static bool s_nativeWatch;
+        private static volatile bool s_hostExiting;
+
+        /// <summary>True once the host process has started exiting, when a grace timer can no longer fire.</summary>
+        internal static bool IsHostExiting => s_hostExiting;
 
         /// <summary>Starts watching <paramref name="child"/>; its exit task completes once the child is reaped.</summary>
         internal static void Register(UnixPtyBackendInstance child)
@@ -59,12 +63,34 @@ internal static partial class UnixPtyBackend
             }
         }
 
+        /// <summary>Kills every registered child still in the hang-up grace that disposal started.</summary>
+        internal static void KillChildrenInHangupGrace()
+        {
+            lock (s_lock)
+            {
+                // Same lock order as the reap: the watcher lock, then the child's pid lock.
+                foreach (var child in s_children.Values)
+                    child.KillIfInHangupGrace();
+            }
+        }
+
+        private static void OnHostExiting()
+        {
+            // Set before the children are visited. A Dispose that takes a child's pid lock after this visit then sees
+            // the flag and kills the child itself, which covers an exit handler that runs after this one.
+            s_hostExiting = true;
+            KillChildrenInHangupGrace();
+        }
+
         private static void EnsureStarted()
         {
             if (s_started)
                 return;
 
             s_nativeWatch = minipty_child_watch_init() == 0;
+            // A grace timer never fires once the host exits. Without this, a disposed child that ignores the hang-up
+            // would outlive a host that exits within the grace.
+            AppDomain.CurrentDomain.ProcessExit += static (_, _) => OnHostExiting();
             var thread = new Thread(Run)
             {
                 IsBackground = true,

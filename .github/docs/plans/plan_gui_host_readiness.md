@@ -765,11 +765,11 @@ Small–medium.
 
 ### Why P2
 
-Linux spawns with the kernel default termios, which lacks `IUTF8`. In canonical mode, erasing a multibyte character such as Japanese input then removes only one byte and leaves invalid UTF-8 in the line.
+Children spawned with the kernel default termios lack `IUTF8` on both Linux and macOS. In canonical mode, erasing a multibyte character such as Japanese input then removes only one byte and leaves invalid UTF-8 in the line.
 
 ### Decision (implemented)
 
-- The native shim builds one `struct termios` for every child: input `ICRNL IXON IXANY IMAXBEL BRKINT IUTF8`, output `OPOST ONLCR`, control `CREAD CS8 HUPCL`, local `ICANON ISIG IEXTEN ECHO ECHOE ECHOK ECHOKE ECHOCTL`, the usual control characters (`VERASE` = DEL, `VEOF` = ^D, `VWERASE` = ^W, …, plus `VDSUSP` and `VSTATUS` where the platform has them), and 38400 baud. These are the settings a terminal emulator gives a new shell; `IUTF8`, `IXANY`, `IMAXBEL`, and `BRKINT` are the ones the Linux default lacks.
+- The native shim builds one `struct termios` for every child: input `ICRNL IXON IXANY IMAXBEL BRKINT IUTF8`, output `OPOST ONLCR`, control `CREAD CS8 HUPCL`, local `ICANON ISIG IEXTEN ECHO ECHOE ECHOK ECHOKE ECHOCTL`, the usual control characters (`VERASE` = DEL, `VEOF` = ^D, `VWERASE` = ^W, …, plus `VDSUSP` and `VSTATUS` where the platform has them), and 38400 baud. These are the settings a terminal emulator gives a new shell. The Linux default lacks `IUTF8`, `IXANY`, `IMAXBEL`, `BRKINT`, and `HUPCL`. The macOS default lacks `IUTF8` and `ECHOK` and starts at 9600 baud. Every control character not listed is `_POSIX_VDISABLE`, so a slot such as FreeBSD's `VERASE2` is disabled rather than NUL.
 - Linux and FreeBSD pass it as `forkpty`'s termios argument. macOS, whose spawn opens the slave in the parent, applies it with `tcsetattr` on the slave before `posix_spawn`. Flags a platform does not define (`IUTF8` on some BSDs, `ECHOKE`/`ECHOCTL` under strict feature macros) are guarded and simply left out.
 - Recorded in [pty_crossplatform.md](../references/pty_crossplatform.md) → Unix line discipline.
 
@@ -783,6 +783,7 @@ Linux spawns with the kernel default termios, which lacks `IUTF8`. In canonical 
 ### Lessons Learned
 
 - **The erase happens when the input is written, not when the child reads.** The line discipline processes canonical editing as bytes enter the tty, so the test's `stty -echo` only keeps echoed bytes out of the output; it does not have to run before the input arrives for the assertion to hold.
+- **A zero control character is not "disabled" everywhere.** `_POSIX_VDISABLE` is 0 on Linux but 0xff on macOS and FreeBSD. A zero-filled `c_cc` therefore makes NUL an erase key through FreeBSD's `VERASE2`, so unset slots are filled with `_POSIX_VDISABLE` first.
 
 ---
 
@@ -804,22 +805,31 @@ What remained was the termination policy itself. `Dispose` sent `SIGKILL` immedi
 ### Decision (implemented)
 
 - `Dispose` sends `SIGHUP` to the child, closes the master as before, and arms a one-shot timer that sends `SIGKILL` one second later unless the watcher has reaped the child by then. The kill takes the same lock as the reap, so it is skipped for a reaped child rather than sent to a reused pid. Nothing waits on the disposing thread, and `DisposeAsync` still waits only for the reader, not for the exit.
-- `SIGHUP` is what a terminal emulator delivers when its window closes; a shell saves its history and runs its exit hooks on it. Closing the master hangs the tty up as well (Linux signals the session leader, BSD the foreground process group), so the explicit signal covers a shell that is not in the foreground.
+- `SIGHUP` is what a terminal emulator delivers when its window closes; a shell saves its history and runs its exit hooks on it. Closing the master also hangs up the session leader, which is the child, but on macOS only while `CLOCAL` is clear. On Linux the master close signals the leader whatever `CLOCAL` says. The explicit signal covers a child that set `CLOCAL` on macOS, and a master close that the reader still delays.
 - `Kill()` stays `SIGKILL`, and `PtyTerminal.Kill()` stays `SIGHUP` without escalation; only disposal is graceful with a bound. The grace is a constant (`UnixPtyBackend.DisposeHangupGraceMs`), long enough for a shell on a loaded machine and short enough that a closed tab leaves nothing behind for long; it can become an option if an embedder needs one.
+- A pending grace timer never fires once the host process exits. A `ProcessExit` handler therefore kills every child still in its grace, so a child that ignores the hang-up does not outlive a host that exits normally (returns from `Main` or calls `Environment.Exit`) right after disposing. The handler also marks the host as exiting, and a `Dispose` that runs later, for example from the application's own `ProcessExit` handler, kills the child itself instead of arming a timer. A host ended by a signal, an unhandled exception, or `Environment.FailFast` runs no `ProcessExit` handler, so such a child survives it. Calling `Kill()` before `Dispose` still ends the child at once.
+- A racing second `Dispose` finds the timer under the pid lock and arms no other.
+- The reap detaches the grace timer, so a child that exits on the hang-up does not keep its disposed session reachable until the timer fires.
 - Windows is unchanged: `TerminateProcess`, then `ClosePseudoConsole`. ConPTY offers no hang-up to send first.
 
 ### Tests
 
 | Test | Covers |
 |---|---|
-| `PtyUnixDisposeTests.DisposeHangsUpAChildThatExitsOnHangup` | A `sh` whose `HUP` trap writes a file and exits: the file appears, so the trap ran and the child was not killed outright; the pid is gone afterwards; `Dispose` returned in less than the grace |
-| `PtyUnixDisposeTests.DisposeKillsAChildThatIgnoresHangupAfterTheGrace` | A `sh` whose `HUP` trap writes the file but keeps running: the file appears (hang-up first), and the pid is gone within the grace plus a margin (the kill followed) |
+| `PtyUnixDisposeTests.DisposeHangsUpAChildThatExitsOnHangup` | A `sh` that sets `CLOCAL` and whose `HUP` trap writes a file and exits: the file appears, so on macOS the explicit hang-up reached it and it was not killed outright; the pid is gone afterwards with status 0; `Dispose` returned in less than the grace |
+| `PtyUnixDisposeTests.DisposeKillsAChildThatIgnoresHangupAfterTheGrace` | A `sh` whose `HUP` trap writes the file but keeps running: the file appears (hang-up first), and the child is still running halfway through the grace, and the pid is gone with `SIGKILL` within the grace plus a margin (the kill followed) |
+| `PtyUnixDisposeTests.DisposeAsyncEndsAChildWithTheDefaultHangupAction` | A `sh` without a trap reports 129 / `SIGHUP` after `DisposeAsync`, not the grace kill |
+| `PtyUnixDisposeTests.DisposeAfterExitKeepsTheChildsOwnStatus` | Disposing after exit leaves the child's own status (3) in place |
+| `PtyUnixDisposeTests.KillChildrenInHangupGraceKillsOnlyDisposedChildrenAtOnce` | The kill the process-exit hook runs, called directly: it kills a disposed child that ignores the hang-up before the grace ends, and spares a session that was never disposed. The hook's registration and the exiting flag are covered only by the host-exit probe below |
 
-Both are red with the previous `SIGKILL`-first disposal: the trap never runs and the file never appears. With G9 and G10 together: Linux 278 pass in 2 full-suite runs (WSL, Ubuntu 24.04), Windows 278 pass, and the `Session` sample published and ran as NativeAOT on Linux. No benchmark scenario disposes a running child, and the only new allocation is the one-shot timer of such a disposal, so the allocation baselines are unaffected.
+The first three are red with the previous `SIGKILL`-first disposal: the trap never runs, the file never appears, and the status is `SIGKILL`. With G9 and G10 together: Linux 278 pass in 2 full-suite runs (WSL, Ubuntu 24.04), Windows 278 pass, and the `Session` sample published and ran as NativeAOT on Linux. With the review fixes on macOS 26.6 (arm64): 281 pass in 3 full-suite runs. A host-exit probe disposes a child that ignores the hang-up and then returns from `Main`, after `Dispose`, after `DisposeAsync`, or with `Dispose` in its own `ProcessExit` handler registered after the first `Pty.Start`. It left no child behind in any mode, both on CoreCLR and published as NativeAOT. The reap detaching the grace timer has no automated test. Linux and Windows have not been rerun with the review fixes. No benchmark scenario disposes a running child, and the only new allocation is the one-shot timer of such a disposal, so the allocation baselines are unaffected.
 
 ### Lessons Learned
 
 - **A shell runs a trap only when the foreground command returns.** The test child loops on `sleep 0.1` rather than blocking in `read` or a long `sleep`, so the trap runs within about 100 ms of the hang-up, well inside the grace, and the test does not depend on how a given `sh` interrupts a builtin.
+- **Closing the master already hangs up the session leader.** A test of the explicit hang-up passes without it unless the child sets `CLOCAL`, which on macOS stops the master close from signaling it. Without `CLOCAL`, removing the explicit `SIGHUP` left both original tests green.
+- **A pending timer does not run at process exit.** With only the grace timer, a child that ignored the hang-up survived a host that returned from `Main` right after `Dispose` or `DisposeAsync`, reparented to `launchd`.
+- **`ProcessExit` runs only on a normal exit, and handlers run in registration order.** A plain console host ended by `SIGTERM`, `SIGINT`, an unhandled exception, or `Environment.FailFast` runs none, even under NativeAOT. A host that registers its own handler after the first `Pty.Start` runs it after MiniPty's, which is why a later `Dispose` checks the exiting flag.
 - **A killed child is a zombie until it is reaped, and `kill(pid, 0)` succeeds on a zombie.** "The pid is gone" therefore also asserts that the watcher reaped the child after disposal, which is the zombie guarantee G1 introduced.
 
 ---

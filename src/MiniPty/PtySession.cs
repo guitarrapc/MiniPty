@@ -29,8 +29,8 @@ namespace MiniPty;
 /// </para>
 /// <para>
 /// Disposing or awaiting <see cref="DisposeAsync"/> ends a child that is still running, then releases handles. On
-/// Unix the child is hung up first (<c>SIGHUP</c>), so a shell can save its history, and killed after a short grace
-/// period if it is still running; on Windows it is terminated.
+/// Unix the child is hung up first (<c>SIGHUP</c>), so a shell can save its history. It is killed after a short grace
+/// period if it is still running, or at once if the host process exits normally first. On Windows it is terminated.
 /// </para>
 /// </remarks>
 public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
@@ -166,6 +166,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <value>
     /// <see langword="true"/> after the process-wide exit watcher has observed the exit. Reading it never blocks.
     /// </value>
+    /// <remarks>
+    /// On Unix the watcher keeps observing after <see cref="Dispose"/>, so this can become <see langword="true"/>
+    /// afterwards. A child disposed while running then reports what ended it: its own exit, the hang-up (129,
+    /// <c>SIGHUP</c>), or the kill after the grace period (137, <c>SIGKILL</c>). <see cref="WaitForExitAsync"/> fails
+    /// once the session is disposed, so read this property, <see cref="ExitCode"/>, or <see cref="ExitStatus"/> instead.
+    /// On Windows a session disposed while its child was running never reports the exit.
+    /// </remarks>
     public bool HasExited => _backend.HasExited;
 
     /// <summary>
@@ -438,8 +445,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </summary>
     /// <remarks>
     /// <para>
-    /// On Unix a running child is hung up (<c>SIGHUP</c>, what a terminal emulator sends when its window closes) and
-    /// killed one second later if it has not exited; both happen off the calling thread. On Windows it is terminated.
+    /// On Unix a running child is hung up (<c>SIGHUP</c>, what a terminal emulator sends when its window closes)
+    /// without waiting for it to exit. A timer kills it one second later if it has not exited. The kill is sent at once
+    /// if the host process exits normally before then, by returning from <c>Main</c> or calling
+    /// <see cref="Environment.Exit(int)"/>. A host ended by a signal or a crash skips it, so a child that ignores the
+    /// hang-up survives. Call <see cref="Kill()"/> first to end the child immediately. On Windows it is terminated.
     /// </para>
     /// <para>
     /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. The background

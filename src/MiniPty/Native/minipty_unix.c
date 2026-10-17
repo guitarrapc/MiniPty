@@ -43,15 +43,18 @@
 #endif
 
 /*
- * The line discipline every child starts with. The kernel default differs by platform, and on Linux it lacks
- * IUTF8, so erasing a multibyte character in canonical mode removed one byte and left invalid UTF-8 on the
- * line. Pinning the whole termios makes a MiniPty terminal behave the same on every Unix: the flags and
- * control characters below are what a terminal emulator sets up for a new shell, and a program that wants
- * raw mode changes them itself.
+ * The line discipline every child starts with. The kernel default differs by platform, and neither the Linux
+ * nor the macOS default sets IUTF8. Without it, erasing a multibyte character in canonical mode removes one
+ * byte and leaves invalid UTF-8 on the line. Pinning the whole termios makes a MiniPty terminal behave the
+ * same on every Unix. The flags and control characters below are what a terminal emulator sets up for a new
+ * shell, and a program that wants raw mode changes them itself.
  */
 static void minipty_default_termios(struct termios *term)
 {
     memset(term, 0, sizeof(*term));
+    /* A zero control character is NUL, not "disabled", wherever _POSIX_VDISABLE is not 0. Every slot not set
+     * below, such as FreeBSD's VERASE2, stays disabled rather than making NUL an editing key. */
+    memset(term->c_cc, _POSIX_VDISABLE, sizeof(term->c_cc));
 
     term->c_iflag = ICRNL | IXON | IXANY | IMAXBEL | BRKINT;
 #if defined(IUTF8)
@@ -396,7 +399,7 @@ static int minipty_spawn_darwin_once(
         goto done;
     }
 
-    /* forkpty takes the termios as an argument; here the slave is open in the parent, so it is set directly. */
+    /* forkpty takes the termios as an argument. Here the slave is already open in the parent, so it is set directly. */
     minipty_default_termios(&term);
     if (tcsetattr(slave, TCSANOW, &term) != 0) {
         err = errno > 0 ? errno : EINVAL;
