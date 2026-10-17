@@ -247,11 +247,23 @@ internal sealed class ScreenBuffer
 
     private void ShiftRight(TermLine line, int column, int count)
     {
+        ClearSplitAt(line, column);
+        ClearSplitAt(line, Columns - count);
         var cells = line.Cells;
         for (var i = Columns - 1; i >= column + count; i--)
             cells[i] = cells[i - count];
         for (var i = column; i < Math.Min(column + count, Columns); i++)
             cells[i] = Cell.Blank(_attributes);
+    }
+
+    /// <summary>Blanks a wide glyph only when a move boundary cuts between its two cells.</summary>
+    private void ClearSplitAt(TermLine line, int boundary)
+    {
+        if (boundary > 0 && boundary < Columns && line.Cells[boundary].IsContinuation)
+        {
+            line.Cells[boundary - 1] = Cell.Blank(EraseAttributes);
+            line.Cells[boundary] = Cell.Blank(EraseAttributes);
+        }
     }
 
     // ---------------------------------------------------------------- C0 controls
@@ -494,7 +506,6 @@ internal sealed class ScreenBuffer
     {
         _wrapPending = false;
         var line = ScreenLine(CursorRow);
-        ClearWideAt(line, CursorColumn);
         ShiftRight(line, CursorColumn, Math.Clamp(count, 1, Columns - CursorColumn));
         Dirty = true;
     }
@@ -504,7 +515,8 @@ internal sealed class ScreenBuffer
         _wrapPending = false;
         var line = ScreenLine(CursorRow);
         count = Math.Clamp(count, 1, Columns - CursorColumn);
-        ClearWideAt(line, CursorColumn);
+        ClearSplitAt(line, CursorColumn);
+        ClearSplitAt(line, CursorColumn + count);
         var cells = line.Cells;
         for (var i = CursorColumn; i < Columns; i++)
             cells[i] = i + count < Columns ? cells[i + count] : Cell.Blank(EraseAttributes);
@@ -806,22 +818,27 @@ internal sealed class ScreenBuffer
 
         _alt = alt;
 
-        if (!_altActive)
+        // Resize the hidden main screen too. Its saved cursor anchors the content while an alternate-screen
+        // application is running; otherwise returning to it can expose fewer lines than Rows.
+        var mainCursor = _altActive ? _savedMain.Row : CursorRow;
+        // The cursor keeps its line. Shrinking removes blank lines below the cursor first, so a prompt near
+        // the top is not pushed into scrollback; growing pulls scrollback back onto the screen.
+        var absolute = _main.Count - Rows + mainCursor;
+        while (_main.Count > rows && _main.Count - 1 > absolute && _main[^1].ToText().Length == 0)
+            _main.RemoveAt(_main.Count - 1);
+
+        while (_main.Count < rows)
+            _main.Add(new TermLine(columns, CellAttributes.Plain));
+
+        mainCursor = Math.Clamp(absolute - (_main.Count - rows), 0, rows - 1);
+        if (_altActive)
         {
-            // The cursor keeps its line. Shrinking removes blank lines below the cursor first, so a prompt near
-            // the top is not pushed into scrollback; growing pulls scrollback back onto the screen.
-            var absolute = _main.Count - Rows + CursorRow;
-            while (_main.Count > rows && _main.Count - 1 > absolute && _main[^1].ToText().Length == 0)
-                _main.RemoveAt(_main.Count - 1);
-
-            while (_main.Count < rows)
-                _main.Add(new TermLine(columns, CellAttributes.Plain));
-
-            CursorRow = Math.Clamp(absolute - (_main.Count - rows), 0, rows - 1);
+            _savedMain = _savedMain with { Row = mainCursor, Column = Math.Min(_savedMain.Column, columns - 1) };
+            CursorRow = Math.Min(CursorRow, rows - 1);
         }
         else
         {
-            CursorRow = Math.Min(CursorRow, rows - 1);
+            CursorRow = mainCursor;
         }
 
         var tabStops = DefaultTabStops(columns);

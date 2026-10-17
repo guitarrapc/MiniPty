@@ -939,6 +939,16 @@ flowchart LR
 - [references/pty_crossplatform.md](../references/pty_crossplatform.md): ConPTY VT forwarding measurements, reader shutdown via wake descriptor, termios settings.
 - [README.md](../../../README.md): GUI host note, recommended pull pattern, `WaitForExitAsync` signature.
 
+## GUI sample regression lessons
+
+- Closing a window must mark the run as closing before disposing its session. Observe both the exit wait and
+  output pump before handling disposal exceptions, skip subsequent rendering/status updates, and do not suppress
+  unrelated output failures. `TerminalRunTests` covers the shared coordination used by both GUI hosts.
+- Resize both screen buffers even when one is hidden. Keep the main cursor anchored to its content while an
+  alternate-screen application changes the grid size; restoring it must never expose fewer lines than the grid.
+- Character insertion/deletion must preserve complete wide glyphs and blank glyphs split at either move boundary.
+  Test both split glyphs and intact glyphs so boundary repair does not erase valid text.
+
 ## Related Documents
 
 - [plan_terminal_parity.md](plan_terminal_parity.md): T7 (ConPTY clear), revisited by G7.

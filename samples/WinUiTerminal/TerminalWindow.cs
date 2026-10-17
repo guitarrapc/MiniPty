@@ -28,6 +28,7 @@ internal sealed class TerminalWindow : Window
     private string _statusCommand = string.Empty;
     private string _statusState = "starting";
     private bool _exited;
+    private readonly TerminalRun _run = new();
 
     public TerminalWindow(bool smoke, string[] command, string? dumpPath)
     {
@@ -113,8 +114,10 @@ internal sealed class TerminalWindow : Window
         _statusState = "running";
         UpdateStatus();
         var pump = PumpOutputAsync(_session);
-        var status = await _session.WaitForExitAsync();
-        await pump;
+        var exit = _session.WaitForExitAsync();
+        if (!await _run.WaitAsync(exit, pump))
+            return;
+        var status = await exit;
 
         _exited = true;
         _statusState = $"exited with {status.ExitCode}";
@@ -153,7 +156,10 @@ internal sealed class TerminalWindow : Window
     private async Task PumpOutputAsync(PtySession session)
     {
         await foreach (var chunk in session.ReadOutputAsync())
-            _terminal.Feed(chunk.Data.Span);
+        {
+            if (!_run.IsClosing)
+                _terminal.Feed(chunk.Data.Span);
+        }
     }
 
     private async void OnInputRequested(string text)
@@ -178,6 +184,7 @@ internal sealed class TerminalWindow : Window
 
     private async void OnClosed(object sender, WindowEventArgs args)
     {
+        _run.BeginClose();
         _terminal.Dispose();
         if (_session is { } session)
         {

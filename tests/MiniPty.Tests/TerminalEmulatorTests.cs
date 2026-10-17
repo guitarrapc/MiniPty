@@ -11,6 +11,94 @@ namespace MiniPty.Tests;
 /// </summary>
 public sealed class TerminalEmulatorTests
 {
+    [Test]
+    public async Task AlternateResizeKeepsMainScreenUsable()
+    {
+        foreach (var mode in new[] { 47, 1047, 1049 })
+        {
+            var (screen, parser) = Create(10, 3);
+            Feed(parser, "main" + $"\u001b[?{mode}h");
+            screen.Resize(10, 8);
+            screen.Resize(10, 5);
+            Feed(parser, $"\u001b[?{mode}l\u001b[HX");
+            await Assert.That(Row(screen, 0)).IsEqualTo("Xain");
+            await Assert.That(screen.ScrollbackCount).IsEqualTo(0);
+            screen.ScrollView(1);
+            Feed(parser, "\u001b[5;1Hlast");
+            await Assert.That(Row(screen, 4)).IsEqualTo("last");
+        }
+    }
+
+    [Test]
+    public async Task EditingPreservesWideCellPairs()
+    {
+        foreach (var sequence in new[] { "a漢b\r\u001b[2P", "ab漢\r\u001b[@", "a漢b\u001b[3G\u001b[@", "a漢b\u001b[3G\u001b[4hX" })
+        {
+            var (screen, parser) = Create(4, 2);
+            Feed(parser, sequence);
+            var cells = screen.ViewLine(0).Cells;
+            for (var column = 0; column < cells.Length; column++)
+            {
+                if (cells[column].Width == 2)
+                    await Assert.That(column + 1 < cells.Length && cells[column + 1].IsContinuation).IsTrue();
+                if (cells[column].IsContinuation)
+                    await Assert.That(column > 0 && cells[column - 1].Width == 2).IsTrue();
+            }
+        }
+    }
+
+    [Test]
+    public async Task EditingKeepsWholeWideGlyphsAndBlanksOnlySplitGlyphs()
+    {
+        foreach (var (sequence, expected) in new[]
+        {
+            ("a漢b\r\u001b[2P", " b"),
+            ("ab漢\r\u001b[@", " ab"),
+            ("漢ab\r\u001b[@", " 漢a"),
+            ("a漢b\r\u001b[P", "漢b"),
+            ("a漢b\u001b[3G\u001b[@", "a"),
+            ("a漢b\u001b[3G\u001b[4hX", "a X"),
+        })
+        {
+            var (screen, parser) = Create(4, 2);
+            Feed(parser, sequence);
+            await Assert.That(Row(screen, 0)).IsEqualTo(expected);
+        }
+    }
+
+    [Test]
+    public async Task AlternateResizeRestoresCursorOnItsOriginalContent()
+    {
+        var (screen, parser) = Create(10, 3);
+        Feed(parser, "one\r\ntwo\r\nthree\u001b[?1049h");
+        screen.Resize(10, 2);
+        screen.Resize(10, 5);
+        Feed(parser, "\u001b[?1049lX");
+        await Assert.That(Row(screen, screen.CursorRow)).IsEqualTo("threeX");
+        await Assert.That(Row(screen, 0)).IsEqualTo("one");
+    }
+
+    [Test]
+    public async Task EveryEditBoundaryMaintainsWideCellPairs()
+    {
+        foreach (var text in new[] { "漢漢ab", "a漢b漢", "ab漢漢" })
+        foreach (var operation in new[] { '@', 'P' })
+        for (var column = 1; column <= 6; column++)
+        foreach (var count in new[] { 1, 2, 6, 65535 })
+        {
+            var (screen, parser) = Create(6, 2);
+            Feed(parser, $"{text}\u001b[{column}G\u001b[{count}{operation}");
+            var cells = screen.ViewLine(0).Cells;
+            for (var i = 0; i < cells.Length; i++)
+            {
+                if (cells[i].Width == 2)
+                    await Assert.That(i + 1 < cells.Length && cells[i + 1].IsContinuation).IsTrue();
+                if (cells[i].IsContinuation)
+                    await Assert.That(i > 0 && cells[i - 1].Width == 2).IsTrue();
+            }
+        }
+    }
+
     private static (ScreenBuffer Screen, VtParser Parser) Create(int columns, int rows)
     {
         var screen = new ScreenBuffer(columns, rows);
