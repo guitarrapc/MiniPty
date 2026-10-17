@@ -154,14 +154,15 @@ On total failure the child exits with status **127**, matching the common shell 
 ```text
 parent (libminipty_unix.dylib):
   posix_openpt → grantpt → unlockpt
-  ioctl(TIOCPTYGNAME) → open slave, TIOCSWINSZ
+  ioctl(TIOCPTYGNAME) → open slave (O_NOCTTY), TIOCSWINSZ, tcsetattr(default termios)
   resolve minipty_spawn_helper via dladdr(dylib path)
   inject MINIPTY_CWD into envp when PtyStartInfo.WorkingDirectory is set
   posix_spawn(helper, dup2 slave → stdio, SETSID, …)
   close slave; keep master fd
 
 minipty_spawn_helper:
-  open(ttyname(STDIN), O_RDWR)   # controlling terminal
+  open(ttyname(STDIN), O_RDWR | O_NONBLOCK)   # controlling terminal
+  poll → POLLHUP: raise(SIGHUP)                # master already closed
   chdir(MINIPTY_CWD) when present; strip MINIPTY_CWD from env
   minipty_execvpe(file, argv, envp)
 ```
@@ -177,6 +178,7 @@ minipty_spawn_helper:
 | `posix_spawn` and `EINTR` | Retry `posix_spawn` in a tight inner loop on `EINTR` only, reusing the same `actions` / `attrs` — separate from the outer transient retry below |
 | Transient spawn errors | macOS only: outer retry up to 4× on `EAGAIN` / `ENOMEM` / `ENXIO` with 25 ms × attempt backoff; closes the master between attempts |
 | Spawn errors to managed | `minipty_fork_pty_exec` returns positive errno; `IOException` uses that value |
+| Host gone before the helper's open | A blocking open of a slave with `CLOCAL` clear waits for carrier, and a closed master never brings it back. The helper therefore opens non-blocking, which still makes the slave its controlling terminal. A terminal that has already hung up reports `POLLHUP` (macOS sets it only when `POLLIN` is requested), and the helper ends by `SIGHUP`, the signal a session leader gets when its terminal hangs up. Before this, a helper whose host crashed right after the spawn waited in `open` forever, reparented to `launchd` |
 
 Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux or macOS.
 

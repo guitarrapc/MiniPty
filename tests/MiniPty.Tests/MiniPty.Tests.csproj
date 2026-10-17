@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Exe</OutputType>
     <TestingPlatformShowTestsFailure>true</TestingPlatformShowTestsFailure>
+    <!-- LibraryImport stubs need it. Tests that drive the native spawn helper directly declare their own libc imports. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
