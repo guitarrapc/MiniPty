@@ -2,6 +2,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -17,11 +19,26 @@ int main(int argc, char **argv)
         _exit(127);
 
     {
+        /*
+         * Opening the slave by name makes it the controlling terminal of this session. A blocking open waits for
+         * carrier, and a master that closed before this point never brings it back, so the helper would wait
+         * forever. A non-blocking open returns at once and still takes the terminal. A terminal that has already
+         * hung up reports POLLHUP, which macOS sets only when read readiness is requested, so POLLIN is asked for
+         * and pending input is left unread. The helper then ends by the SIGHUP it missed, as the kernel ends a
+         * session leader whose terminal hangs up. A hang-up after the open reaches it from the kernel as usual.
+         */
         const char *slave = ttyname(STDIN_FILENO);
         if (slave != NULL) {
-            int fd = open(slave, O_RDWR);
-            if (fd >= 0)
+            int fd = open(slave, O_RDWR | O_NONBLOCK);
+            if (fd >= 0) {
+                struct pollfd pfd = { fd, POLLIN, 0 };
+                if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLHUP) != 0) {
+                    raise(SIGHUP);
+                    _exit(128 + SIGHUP);
+                }
+
                 close(fd);
+            }
         }
     }
 

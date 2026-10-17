@@ -49,7 +49,7 @@ Library callers use `Pty.Start` → `PtySession`. `PtyCapture.RunAsync` wraps th
 | `WaitForExitAsync` / `ExitStatus` | Report the exit code together with the Unix termination signal (`waitpid` `WTERMSIG`); decoding is fully managed (identical exited/signaled status layout on Linux/macOS/FreeBSD). Windows always reports a null signal. |
 | `PtyCompleteOptions.OutputDrainGrace` | Default 1s—post-exit drain before closing transport. |
 | `PtyCompleteOptions.OutputReaderCloseTimeout` | Default 5s—wait after transport close for the reader to finish. |
-| `Dispose()` | If the child is still running, **kills** it, then closes ConPTY/pipes/process handles without blocking; the output pump stops on its own (see [Disposal](#disposal)). The exit watcher reaps the killed child, so `Dispose` never waits for it and leaves no zombie. `DisposeAsync` also waits for the pump to stop. |
+| `Dispose()` | If the child is still running, signals it (**Unix:** `SIGHUP`, then `SIGKILL` from the exit watcher one second later if it has not exited; **Windows:** `TerminateProcess`) and closes ConPTY/pipes/process handles without waiting for it to exit; the output pump stops on its own (see [Disposal](#disposal)). The exit watcher reaps the child, so `Dispose` never waits for it and leaves no zombie. `DisposeAsync` also waits for the pump to stop. |
 | `PtyCapture.RunAsync` | `Pty.Start` + timestamping completion sink. Returns `PtyCaptureResult` with `Chunks`. |
 
 ## Windows: ConPTY
@@ -154,14 +154,15 @@ On total failure the child exits with status **127**, matching the common shell 
 ```text
 parent (libminipty_unix.dylib):
   posix_openpt → grantpt → unlockpt
-  ioctl(TIOCPTYGNAME) → open slave, TIOCSWINSZ
+  ioctl(TIOCPTYGNAME) → open slave (O_NOCTTY), TIOCSWINSZ, tcsetattr(default termios)
   resolve minipty_spawn_helper via dladdr(dylib path)
   inject MINIPTY_CWD into envp when PtyStartInfo.WorkingDirectory is set
   posix_spawn(helper, dup2 slave → stdio, SETSID, …)
   close slave; keep master fd
 
 minipty_spawn_helper:
-  open(ttyname(STDIN), O_RDWR)   # controlling terminal
+  open(ttyname(STDIN), O_RDWR | O_NONBLOCK)   # controlling terminal
+  poll → POLLHUP: raise(SIGHUP)                # master already closed
   chdir(MINIPTY_CWD) when present; strip MINIPTY_CWD from env
   minipty_execvpe(file, argv, envp)
 ```
@@ -177,6 +178,7 @@ minipty_spawn_helper:
 | `posix_spawn` and `EINTR` | Retry `posix_spawn` in a tight inner loop on `EINTR` only, reusing the same `actions` / `attrs` — separate from the outer transient retry below |
 | Transient spawn errors | macOS only: outer retry up to 4× on `EAGAIN` / `ENOMEM` / `ENXIO` with 25 ms × attempt backoff; closes the master between attempts |
 | Spawn errors to managed | `minipty_fork_pty_exec` returns positive errno; `IOException` uses that value |
+| Host gone before the helper's open | A blocking open of a slave with `CLOCAL` clear waits for carrier, and a closed master never brings it back. The helper therefore opens non-blocking, which still makes the slave its controlling terminal. A terminal that has already hung up reports `POLLHUP` (macOS sets it only when `POLLIN` is requested), and the helper ends by `SIGHUP`, the signal a session leader gets when its terminal hangs up. Before this, a helper whose host crashed right after the spawn waited in `open` forever, reparented to `launchd` |
 
 Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux or macOS.
 
@@ -200,7 +202,7 @@ PTY master fds are **not** sockets. `shutdown(master, SHUT_WR)` is invalid (`ENO
 |---|---|---|
 | **EOT (`0x04`, Ctrl-D)** | One-shot / line-discipline programs (`cat`, shells) | `SendEof()` writes EOT to the master |
 | **Leave master open** | TUI / no stdin (`matrix`, `cmatrix`) | `CompleteAsync` with `Input: null`—no `SendEof()` |
-| **`Kill()` / `close(master)` on dispose** | Forced teardown | `Dispose()` kills if still running, then `close(master)` |
+| **Hang-up / `close(master)` on dispose** | Teardown | `Dispose()` sends `SIGHUP` if still running, then `close(master)`; `SIGKILL` follows after the grace period |
 
 EOT is a **terminal convention**, not a kernel EOF like closing a pipe. It is reliable for shell-wrapped one-shot commands when the line discipline is in **canonical mode**.
 
@@ -272,7 +274,14 @@ The close does not always end the transport. ConPTY's `CreatePseudoConsole` dupl
 
 ### Disposal
 
-`Dispose` switches the pump to discarding output, kills the child, closes the transport, and returns. On Windows the pump keeps reading until the pipe ends, because closing a pseudo-console can wait until its final frame fits in the pipe; on Unix the wake descriptor stops it at once. The ring returns to the pool when both the session and the pump have released it, so the reader never writes into an array that another renter owns. `DisposeAsync` additionally completes once the pump has stopped.
+`Dispose` switches the pump to discarding output, signals the child, closes the transport, and returns without waiting for the child to exit. On Windows the pump keeps reading until the pipe ends, because closing a pseudo-console can wait until its final frame fits in the pipe; on Unix the wake descriptor stops it at once. The ring returns to the pool when both the session and the pump have released it, so the reader never writes into an array that another renter owns. `DisposeAsync` additionally completes once the pump has stopped.
+
+How the child is ended differs by platform:
+
+| Platform | On dispose | Why |
+|---|---|---|
+| Unix | `kill(pid, SIGHUP)` on the disposing thread, then `close(master)`. The exit watcher sends `SIGKILL` one second later unless it has reaped the child by then; the deadline is part of the watcher's wait timeout, so disposal allocates no timer. An `AppDomain.ProcessExit` handler sends the pending kills at once when the host exits normally, and a disposal after it, such as one in the host's own exit handler, kills at once. A host ended by a signal it does not handle (a .NET console host receiving `SIGTERM` without a handler of its own) raises no `ProcessExit`, so a child it disposed within the grace and that ignores `SIGHUP` keeps running. The kill and the watcher's reap share the pid lock, so a child the watcher has reaped is never signaled. | `SIGHUP` is the signal a shell receives when its terminal window closes: it saves its history and runs its exit hooks, and a program that catches it can clean up. Closing the last reference to the master also hangs the tty up and signals the session leader, which the child is (Linux `tty_vhangup`; FreeBSD `ttydisc_modem` and XNU `ttymodem`, both only while `CLOCAL` is clear). But glibc's `forkpty` master is not close-on-exec, so a process the host starts inherits a copy, and the tty is not hung up until that process exits. On macOS and FreeBSD a child that sets `CLOCAL` gets no hang-up from the close at all. Measured on Linux with such a process holding the master: with the explicit signal the child's `HUP` trap ran within about 90 ms, without it the trap never ran and the child was killed at the deadline. MiniPty signals only the child. When the child exits, the system sends `SIGHUP` to the terminal's foreground process group (POSIX `_exit` for a controlling process), so a descendant in that group ends too unless it ignores `SIGHUP`. An interactive shell resends `SIGHUP` to its jobs before it exits (bash documents this), so its background jobs end as well. The previous `SIGKILL` gave the shell no chance to, and they kept running. A descendant that ignores `SIGHUP` (`nohup`), was disowned, or started its own session keeps running, as it does when a terminal window closes. `Kill()` stays `SIGKILL`; only disposal is graceful. |
+| Windows | `TerminateProcess`, then `ClosePseudoConsole` | ConPTY has no hang-up signal to send first. |
 
 ## Child exit observation
 
@@ -310,6 +319,12 @@ PTY output is a **byte stream**, not lines or Unicode strings:
 Initial size comes from `PtyStartInfo.Size` (character cells, not pixels). Windows: `COORD` for `CreatePseudoConsole` and `ResizePseudoConsole`. Unix: `winsize` in `forkpty` and `TIOCSWINSZ` via `minipty_set_winsize` (`PtySession.Resize`).
 
 Dimensions are clamped to what those structures encode: 1–32767 on Windows (`COORD` is two signed 16-bit values), 1–65535 on Unix. ConPTY accepts the full range: on Windows 11 build 26200, `CreatePseudoConsole` and `ResizePseudoConsole` succeeded at 32767×32767 in about 5 ms, and a PowerShell child reported 600×200, 4000×300, 32767×50, and 200×32767 as its window and buffer size. An earlier 512-cell cap silently disagreed with wide frontends.
+
+### Unix line discipline
+
+The child's termios is set at spawn (`forkpty`'s termios argument on Linux and FreeBSD; `tcsetattr` on the slave before `posix_spawn` on macOS), not left to the kernel default, which differs by platform. The settings are input `ICRNL IXON IXANY IMAXBEL BRKINT IUTF8`, output `OPOST ONLCR`, control `CREAD CS8 HUPCL`, local `ICANON ISIG IEXTEN ECHO ECHOE ECHOK ECHOKE ECHOCTL`, and 38400 baud. Every control character slot starts disabled (`_POSIX_VDISABLE`), and the usual ones are enabled: `VEOF` ^D, `VERASE` DEL, `VWERASE` ^W, `VKILL` ^U, `VREPRINT` ^R, `VINTR` ^C, `VQUIT` ^\\, `VSUSP` ^Z, `VSTART` ^Q, `VSTOP` ^S, `VLNEXT` ^V, `VDISCARD` ^O, `VMIN` 1, `VTIME` 0, and where the platform defines them `VERASE2` ^H (FreeBSD), `VDSUSP` ^Y and `VSTATUS` ^T (macOS, FreeBSD). Flags and control characters a platform does not define are left out, so the line discipline is not identical everywhere: ^T, for example, reports status on BSD and is an ordinary character on Linux.
+
+Measured against the Linux pts default (iflag `ICRNL IXON`, oflag `OPOST ONLCR`, cflag `B38400 CS8 CREAD`, the same local flags and control characters), two differences change behavior. `IUTF8` makes a canonical-mode erase remove a whole multibyte character; without it, a shell that reads a line containing Japanese and a backspace receives invalid UTF-8. `IXANY` lets any character, not only ^Q, resume output stopped with ^S. `IMAXBEL`, `BRKINT`, and `HUPCL` have no visible effect on a Linux pts. The macOS default lacks `IUTF8` as well. Disabled slots matter on BSD, where `_POSIX_VDISABLE` is 0xff: a slot left at zero would make NUL act as that control character. A program that wants raw mode still changes the termios itself, as it would on any terminal.
 
 ### Environment variables
 

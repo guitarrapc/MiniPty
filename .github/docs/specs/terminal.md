@@ -47,7 +47,7 @@ PtyTerminal.Attach(PtySession session, PtyTerminalOptions options)    // transfe
 | `Kill()` | SIGHUP on Unix (node-pty default); process termination on Windows. Core `PtySession.Kill()` remains forceful. |
 | `Clear()` | Safe compatibility no-op pending a public in-box ConPTY clear API. |
 | `ProcessId` / `Size` / `ActiveProcessName` / `HasExited` / `ExitStatus` | Session state. `ActiveProcessName` is polled by the embedder (typically 200 ms on Unix); no library polling task is created. |
-| `DisposeAsync` | Stops the pump, kills the child if running, releases the PTY. |
+| `DisposeAsync` | Stops the pump, ends the child if running (Unix: hang-up, then kill after a grace period; Windows: termination), releases the PTY. |
 
 Design decisions (WHY):
 
@@ -103,7 +103,7 @@ The client counts binary payload bytes it has fed through `term.write` callbacks
 | Child exits | drain → final output frame → `exit` text message → `NormalClosure` (bounded by `CloseTimeout`) → dispose → return status |
 | Client closes the socket | kill child → drain (output discarded) → close response → return killed status |
 | Protocol violation | `PolicyViolation` close → kill → `InvalidDataException` |
-| Socket send failure | kill via disposal → the socket exception propagates from `RunAsync` |
+| Socket send failure | the pump's handler fault kills the child (`Kill()`) → the socket exception propagates from `RunAsync` |
 | Cancellation | kill → dispose → `OperationCanceledException` |
 | Invalid options / null args | `ArgumentOutOfRangeException` / `ArgumentNullException` before spawn |
 
@@ -182,7 +182,7 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 | Handler throws | pump stops, child killed, `Completion` faults with the handler exception |
 | `Kill()` during delivery | remaining output drained and delivered, then `Completion` resolves with the status |
 | `Kill()` / child exit while `Pause()`d | `Completion` stays pending until `Resume()` or disposal — flow control holds the drain by design |
-| Dispose before exit | `Completion` faults with `OperationCanceledException`; child killed |
+| Dispose before exit | `Completion` faults with `OperationCanceledException`; the child is ended as by `PtySession.Dispose` (Unix: hang-up, then kill after a grace period; Windows: termination) |
 | `Resize` after exit (frontend size change before teardown) | no-op once the transport is closed; never throws because the child exited |
 | Member call after dispose | `ObjectDisposedException` |
 
@@ -200,7 +200,7 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 - ConPTY line submission needs CR — sending `\n` echoes but never completes a `cmd.exe` `set /p` read. Cross-platform clients should send `\r` (xterm.js `onData` already does) and tests must not assert on LF-terminated input.
 - `cmd.exe /c "set /p LINE= & echo %LINE%"` prints the literal `%LINE%` because expansion happens at parse time; interactive-input children in tests need `/v:on` with `!LINE!`.
 - A stdio helper must reserve stdout exclusively for framed protocol bytes. Diagnostics belong on stderr; one accidental text write makes the length stream unrecoverable.
-- `PtyTerminal.Kill()` can use SIGHUP without weakening deterministic cleanup: handler faults and final disposal continue to use core's forceful kill path.
+- `PtyTerminal.Kill()` can use SIGHUP without weakening deterministic cleanup: handler faults use core's forceful `Kill()`, and final disposal goes through `PtySession.Dispose`, which on Unix kills a child that ignores the hang-up after a one-second grace, or at once when the process exits normally.
 - Reliable reconnect requires absolute acknowledgement state. Byte-count credit alone cannot distinguish “rendered but ACK lost” from “never received,” so the persistent protocol pairs each binary message with its stream offset.
 - Expiration teardown must force child exit, release any producer blocked on replay capacity, and await the Terminal pump before disposing core session buffers. Canceling and disposing an active output reader concurrently reproduces the core double-signal race.
 - Detach must also bound both send and receive shutdown. Cancellation alone does not reliably unblock every `ManagedWebSocket` transport wait, so persistent connections use `CloseTimeout` and abort a socket that remains wedged before making the session attachable again.

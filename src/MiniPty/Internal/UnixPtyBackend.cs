@@ -8,6 +8,9 @@ namespace MiniPty.Internal;
 internal static partial class UnixPtyBackend
 {
     private const byte InputEot = 0x04;
+    // Disposal hangs the child up and kills it only this long afterwards, because a shell needs time to save its
+    // history and run its exit hooks. The bound is for a child that ignores the hang-up.
+    internal const int DisposeHangupGraceMs = 1000;
     // EOF staging advances one step per tick, matching the cadence of the exit-wait poll loop it replaced.
     private const int EofTickMs = 100;
     // macOS posix_spawn children can still be running short -c scripts when the first EOF tick fires.
@@ -135,6 +138,8 @@ internal static partial class UnixPtyBackend
         // Mutable struct: used only through this field, never copied.
         private PtyExitSignal _exitSignal;
         private Timer? _eofTimer;
+        // Zero until Dispose hangs up a running child. Written under _pidLock.
+        private long _hangupKillDeadline;
         private bool _eofSent;
         private bool _eofPending;
         private int _eofAttachPollsRemaining;
@@ -740,25 +745,49 @@ internal static partial class UnixPtyBackend
 
             _disposed = true;
             // Queued writes fail now, on the disposing thread, without waiting for the reader to stop. This comes before
-            // the kill, which ends output, so a queued write reports the disposal rather than the end of output.
+            // the hang-up and the master close, which end output, so a queued write reports the disposal rather than
+            // the end of output.
             CloseInput(InputDisposed);
             var exitObserved = true;
             lock (_pidLock)
             {
-                // The watcher reaps the killed child, so disposal never waits for it on the caller's thread.
-                if (!_exited)
+                // A hang-up rather than a kill, so a shell can save its history and run its exit hooks. Closing the
+                // master below hangs the tty up too, but only once no other process holds a copy of the master, so
+                // the signal is sent explicitly. The deadline is set under the lock, so a racing second Dispose finds
+                // it and schedules no other kill.
+                if (!_exited && _hangupKillDeadline == 0)
                 {
                     exitObserved = false;
-                    KillCore();
+                    UnixInterop.kill(_pid, UnixInterop.SigHup);
+                    _hangupKillDeadline = Environment.TickCount64 + DisposeHangupGraceMs;
                 }
             }
 
             _eofTimer?.Dispose();
             if (!exitObserved)
+            {
                 _exitSignal.SetDisposedBeforeExit();
+                // The watcher kills a child that ignores the hang-up and reaps it either way, so disposal never waits.
+                ChildWatcher.ScheduleHangupKill(this);
+            }
 
             CloseTransport();
             _execHold?.Dispose();
+        }
+
+        /// <summary>The tick count at which <see cref="ChildWatcher"/> kills this child if a disposal hung it up.</summary>
+        internal long HangupKillDeadline => _hangupKillDeadline;
+
+        /// <summary>Sends the kill that backs a disposal's hang-up. Called only by <see cref="ChildWatcher"/>.</summary>
+        internal void KillAfterHangup()
+        {
+            // Under the reap's lock, so a child the watcher has already reaped is skipped and its released pid is
+            // never signaled.
+            lock (_pidLock)
+            {
+                if (!_exited)
+                    KillCore();
+            }
         }
 
         /// <summary>

@@ -712,6 +712,25 @@ public sealed class PtyTests
         await Assert.That(status.Signal).IsNull();
     }
 
+    /// <summary>
+    /// The reported signal 9 is what proves SIGKILL. A Kill() that sent SIGHUP instead would end the child with signal 1
+    /// before its trap is installed, or leave it running after, and fail either way.
+    /// </summary>
+    [Test]
+    public async Task PtyKillSendsSigkillOnUnix()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using var session = Pty.Start(UnixShell("trap '' HUP; IFS= read -r _"));
+        session.Kill();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var status = await session.WaitForExitAsync(cts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(137);
+        await Assert.That(status.Signal).IsEqualTo(9);
+    }
+
     [Test]
     public async Task PtyKillWithUndefinedSignalThrows()
     {

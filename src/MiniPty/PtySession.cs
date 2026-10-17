@@ -28,7 +28,10 @@ namespace MiniPty;
 /// on <see cref="Output"/>, still block.
 /// </para>
 /// <para>
-/// Disposing or awaiting <see cref="DisposeAsync"/> kills the child if it is still running, then releases handles.
+/// Disposing or awaiting <see cref="DisposeAsync"/> ends a child that is still running and releases handles without
+/// waiting for the child to exit. On Unix the child is hung up first (<c>SIGHUP</c>), so a shell can save its history.
+/// It is killed after a short grace period if it is still running, or at once if the host process exits normally
+/// first. On Windows it is terminated.
 /// </para>
 /// </remarks>
 public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
@@ -164,6 +167,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <value>
     /// <see langword="true"/> after the process-wide exit watcher has observed the exit. Reading it never blocks.
     /// </value>
+    /// <remarks>
+    /// On Unix the watcher keeps observing after <see cref="Dispose"/>, so this can become <see langword="true"/>
+    /// afterwards. A child disposed while running then reports what ended it: its own exit, the hang-up (129,
+    /// <c>SIGHUP</c>), or the kill after the grace period (137, <c>SIGKILL</c>). <see cref="WaitForExitAsync"/> fails
+    /// once the session is disposed, so read this property, <see cref="ExitCode"/>, or <see cref="ExitStatus"/> instead.
+    /// On Windows a session disposed while its child was running never reports the exit.
+    /// </remarks>
     public bool HasExited => _backend.HasExited;
 
     /// <summary>
@@ -342,6 +352,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// Uses <c>TerminateProcess</c> on Windows and <c>SIGKILL</c> on Unix.
     /// Call <see cref="Dispose"/> afterward to release resources.
     /// </remarks>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     public void Kill()
     {
         ThrowIfDisposed();
@@ -359,6 +370,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </remarks>
     /// <param name="signal">Signal to deliver.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="signal"/> is not a defined <see cref="PtySignal"/> value.</exception>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     public void Kill(PtySignal signal)
     {
         ThrowIfDisposed();
@@ -378,13 +390,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <remarks>
     /// <para>
     /// Without a cancelable token every call returns the same task, so waiting allocates nothing beyond the first
-    /// call. Nothing polls or blocks: the task completes when the operating system reports the exit.
+    /// call. The wait holds no thread: the task completes when the process-wide exit watcher observes the exit.
     /// </para>
     /// <para>
     /// Waiting does not affect output: a concurrent output reader keeps receiving output until end of output,
     /// which follows shortly after exit once output has gone quiet. Disposing the session before the child exits
     /// fails the wait with <see cref="ObjectDisposedException"/>. A wait started earlier still reports the status of
-    /// a child that exited before the session was disposed.
+    /// a child whose exit was observed before the session was disposed. After disposal, read <see cref="ExitStatus"/>.
     /// </para>
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
@@ -432,12 +444,24 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// Releases PTY and process handles, killing the child if it is still running. Does not block.
+    /// Releases PTY and process handles, ending the child if it is still running. Does not block.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// On Unix a running child is hung up with <c>SIGHUP</c>, the signal a shell receives when its terminal window
+    /// closes. The signal is sent without blocking. If the child has not exited one second later, a background thread
+    /// kills it with <c>SIGKILL</c>. If the process exits normally before then, by returning from <c>Main</c> or calling
+    /// <see cref="Environment.Exit(int)"/>, the kill is sent at exit. A host ended by a crash or by a signal it does not
+    /// handle, such as <c>SIGTERM</c> to a console app, cannot send it, so a child that ignores the hang-up survives.
+    /// Call <see cref="Kill()"/> first to end the child immediately. MiniPty signals only the child. When it exits, the
+    /// system hangs up the terminal's foreground process group, so a descendant in that group ends too unless it
+    /// ignores <c>SIGHUP</c>. On Windows the child is terminated.
+    /// </para>
+    /// <para>
     /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. The background
     /// reader stops on its own shortly afterwards; output chunk memory must not be used after this call. Use
     /// <see cref="DisposeAsync"/> to also wait until the reader has stopped.
+    /// </para>
     /// </remarks>
     public void Dispose()
     {
@@ -454,13 +478,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// Releases PTY and process handles, killing the child if it is still running, and completes once the
-    /// background output reader has stopped.
+    /// Releases PTY and process handles, ending the child if it is still running as <see cref="Dispose"/> does, and
+    /// completes once the background output reader has stopped.
     /// </summary>
     /// <returns>A value task that completes when the reader has released the transport.</returns>
     /// <remarks>
-    /// Does not wait for the reader on the calling thread. Every call waits for the same shutdown, including calls
-    /// after <see cref="Dispose"/> and concurrent ones.
+    /// Does not wait for the reader on the calling thread, and does not wait for the child to exit. Every call waits
+    /// for the same shutdown, including calls after <see cref="Dispose"/> and concurrent ones.
     /// </remarks>
     public ValueTask DisposeAsync()
     {

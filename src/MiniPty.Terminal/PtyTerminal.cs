@@ -11,8 +11,9 @@ namespace MiniPty.Terminal;
 /// <remarks>
 /// <para>
 /// The terminal owns its session end-to-end: it is created by <see cref="Start"/> or transferred
-/// by <see cref="Attach"/>, is the sole output consumer, and disposing the terminal kills the child
-/// if still running. The underlying session is not exposed after ownership is transferred.
+/// by <see cref="Attach"/>, is the sole output consumer, and disposing the terminal ends the child
+/// if still running (hang-up then kill on Unix, termination on Windows, as <see cref="PtySession.Dispose"/>).
+/// The underlying session is not exposed after ownership is transferred.
 /// </para>
 /// <para>
 /// Output ordering contract: every output handler invocation completes before
@@ -42,7 +43,7 @@ public sealed class PtyTerminal : IAsyncDisposable
     /// </summary>
     /// <param name="startInfo">Child process launch configuration.</param>
     /// <param name="options">Terminal behavior; the output handler is required.</param>
-    /// <returns>A running terminal. Dispose it to kill the child and release the PTY.</returns>
+    /// <returns>A running terminal. Dispose it to end the child and release the PTY.</returns>
     public static PtyTerminal Start(PtyStartInfo startInfo, PtyTerminalOptions options)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
@@ -219,7 +220,8 @@ public sealed class PtyTerminal : IAsyncDisposable
     }
 
     /// <summary>
-    /// Stops output delivery and disposes the session, killing the child if still running.
+    /// Stops output delivery and disposes the session, which ends the child if still running: hang-up then kill
+    /// after a grace period on Unix, termination on Windows.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
