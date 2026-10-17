@@ -29,7 +29,8 @@ namespace WinUiTerminal;
 /// Shift+Insert / Ctrl+V paste, Ctrl+C copies when a selection exists and otherwise interrupts, and a right click
 /// copies the selection if there is one or pastes if there is none. When the program has enabled mouse tracking,
 /// clicks are reported to it instead, and Shift forces local selection. The wheel scrolls the scrollback, or sends
-/// arrow keys to a full-screen program.
+/// arrow keys to a full-screen program. Wheel deltas are accumulated, so a precision touchpad's many small deltas
+/// scroll by distance instead of being dropped.
 /// </remarks>
 internal sealed class TerminalControl : Grid, IDisposable
 {
@@ -49,6 +50,7 @@ internal sealed class TerminalControl : Grid, IDisposable
     private bool _disposed;
     private bool _mouseButtonDown;
     private (int Row, int Column) _lastReportedCell = (-1, -1);
+    private WheelAccumulator _wheel;
     private DateTime _lastPressTime;
     private (int Row, int Column) _lastPressCell;
 
@@ -540,32 +542,45 @@ internal sealed class TerminalControl : Grid, IDisposable
         }
     }
 
+    /// <remarks>
+    /// A mouse wheel notch arrives as a delta of 120, but a precision touchpad sends a stream of smaller deltas, and
+    /// an integer division by 120 dropped every one of them, so touchpad scrolling did nothing.
+    /// <see cref="WheelAccumulator"/> carries the fractions and only whole lines are acted on. Horizontal deltas
+    /// (tilt wheels, the sideways part of a touchpad swipe) are ignored: the grid does not scroll sideways.
+    /// </remarks>
     private void OnPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
         var point = e.GetCurrentPoint(this);
-        var notches = point.Properties.MouseWheelDelta / 120;
-        if (notches == 0)
+        var delta = point.Properties.MouseWheelDelta;
+        if (delta == 0 || point.Properties.IsHorizontalMouseWheel)
             return;
 
         e.Handled = true;
+        var lines = delta / 120.0 * WheelLinesPerNotch;
         var (row, column) = CellAt(point.Position);
         if (_screen.Mouse != MouseTracking.None && !IsDown(VirtualKey.Shift))
         {
+            // One report per notch's worth of lines: a program scrolls its own step for each report.
+            var notches = _wheel.Add(lines, WheelLinesPerNotch);
             for (var i = 0; i < Math.Abs(notches); i++)
                 ReportMouse(notches > 0 ? MouseReport.WheelUp : MouseReport.WheelDown, row, column, release: false, motion: false);
             return;
         }
 
+        var whole = _wheel.Add(lines);
+        if (whole == 0)
+            return;
+
         if (_screen.IsAlternateScreen)
         {
             // A full-screen program has no scrollback; arrow keys are what it expects from a wheel.
-            var key = KeyEncoder.ScrollArrow(notches > 0, _screen.ApplicationCursorKeys);
-            for (var i = 0; i < Math.Abs(notches) * WheelLinesPerNotch; i++)
+            var key = KeyEncoder.ScrollArrow(whole > 0, _screen.ApplicationCursorKeys);
+            for (var i = 0; i < Math.Abs(whole); i++)
                 InputRequested?.Invoke(key);
             return;
         }
 
-        _screen.ScrollView(notches * WheelLinesPerNotch);
+        _screen.ScrollView(whole);
         if (_screen.Dirty)
             _canvas.Invalidate();
     }

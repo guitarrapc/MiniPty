@@ -359,6 +359,15 @@ public sealed class TerminalEmulatorTests
             total += wheel.Add(0.25);
         await Assert.That(total).IsEqualTo(10);
 
+        // The WinUI host's input: a notch is a delta of 120, and a Windows precision touchpad sends smaller deltas
+        // (30 here), which an integer division by 120 used to drop entirely. Eight of them are two notches' worth.
+        wheel = new WheelAccumulator();
+        await Assert.That(wheel.Add(120 / 120.0 * 3)).IsEqualTo(3);
+        total = 0;
+        for (var i = 0; i < 8; i++)
+            total += wheel.Add(30 / 120.0 * 3);
+        await Assert.That(total).IsEqualTo(6);
+
         // Reversing drops the carry: 0.9 lines up, then 0.5 down, scrolls nothing and keeps nothing of the 0.9.
         wheel = new WheelAccumulator();
         await Assert.That(wheel.Add(0.9)).IsEqualTo(0);

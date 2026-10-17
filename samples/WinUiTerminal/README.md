@@ -19,7 +19,7 @@ Windows only; the same emulator runs on Windows, Linux, and macOS as the Avaloni
 | Cursor and editing | CUU/CUD/CUF/CUB, CUP/HVP, CHA, VPA, CNL/CPL, CHT/CBT, ED/EL, ICH/DCH/ECH, IL/DL, SU/SD, REP, DECSTBM scroll region, DECSC/DECRC, tab stops (HTS/TBC) |
 | Modes | DECCKM application cursor keys, DECOM, DECAWM with deferred wrap, insert mode, DECTCEM cursor visibility, alternate screen (47/1047/1049), bracketed paste (2004), focus events (1004), synchronized output (2026), mouse tracking (9/1000/1002/1003) with SGR encoding (1006) |
 | Reports | DSR cursor position and status, DA1/DA2; window title from OSC 0/2 |
-| Scrollback | 5,000 lines on the main screen; mouse wheel scrolls, any input or output snaps back to the bottom; in a full-screen program the wheel sends arrow keys |
+| Scrollback | 5,000 lines on the main screen; the mouse wheel and a precision touchpad scroll it (touchpad deltas smaller than a notch are carried between events), any input or output snaps back to the bottom; in a full-screen program the wheel sends arrow keys |
 
 Not a goal: a scrollbar, cursor shapes and blinking, double-width lines, Sixel or Kitty graphics, Win32 input mode (`9001`), reflow on resize (the PTY repaints instead), or an IME candidate window placed at the cursor.
 
