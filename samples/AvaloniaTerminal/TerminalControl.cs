@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
+using Avalonia.Input.TextInput;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Media.Immutable;
@@ -23,7 +24,14 @@ namespace AvaloniaTerminal;
 /// Shift+Insert / Ctrl+V paste (Cmd on macOS), Ctrl+C copies when a selection exists and otherwise interrupts,
 /// and a right click copies the selection if there is one or pastes if there is none. When the program has
 /// enabled mouse tracking, clicks are reported to it instead, and Shift forces local selection. The wheel scrolls
-/// the scrollback, or sends arrow keys to a full-screen program.
+/// the scrollback, or sends arrow keys to a full-screen program. Wheel deltas are accumulated, so a trackpad's many
+/// small deltas scroll by distance instead of by event count.
+/// <para>
+/// Text input: the control hands Avalonia an input method client (<see cref="TerminalInputMethodClient"/>), which
+/// is what turns the platform input method on for it. Without one, Avalonia on macOS bypasses the input method
+/// entirely, so Japanese and Chinese input and dead keys never compose. The composition in progress (preedit) is
+/// drawn underlined at the cursor; committed text arrives through <see cref="OnTextInput"/>.
+/// </para>
 /// </remarks>
 internal sealed class TerminalControl : Control
 {
@@ -39,6 +47,10 @@ internal sealed class TerminalControl : Control
     private readonly IBrush _selectionBrush = new ImmutableSolidColorBrush(Color.FromArgb(0x60, 0x80, 0xB0, 0xFF));
     private readonly double _cellWidth;
     private readonly double _cellHeight;
+    private readonly TerminalInputMethodClient _inputMethodClient;
+    private string _preedit = string.Empty;
+    private (int Row, int Column) _inputMethodCursor = (-1, -1);
+    private WheelAccumulator _wheel;
     private bool _focused;
     private bool _mouseButtonDown;
     private (int Row, int Column) _lastReportedCell = (-1, -1);
@@ -68,6 +80,10 @@ internal sealed class TerminalControl : Control
         Focusable = true;
         ClipToBounds = true;
         Cursor = new Cursor(StandardCursorType.Ibeam);
+
+        // Asked for when the control takes focus; answering is what enables the platform input method for it.
+        _inputMethodClient = new TerminalInputMethodClient(this);
+        AddHandler(TextInputMethodClientRequestedEvent, (_, e) => e.Client = _inputMethodClient);
     }
 
     /// <summary>Text to send to the program: keystrokes, pasted text, mouse reports, and terminal replies.</summary>
@@ -96,6 +112,7 @@ internal sealed class TerminalControl : Control
         _parser.Feed(bytes);
         if (_screen.Dirty && !_screen.SynchronizedOutput)
             InvalidateVisual();
+        NotifyCursorMoved();
     }
 
     /// <summary>The visible screen as text, one line per row, for smoke tests.</summary>
@@ -122,6 +139,7 @@ internal sealed class TerminalControl : Control
         _selection.Clear();
         GridSizeChanged?.Invoke(columns, rows);
         InvalidateVisual();
+        NotifyCursorMoved();
     }
 
     // ---------------------------------------------------------------- Drawing
@@ -212,6 +230,13 @@ internal sealed class TerminalControl : Control
                 context.FillRectangle(_selectionBrush, new Rect(from * _cellWidth, y, (to - from) * _cellWidth, _cellHeight));
         }
 
+        // An input method composition replaces the cursor: it is drawn where the committed text will go.
+        if (_preedit.Length > 0)
+        {
+            DrawPreedit(context);
+            return;
+        }
+
         // Cursor: a solid block with focus, a hollow one without; hidden while scrolled back.
         if (_screen.CursorVisible && _screen.ScrollOffset == 0)
         {
@@ -232,6 +257,48 @@ internal sealed class TerminalControl : Control
                 context.DrawRectangle(new Pen(Brush(Palette.DefaultForeground)), rect.Deflate(0.5));
             }
         }
+    }
+
+    /// <summary>
+    /// The composition in progress, underlined on the default background from the cursor on. Wide characters take
+    /// two cells as they will once committed, and text past the right edge is clipped.
+    /// </summary>
+    private void DrawPreedit(DrawingContext context)
+    {
+        var cells = 0;
+        foreach (var rune in _preedit.EnumerateRunes())
+            cells += CharWidth.Of(rune.Value);
+
+        var origin = new Point(_screen.CursorColumn * _cellWidth, _screen.CursorRow * _cellHeight);
+        context.FillRectangle(Brush(Palette.DefaultBackground), new Rect(origin, new Size(Math.Max(1, cells) * _cellWidth, _cellHeight)));
+        var formatted = Format(_preedit, _typefaces[0], Brush(Palette.DefaultForeground));
+        formatted.SetTextDecorations(TextDecorations.Underline);
+        context.DrawText(formatted, origin);
+    }
+
+    /// <summary>The cell the next character goes into, where an input method places its candidate window.</summary>
+    internal Rect CursorCellRect() =>
+        new(_screen.CursorColumn * _cellWidth, _screen.CursorRow * _cellHeight, _cellWidth, _cellHeight);
+
+    /// <summary>Tells the input method the cursor moved, only when it did, so output does not flood it.</summary>
+    private void NotifyCursorMoved()
+    {
+        var cursor = (_screen.CursorRow, _screen.CursorColumn);
+        if (cursor == _inputMethodCursor)
+            return;
+
+        _inputMethodCursor = cursor;
+        _inputMethodClient.NotifyCursorRectangleChanged();
+    }
+
+    internal void SetPreedit(string? text)
+    {
+        text ??= string.Empty;
+        if (text == _preedit)
+            return;
+
+        _preedit = text;
+        InvalidateVisual();
     }
 
     private static FormattedText Format(string text, Typeface typeface, IBrush foreground) =>
@@ -301,6 +368,19 @@ internal sealed class TerminalControl : Control
         if (ctrl && alt)
             return;
 
+        // While an input method composes, every key belongs to it (Enter commits, Backspace edits the composition).
+        if (e.Key == Key.ImeProcessed)
+            return;
+
+        var termKey = AvaloniaKeys.ToTermKey(e.Key);
+
+        // On macOS, Option is the layout's third level, as AltGr is elsewhere: Option+E is a dead key, Option+L is
+        // @ on a German layout, Option+Y is ¥ on a US layout. Encoding Option+letter as ESC+letter would swallow those
+        // characters, so letters and digits with Option are left to text input, as Terminal.app and iTerm2 do by
+        // default. Option still modifies keys that type nothing: arrows, Backspace, Enter, and function keys.
+        if (alt && !command && OperatingSystem.IsMacOS() && termKey is >= TermKey.A and <= TermKey.Z or >= TermKey.D0 and <= TermKey.D9)
+            return;
+
         if (command && shift && e.Key is Key.C or Key.V)
         {
             if (e.Key == Key.C)
@@ -335,7 +415,7 @@ internal sealed class TerminalControl : Control
             return;
         }
 
-        var sequence = KeyEncoder.Encode(AvaloniaKeys.ToTermKey(e.Key), shift, ctrl, alt, _screen.ApplicationCursorKeys);
+        var sequence = KeyEncoder.Encode(termKey, shift, ctrl, alt, _screen.ApplicationCursorKeys);
         if (sequence is null)
             return;
 
@@ -513,34 +593,43 @@ internal sealed class TerminalControl : Control
         }
     }
 
+    /// <remarks>
+    /// A mouse wheel notch arrives as a delta of 1, but a trackpad sends a stream of small fractional deltas (macOS
+    /// reports each as pixels / 50), so <see cref="WheelAccumulator"/> carries the fractions and only whole lines
+    /// are acted on.
+    /// </remarks>
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
         base.OnPointerWheelChanged(e);
-        var notches = (int)Math.Round(e.Delta.Y);
-        if (notches == 0)
-            notches = Math.Sign(e.Delta.Y);
-        if (notches == 0)
+        if (e.Delta.Y == 0)
             return;
 
         e.Handled = true;
+        var lines = e.Delta.Y * WheelLinesPerNotch;
         var (row, column) = CellAt(e.GetPosition(this));
         if (_screen.Mouse != MouseTracking.None && !e.KeyModifiers.HasFlag(KeyModifiers.Shift))
         {
+            // One report per notch's worth of lines: a program scrolls its own step for each report.
+            var notches = _wheel.Add(lines, WheelLinesPerNotch);
             for (var i = 0; i < Math.Abs(notches); i++)
                 ReportMouse(notches > 0 ? MouseReport.WheelUp : MouseReport.WheelDown, row, column, release: false, motion: false, e.KeyModifiers);
             return;
         }
 
+        var whole = _wheel.Add(lines);
+        if (whole == 0)
+            return;
+
         if (_screen.IsAlternateScreen)
         {
             // A full-screen program has no scrollback; arrow keys are what it expects from a wheel.
-            var key = KeyEncoder.ScrollArrow(notches > 0, _screen.ApplicationCursorKeys);
-            for (var i = 0; i < Math.Abs(notches) * WheelLinesPerNotch; i++)
+            var key = KeyEncoder.ScrollArrow(whole > 0, _screen.ApplicationCursorKeys);
+            for (var i = 0; i < Math.Abs(whole); i++)
                 InputRequested?.Invoke(key);
             return;
         }
 
-        _screen.ScrollView(notches * WheelLinesPerNotch);
+        _screen.ScrollView(whole);
         if (_screen.Dirty)
             InvalidateVisual();
     }
@@ -591,4 +680,32 @@ internal static class AvaloniaKeys
             _ => TermKey.None,
         };
     }
+}
+
+/// <summary>
+/// What Avalonia's input method support needs from a terminal: where the cursor is (for the candidate window) and
+/// a place to show the composition. A terminal has no editable text of its own, so it offers no surrounding text
+/// or selection; committed text reaches the control as an ordinary <c>TextInput</c> event.
+/// </summary>
+internal sealed class TerminalInputMethodClient(TerminalControl owner) : TextInputMethodClient
+{
+    public override Visual TextViewVisual => owner;
+
+    public override bool SupportsPreedit => true;
+
+    public override bool SupportsSurroundingText => false;
+
+    public override string SurroundingText => string.Empty;
+
+    public override Rect CursorRectangle => owner.CursorCellRect();
+
+    public override TextSelection Selection
+    {
+        get => default;
+        set { }
+    }
+
+    public override void SetPreeditText(string? preeditText) => owner.SetPreedit(preeditText);
+
+    public void NotifyCursorRectangleChanged() => RaiseCursorRectangleChanged();
 }

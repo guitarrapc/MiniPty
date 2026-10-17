@@ -255,4 +255,32 @@ public sealed class TerminalEmulatorTests
         await Assert.That(CharWidth.Of(0x301)).IsEqualTo(0);
         await Assert.That(CharWidth.Of('─')).IsEqualTo(1);
     }
+
+    [Test]
+    public async Task WheelNotchesScrollWholeStepsAndTrackpadDeltasAccumulate()
+    {
+        // A mouse notch (delta 1, three lines) scrolls three lines at once, as before.
+        var wheel = new WheelAccumulator();
+        await Assert.That(wheel.Add(3)).IsEqualTo(3);
+        await Assert.That(wheel.Add(-3)).IsEqualTo(-3);
+
+        // A trackpad swipe: forty events of a quarter line each is ten lines, not forty notches.
+        wheel = new WheelAccumulator();
+        var total = 0;
+        for (var i = 0; i < 40; i++)
+            total += wheel.Add(0.25);
+        await Assert.That(total).IsEqualTo(10);
+
+        // Reversing drops the carry: 0.9 lines up, then 0.5 down, scrolls nothing and keeps nothing of the 0.9.
+        wheel = new WheelAccumulator();
+        await Assert.That(wheel.Add(0.9)).IsEqualTo(0);
+        await Assert.That(wheel.Add(-0.5)).IsEqualTo(0);
+        await Assert.That(wheel.Add(-0.5)).IsEqualTo(-1);
+
+        // Mouse reports go one per notch's worth of lines.
+        wheel = new WheelAccumulator();
+        await Assert.That(wheel.Add(2, step: 3)).IsEqualTo(0);
+        await Assert.That(wheel.Add(2, step: 3)).IsEqualTo(1);
+        await Assert.That(wheel.Add(5, step: 3)).IsEqualTo(2);
+    }
 }

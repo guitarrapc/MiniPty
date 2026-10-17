@@ -24,8 +24,14 @@ The same as the WinUI sample, because the emulator is the same code: see [its ta
 | Interrupt | Ctrl+C with no selection sends `^C`; other Ctrl+letter chords send their control characters |
 | Keys | arrows, Home/End, Insert/Delete, PgUp/PgDn, F1–F12 with xterm modifier encoding; Tab/Shift+Tab; Backspace sends DEL (Ctrl+Backspace sends BS); Alt+key sends ESC+key |
 | Mouse to the program | when a program enables mouse tracking, clicks, drags, and the wheel are reported to it; hold Shift to select locally instead |
+| Wheel and trackpad | scrolls the scrollback (arrow keys in a full-screen program); fractional trackpad deltas are carried between events, so scrolling follows the distance moved |
 
-On macOS, Cmd works like Ctrl for the clipboard shortcuts. Printable text arrives through Avalonia's `TextInput` event (so dead keys, AltGr, and IMEs compose before the terminal sees anything) and control keys through `KeyDown`.
+Printable text arrives through Avalonia's `TextInput` event and control keys through `KeyDown`. The control gives Avalonia an input method client, which is what turns the platform input method on for it: Japanese, Chinese, and Korean input compose with the candidate window at the cursor, the composition is drawn underlined there, and only the committed text is sent. Dead keys compose the same way.
+
+On macOS:
+
+- Cmd works like Ctrl for the clipboard shortcuts.
+- Option types the characters the keyboard layout puts on it (Option+E is a dead key, Option+L is `@` on a German layout), as Terminal.app and iTerm2 do by default, so Option+letter is not Meta. Press Esc and then the key for a Meta chord. Option still modifies keys that type nothing (arrows, Backspace, Enter, function keys) with xterm encoding.
 
 ## What it demonstrates about MiniPty
 
