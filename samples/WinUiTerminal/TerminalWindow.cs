@@ -1,6 +1,9 @@
 using System.Text;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MiniPty;
+using Windows.UI;
 using WinUiTerminal.Terminal;
 
 namespace WinUiTerminal;
@@ -20,7 +23,10 @@ internal sealed class TerminalWindow : Window
     private readonly string[] _command;
     private readonly string? _dumpPath;
     private readonly TerminalControl _terminal;
+    private readonly TextBlock _status;
     private PtySession? _session;
+    private string _statusCommand = string.Empty;
+    private string _statusState = "starting";
     private bool _exited;
 
     public TerminalWindow(bool smoke, string[] command, string? dumpPath)
@@ -38,12 +44,52 @@ internal sealed class TerminalWindow : Window
             if (_exited)
                 Close();
         };
-        _terminal.GridSizeChanged += (columns, rows) => _session?.Resize(new PtySize(columns, rows));
+        _terminal.GridSizeChanged += (columns, rows) =>
+        {
+            _session?.Resize(new PtySize(columns, rows));
+            UpdateStatus();
+        };
         _terminal.TitleChanged += title => Title = title.Length == 0 ? "MiniPty WinUI terminal" : title;
-        Content = _terminal;
+
+        // A status line below the grid says who hosts the PTY. It lives outside the emulator on purpose: ConPTY
+        // clears the screen when the shell starts, so a banner written into the grid would not survive.
+        _status = new TextBlock
+        {
+            FontFamily = new FontFamily("Cascadia Mono"),
+            FontSize = 12,
+            Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x9A, 0x9A, 0x9A)),
+            Padding = new Thickness(8, 3, 8, 4),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+        };
+        var statusBar = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x1C, 0x1C, 0x1C)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x33, 0x33, 0x33)),
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Child = _status,
+        };
+
+        var layout = new Grid();
+        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetRow(_terminal, 0);
+        Grid.SetRow(statusBar, 1);
+        layout.Children.Add(_terminal);
+        layout.Children.Add(statusBar);
+        Content = layout;
+        UpdateStatus();
 
         _terminal.Loaded += OnLoaded;
         Closed += OnClosed;
+    }
+
+    private static readonly string MiniPtyVersion = typeof(Pty).Assembly.GetName().Version?.ToString(3) ?? "?";
+
+    private void UpdateStatus()
+    {
+        var backend = OperatingSystem.IsWindows() ? "ConPTY" : "PTY";
+        var pid = _session is { } session ? $" · pid {session.ProcessId}" : string.Empty;
+        _status.Text = $"MiniPty {MiniPtyVersion} hosting {backend}{pid} · {_terminal.Columns}×{_terminal.Rows} · {_statusCommand} · {_statusState}";
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -63,15 +109,21 @@ internal sealed class TerminalWindow : Window
 
         // Spawned, read, and awaited on the UI thread. No Task.Run anywhere in this file.
         _session = Pty.Start(startInfo);
+        _statusCommand = startInfo.Arguments.Count == 0 ? startInfo.FileName : startInfo.FileName + " " + string.Join(' ', startInfo.Arguments);
+        _statusState = "running";
+        UpdateStatus();
         var pump = PumpOutputAsync(_session);
         var status = await _session.WaitForExitAsync();
         await pump;
 
         _exited = true;
+        _statusState = $"exited with {status.ExitCode}";
+        UpdateStatus();
         Title = $"MiniPty WinUI terminal — exited with {status.ExitCode}";
         if (_dumpPath is not null)
         {
-            File.WriteAllText(_dumpPath, _terminal.VisibleText());
+            // The status line first, then the screen, so a script can check both.
+            File.WriteAllText(_dumpPath, _status.Text + Environment.NewLine + _terminal.VisibleText());
             Close();
         }
         else if (_smoke)
