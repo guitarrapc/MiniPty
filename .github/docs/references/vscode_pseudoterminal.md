@@ -1,6 +1,6 @@
 # VS Code Pseudoterminal Reference
 
-A VS Code extension cannot load MiniPty directly, so it spawns the NativeAOT-capable [VsCodeTerminalHelper.cs](../../../samples/VsCodeTerminalHelper.cs) and implements `vscode.Pseudoterminal` over its stdin/stdout.
+A VS Code extension cannot load MiniPty directly, so it spawns the NativeAOT-capable [VsCodeTerminalHelper.cs](../../../samples/SingleFiles/VsCodeTerminalHelper.cs) and implements `vscode.Pseudoterminal` over its stdin/stdout.
 
 The runnable [VsCodeExtension sample](../../../samples/VsCodeExtension) implements this mapping without npm dependencies. It opens a real VS Code integrated terminal and is the manual integration check for input, output, UTF-8 streaming, resize, flow-control acknowledgement, and ordered exit.
 
@@ -20,7 +20,7 @@ Map `handleInput` to type 2 and `setDimensions` to `{"type":"resize","cols":...,
 
 The helper's stdout is protocol-only. Route logs and diagnostics to stderr.
 
-The stdio extension path is deliberately one-shot. Closing it closes the helper input and therefore the owned PTY. The same sample extension also has a persistent path backed by [VsCodePersistentBridge.cs](../../../samples/VsCodePersistentBridge.cs) for real authenticated reconnect testing.
+The stdio extension path is deliberately one-shot. Closing it closes the helper input and therefore the owned PTY. The same sample extension also has a persistent path backed by [VsCodePersistentBridge.cs](../../../samples/SingleFiles/VsCodePersistentBridge.cs) for real authenticated reconnect testing.
 
 ## Persistent reconnect option
 

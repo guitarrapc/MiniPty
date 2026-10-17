@@ -58,6 +58,24 @@ internal static partial class WindowsInterop
     internal static partial bool SetEvent(IntPtr hEvent);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial IntPtr OpenThread(
+        uint dwDesiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle,
+        uint dwThreadId);
+
+    [LibraryImport("kernel32.dll")]
+    internal static partial uint GetCurrentThreadId();
+
+    /// <summary>
+    /// Cancels the synchronous I/O in progress on <paramref name="hThread"/> (which needs <c>THREAD_TERMINATE</c>
+    /// access); the canceled call fails with <c>ERROR_OPERATION_ABORTED</c>. Fails with <c>ERROR_NOT_FOUND</c>
+    /// when nothing is in progress.
+    /// </summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool CancelSynchronousIo(IntPtr hThread);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static unsafe partial bool SetNamedPipeHandleState(
         SafeFileHandle hNamedPipe,

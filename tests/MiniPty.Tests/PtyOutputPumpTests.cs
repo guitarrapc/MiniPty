@@ -239,6 +239,77 @@ public sealed class PtyOutputPumpTests
         await second.AsTask().WaitAsync(Timeout);
     }
 
+    /// <summary>
+    /// Closing the transport does not always end it: on Windows a process that inherited ConPTY's output pipe keeps
+    /// it open until it exits. Once reads have been quiet since the close, the pump ends output itself rather than
+    /// waiting for that process. Without the forced end, the read below never completes.
+    /// </summary>
+    [Test]
+    public async Task OutputEndsAfterQuietWhenTheClosedTransportStaysOpen()
+    {
+        var backend = new HeldOpenBackend();
+        await using var session = new PtySession(backend);
+        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+        var next = enumerator.MoveNextAsync().AsTask();
+        await backend.Reading.WaitAsync(Timeout);
+
+        var stopwatch = Stopwatch.StartNew();
+        backend.Exit(0);
+
+        await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
+        // Quiet after exit closes the transport, and quiet after the close ends output: two intervals, no OS event.
+        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(1500);
+        await Assert.That(backend.IsOutputClosed).IsTrue();
+    }
+
+    /// <summary>
+    /// The same held-open transport under one-shot completion: it must complete, not fail with the close timeout
+    /// (<see cref="PtyCompleteOptions.OutputReaderCloseTimeout"/>) although every byte had been read.
+    /// </summary>
+    [Test]
+    public async Task CompleteAsyncDoesNotTimeOutWhenTheClosedTransportStaysOpen()
+    {
+        var backend = new HeldOpenBackend();
+        await using var session = new PtySession(backend);
+        await backend.Reading.WaitAsync(Timeout);
+        var completion = session.CompleteAsync(new PtyCompleteOptions { OutputReaderCloseTimeout = TimeSpan.FromSeconds(3) });
+
+        var stopwatch = Stopwatch.StartNew();
+        backend.Exit(7);
+
+        var result = await completion.WaitAsync(Timeout);
+        await Assert.That(result.ExitCode).IsEqualTo(7);
+        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(1500);
+    }
+
+    /// <summary>
+    /// Output still draining out of the transport after the close is not quiet. Each read restarts the interval, so
+    /// a slow final flush is delivered in full before the pump ends output on its own; measured from the close alone,
+    /// the forced end would cut it short.
+    /// </summary>
+    [Test]
+    public async Task OutputStillDrainingAfterTheCloseIsDelivered()
+    {
+        const int FlushReads = 8;
+        var backend = new SlowFlushAfterCloseBackend(FlushReads, intervalMs: 40);
+        await using var session = new PtySession(backend);
+        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+        var next = enumerator.MoveNextAsync().AsTask();
+        await backend.Reading.WaitAsync(Timeout);
+
+        backend.Exit(0);
+
+        var bytes = 0;
+        if (await next.WaitAsync(Timeout))
+        {
+            bytes += enumerator.Current.Data.Length;
+            while (await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout))
+                bytes += enumerator.Current.Data.Length;
+        }
+
+        await Assert.That(bytes).IsEqualTo(FlushReads);
+    }
+
     private const string ReaderThreadName = "MiniPty output reader";
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
@@ -370,13 +441,81 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
-    /// A child that never exits on its own. Subclasses script the output transport, and may script span writes to the
-    /// input queue.
+    /// A transport that the close does not end, as a ConPTY output pipe whose write end another process inherited:
+    /// reads block until woken or canceled and then report "re-check" rather than end of output, whether or not the
+    /// transport was closed. Only disposal ends reads, as the disposed pipe handle does on Windows.
+    /// </summary>
+    private sealed class HeldOpenBackend : FakeBackend
+    {
+        private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Completes once the reader thread is inside <see cref="ReadOutput"/>.</summary>
+        public Task Reading => _reading.Task;
+
+        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        {
+            if (IsDisposed)
+                return 0;
+
+            _reading.TrySetResult();
+            reader.WaitForWake(System.Threading.Timeout.Infinite);
+            return -1;
+        }
+
+        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
+        {
+            endOfOutput = false;
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Held open like <see cref="HeldOpenBackend"/>, but after the close it still yields one byte per read, each
+    /// after <c>intervalMs</c>, for <c>flushReads</c> reads: a transport flushing its tail slowly.
+    /// </summary>
+    private sealed class SlowFlushAfterCloseBackend(int flushReads, int intervalMs) : FakeBackend
+    {
+        private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _remaining = flushReads;
+
+        public Task Reading => _reading.Task;
+
+        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        {
+            if (IsDisposed)
+                return 0;
+
+            if (IsOutputClosed && _remaining > 0)
+            {
+                _remaining--;
+                Thread.Sleep(intervalMs);
+                buffer[0] = (byte)'x';
+                return 1;
+            }
+
+            _reading.TrySetResult();
+            reader.WaitForWake(System.Threading.Timeout.Infinite);
+            return -1;
+        }
+
+        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
+        {
+            endOfOutput = false;
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// A child that exits only through <see cref="Exit"/>. Subclasses script the output transport, and may script span
+    /// writes to the input queue.
     /// </summary>
     internal abstract class FakeBackend : IPtyBackend
     {
         private readonly TaskCompletionSource<PtyExitStatus> _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private volatile bool _closed;
+        private volatile bool _disposed;
+        private volatile bool _hasExited;
+        private IPtyExitListener? _listener;
 
         public Stream Input => Stream.Null;
         public virtual PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes) => null;
@@ -384,21 +523,30 @@ public sealed class PtyOutputPumpTests
         public void SetOutputPump(PtyOutputPump pump) { }
         public void WaitWhileOutputBlocked(PtyReaderThread reader) => reader.WaitForWake(System.Threading.Timeout.Infinite);
         public int ProcessId => 0;
-        public bool HasExited => false;
+        public bool HasExited => _hasExited;
         public int ExitCode => 0;
         public int? ExitSignal => null;
         public PtySize Size => new(80, 24);
         public string? ActiveProcessName => null;
         public Task<PtyExitStatus> Exited => _exited.Task;
         public bool IsOutputClosed => _closed;
+        public bool IsDisposed => _disposed;
         public long CoalesceBudgetTicks => Stopwatch.Frequency * 2 / 1000;
+
+        /// <summary>Reports child exit the way the exit watcher does: records it, then notifies the session's listener.</summary>
+        public void Exit(int exitCode)
+        {
+            _hasExited = true;
+            _exited.TrySetResult(new PtyExitStatus(exitCode, null));
+            Volatile.Read(ref _listener)?.OnChildExited();
+        }
 
         public void Resize(int columns, int rows, int pixelWidth, int pixelHeight) { }
         public void SendEof() { }
         public void Kill() { }
         public void Kill(PtySignal signal) { }
         public ValueTask<int> WaitForExitCodeAsync() => new(_exited.Task.ContinueWith(static t => t.Result.ExitCode, TaskScheduler.Default));
-        public void SetExitListener(IPtyExitListener listener) { }
+        public void SetExitListener(IPtyExitListener listener) => Volatile.Write(ref _listener, listener);
         public bool TryBeginOutputRead() => !_closed;
         public void EndOutputRead() { }
         public void CloseOutputTransport() => _closed = true;
@@ -408,6 +556,7 @@ public sealed class PtyOutputPumpTests
 
         public virtual void Dispose()
         {
+            _disposed = true;
             _closed = true;
             _exited.TrySetException(new ObjectDisposedException(GetType().Name));
         }

@@ -4,8 +4,8 @@
 #:property ImplicitUsings=enable
 #:property AllowUnsafeBlocks=true
 #:property PublishAot=true
-#:project ../src/MiniPty/MiniPty.csproj
-#:project ../src/MiniPty.Console/MiniPty.Console.csproj
+#:project ../../src/MiniPty/MiniPty.csproj
+#:project ../../src/MiniPty.Console/MiniPty.Console.csproj
 
 using System.Runtime.InteropServices;
 using MiniPty;
@@ -21,7 +21,7 @@ if (Console.IsInputRedirected || Console.IsOutputRedirected)
 {
     Console.Error.WriteLine("ConsoleAttach requires an interactive terminal (stdin and stdout must be a TTY).");
     Console.Error.WriteLine("Run from a real console, for example:");
-    Console.Error.WriteLine("  dotnet samples/ConsoleAttach.cs");
+    Console.Error.WriteLine("  dotnet samples/SingleFiles/ConsoleAttach.cs");
     Console.Error.WriteLine("On Windows, use Windows Terminal, PowerShell, or cmd — not Git Bash or MSYS.");
     return 0;
 }

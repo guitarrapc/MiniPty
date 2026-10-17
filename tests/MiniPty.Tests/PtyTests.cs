@@ -1167,6 +1167,75 @@ public sealed class PtyTests
             session.Resize(new PtySize(90, 25), new PtyPixelSize(-1, 500)));
     }
 
+    /// <summary>
+    /// Wide windows exceed 512 cells; a clamp there made the frontend grid and the PTY disagree. Sizes are now
+    /// bounded only by what the platform API encodes, and out-of-range values clamp rather than throw.
+    /// </summary>
+    [Test]
+    public async Task PtyResizeAppliesSizesUpToThePlatformLimit()
+    {
+        using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("set /p DUMMY=")
+            : UnixShell("IFS= read -r _"));
+        int max = OperatingSystem.IsWindows() ? short.MaxValue : ushort.MaxValue;
+
+        session.Resize(new PtySize(600, 200));
+        await Assert.That(session.Size).IsEqualTo(new PtySize(600, 200));
+
+        session.Resize(new PtySize(max, max));
+        await Assert.That(session.Size).IsEqualTo(new PtySize(max, max));
+
+        session.Resize(new PtySize(max + 1, 100_000));
+        await Assert.That(session.Size).IsEqualTo(new PtySize(max, max));
+
+        // A window before layout can report zero cells; that must not fault a size-changed handler.
+        session.Resize(new PtySize(0, -5));
+        await Assert.That(session.Size).IsEqualTo(new PtySize(1, 1));
+    }
+
+    [Test]
+    public async Task PtyStartAppliesSizesUpToThePlatformLimit()
+    {
+        int max = OperatingSystem.IsWindows() ? short.MaxValue : ushort.MaxValue;
+        var wide = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("set /p DUMMY=")
+            : UnixShell("IFS= read -r _");
+
+        using var wideSession = Pty.Start(wide with { Size = new PtySize(600, 200) });
+        await Assert.That(wideSession.Size).IsEqualTo(new PtySize(600, 200));
+
+        using var clampedSession = Pty.Start(wide with { Size = new PtySize(100_000, 0) });
+        await Assert.That(clampedSession.Size).IsEqualTo(new PtySize(max, 1));
+    }
+
+    /// <summary>The child, not only <c>Size</c>, must observe a grid wider than the former 512-cell cap.</summary>
+    [Test]
+    public async Task PtyChildSeesWideResizedSize()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            if (!TryResolveWindowsPowerShell(out var powershell))
+                return;
+
+            await using var session = Pty.Start(
+                Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null; $s = $Host.UI.RawUI.WindowSize; Write-Output (\"{0} {1}\" -f $s.Width, $s.Height); exit 0"]));
+            session.Resize(new(600, 200));
+            var result = await session.CompleteAsync(new PtyCompleteOptions { Input = "go\r\n" });
+
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            await Assert.That(result.Contains("600 200")).IsTrue();
+            return;
+        }
+
+        await using var unixSession = Pty.Start(
+            UnixShell("read _; set -- $(stty size); printf 'SIZE:%s:%s\\n' \"$1\" \"$2\""));
+        unixSession.Resize(new(600, 200));
+        var unixResult = await unixSession.CompleteAsync(new PtyCompleteOptions { Input = "go\n" });
+
+        await Assert.That(unixResult.ExitCode).IsEqualTo(0);
+        await Assert.That(unixResult.Contains("SIZE:200:600")).IsTrue();
+    }
+
     [Test]
     public async Task PtyResizeAfterExitWithOpenTransportDoesNotThrow()
     {
@@ -1602,6 +1671,117 @@ public sealed class PtyTests
         await Assert.That(text).Contains("got:immediate");
     }
 
+    /// <summary>
+    /// A process the host starts with handle inheritance while a pseudo-console is being created inherits ConPTY's
+    /// output pipe and keeps it open after the pseudo-console closes, so end of output used to wait for that process
+    /// (F12 in the GUI host readiness plan). The post-exit drain now ends output once reads have been quiet after the
+    /// close. The window is ConPTY's own <c>CreateProcess</c> of its host, a few milliseconds per pseudo-console: a
+    /// steady 16 spawns per second elsewhere in the process hit it in none of 12 sessions, so this test races
+    /// <c>Process.Start</c> around <c>Pty.Start</c> itself. Each leaked handle would otherwise hold end of output for
+    /// the 3 s its child lives.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task PtyWindowsOutputEndsWhileAnotherProcessHoldsTheOutputPipe()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        using var stop = new CancellationTokenSource();
+        using var spawnGate = new ManualResetEventSlim();
+        var spawned = new System.Collections.Concurrent.ConcurrentBag<Process>();
+        // Dedicated threads: pool workers blocked here would starve the consumer's own continuations.
+        var spawners = new Thread[4];
+        for (var i = 0; i < spawners.Length; i++)
+        {
+            spawners[i] = new Thread(() =>
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    try
+                    {
+                        spawnGate.Wait(stop.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // An exception on a dedicated thread would take the test host down.
+                        return;
+                    }
+
+                    // Process.Start always inherits handles; redirected stdio makes the child hold the pipes it got.
+                    spawned.Add(Process.Start(new ProcessStartInfo("ping.exe", "-n 4 127.0.0.1")
+                    {
+                        RedirectStandardInput = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                    })!);
+                }
+            })
+            {
+                IsBackground = true,
+            };
+            spawners[i].Start();
+        }
+
+        try
+        {
+            for (var i = 0; i < 8; i++)
+            {
+                var stopwatch = Stopwatch.StartNew();
+                PtySession session;
+                spawnGate.Set();
+                try
+                {
+                    session = Pty.Start(WindowsCommand("echo hi"));
+                }
+                finally
+                {
+                    spawnGate.Reset();
+                }
+
+                await using (session)
+                {
+                    await foreach (var _ in session.ReadOutputAsync())
+                    {
+                    }
+                }
+
+                var elapsed = stopwatch.ElapsedMilliseconds;
+                KillSpawned(spawned);
+
+                // Exit, 100 ms quiet, close, 100 ms quiet, end: well under a second even on a loaded machine. A
+                // leaked handle holds end of output until the ping child exits, about 3 s after it started.
+                await Assert.That(elapsed).IsLessThan(2000);
+            }
+        }
+        finally
+        {
+            stop.Cancel();
+            foreach (var spawner in spawners)
+                spawner.Join();
+
+            KillSpawned(spawned);
+        }
+
+        static void KillSpawned(System.Collections.Concurrent.ConcurrentBag<Process> spawned)
+        {
+            while (spawned.TryTake(out var process))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                    // Already exited.
+                }
+
+                process.Dispose();
+            }
+        }
+    }
     [Test]
     public async Task PtyWindowsSpawnAllowsImmediateResize()
     {

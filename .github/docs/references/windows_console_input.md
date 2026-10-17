@@ -53,4 +53,4 @@ Undecorated names are not exported and fail at runtime under NativeAOT publish.
 
 ## Testing Notes
 
-Inject-based Windows tests can pass while physical keyboard input still fails. Validate interactive attach with a real TTY (for example `samples/ConsoleAttach.cs`) after changing this path.
+Inject-based Windows tests can pass while physical keyboard input still fails. Validate interactive attach with a real TTY (for example `samples/SingleFiles/ConsoleAttach.cs`) after changing this path.

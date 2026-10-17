@@ -35,7 +35,10 @@ internal interface IPtyOutputWaiter
 /// <b>End of output.</b> Unix PTYs report end of output once every slave descriptor closes. ConPTY reports it
 /// only after the pseudo-console closes, and a Linux grandchild can hold the slave open, so after child exit
 /// <see cref="PtyOutputDrainScheduler"/> closes the transport once reads have been quiet for
-/// <see cref="PostExitQuietMs"/> (one-shot completion also bounds this by its grace and close timeouts).
+/// <see cref="PostExitQuietMs"/> (one-shot completion also bounds this by its grace and close timeouts). When
+/// even the close does not end the transport, because another process holds ConPTY's output pipe open, the
+/// pump ends output itself once reads have been quiet for the same interval after the close
+/// (<see cref="OnDrainTick"/>).
 /// </para>
 /// <para>
 /// <b>Lifetime.</b> The pump and the session each hold a reference to the ring; it returns to the pool when both
@@ -56,6 +59,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private const int FlagSessionDisposed = 2;
     private const int FlagCloseRequested = 4;
     private const int FlagExitObserved = 8;
+    /// <summary>The drain has given up on the OS ending the transport; the reader drains without blocking and stops.</summary>
+    private const int FlagEndOfOutputForced = 16;
 
     private readonly IPtyBackend _backend;
     // A second concurrent stop waiter falls back to a task; the first uses the allocation-free slot below.
@@ -171,11 +176,24 @@ internal sealed class PtyOutputPump : IValueTaskSource
             // After disposal nothing reads the ring, so the reader reuses the same slot only to let the transport end.
             var slot = _tail;
             var buffer = _ring.AsSpan(slot * SlotSize, SlotSize);
-            var read = _backend.ReadOutput(buffer, reader);
-            if (read < 0)
-                continue; // Woken: re-check state.
-            if (read == 0)
-                return;
+            int read;
+            if ((Volatile.Read(ref _flags) & FlagEndOfOutputForced) != 0)
+            {
+                // The drain gave up on the OS ending the transport (see OnDrainTick). Take what is there without
+                // blocking, including output that landed between the drain's quiet check and the read's
+                // cancellation, then report end of output.
+                read = _backend.ReadMoreOutput(buffer, reader, out _);
+                if (read <= 0)
+                    return;
+            }
+            else
+            {
+                read = _backend.ReadOutput(buffer, reader);
+                if (read < 0)
+                    continue; // Woken or canceled: re-check state.
+                if (read == 0)
+                    return;
+            }
 
             var timestamp = Stopwatch.GetTimestamp();
             // Stamped per read that returned bytes, so the empty tail of the micro-window does not postpone the
@@ -456,7 +474,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
     /// <summary>
     /// One post-exit drain step, run by <see cref="PtyOutputDrainScheduler"/>: closes the transport once reads
-    /// have gone quiet (or a completion grace expires), then lets a completion sink watch its close timeout.
+    /// have gone quiet (or a completion grace expires); then, if the close has not ended the transport either,
+    /// ends output once reads have gone quiet again; and lets a completion sink watch its close timeout throughout.
     /// </summary>
     /// <returns><see langword="true"/> once this pump needs no further ticks.</returns>
     internal bool OnDrainTick(long now)
@@ -474,30 +493,42 @@ internal sealed class PtyOutputPump : IValueTaskSource
         var sink = Volatile.Read(ref _sink);
         if ((flags & FlagCloseRequested) == 0)
         {
-            if (!IsQuiet(now, sink) && (sink is null || !sink.IsGraceExpired(now, ExitTick)))
+            // One-shot completion never closes before the first read: ConPTY can emit its first frame after a fast
+            // child has already exited, and closing then would lose it. The grace bounds that wait.
+            var quiet = IsQuietSince(now, ExitTick) && (sink is null || Volatile.Read(ref _lastReadTick) != 0);
+            if (!quiet && (sink is null || !sink.IsGraceExpired(now, ExitTick)))
                 return false;
 
             RequestClose();
+            return false;
         }
 
-        // The transport ends shortly. Only a completion sink still has a deadline to watch.
-        return sink is null || sink.CheckCloseTimeout(now, Volatile.Read(ref _closeRequestedTick), this);
+        // The close normally ends the transport within milliseconds: ConPTY writes its final frame within about
+        // 1 ms and its host exits, which breaks the pipe. It does not when another process holds the pipe's write
+        // end: a process the host started with handle inheritance while CreatePseudoConsole was duplicating its
+        // ends into the console host inherited them, and the pipe breaks only when that process exits. So once
+        // reads have been quiet for the same interval after the close, the pump ends output itself: the reader is
+        // released from its blocking read and drains what is left without blocking. Repeated every tick until the
+        // reader has finished, because a cancel that lands between two reads cancels nothing.
+        var closeRequestedTick = Volatile.Read(ref _closeRequestedTick);
+        if (IsQuietSince(now, closeRequestedTick))
+        {
+            SetFlag(FlagEndOfOutputForced);
+            Volatile.Read(ref _reader)?.CancelRead(this);
+        }
+
+        // Only a completion sink has a deadline of its own to watch; every pump ticks until its reader finishes.
+        return sink is not null && sink.CheckCloseTimeout(now, closeRequestedTick, this);
     }
 
-    private bool IsQuiet(long now, PtyOutputSink? sink)
+    /// <summary>Whether the reader has read nothing for <see cref="PostExitQuietMs"/>, counted from the later of its last read and <paramref name="since"/>.</summary>
+    private bool IsQuietSince(long now, long since)
     {
         // A pump parked on a full ring is not reading, so silence says nothing about the transport.
         if (Volatile.Read(ref _producerWaiting) != 0)
             return false;
 
-        var lastRead = Volatile.Read(ref _lastReadTick);
-
-        // One-shot completion never closes before the first read: ConPTY can emit its first frame after a fast
-        // child has already exited, and closing then would lose it. The grace bounds that wait.
-        if (sink is not null && lastRead == 0)
-            return false;
-
-        return now - Math.Max(lastRead, ExitTick) >= PostExitQuietMs;
+        return now - Math.Max(Volatile.Read(ref _lastReadTick), since) >= PostExitQuietMs;
     }
 
     /// <summary>
@@ -539,11 +570,12 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
     /// <summary>
     /// Second half of session disposal, after the backend closed the transport: wakes a Unix reader to observe the
-    /// close, and drops the session's reference to the ring.
+    /// close, releases a Windows read that the closed pseudo-console did not end (the output pipe held open by
+    /// another process), and drops the session's reference to the ring.
     /// </summary>
     internal void OnSessionDisposed()
     {
-        WakeReader();
+        Volatile.Read(ref _reader)?.CancelRead(this);
         ReleaseRing();
     }
 

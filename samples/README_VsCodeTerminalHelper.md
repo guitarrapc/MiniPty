@@ -40,7 +40,7 @@ if command -v brew >/dev/null 2>&1; then
 fi
 
 out="$(mktemp -d)/minipty-vscode-helper"
-dotnet publish samples/VsCodeTerminalHelper.cs \
+dotnet publish samples/SingleFiles/VsCodeTerminalHelper.cs \
   -c Release -r "$rid" --self-contained true \
   -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None \
   -o "$out"

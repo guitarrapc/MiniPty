@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    WinUI 3 host sample for MiniPty. A code-only (no XAML) unpackaged desktop app that runs a shell in a
+    pseudo-terminal and drives every MiniPty call from the UI thread. See README.md in this folder.
+
+    The Windows App SDK is a dependency of this sample only; the MiniPty packages stay dependency-free.
+    NativeAOT is off here: the sample demonstrates the UI threading model, not AOT publishing.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!--
+      Required for `dotnet publish` to include the project's PRI file (WinUiTerminal.pri) next to the executable.
+      `dotnet build` always writes it, but publish adds it only with the MSIX tooling enabled, which the Windows App
+      SDK templates turn on for unpackaged apps too. A code-only app needs it: `new XamlControlsResources()` resolves
+      ms-appx:///Microsoft.UI.Xaml/Themes/themeresources.xaml through the app's resource map and fails without the
+      file (an App.xaml-based app gets the same dictionary through the XAML parser and does not).
+    -->
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <IsAotCompatible>false</IsAotCompatible>
+    <PublishAot>false</PublishAot>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>WinUiTerminal</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.251106002" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
+    <!-- Immediate-mode drawing for the terminal grid; XAML text elements cannot repaint a full screen per frame. -->
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
+  </ItemGroup>
+
+  <!-- The emulator core (parser, screen buffer, key encoding, selection) is shared with the Avalonia sample. -->
+  <ItemGroup>
+    <Compile Include="..\TerminalEmulator\*.cs" Link="TerminalEmulator\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

@@ -14,4 +14,13 @@
     <ProjectReference Include="..\..\src\MiniPty.Terminal\MiniPty.Terminal.csproj" />
   </ItemGroup>
 
+  <!--
+    The terminal emulator core shared by the WinUI and Avalonia samples has no UI dependency, so its sources are
+    compiled here and tested on every platform (TerminalEmulatorTests). The GUI sample projects build only where
+    their frameworks do.
+  -->
+  <ItemGroup>
+    <Compile Include="..\..\samples\TerminalEmulator\*.cs" Link="TerminalEmulator\%(Filename)%(Extension)" />
+  </ItemGroup>
+
 </Project>

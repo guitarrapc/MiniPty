@@ -3,16 +3,16 @@
 #:property Nullable=enable
 #:property ImplicitUsings=enable
 #:property PublishAot=true
-#:project ../src/MiniPty/MiniPty.csproj
-#:project ../src/MiniPty.Terminal/MiniPty.Terminal.csproj
+#:project ../../src/MiniPty/MiniPty.csproj
+#:project ../../src/MiniPty.Terminal/MiniPty.Terminal.csproj
 
 // Reference helper for a VS Code Pseudoterminal extension.
 // stdout is protocol-only. Diagnostics and usage errors go to stderr.
 //
 // Run a shell:
-//   dotnet samples/VsCodeTerminalHelper.cs
+//   dotnet samples/SingleFiles/VsCodeTerminalHelper.cs
 // Run a specific command:
-//   dotnet samples/VsCodeTerminalHelper.cs -- pwsh -NoLogo
+//   dotnet samples/SingleFiles/VsCodeTerminalHelper.cs -- pwsh -NoLogo
 
 using System.Runtime.InteropServices;
 using System.Buffers.Binary;

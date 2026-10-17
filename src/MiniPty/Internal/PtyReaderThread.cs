@@ -22,11 +22,17 @@ namespace MiniPty.Internal;
 /// that has finished is dropped, so a late signal never reaches another session, and the primitive is never
 /// touched after the thread retires.
 /// </para>
+/// <para>
+/// A Windows pump reads its pipe with a blocking <c>ReadFile</c> that no event can interrupt. The thread
+/// therefore also holds a handle to itself, so <see cref="CancelRead"/> can release that read with
+/// <c>CancelSynchronousIo</c> when the pipe's writer never goes away (see <see cref="PtyOutputPump.OnDrainTick"/>).
+/// </para>
 /// </remarks>
 internal sealed class PtyReaderThread
 {
     private const int IdleTimeoutMs = 30_000;
     private const uint Infinite = 0xFFFFFFFF;
+    private const uint ThreadTerminate = 0x0001;
 
     private static readonly Lock s_lock = new();
     // Idle threads, most recently parked first, linked through _nextIdle and guarded by s_lock.
@@ -37,6 +43,8 @@ internal sealed class PtyReaderThread
     private readonly IntPtr _event;
     private readonly int _wakeRead = -1;
     private readonly int _wakeWrite = -1;
+    // Windows: this thread's own handle, opened by the thread itself when it starts. Guarded by _lock.
+    private IntPtr _threadHandle;
     private PtyOutputPump? _pump;
     private PtyReaderThread? _nextIdle;
     private bool _idle;
@@ -111,6 +119,26 @@ internal sealed class PtyReaderThread
     }
 
     /// <summary>
+    /// Interrupts whatever this thread is blocked in for <paramref name="pump"/>: the wake wait, the Unix wait on
+    /// the master, or a Windows blocking <c>ReadFile</c>, which <c>CancelSynchronousIo</c> is the only way to release
+    /// while the pipe's writer stays alive. Does nothing once the thread has moved on, and the lock orders the cancel
+    /// against that handover, so it never reaches another session's read. A cancel that finds no read in progress
+    /// is lost; a caller that depends on it repeats it.
+    /// </summary>
+    internal void CancelRead(PtyOutputPump pump)
+    {
+        lock (_lock)
+        {
+            if (_pump != pump)
+                return;
+
+            Signal();
+            if (OperatingSystem.IsWindows() && _threadHandle != IntPtr.Zero)
+                WindowsInterop.CancelSynchronousIo(_threadHandle);
+        }
+    }
+
+    /// <summary>
     /// Blocks the running pump until a wake arrives or <paramref name="timeoutMs"/> elapses
     /// (<see cref="Timeout.Infinite"/> waits indefinitely). Spurious returns are possible; callers re-check state.
     /// </summary>
@@ -170,6 +198,16 @@ internal sealed class PtyReaderThread
 
     private void Loop()
     {
+        if (OperatingSystem.IsWindows())
+        {
+            // CancelSynchronousIo needs THREAD_TERMINATE on the thread whose read it cancels. Only the thread itself
+            // knows its id, so the handle is opened here rather than by the creator. A cancel issued before this
+            // runs is lost, which is harmless: the thread has not started reading yet.
+            var handle = WindowsInterop.OpenThread(ThreadTerminate, bInheritHandle: false, WindowsInterop.GetCurrentThreadId());
+            lock (_lock)
+                _threadHandle = handle;
+        }
+
         while (true)
         {
             PtyOutputPump? pump;
@@ -245,11 +283,24 @@ internal sealed class PtyReaderThread
             _idle = false;
         }
 
-        // Nothing can hand this thread a pump any more, and Wake ignores it because _pump is null.
+        // Nothing can hand this thread a pump any more, and Wake and CancelRead ignore it because _pump is null.
         if (OperatingSystem.IsWindows())
+        {
             WindowsInterop.CloseHandle(_event);
+            IntPtr threadHandle;
+            lock (_lock)
+            {
+                threadHandle = _threadHandle;
+                _threadHandle = IntPtr.Zero;
+            }
+
+            if (threadHandle != IntPtr.Zero)
+                WindowsInterop.CloseHandle(threadHandle);
+        }
         else
+        {
             UnixInterop.minipty_wake_close(_wakeRead, _wakeWrite);
+        }
 
         return true;
     }

@@ -3,16 +3,16 @@
 #:property Nullable=enable
 #:property ImplicitUsings=enable
 #:property PublishAot=true
-#:project ../src/MiniPty/MiniPty.csproj
-#:project ../src/MiniPty.Terminal/MiniPty.Terminal.csproj
+#:project ../../src/MiniPty/MiniPty.csproj
+#:project ../../src/MiniPty.Terminal/MiniPty.Terminal.csproj
 
 // WebTerminal: xterm.js in a browser, MiniPty.Terminal as the backend PTY.
 //
-// Interactive mode:  dotnet samples/WebTerminal.cs
+// Interactive mode:  dotnet samples/SingleFiles/WebTerminal.cs
 //   Serves http://localhost:5170/ with an xterm.js page; each WebSocket connection
 //   at /ws spawns the platform shell through PtyWebSocketBridge.
 //
-// Smoke mode (CI):   dotnet samples/WebTerminal.cs --smoke   (or redirected stdin)
+// Smoke mode (CI):   dotnet samples/SingleFiles/WebTerminal.cs --smoke   (or redirected stdin)
 //   Starts the server on an ephemeral port, connects a ClientWebSocket to itself,
 //   drives resize + a marker command + exit, and asserts the marker output and the
 //   exit control message round-trip. Exits 0 on success.

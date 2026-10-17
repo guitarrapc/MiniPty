@@ -70,7 +70,7 @@ Redirecting `CreateProcess` stdin/stdout to anonymous pipes **without** ConPTY i
 ### Setup sequence
 
 1. Create the output pipe with `CreatePipe`, and the input pipe as a named pipe whose MiniPty end (the server) is opened overlapped and whose ConPTY end is opened synchronously by name. An anonymous pipe cannot be overlapped. The named pipe has a random name, one instance, `FILE_FLAG_FIRST_PIPE_INSTANCE`, and `PIPE_REJECT_REMOTE_CLIENTS`, so anything else that connects first makes the spawn fail instead of sharing the pipe. It keeps a 4 KiB buffer; with none, every write would wait for ConPTY to read.
-2. Create every handle non-inheritable. ConPTY duplicates its ends into its host process itself, and the child is created with `bInheritHandles = false`. Non-inheritable handles do not prevent one leak, though: a process the host spawns with inheritance while `CreatePseudoConsole` runs can still hold the output pipe open (see [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md) F12 and G11).
+2. Create every handle non-inheritable. ConPTY duplicates its ends into its host process itself, and the child is created with `bInheritHandles = false`. Non-inheritable handles do not prevent one leak, though: a process the host spawns with inheritance while `CreatePseudoConsole` runs can still hold the output pipe open, so end of output must not depend on the pipe breaking (see [Post-exit drain](#post-exit-drain)).
 3. `CreatePseudoConsole(size, inputRead, outputWrite, …)` → `HPCON`. Returns **HRESULT** (not `GetLastError`); treat `hr < 0` as failure and use `Marshal.ThrowExceptionForHR(hr)`.
 4. **Close** `inputRead` and `outputWrite` in the parent immediately (ConPTY holds its own duplicates).
 5. Build `STARTUPINFOEX` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`.
@@ -268,6 +268,8 @@ A one-shot completion sink adds bounds: the transport closes at `OutputDrainGrac
 
 Closing ends output without losing it: ConPTY flushes its final frame and the pump drains the pipe to its end, and Unix closes only after output has been quiet. Waiting for exit never closes the transport.
 
+The close does not always end the transport. ConPTY's `CreatePseudoConsole` duplicates its pipe ends as inheritable while it starts its console host, and a process the host application creates with handle inheritance in that window (`Process.Start` always does) inherits the output pipe's write end and keeps it open until it exits; MiniPty's own handles are all non-inheritable and cannot prevent it. Measured on Windows 11 build 26200: `ClosePseudoConsole` returns within 1 ms, ConPTY's final frame (`ESC[?9001l ESC[?1004l`) arrives within 1 ms of the close in every run, and the pipe breaks 3 ms after the close when nothing else holds it, but only when the inheriting process exits otherwise. So after the close the drain keeps ticking: once reads have been quiet for the same 100 ms, the pump ends output itself. The reader thread cancels its blocking `ReadFile` with `CancelSynchronousIo` on a handle to itself (a canceled read transfers nothing), takes whatever arrived meanwhile with a non-blocking read, and reports end of output. The cancel is repeated every tick until the reader has finished, because a cancel that lands between two reads cancels nothing, and it is aimed by pump identity so a reader thread that has moved on to another session is never interrupted. Disposal issues the same cancel after closing the pipe handle, so `DisposeAsync` does not wait for such a process either.
+
 ### Disposal
 
 `Dispose` switches the pump to discarding output, kills the child, closes the transport, and returns. On Windows the pump keeps reading until the pipe ends, because closing a pseudo-console can wait until its final frame fits in the pipe; on Unix the wake descriptor stops it at once. The ring returns to the pool when both the session and the pump have released it, so the reader never writes into an array that another renter owns. `DisposeAsync` additionally completes once the pump has stopped.
@@ -306,6 +308,8 @@ PTY output is a **byte stream**, not lines or Unicode strings:
 ### Terminal size
 
 Initial size comes from `PtyStartInfo.Size` (character cells, not pixels). Windows: `COORD` for `CreatePseudoConsole` and `ResizePseudoConsole`. Unix: `winsize` in `forkpty` and `TIOCSWINSZ` via `minipty_set_winsize` (`PtySession.Resize`).
+
+Dimensions are clamped to what those structures encode: 1–32767 on Windows (`COORD` is two signed 16-bit values), 1–65535 on Unix. ConPTY accepts the full range: on Windows 11 build 26200, `CreatePseudoConsole` and `ResizePseudoConsole` succeeded at 32767×32767 in about 5 ms, and a PowerShell child reported 600×200, 4000×300, 32767×50, and 200×32767 as its window and buffer size. An earlier 512-cell cap silently disagreed with wide frontends.
 
 ### Environment variables
 

@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -65,7 +65,7 @@ jobs:
         run: |
           for sample in Capture Session Observe Interactive ConsoleAttach WebTerminal VsCodeTerminalHelper VsCodePersistentBridge; do
             out="$RUNNER_TEMP/minipty-${sample}-aot"
-            dotnet publish "samples/${sample}.cs" -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
+            dotnet publish "samples/SingleFiles/${sample}.cs" -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
             exe="$out/${sample}"
             if [[ "${{ matrix.rid }}" == win-* ]]; then
               exe="$out/${sample}.exe"
@@ -86,6 +86,35 @@ jobs:
               "$exe"
             fi
           done
+
+      # The WinUI host sample is JIT-only (the Windows App SDK is its dependency, not MiniPty's) and runs here
+      # in smoke mode: it spawns a shell on the UI thread, shows its output, and exits 0 once the output arrived.
+      - name: Build and smoke-test the WinUI sample
+        if: ${{ startsWith(matrix.rid, 'win') }}
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/minipty-winui"
+          dotnet publish samples/WinUiTerminal/WinUiTerminal.csproj -c Release -r "${{ matrix.rid }}" -o "$out"
+          "$out/WinUiTerminal.exe" --smoke
+
+      # The Avalonia host sample is the same emulator on Windows, Linux, and macOS, JIT-only like the WinUI one.
+      # Smoke mode needs a display: the Windows and macOS runners have one, Linux gets a virtual one from Xvfb.
+      - name: Build and smoke-test the Avalonia sample
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/minipty-avalonia"
+          dotnet publish samples/AvaloniaTerminal/AvaloniaTerminal.csproj -c Release -r "${{ matrix.rid }}" -o "$out"
+          exe="$out/AvaloniaTerminal"
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            exe="$out/AvaloniaTerminal.exe"
+          fi
+          test -f "$exe"
+          if [[ "${{ matrix.rid }}" == linux-* ]]; then
+            command -v xvfb-run >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb)
+            xvfb-run -a "$exe" --smoke
+          else
+            "$exe" --smoke
+          fi
 
   build-unix-native:
     name: Native (${{ matrix.rid }})
