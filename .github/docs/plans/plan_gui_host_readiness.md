@@ -712,7 +712,7 @@ Large.
 
 ### Why P2
 
-The in-box ConPTY's VT behavior depends on the user's Windows build. On the measured build it withholds query responses (OSC 11, DECRQSS, XTGETTCAP) and graphics protocols from the terminal side. It also reorders forwarded sequences relative to text (F10). It exposes no buffer clear, which is why `PtyTerminal.Clear()` is a no-op ([plan_terminal_parity.md](plan_terminal_parity.md) T7).
+The in-box ConPTY's VT behavior depends on the user's Windows build. On the measured build it withholds query responses (OSC 11, DECRQSS, XTGETTCAP) and graphics protocols from the terminal side. It also reorders forwarded sequences relative to text (F10). It exposes no buffer clear, which is why `PtyTerminal.Clear()` is a no-op ([terminal.md](../specs/terminal.md) N7).
 
 A terminal emulator that wants consistent behavior across Windows builds needs Microsoft's out-of-band ConPTY redistributable: `conpty.dll` plus `OpenConsole.exe`, published as the NuGet package `Microsoft.Windows.Console.ConPTY`.
 
@@ -724,7 +724,7 @@ Verified against the console host source (the `winconpty`, `VtIo`, and input-eng
 
 **Exports.** Both builds export the same 14 names: `ConptyCreatePseudoConsole`, `ConptyCreatePseudoConsoleAsUser`, `ConptyResizePseudoConsole`, `ConptyClearPseudoConsole`, `ConptyShowHidePseudoConsole`, `ConptyReparentPseudoConsole`, `ConptyReleasePseudoConsole`, `ConptyClosePseudoConsole`, `ConptyPackPseudoConsole`, and the unprefixed `CreatePseudoConsole`, `ResizePseudoConsole`, `ClosePseudoConsole`, `ClearPseudoConsole`, `ReleasePseudoConsole`. `ConptyClosePseudoConsoleTimeout` appears in some header copies but in no binary and not in the source; nothing may depend on it. `ConptyClearPseudoConsole` takes **two** arguments, `(HPCON, BOOL keepCursorRow)`, in 1.24, 1.25, and main; a caller using a one-argument signature leaves the second register undefined, so the argument is always passed explicitly.
 
-**Flags.** `PSEUDOCONSOLE_INHERIT_CURSOR` (0x1) is stable and exists in-box. The other bits have changed meaning: older headers defined 0x2, 0x4, and 0x8 as resize-quirk, Win32-input-mode, and passthrough; 1.22 and later use 0x08, 0x10, and 0x18 for glyph-width measurement and 1.25 adds 0x20 (ambiguous-is-wide). MiniPty passes 0 and exposes no flags. Inherit-cursor stays deferred (T9).
+**Flags.** `PSEUDOCONSOLE_INHERIT_CURSOR` (0x1) is stable and exists in-box. The other bits have changed meaning: older headers defined 0x2, 0x4, and 0x8 as resize-quirk, Win32-input-mode, and passthrough; 1.22 and later use 0x08, 0x10, and 0x18 for glyph-width measurement and 1.25 adds 0x20 (ambiguous-is-wide). MiniPty passes 0 and exposes no flags. Inherit-cursor stays deferred ([terminal.md](../specs/terminal.md) N8).
 
 **Startup handshake, by version.** On every version the host writes `ESC[c` (DA1), `ESC[?1004h`, and `ESC[?9001h` at startup. What differs is the wait:
 
@@ -792,9 +792,9 @@ public sealed class PtySession { public void Clear(); }   // PtyTerminal.Clear()
 
 **Packaging help, without a dependency.** The usable layout is the flat one: `OpenConsole.exe` beside `conpty.dll`, which the DLL probes first and which is architecture-agnostic (each `runtimes\win-<arch>\native\` folder gets the host of its own architecture). MiniPty's `buildTransitive/MiniPty.targets` gains an optional target that, when the consumer's resolved copy-local items contain `conpty.dll`, adds the matching `OpenConsole.exe` from the same package directory (derived from the resolved DLL path, never from a version literal) with the DLL's own `DestinationSubDirectory`. It adds no package reference, does nothing when the package is absent, and is disabled with `MiniPtyStageConPtyHost=false`. The alternative for applications that do not want it, a RID-specific build with `ConptyRequires<arch>Host=true`, is documented too.
 
-**Clear.** `PtySession.Clear()` calls `ConptyClearPseudoConsole(hpc, keepCursorRow: false)` on the out-of-band path and is a no-op otherwise; `PtyTerminal.Clear()` forwards. This revisits T7's no-op resolution and stays compatible with it because MiniPty still ships nothing.
+**Clear.** `PtySession.Clear()` calls `ConptyClearPseudoConsole(hpc, keepCursorRow: false)` on the out-of-band path and is a no-op otherwise; `PtyTerminal.Clear()` forwards. This revisits the no-op resolution (terminal.md N7) and stays compatible with it because MiniPty still ships nothing.
 
-**Not in G7.** Create-as-user, show/hide, reparent, pack; any flag including inherit-cursor (T9); answering DA1; in-box `ReleasePseudoConsole` (follow-up); shipping or downloading binaries.
+**Not in G7.** Create-as-user, show/hide, reparent, pack; any flag including inherit-cursor (terminal.md N8); answering DA1; in-box `ReleasePseudoConsole` (follow-up); shipping or downloading binaries.
 
 ### Acceptance
 
@@ -1099,7 +1099,6 @@ flowchart LR
 
 ## Related Documents
 
-- [plan_terminal_parity.md](plan_terminal_parity.md): T7 (ConPTY clear), revisited by G7.
 - [specs/core_session.md](../specs/core_session.md): `ReadOutputAsync` bounded buffering and coalescing (the step 3 pump, which G6 later re-drives).
-- [specs/terminal.md](../specs/terminal.md): `PtyTerminal` contract.
+- [specs/terminal.md](../specs/terminal.md): `PtyTerminal` contract; N7 (ConPTY clear, revisited by G7) and N8 (inherit-cursor).
 - [references/pty_crossplatform.md](../references/pty_crossplatform.md): ConPTY and Unix spawn details.

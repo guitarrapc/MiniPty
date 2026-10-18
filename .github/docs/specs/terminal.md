@@ -29,7 +29,12 @@ Bridging to a browser needs one more layer. The WebSocket protocol has no backpr
 | N3 | Host console attach ([Console](console.md); use case 3) |
 | N4 | Remote shell protocols (`ssh`), user identity/authentication, or multi-user session management. Per-session bridge bearer authentication is included. |
 | N6 | HTTP serving — the embedder accepts the WebSocket (Kestrel, `HttpListener`, …) and hands it to the bridge |
-| N7 | Native Windows ConPTY buffer clear. `PtyTerminal.Clear()` is a safe compatibility no-op because the in-box API exposes no clear operation. |
+| N7 | Native Windows ConPTY buffer clear. `PtyTerminal.Clear()` is a safe compatibility no-op because the in-box API exposes no clear operation. The opt-in out-of-band ConPTY (G7 in [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md)) revisits this. |
+| N8 | node-pty `conptyInheritCursor` (`PSEUDOCONSOLE_INHERIT_CURSOR`). VS Code requests it only when the frontend writes `initialText` before the shell starts, so ConPTY does not repaint the viewport over that text. The flag makes ConPTY ask the frontend for the cursor position at startup, so it only suits frontends that answer the query. Deferred until an embedder writes frontend text before the child starts. |
+| N9 | node-pty `open()` (a PTY pair without a spawned child). Neither VS Code nor any known embedder calls it. |
+| N10 | `uid` / `gid` on spawn. Switching identity is security-sensitive and outside a minimal PTY library. |
+| N11 | An `encoding` spawn option that decodes output to strings. The library is bytes-first; frontends decode at their boundary with an incremental decoder. |
+| N12 | node-pty `handleFlowControl` (XON/XOFF interception). VS Code throttles with pause/resume plus ACK credit, which `PtyTerminal` and both bridges provide. |
 
 ## `PtyTerminal` — push facade
 
@@ -46,7 +51,7 @@ PtyTerminal.Attach(PtySession session, PtyTerminalOptions options)    // transfe
 | `WriteInputAsync` / `SendEof` / `Resize` / `Kill(PtySignal)` | Pass-through to the owned session; callable concurrently with output delivery. Resize accepts optional pixel dimensions. |
 | `Kill()` | SIGHUP on Unix (node-pty default); process termination on Windows. Core `PtySession.Kill()` remains forceful. |
 | `Clear()` | Safe compatibility no-op pending a public in-box ConPTY clear API. |
-| `ProcessId` / `Size` / `ActiveProcessName` / `HasExited` / `ExitStatus` | Session state. `ActiveProcessName` is polled by the embedder (typically 200 ms on Unix); no library polling task is created. |
+| `ProcessId` / `Size` / `ActiveProcessName` / `HasExited` / `ExitStatus` | Session state. `ActiveProcessName` is polled by the embedder (typically 200 ms on Unix); no library polling task is created. It is null on Windows, where VS Code derives tab titles from its own process-tree lookup rather than from node-pty. |
 | `DisposeAsync` | Stops the pump, ends the child if running (Unix: hang-up, then kill after a grace period; Windows: termination), releases the PTY. |
 
 Design decisions (WHY):
