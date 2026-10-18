@@ -619,7 +619,10 @@ public sealed class PtyBaselineTests
             foreach (var descendant in descendants)
             {
                 var window = descendant == Descendant.Detached ? "-WindowStyle Hidden" : "-NoNewWindow";
-                // waitfor blocks silently until its timeout, so the child's own output is the only output on the console.
+                // waitfor blocks silently until its timeout, so the child is the only process writing to the console. With
+                // a descendant that wrote at the same moment (ping), ConPTY's stream lacked the child's "ready" in 0.5–5 %
+                // of runs, depending on load, although the child wrote it and exited normally (see lifecycle.md, Lessons
+                // Learned).
                 script.Append($"$lines += '{descendant} ' + (Start-Process waitfor.exe -ArgumentList '/t','30','MiniPtyBaseline{Guid.NewGuid():N}' {window} -PassThru).Id; ");
             }
 
@@ -665,7 +668,19 @@ public sealed class PtyBaselineTests
                 if (!File.Exists(pidFile))
                     return false;
 
-                var lines = File.ReadAllLines(pidFile);
+                // The child may still be writing: only lines that already end in a newline count, so a pid cut short is
+                // never read, and a read that collides with the writer tries again.
+                string text;
+                try
+                {
+                    text = File.ReadAllText(pidFile);
+                }
+                catch (IOException)
+                {
+                    return false;
+                }
+
+                var lines = text[..(text.LastIndexOf('\n') + 1)].Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                 for (var i = 0; i < descendants.Length; i++)
                 {
                     pids[i] = 0;
@@ -687,7 +702,14 @@ public sealed class PtyBaselineTests
         }
         finally
         {
-            File.Delete(pidFile);
+            try
+            {
+                File.Delete(pidFile);
+            }
+            catch (IOException)
+            {
+                // The child still has it open; a temporary file is left behind.
+            }
         }
     }
 
