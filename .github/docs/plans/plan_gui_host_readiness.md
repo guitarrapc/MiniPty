@@ -838,7 +838,8 @@ Measured on Windows 11 build 26200 with package `1.25.260930003`:
 | Inherit cursor | Answered: continues from the report without clearing. Unanswered: the host gives up after its 1 s wait and runs the child, 1043 ms measured, where in-box had produced nothing after 8 s |
 | Layouts | A portable test build stages all three `runtimes\win-<arch>\native\` pairs and `TryLoadFromApplicationDirectory` finds the process architecture's; a RID-specific publish puts both files at the root; a NativeAOT publish (`PublishAot`, win-x64) builds without trim or AOT warnings, loads the library, hosts under `OpenConsole.exe`, and forwards 18 of 18 |
 | Leaks | `StartAndTeardownLeakNothing` on the out-of-band path |
-| Suite | Windows 338 of 338 after the census fix below; Linux: the ConPTY, pump, and terminal classes pass (the type refuses to load, `Clear` is a no-op) |
+| Suite | Windows 340 of 340 after the census fix below, Linux 340 of 340 (the type refuses to load there, `Clear` is a no-op) |
+| Allocation | `PtyIntegrationBenchmarks` on the branch and on `main` in the same checkout: identical on every scenario (`Session_Exit0_Bytes` 1.88 against 1.89 KB, `Session_32KiB_StreamBytes` 1.60 KB both, `Capture_32KiB_Text` 114.06 KB both); the in-box handle gained no field once the implementation moved into a handle subclass, which the first version's extra field had shown as +40 B |
 
 Lessons learned:
 
