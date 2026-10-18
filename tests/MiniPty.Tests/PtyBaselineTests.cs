@@ -349,7 +349,7 @@ public sealed class PtyBaselineTests
             Environment.Exit(RunWindowsDescendantsChild(descendants, Environment.GetEnvironmentVariable(PidFileVariable)!));
     }
 
-    private static string TestExecutable => Path.Combine(AppContext.BaseDirectory, "MiniPty.Tests.exe");
+    internal static string TestExecutable => Path.Combine(AppContext.BaseDirectory, "MiniPty.Tests.exe");
 
     /// <summary>
     /// Reports each <c>WINDOW_BUFFER_SIZE_EVENT</c> as <c>SIZE:columns:rows;</c>, as the child of
@@ -588,7 +588,7 @@ public sealed class PtyBaselineTests
 
     private static PtyStartInfo Cmd(string command) => new() { FileName = ComSpec, Arguments = ["/c", command] };
 
-    private static PtyStartInfo MissingProgram() => new() { FileName = "minipty-baseline-no-such-program" };
+    internal static PtyStartInfo MissingProgram() => new() { FileName = "minipty-baseline-no-such-program" };
 
     private static PtyStartInfo InMissingDirectory()
     {
@@ -596,13 +596,13 @@ public sealed class PtyBaselineTests
         return startInfo with { WorkingDirectory = Path.Combine(Path.GetTempPath(), "minipty-baseline-missing-" + Guid.NewGuid().ToString("N")) };
     }
 
-    private static PtyStartInfo Exits(int code) => OperatingSystem.IsWindows() ? Cmd($"exit {code}") : Shell($"exit {code}");
+    internal static PtyStartInfo Exits(int code) => OperatingSystem.IsWindows() ? Cmd($"exit {code}") : Shell($"exit {code}");
 
     /// <summary>Waits on stdin, which nobody writes, so only teardown ends it.</summary>
     private static PtyStartInfo Blocks() => OperatingSystem.IsWindows() ? Cmd("set /p DUMMY=") : Shell("IFS= read -r _");
 
     /// <summary>A long-lived descendant the child starts; each lives about 30 s unless teardown ends it.</summary>
-    private enum Descendant
+    internal enum Descendant
     {
         /// <summary>Unix: in the terminal's foreground process group. Windows: attached to the pseudo-console.</summary>
         OnTerminal,
@@ -626,13 +626,22 @@ public sealed class PtyBaselineTests
     /// A Unix descendant records its own pid after it has set up how it treats the hang-up. Recorded by the child
     /// instead, a <c>nohup</c> descendant could still be starting when the child exits, and the hang-up killed it.
     /// </remarks>
-    private static PtySession StartWithDescendants(Descendant[] descendants, out Task<int[]> pids)
+    internal static PtySession StartWithDescendants(Descendant[] descendants, out Task<int[]> pids, bool killProcessTree = false)
     {
-        var pidFile = Path.Combine(Path.GetTempPath(), "minipty-baseline-" + Guid.NewGuid().ToString("N"));
-        PtyStartInfo child;
+        var pidFile = NewPidFilePath();
+        var session = Pty.Start(DescendantsChild(descendants, pidFile) with { KillProcessTree = killProcessTree });
+        pids = ReadPidFileAsync(pidFile, descendants);
+        return session;
+    }
+
+    internal static string NewPidFilePath() => Path.Combine(Path.GetTempPath(), "minipty-baseline-" + Guid.NewGuid().ToString("N"));
+
+    /// <summary>The child of <see cref="StartWithDescendants"/>, recording the descendants' pids in <paramref name="pidFile"/>.</summary>
+    internal static PtyStartInfo DescendantsChild(Descendant[] descendants, string pidFile)
+    {
         if (OperatingSystem.IsWindows())
         {
-            child = new PtyStartInfo
+            return new PtyStartInfo
             {
                 FileName = TestExecutable,
                 Environment = new Dictionary<string, string?>
@@ -642,27 +651,21 @@ public sealed class PtyBaselineTests
                 },
             };
         }
-        else
-        {
-            var script = new StringBuilder();
-            foreach (var descendant in descendants)
-            {
-                var record = $"echo \"{descendant} $$\" >> \"{pidFile}\"; exec sleep 30";
-                script.Append(descendant switch
-                {
-                    Descendant.OnTerminal => $"sh -c '{record}' & ",
-                    Descendant.HoldsTerminal => $"sh -c 'trap \"\" HUP; {record}' & ",
-                    _ => $"nohup sh -c '{record}' >/dev/null 2>&1 & ",
-                });
-            }
 
-            script.Append("printf ready; IFS= read -r _; exit 0");
-            child = Shell(script.ToString());
+        var script = new StringBuilder();
+        foreach (var descendant in descendants)
+        {
+            var record = $"echo \"{descendant} $$\" >> \"{pidFile}\"; exec sleep 30";
+            script.Append(descendant switch
+            {
+                Descendant.OnTerminal => $"sh -c '{record}' & ",
+                Descendant.HoldsTerminal => $"sh -c 'trap \"\" HUP; {record}' & ",
+                _ => $"nohup sh -c '{record}' >/dev/null 2>&1 & ",
+            });
         }
 
-        var session = Pty.Start(child);
-        pids = ReadPidFileAsync(pidFile, descendants);
-        return session;
+        script.Append("printf ready; IFS= read -r _; exit 0");
+        return Shell(script.ToString());
     }
 
     /// <summary>
@@ -740,7 +743,7 @@ public sealed class PtyBaselineTests
     }
 
     /// <summary>Sends the line on which a child from <see cref="StartWithDescendants"/> exits by itself.</summary>
-    private static Task EndChildAsync(PtySession session) =>
+    internal static Task EndChildAsync(PtySession session) =>
         session.WriteInputAsync(OperatingSystem.IsWindows() ? "\r\n" : "\n").AsTask().WaitAsync(Timeout);
 
     /// <summary>Waits until <paramref name="pidFile"/> has a <c>name pid</c> line for each descendant, then deletes it.</summary>
@@ -749,53 +752,60 @@ public sealed class PtyBaselineTests
         try
         {
             var pids = new int[descendants.Length];
-            var found = await WaitUntilAsync(() =>
-            {
-                if (!File.Exists(pidFile))
-                    return false;
-
-                // The child may still be writing: only lines that already end in a newline count, so a pid cut short is
-                // never read, and a read that collides with the writer tries again.
-                string text;
-                try
-                {
-                    text = File.ReadAllText(pidFile);
-                }
-                catch (IOException)
-                {
-                    return false;
-                }
-
-                var lines = text[..(text.LastIndexOf('\n') + 1)].Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                for (var i = 0; i < descendants.Length; i++)
-                {
-                    pids[i] = 0;
-                    foreach (var line in lines)
-                    {
-                        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                        if (parts.Length == 2 && parts[0] == descendants[i].ToString())
-                            pids[i] = int.Parse(parts[1]);
-                    }
-
-                    if (pids[i] == 0)
-                        return false;
-                }
-
-                return true;
-            }, Timeout);
-
+            var found = await WaitUntilAsync(() => TryReadPids(pidFile, descendants, pids), Timeout);
             return found ? pids : throw new TimeoutException("The descendants did not record their pids.");
         }
         finally
         {
-            try
+            DeletePidFile(pidFile);
+        }
+    }
+
+    /// <summary>Fills <paramref name="pids"/> from <paramref name="pidFile"/> once it lists every descendant.</summary>
+    internal static bool TryReadPids(string pidFile, Descendant[] descendants, int[] pids)
+    {
+        if (!File.Exists(pidFile))
+            return false;
+
+        // The child may still be writing: only lines that already end in a newline count, so a pid cut short is never
+        // read, and a read that collides with the writer tries again.
+        string text;
+        try
+        {
+            text = File.ReadAllText(pidFile);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+
+        var lines = text[..(text.LastIndexOf('\n') + 1)].Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var i = 0; i < descendants.Length; i++)
+        {
+            pids[i] = 0;
+            foreach (var line in lines)
             {
-                File.Delete(pidFile);
+                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 2 && parts[0] == descendants[i].ToString())
+                    pids[i] = int.Parse(parts[1]);
             }
-            catch (IOException)
-            {
-                // The child still has it open; a temporary file is left behind.
-            }
+
+            if (pids[i] == 0)
+                return false;
+        }
+
+        return true;
+    }
+
+    internal static void DeletePidFile(string pidFile)
+    {
+        try
+        {
+            File.Delete(pidFile);
+        }
+        catch (IOException)
+        {
+            // The child still has it open; a temporary file is left behind.
         }
     }
 
@@ -812,18 +822,24 @@ public sealed class PtyBaselineTests
     /// warm-up that lasts until the count has held still for a while.
     /// </summary>
     /// <remarks>
-    /// Two kinds of growth are not leaks. The first starts in a process add handles that stay: on Windows a few dozen at
-    /// a time, in a few steps over the first dozen or so starts, with the thread count all but unchanged. And on Windows
-    /// a closed pseudo-console lets go of its handles in the background within a second, so starts that fail quickly
-    /// leave dozens still pending when the last one returns. So the warm-up lasts until the count holds still, and the
-    /// count is read once it has settled, before and after. A leak never settles.
+    /// <para>
+    /// Three kinds of growth are not leaks. The first starts in a process add handles that stay: on Windows a few dozen at
+    /// a time, in a few steps over the first dozen or so starts, with the thread count all but unchanged. On Windows a
+    /// closed pseudo-console lets go of its handles in the background within a second, so starts that fail quickly leave
+    /// dozens still pending when the last one returns. So the warm-up lasts until the count holds still, and the count is
+    /// read once it has settled, before and after.
+    /// </para>
+    /// <para>
+    /// And anything else in the process can set itself up at any moment, once: the test platform's telemetry upload opens
+    /// an HTTPS connection, and the certificate chain engine and HTTP stack it brings up add 28 to 49 handles at once
+    /// (certificate store keys, a native thread pool, ETW registrations). A one-time step grows one batch of runs, while a
+    /// leak grows every batch, so a batch that grew is followed by another, and the check fails only when both grew.
+    /// </para>
     /// </remarks>
     internal static async Task AssertNoLeakAsync(Func<Task> iteration)
     {
         const int MaxWarmUp = 100;
         const int StillRuns = 10;
-        const int Iterations = 40;
-        const int Slack = 20;
 
         var last = CountOpenHandles();
         for (int i = 0, still = 0; i < MaxWarmUp && still < StillRuns; i++)
@@ -834,13 +850,29 @@ public sealed class PtyBaselineTests
             last = count;
         }
 
+        var grown = await GrowthOverLeakCheckRunsAsync(iteration);
+        if (grown < LeakCheckSlack)
+            return;
+
+        var grownAgain = await GrowthOverLeakCheckRunsAsync(iteration);
+        await Assert.That(grownAgain).IsLessThan(LeakCheckSlack)
+            .Because($"{grown}, then {grownAgain} more handles or descriptors over two batches of {LeakCheckRuns} runs");
+    }
+
+    private const int LeakCheckRuns = 40;
+    // Under one per two runs: a handle leaked on every run, or every other run, fails the check.
+    private const int LeakCheckSlack = 20;
+
+    /// <summary>How much the settled count grew over <see cref="LeakCheckRuns"/> runs, read once it falls under the slack or after 10 s.</summary>
+    private static async Task<int> GrowthOverLeakCheckRunsAsync(Func<Task> iteration)
+    {
         var before = await SettledHandleCountAsync();
-        for (var i = 0; i < Iterations; i++)
+        for (var i = 0; i < LeakCheckRuns; i++)
             await iteration();
 
         var grown = 0;
-        await WaitUntilAsync(() => (grown = CountOpenHandles() - before) < Slack, TimeSpan.FromSeconds(10));
-        await Assert.That(grown).IsLessThan(Slack).Because($"{grown} more handles or descriptors after {Iterations} runs");
+        await WaitUntilAsync(() => (grown = CountOpenHandles() - before) < LeakCheckSlack, TimeSpan.FromSeconds(10));
+        return grown;
     }
 
     /// <summary>The handle or descriptor count once it has stopped falling, or after a few seconds.</summary>
@@ -869,7 +901,7 @@ public sealed class PtyBaselineTests
         return Directory.GetFileSystemEntries(OperatingSystem.IsLinux() ? "/proc/self/fd" : "/dev/fd").Length;
     }
 
-    private static async Task<string> ReadAllTextAsync(PtySession session)
+    internal static async Task<string> ReadAllTextAsync(PtySession session)
     {
         using var output = new MemoryStream();
         await foreach (var chunk in session.ReadOutputAsync())
@@ -894,7 +926,7 @@ public sealed class PtyBaselineTests
         }
     }
 
-    private static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    internal static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
     {
         var deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
         while (!condition())
@@ -912,7 +944,7 @@ public sealed class PtyBaselineTests
     /// Whether the process is still running. A Unix descendant that ended stays a zombie until init reaps it, which
     /// counts as ended.
     /// </summary>
-    private static bool IsRunning(int pid)
+    internal static bool IsRunning(int pid)
     {
         if (OperatingSystem.IsWindows())
         {
@@ -947,7 +979,7 @@ public sealed class PtyBaselineTests
 
     private static bool UnixProcessExists(int pid) => kill(pid, 0) == 0 || Marshal.GetLastPInvokeError() != ESRCH;
 
-    private static void KillAll(int[] pids)
+    internal static void KillAll(int[] pids)
     {
         foreach (var pid in pids)
         {

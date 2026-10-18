@@ -44,15 +44,18 @@ public sealed class PtyConcurrentDisposeTests
 
     /// <summary>
     /// Disposal, kills, and exit queries on real sessions, all at once. A kill that loses the race to disposal either
-    /// ends the child or reports the disposal, and exit queries never fail.
+    /// ends the child or reports the disposal, and exit queries never fail. With <see cref="PtyStartInfo.KillProcessTree"/>
+    /// the kill uses the job handle that disposal releases, pinned the same way.
     /// </summary>
     [Test]
-    public async Task DisposeKillAndExitQueriesCanRunAtTheSameTime()
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task DisposeKillAndExitQueriesCanRunAtTheSameTime(bool killProcessTree)
     {
         const int Rounds = 20;
         for (var round = 0; round < Rounds; round++)
         {
-            var session = Pty.Start(BlockingChild());
+            var session = Pty.Start(BlockingChild() with { KillProcessTree = killProcessTree });
             var disposeAsync = Task.CompletedTask;
 
             RunTogether(

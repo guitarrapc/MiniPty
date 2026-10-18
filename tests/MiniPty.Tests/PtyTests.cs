@@ -1247,8 +1247,10 @@ public sealed class PtyTests
             session.Resize(new(600, 200));
             var result = await session.CompleteAsync(new PtyCompleteOptions { Input = "go\r\n" });
 
-            await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(result.Contains("600 200")).IsTrue();
+            // Exited once with 5 on windows-11-arm (not reproduced on x64, idle or loaded); the output says why next time.
+            var output = Escape(result.GetTextString());
+            await Assert.That(result.ExitCode).IsEqualTo(0).Because("the output was: " + output);
+            await Assert.That(result.Contains("600 200")).IsTrue().Because("the output was: " + output);
             return;
         }
 
@@ -1259,6 +1261,10 @@ public sealed class PtyTests
 
         await Assert.That(unixResult.ExitCode).IsEqualTo(0);
         await Assert.That(unixResult.Contains("SIZE:200:600")).IsTrue();
+
+        static string Escape(string text) =>
+            text.Replace("\u001b", "\\e", StringComparison.Ordinal).Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal);
     }
 
     [Test]

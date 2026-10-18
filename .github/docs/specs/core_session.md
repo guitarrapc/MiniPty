@@ -18,6 +18,7 @@ Implemented user-facing contract for the **MiniPty** core session API.
 | `Environment` | Optional child environment overlay. Null inherits the parent environment. Non-null entries override or remove inherited variables. |
 | `TerminalName` | Optional Unix terminal name for `TERM`. Null or empty uses default behavior. Currently ignored on Windows. |
 | `InheritCursor` | Default `false`. On Windows, start the child at the frontend's cursor instead of on a cleared screen (node-pty `conptyInheritCursor`); the frontend must answer ConPTY's cursor position query. Ignored on Unix, which already starts at the frontend's cursor. See [Inherited cursor](#inherited-cursor). |
+| `KillProcessTree` | Default `false`. On Windows, run the child in a kill-on-close job, so `Dispose`, `Kill`, and the end of the host process, including a crash, end every process the child started. Ignored on Unix. See [Process tree](#process-tree). |
 
 ## Spawn Environment
 
@@ -37,6 +38,23 @@ On Unix, MiniPty removes inherited terminal-container and size variables before 
 On Unix, `TerminalName` sets `TERM` after the environment overlay. If `TerminalName` is null or empty and no `TERM` remains, MiniPty sets `TERM=xterm-256color` unless `TERM` was explicitly removed by the overlay. `Environment["TERM"] = ""` is respected as an explicit empty value on Unix. On Windows, `TerminalName` does not set `TERM`; use `Environment["TERM"]` to pass it explicitly.
 
 MiniPty environment inheritance follows normal process-spawn behavior and is not a sandbox. Callers exposing PTYs to untrusted users must isolate the child process outside MiniPty, for example with OS users, containers, sandboxing, or explicit environment removal.
+
+## Process Tree
+
+By default, ending a session on Windows ends the child and the processes attached to its pseudo-console. A descendant in a console of its own, or a GUI program, keeps running, and when the host process crashes every descendant does ([Descendants](lifecycle.md#descendants)).
+
+`PtyStartInfo.KillProcessTree = true` runs the child in a job object with kill-on-close. The child joins it at creation, and its descendants inherit it.
+
+| Rule | Behavior |
+|---|---|
+| Ends the tree | `Dispose`, `Kill` (also after the child itself has exited), and the end of the host process in any way, including a crash: the kernel closes the job's only handle. |
+| Leaves it running | The child's own exit. The session owns the tree until it is disposed, so a descendant of a finished child runs until then. |
+| Breakaway | Not allowed. A program that asks to leave the job (`CREATE_BREAKAWAY_FROM_JOB`) fails to start in the session. |
+| Host inside a job | Supported: jobs nest, as under CI runners and editors. |
+| Failure | A job that cannot be created fails `Pty.Start`; there is no fallback to a session without it. |
+| Unix | Ignored. Disposal hangs the child up as without it. |
+
+The option is off by default because it also ends programs the user started from the terminal on purpose, such as an editor window.
 
 ## Inherited Cursor
 

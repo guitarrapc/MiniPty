@@ -43,6 +43,17 @@ internal static partial class WindowsInterop
     internal static partial bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial IntPtr CreateJobObjectW(IntPtr lpJobAttributes, IntPtr lpName);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool SetInformationJobObject(IntPtr hJob, int jobObjectInformationClass, void* lpJobObjectInformation, uint cbJobObjectInformationLength);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool TerminateJobObject(IntPtr hJob, uint uExitCode);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool CloseHandle(IntPtr hObject);
 
