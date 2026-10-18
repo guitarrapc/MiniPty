@@ -35,6 +35,10 @@ public sealed class PtyBaselineTests
     private const int SigKill = 9;
     // Set on this test executable to make it the child of ResizeReachesTheRunningChild on Windows.
     private const string ResizeChildVariable = "MINIPTY_TESTS_RESIZE_CHILD";
+    // Set on this test executable to make it the child of StartWithDescendants on Windows: the descendants to start, and
+    // the file their pids go to.
+    private const string DescendantsChildVariable = "MINIPTY_TESTS_DESCENDANTS_CHILD";
+    private const string PidFileVariable = "MINIPTY_TESTS_PID_FILE";
 
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
@@ -306,7 +310,7 @@ public sealed class PtyBaselineTests
         var child = OperatingSystem.IsWindows()
             ? new PtyStartInfo
             {
-                FileName = Path.Combine(AppContext.BaseDirectory, "MiniPty.Tests.exe"),
+                FileName = TestExecutable,
                 Environment = new Dictionary<string, string?> { [ResizeChildVariable] = "1" },
             }
             : Shell("trap 'set -- $(stty size); printf \"SIZE:%s:%s;\" \"$1\" \"$2\"' WINCH; printf ready; " + UnixWaitLoop);
@@ -324,17 +328,33 @@ public sealed class PtyBaselineTests
     }
 
     /// <summary>
-    /// Reports each <c>WINDOW_BUFFER_SIZE_EVENT</c> as <c>SIZE:columns:rows;</c> when <see cref="ResizeChildVariable"/>
-    /// is set, as the child of <see cref="ResizeReachesTheRunningChild"/>. Runs before the test framework starts, ends
-    /// by itself after 30 s, and exits the process; in a test run the variable is unset and this returns at once.
+    /// Makes this test executable a Windows child of these tests when one of their variables is set: the resize child
+    /// (<see cref="ResizeChildVariable"/>) or the descendants child (<see cref="DescendantsChildVariable"/>). Runs before
+    /// the test framework starts and exits the process; in a test run the variables are unset and this returns at once.
     /// </summary>
+    /// <remarks>
+    /// This executable starts in a fraction of the time Windows PowerShell takes. A PowerShell child that started the
+    /// descendants did not record them within the tests' 30 s on the hosted ARM64 runner under the parallel suite.
+    /// </remarks>
     [ModuleInitializer]
-    internal static void RunAsResizeChildWhenAsked()
+    internal static void RunAsChildWhenAsked()
     {
-        if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable(ResizeChildVariable) is not null)
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        if (Environment.GetEnvironmentVariable(ResizeChildVariable) is not null)
             Environment.Exit(RunWindowsResizeChild());
+
+        if (Environment.GetEnvironmentVariable(DescendantsChildVariable) is { } descendants)
+            Environment.Exit(RunWindowsDescendantsChild(descendants, Environment.GetEnvironmentVariable(PidFileVariable)!));
     }
 
+    private static string TestExecutable => Path.Combine(AppContext.BaseDirectory, "MiniPty.Tests.exe");
+
+    /// <summary>
+    /// Reports each <c>WINDOW_BUFFER_SIZE_EVENT</c> as <c>SIZE:columns:rows;</c>, as the child of
+    /// <see cref="ResizeReachesTheRunningChild"/>. Ends by itself after 30 s.
+    /// </summary>
     private static unsafe int RunWindowsResizeChild()
     {
         var input = CreateFileW("CONIN$", GenericRead | GenericWrite, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
@@ -612,23 +632,15 @@ public sealed class PtyBaselineTests
         PtyStartInfo child;
         if (OperatingSystem.IsWindows())
         {
-            if (!TryGetWindowsPowerShell(out var powershell))
-                throw new InvalidOperationException("Windows PowerShell is not installed.");
-
-            var script = new StringBuilder("$lines = @(); ");
-            foreach (var descendant in descendants)
+            child = new PtyStartInfo
             {
-                var window = descendant == Descendant.Detached ? "-WindowStyle Hidden" : "-NoNewWindow";
-                // waitfor blocks silently until its timeout, so the child is the only process writing to the console. With
-                // a descendant that wrote at the same moment (ping), ConPTY's stream lacked the child's "ready" in 0.5–5 %
-                // of runs, depending on load, although the child wrote it and exited normally (see lifecycle.md, Lessons
-                // Learned).
-                script.Append($"$lines += '{descendant} ' + (Start-Process waitfor.exe -ArgumentList '/t','30','MiniPtyBaseline{Guid.NewGuid():N}' {window} -PassThru).Id; ");
-            }
-
-            script.Append($"[IO.File]::WriteAllLines('{pidFile}', [string[]]$lines); ");
-            script.Append("[Console]::Out.Write('ready'); [Console]::In.ReadLine() | Out-Null; exit 0");
-            child = new PtyStartInfo { FileName = powershell, Arguments = ["-NoLogo", "-NoProfile", "-Command", script.ToString()] };
+                FileName = TestExecutable,
+                Environment = new Dictionary<string, string?>
+                {
+                    [DescendantsChildVariable] = string.Join(',', descendants),
+                    [PidFileVariable] = pidFile,
+                },
+            };
         }
         else
         {
@@ -651,6 +663,80 @@ public sealed class PtyBaselineTests
         var session = Pty.Start(child);
         pids = ReadPidFileAsync(pidFile, descendants);
         return session;
+    }
+
+    /// <summary>
+    /// The Windows child of <see cref="StartWithDescendants"/>: starts each of <paramref name="descendants"/>, records
+    /// their pids in <paramref name="pidFile"/>, prints <c>ready</c>, and exits once a line arrives on stdin.
+    /// </summary>
+    private static int RunWindowsDescendantsChild(string descendants, string pidFile)
+    {
+        var lines = new List<string>();
+        foreach (var descendant in descendants.Split(','))
+            lines.Add($"{descendant} {StartWindowsDescendant(detached: descendant == nameof(Descendant.Detached))}");
+
+        File.WriteAllLines(pidFile, lines);
+        System.Console.Out.Write("ready");
+        System.Console.Out.Flush();
+        System.Console.In.ReadLine();
+        return 0;
+    }
+
+    /// <summary>
+    /// Starts <c>waitfor</c>, which blocks silently for 30 s, attached to this process's console or in a hidden console
+    /// of its own, and returns its pid. No handle is inherited, so an attached descendant holds nothing of this process
+    /// but the console it joins.
+    /// </summary>
+    /// <remarks>
+    /// Silent, so the child is the only process writing to the console. With a descendant that wrote at the same moment
+    /// (<c>ping</c>), ConPTY's stream lacked the child's <c>ready</c> in 0.5–5 % of runs, depending on load, although the
+    /// child wrote it and exited normally (see lifecycle.md, Lessons Learned).
+    /// </remarks>
+    private static int StartWindowsDescendant(bool detached)
+    {
+        var startupInfo = new StartupInfo { Size = Marshal.SizeOf<StartupInfo>() };
+        uint creationFlags = 0;
+        if (detached)
+        {
+            creationFlags = CreateNewConsole;
+            startupInfo.Flags = StartfUseShowWindow;
+            startupInfo.ShowWindow = SwHide;
+        }
+
+        var commandLine = new StringBuilder($"\"{Path.Combine(Environment.SystemDirectory, "waitfor.exe")}\" /t 30 MiniPtyBaseline{Guid.NewGuid():N}");
+        if (!CreateProcessW(null, commandLine, IntPtr.Zero, IntPtr.Zero, false, creationFlags, IntPtr.Zero, null, ref startupInfo, out var processInformation))
+            throw new Win32Exception();
+
+        CloseHandle(processInformation.Thread);
+        CloseHandle(processInformation.Process);
+        if (!detached)
+            WaitUntilAttached(processInformation.ProcessId);
+
+        return processInformation.ProcessId;
+    }
+
+    /// <summary>
+    /// Waits until <paramref name="processId"/> is attached to this process's console. A process attaches during its
+    /// own startup, after <c>CreateProcess</c> returns; one still starting when the pseudo-console closes never attaches
+    /// and outlives it, so a descendant is reported only once it is attached.
+    /// </summary>
+    private static void WaitUntilAttached(int processId)
+    {
+        var attached = new uint[64];
+        var deadline = Environment.TickCount64 + 30_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            var count = GetConsoleProcessList(attached, (uint)attached.Length);
+            for (var i = 0; i < count && i < attached.Length; i++)
+            {
+                if (attached[i] == (uint)processId)
+                    return;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        throw new TimeoutException($"Process {processId} did not attach to the console.");
     }
 
     /// <summary>Sends the line on which a child from <see cref="StartWithDescendants"/> exits by itself.</summary>
@@ -924,6 +1010,60 @@ public sealed class PtyBaselineTests
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern unsafe bool ReadConsoleInputW(IntPtr hConsoleInput, InputRecord* lpBuffer, uint nLength, out uint lpNumberOfEventsRead);
+
+    private const uint CreateNewConsole = 0x00000010;
+    private const int StartfUseShowWindow = 0x00000001;
+    private const short SwHide = 0;
+
+    /// <summary><c>STARTUPINFOW</c>; the string members are left null.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StartupInfo
+    {
+        public int Size;
+        public IntPtr Reserved;
+        public IntPtr Desktop;
+        public IntPtr Title;
+        public int X;
+        public int Y;
+        public int XSize;
+        public int YSize;
+        public int XCountChars;
+        public int YCountChars;
+        public int FillAttribute;
+        public int Flags;
+        public short ShowWindow;
+        public short Reserved2Size;
+        public IntPtr Reserved2;
+        public IntPtr StdInput;
+        public IntPtr StdOutput;
+        public IntPtr StdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr Process;
+        public IntPtr Thread;
+        public int ProcessId;
+        public int ThreadId;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessW(
+        string? lpApplicationName,
+        StringBuilder lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        [MarshalAs(UnmanagedType.Bool)] bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string? lpCurrentDirectory,
+        ref StartupInfo lpStartupInfo,
+        out ProcessInformation lpProcessInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetConsoleProcessList([Out] uint[] lpdwProcessList, uint dwProcessCount);
 
     private const int ErrorBrokenPipe = 109;
     private const uint HandleFlagInherit = 0x00000001;

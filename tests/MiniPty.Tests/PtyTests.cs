@@ -1269,17 +1269,32 @@ public sealed class PtyTests
             : UnixShell("exit 0"));
         var initial = session.Size;
 
-        // HasExited observes exit without closing the transport, unlike WaitForExitAsync on Windows.
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        // HasExited observes exit without closing the transport. The post-exit drain closes it after 100 ms of quiet, so
+        // the poll spins rather than sleeping: a timer wait on a loaded runner outlasted that and found it closed.
+        var deadline = Environment.TickCount64 + 15_000;
+        var spinner = new SpinWait();
         while (!session.HasExited)
-            await Task.Delay(10, cts.Token);
+        {
+            if (Environment.TickCount64 > deadline)
+                throw new TimeoutException("The child did not exit.");
+
+            spinner.SpinOnce(sleep1Threshold: -1);
+        }
 
         session.Resize(new PtySize(100, 30));
+        // Read after the resize returned: the flag is set before the close starts, so a clear flag means the resize ran
+        // while the transport was open.
+        var closeStarted = session.OutputPump.IsCloseRequested;
 
         if (OperatingSystem.IsWindows())
         {
-            // conhost stays alive until the pseudo-console is closed, so the size is still applied.
-            await Assert.That(session.Size).IsEqualTo(new PtySize(100, 30));
+            // conhost stays alive until the pseudo-console is closed, so the size is still applied. A runner that kept
+            // this thread off a core past the drain's quiet period closed it first, and the resize is then the documented
+            // no-op that PtyResizeAfterTransportClosedIsNoOp covers.
+            if (!closeStarted)
+                await Assert.That(session.Size).IsEqualTo(new PtySize(100, 30));
+            else
+                await Assert.That(session.Size == new PtySize(100, 30) || session.Size == initial).IsTrue();
             return;
         }
 

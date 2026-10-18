@@ -333,12 +333,19 @@ public sealed class PtyTerminalTests
         Spawn("sh", ["-c", "trap 'exit 0' HUP; printf 'READY\\n'; IFS= read -r _"]);
 
     /// <summary>
-    /// Child that emits one line immediately, then sustained bulk output (256 KiB) and exits 0. Windows types a
-    /// file: echoing the lines one by one outlasted the test's 30 s on a loaded hosted ARM64 runner.
+    /// Child that emits one line immediately, then bulk output, and exits 0. The output only has to outlast what the
+    /// session and the terminal take while paused, so that the child stays blocked. Windows types a file: echoing the
+    /// lines one by one outlasted the test's 30 s on a loaded hosted ARM64 runner.
     /// </summary>
+    /// <remarks>
+    /// Windows writes 64 KiB: 16 KiB that nobody read already kept the child from exiting, and every byte more costs
+    /// time after resume. Under CPU oversubscription ConPTY drains only about 10 KB/s whatever the line shape (Windows 11
+    /// build 26200 with 48 busy processes: 256 KiB took 20–60 s in 512, 128, or 32 lines), and 256 KiB outlasted the
+    /// 30 s on both hosted Windows runners. A Unix pty buffers up to about 64 KB of its own, so Unix keeps 256 KiB.
+    /// </remarks>
     private static PtyStartInfo PauseFlowTestChild() =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? WindowsCommandLine($"echo PAUSE_FLOW_START & {WindowsFloodFile.TypeCommand(BulkOutputLines, BulkOutputLineWidth)}")
+            ? WindowsCommandLine($"echo PAUSE_FLOW_START & {WindowsFloodFile.TypeCommand(PauseFlowLines, BulkOutputLineWidth)}")
             : Spawn("sh", ["-c", "printf 'PAUSE_FLOW_START\\n'; i=0; while [ $i -lt 2048 ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
 
     /// <summary>Child that emits sustained bulk output (256 KiB) then exits 0.</summary>
@@ -350,6 +357,8 @@ public sealed class PtyTerminalTests
     // 256 KiB in few lines: a drain costs a console frame per line, about 8 ms each under CPU oversubscription.
     private const int BulkOutputLines = 512;
     private const int BulkOutputLineWidth = 512;
+    // 64 KiB at BulkOutputLineWidth; see PauseFlowTestChild.
+    private const int PauseFlowLines = 128;
 
     /// <summary>A cmd.exe child given a pre-escaped command line, so a quoted path inside it reaches cmd intact.</summary>
     private static PtyStartInfo WindowsCommandLine(string command) =>

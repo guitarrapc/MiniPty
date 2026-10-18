@@ -11,6 +11,12 @@ namespace MiniPty.Tests;
 /// output ring exactly once, and nothing may use a handle after its release, because Windows hands a released handle's
 /// value to the next object the process opens.
 /// </summary>
+/// <remarks>
+/// The tests run alone. Their racing threads spin to start together and take whole cores meanwhile, which slows any
+/// ConPTY-bound test beside them on a four-core hosted runner, because ConPTY drains slowly under CPU contention. Other
+/// tests opening handles meanwhile would also take the released values the reuse test waits for.
+/// </remarks>
+[NotInParallel]
 public sealed class PtyConcurrentDisposeTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);

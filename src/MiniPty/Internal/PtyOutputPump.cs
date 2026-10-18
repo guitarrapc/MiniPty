@@ -113,6 +113,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
     internal bool IsSessionDisposed => (Volatile.Read(ref _flags) & FlagSessionDisposed) != 0;
 
+    /// <summary>Whether the transport close has started: set before <see cref="IPtyBackend.CloseOutputTransport"/> runs.</summary>
+    internal bool IsCloseRequested => (Volatile.Read(ref _flags) & FlagCloseRequested) != 0;
+
     /// <summary>The transport failure that ended the pump, if any. Read only after <see cref="IsProducerFinished"/>.</summary>
     internal Exception? Error => _error;
 
