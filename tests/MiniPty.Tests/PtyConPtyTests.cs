@@ -16,11 +16,18 @@ namespace MiniPty.Tests;
 /// beside the DLL in this test's output, as it does for a package consumer. Windows only; elsewhere the type refuses to
 /// load and <see cref="PtySession.Clear"/> is a no-op.
 /// </summary>
+/// <remarks>
+/// One at a time: the census tests tell the implementation by the console host processes this test process has, and
+/// the timing tests compare the two implementations under the same load.
+/// </remarks>
+[NotInParallel("conpty")]
 public sealed class PtyConPtyTests
 {
     // Set on this test executable to make it the VT probe child of ForwardsTheSequencesTheInBoxHostConsumes.
     private const string VtProbeChildVariable = "MINIPTY_TESTS_VT_PROBE_CHILD";
     private const string DeviceAttributesQuery = "\e[c";
+    private const string CursorPositionQuery = "\e[6n";
+    private const string ClearScreen = "\e[2J";
     private const string CursorHome = "\e[1;1H";
     private const string OutOfBandHost = "OpenConsole.exe";
     private const string InBoxHost = "conhost.exe";
@@ -102,7 +109,6 @@ public sealed class PtyConPtyTests
     /// <c>conhost.exe</c> child, and both go away with the session.
     /// </summary>
     [Test]
-    [NotInParallel("conpty-census")]
     [Arguments(true)]
     [Arguments(false)]
     public async Task SessionRunsUnderTheHostOfItsImplementation(bool outOfBand)
@@ -112,18 +118,7 @@ public sealed class PtyConPtyTests
 
         var host = outOfBand ? OutOfBandHost : InBoxHost;
         var startInfo = outOfBand ? Shell() with { ConPty = Library() } : Shell();
-        var hostsBefore = CountChildren(host);
-
-        await using var session = Pty.Start(startInfo);
-        var output = ReadAllTextAsync(session);
-        await Assert.That(await WaitUntilAsync(() => CountChildren(host) > hostsBefore, Timeout)).IsTrue()
-            .Because($"a {host} child of this process should host the session");
-
-        await session.WriteInputAsync("exit\r");
-        await session.WaitForExitAsync().WaitAsync(Timeout);
-        await output.WaitAsync(Timeout);
-        await Assert.That(await WaitUntilAsync(() => CountChildren(host) == hostsBefore, Timeout)).IsTrue()
-            .Because($"the {host} should end with the session");
+        await AssertSessionRunsUnderAsync(startInfo, host);
     }
 
     /// <summary>
@@ -131,7 +126,6 @@ public sealed class PtyConPtyTests
     /// without an error. <see cref="ConPtyLibrary.HasConsoleHost"/> reports that before the first spawn.
     /// </summary>
     [Test]
-    [NotInParallel("conpty-census")]
     public async Task WithoutItsHostTheLibraryReportsSoAndSessionsRunOnConhost()
     {
         if (!OperatingSystem.IsWindows())
@@ -150,15 +144,60 @@ public sealed class PtyConPtyTests
         await Assert.That(library.ConsoleHostPath).IsNull();
         await Assert.That(library.FileVersion).IsEqualTo(staged.FileVersion);
 
-        var conhostsBefore = CountChildren(InBoxHost);
-        await using var session = Pty.Start(Shell() with { ConPty = library });
-        var output = ReadAllTextAsync(session);
-        await Assert.That(await WaitUntilAsync(() => CountChildren(InBoxHost) > conhostsBefore, Timeout)).IsTrue()
-            .Because("conpty.dll without its host falls back to conhost.exe");
+        await AssertSessionRunsUnderAsync(Shell() with { ConPty = library }, InBoxHost);
+    }
 
-        await session.WriteInputAsync("exit\r");
-        await session.WaitForExitAsync().WaitAsync(Timeout);
-        await output.WaitAsync(Timeout);
+    // ---------------------------------------------------------------- Inherited cursor
+
+    /// <summary>
+    /// <see cref="PtyStartInfo.InheritCursor"/> on the out-of-band host: it asks for the cursor position, continues
+    /// from the answer, and does not clear, as the in-box host does ([PtyInheritCursorTests]).
+    /// </summary>
+    [Test]
+    public async Task InheritCursorContinuesFromTheAnsweredPositionOnTheOutOfBandHost()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        await using var session = Pty.Start(WindowsCommand("echo INHERIT_MARKER") with { ConPty = Library(), InheritCursor = true });
+        using var cts = new CancellationTokenSource(Timeout);
+        var output = new StringBuilder();
+        var answered = false;
+        await foreach (var chunk in session.ReadOutputAsync(cts.Token))
+        {
+            output.Append(Encoding.UTF8.GetString(chunk.Data.Span));
+            if (answered || output.ToString().IndexOf(CursorPositionQuery, StringComparison.Ordinal) < 0)
+                continue;
+
+            answered = true;
+            await session.WriteInputAsync("\e[5;1R"u8.ToArray(), cts.Token);
+        }
+
+        var status = await session.WaitForExitAsync().WaitAsync(Timeout);
+        await Assert.That(status.ExitCode).IsEqualTo(0);
+        var text = output.ToString();
+        await Assert.That(text).Contains(CursorPositionQuery);
+        await Assert.That(text).Contains("INHERIT_MARKER");
+        await Assert.That(text).DoesNotContain(ClearScreen);
+    }
+
+    /// <summary>
+    /// Unanswered, the out-of-band host gives up on its startup answers after one second and runs the child (1043 ms
+    /// measured), where the in-box host holds the child's output with no timeout.
+    /// </summary>
+    [Test]
+    public async Task UnansweredInheritCursorIsBoundedOnTheOutOfBandHost()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        await using var session = Pty.Start(WindowsCommand("echo BOUNDED_MARKER") with { ConPty = Library(), InheritCursor = true });
+        var result = await session.CompleteAsync().WaitAsync(Timeout);
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        var text = result.GetText().ToString();
+        await Assert.That(text).Contains(CursorPositionQuery);
+        await Assert.That(text).Contains("BOUNDED_MARKER");
     }
 
     // ---------------------------------------------------------------- Behavior of the out-of-band host
@@ -192,7 +231,6 @@ public sealed class PtyConPtyTests
     /// wait for the answer, where earlier versions waited three seconds per session.
     /// </summary>
     [Test]
-    [NotInParallel("conpty-timing")]
     public async Task ReadOnlyCompletionDoesNotWaitForTheDeviceAttributesAnswer()
     {
         if (!OperatingSystem.IsWindows())
@@ -217,7 +255,6 @@ public sealed class PtyConPtyTests
     /// post-exit quiet interval the in-box path needs.
     /// </summary>
     [Test]
-    [NotInParallel("conpty-timing")]
     public async Task OutputEndsOnThePipeBreakAfterExit()
     {
         if (!OperatingSystem.IsWindows())
@@ -434,8 +471,31 @@ public sealed class PtyConPtyTests
         }
     }
 
-    /// <summary>Children of this process named <paramref name="exeName"/>, from a Toolhelp snapshot.</summary>
-    private static int CountChildren(string exeName)
+    /// <summary>
+    /// Starts <paramref name="startInfo"/> and checks that a new child of this process named <paramref name="host"/>
+    /// appears with it and ends with it. Children are told apart by process id, so hosts of other sessions, which
+    /// other test classes start and end meanwhile, do not count.
+    /// </summary>
+    private static async Task AssertSessionRunsUnderAsync(PtyStartInfo startInfo, string host)
+    {
+        var before = ChildProcesses(host);
+        var started = new HashSet<uint>();
+
+        await using var session = Pty.Start(startInfo);
+        var output = ReadAllTextAsync(session);
+        await Assert.That(await WaitUntilAsync(() => (started = ChildProcesses(host)).Except(before).Any(), Timeout)).IsTrue()
+            .Because($"a {host} child of this process should host the session");
+        started.ExceptWith(before);
+
+        await session.WriteInputAsync("exit\r");
+        await session.WaitForExitAsync().WaitAsync(Timeout);
+        await output.WaitAsync(Timeout);
+        await Assert.That(await WaitUntilAsync(() => !ChildProcesses(host).Overlaps(started), Timeout)).IsTrue()
+            .Because($"the {host} should end with the session");
+    }
+
+    /// <summary>Process ids of the children of this process named <paramref name="exeName"/>, from a Toolhelp snapshot.</summary>
+    private static HashSet<uint> ChildProcesses(string exeName)
     {
         var snapshot = CreateToolhelp32Snapshot(Th32CsSnapProcess, 0);
         if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1))
@@ -444,15 +504,15 @@ public sealed class PtyConPtyTests
         try
         {
             var self = (uint)Environment.ProcessId;
-            var count = 0;
+            var children = new HashSet<uint>();
             var entry = new ProcessEntry { dwSize = (uint)Marshal.SizeOf<ProcessEntry>() };
             for (var more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry))
             {
                 if (entry.th32ParentProcessID == self && string.Equals(entry.szExeFile, exeName, StringComparison.OrdinalIgnoreCase))
-                    count++;
+                    children.Add(entry.th32ProcessID);
             }
 
-            return count;
+            return children;
         }
         finally
         {

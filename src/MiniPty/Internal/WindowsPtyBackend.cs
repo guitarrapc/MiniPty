@@ -171,7 +171,8 @@ internal static class WindowsPtyBackend
         var coord = new WindowsCoord((short)size.Columns, (short)size.Rows);
         var pseudoConsoleFlags = startInfo.InheritCursor ? PseudoConsoleInheritCursor : 0;
         // The application's out-of-band ConPTY, or null for the one Windows ships (see PtyStartInfo.ConPty). Every
-        // pseudo-console call of the session goes through the implementation that created it.
+        // pseudo-console call of the session goes through the implementation that created it, which the handle
+        // carries; a session on the in-box ConPTY keeps its handle and its allocation unchanged.
         var library = startInfo.ConPty;
         IntPtr pseudoConsoleHandle;
         int hr;
@@ -188,7 +189,9 @@ internal static class WindowsPtyBackend
             throw new Win32Exception(hr, "CreatePseudoConsole failed");
         }
 
-        var hpc = new SafePseudoConsoleHandle(pseudoConsoleHandle, library);
+        SafePseudoConsoleHandle hpc = library is null
+            ? new SafePseudoConsoleHandle(pseudoConsoleHandle)
+            : new OutOfBandPseudoConsoleHandle(pseudoConsoleHandle, library);
         inputRead.Dispose();
         outputWrite.Dispose();
 
@@ -313,7 +316,6 @@ internal static class WindowsPtyBackend
                 inputWriteHandle,
                 outputReadHandle,
                 hpc,
-                library,
                 attrList,
                 process,
                 job,
@@ -430,9 +432,8 @@ internal static class WindowsPtyBackend
         // MiniPty's end of the input pipe, opened overlapped (see CreateInputPipe).
         private readonly SafeFileHandle _inputWriteHandle;
         private readonly SafeFileHandle _outputReadHandle;
+        // Resizes, clears, and closes through the ConPTY implementation that created the pseudo-console.
         private readonly SafePseudoConsoleHandle _hpc;
-        // The out-of-band ConPTY the pseudo-console was created with, or null for the in-box one.
-        private readonly ConPtyLibrary? _library;
         private readonly IntPtr _attrList;
         // Pinned for every native call (see TryPin), because Dispose can release it while the exit watcher, the
         // EOF timer, or a caller is still using it.
@@ -474,7 +475,6 @@ internal static class WindowsPtyBackend
             SafeFileHandle inputWriteHandle,
             SafeFileHandle outputReadHandle,
             SafePseudoConsoleHandle hpc,
-            ConPtyLibrary? library,
             IntPtr attrList,
             SafeKernelHandle process,
             SafeKernelHandle? job,
@@ -484,7 +484,6 @@ internal static class WindowsPtyBackend
             _inputWriteHandle = inputWriteHandle;
             _outputReadHandle = outputReadHandle;
             _hpc = hpc;
-            _library = library;
             _attrList = attrList;
             _process = process;
             _job = job;
@@ -999,10 +998,7 @@ internal static class WindowsPtyBackend
             int hr;
             try
             {
-                var coord = new WindowsCoord((short)columns, (short)rows);
-                hr = _library is null
-                    ? WindowsInterop.ResizePseudoConsole(_hpc.DangerousGetHandle(), coord)
-                    : _library.ResizePseudoConsole(_hpc.DangerousGetHandle(), coord);
+                hr = _hpc.Resize(new WindowsCoord((short)columns, (short)rows));
             }
             finally
             {
@@ -1027,7 +1023,7 @@ internal static class WindowsPtyBackend
 
             // The in-box ConPTY exposes no clear operation. After the post-exit drain has closed the pseudo-console
             // there is nothing left to clear, so the call is a no-op, as Resize is.
-            if (_library is null || _hpc.IsClosed)
+            if (!_hpc.CanClear || _hpc.IsClosed)
                 return;
 
             var addedRef = false;
@@ -1043,7 +1039,7 @@ internal static class WindowsPtyBackend
             int hr;
             try
             {
-                hr = _library.ClearPseudoConsole(_hpc.DangerousGetHandle(), keepCursorRow: false);
+                hr = _hpc.Clear();
             }
             finally
             {
@@ -1718,28 +1714,48 @@ internal static class WindowsPtyBackend
     }
 
     /// <summary>
-    /// The pseudo-console handle, closed by the implementation that created it: a handle from the out-of-band
-    /// <c>conpty.dll</c> must not reach the in-box <c>ClosePseudoConsole</c>, nor the reverse.
+    /// The pseudo-console handle of the in-box ConPTY, which resizes and closes it through <c>kernel32.dll</c>. Every
+    /// operation on a pseudo-console goes through the implementation that created it, so a handle from the out-of-band
+    /// <c>conpty.dll</c> is an <see cref="OutOfBandPseudoConsoleHandle"/> instead; an in-box session carries nothing for
+    /// the other implementation.
     /// </summary>
-    private sealed class SafePseudoConsoleHandle : SafeHandle
+    private class SafePseudoConsoleHandle : SafeHandle
     {
-        private readonly ConPtyLibrary? _library;
-
-        public SafePseudoConsoleHandle(IntPtr value, ConPtyLibrary? library) : base(IntPtr.Zero, ownsHandle: true)
-        {
-            _library = library;
-            SetHandle(value);
-        }
+        public SafePseudoConsoleHandle(IntPtr value) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(value);
 
         public override bool IsInvalid => handle == IntPtr.Zero;
 
+        /// <summary>Whether <see cref="Clear"/> does anything: the in-box ConPTY exposes no clear operation.</summary>
+        public virtual bool CanClear => false;
+
+        public virtual int Resize(WindowsCoord size) => WindowsInterop.ResizePseudoConsole(handle, size);
+
+        public virtual int Clear() => 0;
+
         protected override bool ReleaseHandle()
         {
-            if (_library is null)
-                WindowsInterop.ClosePseudoConsole(handle);
-            else
-                _library.ClosePseudoConsole(handle);
+            WindowsInterop.ClosePseudoConsole(handle);
+            return true;
+        }
+    }
 
+    /// <summary>A pseudo-console created by an out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>).</summary>
+    private sealed class OutOfBandPseudoConsoleHandle : SafePseudoConsoleHandle
+    {
+        private readonly ConPtyLibrary _library;
+
+        public OutOfBandPseudoConsoleHandle(IntPtr value, ConPtyLibrary library) : base(value) => _library = library;
+
+        public override bool CanClear => true;
+
+        public override int Resize(WindowsCoord size) => _library.ResizePseudoConsole(handle, size);
+
+        // The frontend has cleared its own display, so the host's cursor goes to the top with it.
+        public override int Clear() => _library.ClearPseudoConsole(handle, keepCursorRow: false);
+
+        protected override bool ReleaseHandle()
+        {
+            _library.ClosePseudoConsole(handle);
             return true;
         }
     }

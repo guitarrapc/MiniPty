@@ -105,6 +105,38 @@ Without this, command output can appear on the parent's console instead of the c
 
 ConPTY requires Windows 10 1809+ / Windows 11. MiniPty does not use winpty.
 
+### Out-of-band ConPTY
+
+`PtyStartInfo.ConPty` runs a session on `conpty.dll` plus `OpenConsole.exe` supplied by the application ([Out-of-band ConPTY](../specs/core_session.md#out-of-band-conpty)). What differs from the in-box path, verified against the console host source of the 1.22, 1.24, 1.25, and main branches, the export tables of the 1.22 and 1.25 builds, and package `1.25.260930003` on Windows 11 build 26200:
+
+| Topic | In-box (`kernel32.dll` + `conhost.exe`) | Out-of-band (`conpty.dll` + `OpenConsole.exe`) |
+|---|---|---|
+| Entry points | `CreatePseudoConsole`, `ResizePseudoConsole`, `ClosePseudoConsole`; build 26100 also exports `ReleasePseudoConsole` | The same names plus a `Conpty`-prefixed set: `ConptyCreatePseudoConsole`, `ConptyResizePseudoConsole`, `ConptyClearPseudoConsole(HPCON, BOOL keepCursorRow)`, `ConptyReleasePseudoConsole`, `ConptyClosePseudoConsole`, `ConptyShowHidePseudoConsole`, `ConptyReparentPseudoConsole`, `ConptyPackPseudoConsole`, `ConptyCreatePseudoConsoleAsUser`. Identical in the 1.22 and 1.25 builds. `ConptyClosePseudoConsoleTimeout` appears in some header copies but in no binary. |
+| Binding | `LibraryImport` | `NativeLibrary.Load` by absolute path, `GetExport`, unmanaged function pointers. `ConptyClearPseudoConsole` takes two arguments in every published version; the second is always passed, since a one-argument call leaves it to whatever the register holds. |
+| Host discovery | `System32\conhost.exe` | Beside `conpty.dll`; then `<dir>\<arch>\OpenConsole.exe` with `<arch>` the operating system's native architecture (`IsWow64Process2`, so an x64 process on ARM64 Windows looks in `arm64\`); then `System32\conhost.exe`, silently. |
+| Flags | `PSEUDOCONSOLE_INHERIT_CURSOR` (0x1) | The same bit. Older headers defined 0x2, 0x4, 0x8 as resize-quirk, Win32-input-mode, passthrough; 1.22 and later use 0x08, 0x10, 0x18 for glyph-width measurement and 1.25 adds 0x20. MiniPty passes nothing else. |
+| Startup | `ESC[?9001h ESC[?1004h`, then a clear (`ESC[2J ESC[H`) unless inherit-cursor | `ESC[1t ESC[c ESC[?1004h ESC[?9001h ESC[?7l ESC[?7h`: a Primary Device Attributes query (`ESC[c`) that the frontend answers. 1.22 and 1.24 wait 3000 ms for the answer unconditionally; 1.25 and later wait 1000 ms only when inherit-cursor was requested. The input engine consumes the first DA1 reply per host, with or without a wait; later replies reach the child as keyboard input, which is why MiniPty never answers on an emulator's behalf. Measured: a read-only `CompleteAsync` of `cmd /c echo` completes in about 40 ms on 1.25 (140 ms in-box). |
+| Unanswered inherit-cursor | Holds the child's output with no timeout ([Inherited cursor](../specs/core_session.md#inherited-cursor)): `cmd /c echo` had still produced nothing after 8 s | Bounded: the host gives up after its 1000 ms wait and runs the child; `cmd /c echo` completed in 1043 ms (`UnansweredInheritCursorIsBoundedOnTheOutOfBandHost`). Answered, it continues from the reported position without clearing, as in-box. |
+| End of output | Only after `ClosePseudoConsole`, so the post-exit drain closes the pseudo-console after 100 ms of quiet | `ConptyReleasePseudoConsole` right after `CreateProcess` drops MiniPty's reference to the console server; the host exits with its last client and the pipe breaks. Measured over 10 sessions of `cmd /c echo`: output ended 2.4 ms after exit (min 2.0, max 2.6) against 114 ms in-box. The drain's close-after-quiet stays as the bound for a host kept alive by a grandchild. |
+| Close | Returns within 1 ms on build 26200; older builds are unverified | Closes the signal, reference, and process handles and never waits for the host (1.22 and main) |
+| Clear | No operation | `ConptyClearPseudoConsole(hpc, keepCursorRow: false)` on the signal pipe. The host emits nothing; the next output is placed at row 1 (`ESC[1;1H`). The clear and input travel on different pipes with no ordering between them, so typing immediately after the clear can be processed first (observed once); a frontend's user types long after. |
+| Census | A `conhost.exe` child of the calling process | An `OpenConsole.exe` child of the calling process. The only direct evidence of which implementation runs, since the fallback is silent. |
+
+VT sequences written by a child, through each implementation (the F10 probe of [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md) rerun with `PtyConPtyTests` on build 26200; the in-box column is that build's conhost):
+
+| Sequence | In-box | Out-of-band |
+|---|---|---|
+| Mouse tracking 1000, 1003, SGR 1006 | consumed | forwarded |
+| DECCKM (`ESC[?1h`) | consumed | forwarded |
+| OSC 11 color query, DECRQSS, XTGETTCAP | consumed | forwarded |
+| Kitty graphics APC, Sixel DCS | consumed | forwarded |
+| OSC 0 title, OSC 8 hyperlink, OSC 52 clipboard, OSC 133, OSC 9;4 | forwarded (OSC 8 re-encoded) | forwarded |
+| DEC modes 1049, 2004, 2026; `CSI > 1 u`; truecolor and `4:3` SGR | forwarded | forwarded |
+
+The forwarded sequences also arrive in their original order relative to text out-of-band, where in-box reorders them. The host's own VT output differs too: a resize repaints the whole screen in-box and emits nothing out-of-band when nothing changed.
+
+Packaging: the `Microsoft.Windows.Console.ConPTY` package carries `runtimes/win-{x86,x64,arm64}/native/conpty.dll` and `build/native/runtimes/{x86,x64,arm64}/OpenConsole.exe`. Its managed build files copy `<arch>\OpenConsole.exe` to the output root only when `ConptyRequires{x86,x64,ARM64}Host` is true, which they derive from `PlatformTarget`; a .NET project's `AnyCPU` sets none, and `build/` files import only for a direct reference. `buildTransitive/MiniPty.ConPty.targets` therefore adds the host from the resolved `conpty.dll`'s own package directory, with the DLL's `DestinationSubDirectory`, so it lands beside the DLL at the output root (runtime-specific build) or under `runtimes\win-<arch>\native\` (portable build), where the DLL's first probe finds it. Verified: a portable test build gets all three pairs, and `ConPtyLibrary.TryLoadFromApplicationDirectory()` finds the process architecture's.
+
 ## Unix spawn
 
 Linux and FreeBSD use `forkpty` + native `execve`. macOS uses `posix_openpt` + `posix_spawn` of a bundled helper so the child acquires a controlling terminal without `fork` from a multithreaded parent.

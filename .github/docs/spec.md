@@ -62,6 +62,7 @@ flowchart TB
 | Persistent transport sample (`ReadOutputAsync` command loop) | [samples/SingleFiles/Interactive.cs](../../samples/SingleFiles/Interactive.cs) |
 | Attach host terminal input to an existing `PtySession` (use case 3) | [Console](specs/console.md) |
 | Exit status with Unix termination signal; `Kill(PtySignal)` | [Core session](specs/core_session.md) |
+| Run on the out-of-band ConPTY an application supplies on Windows (`PtyStartInfo.ConPty`, `ConPtyLibrary`), with `Clear()` | [Core session](specs/core_session.md#out-of-band-conpty) |
 | Backend PTY for frontend terminals: push facade, flow control, WebSocket and stdio bridges (use case 4) | [Terminal](specs/terminal.md) |
 | Browser terminal sample (xterm.js over WebSocket) | [samples/SingleFiles/WebTerminal.cs](../../samples/SingleFiles/WebTerminal.cs) |
 | VS Code helper sample (length-framed stdio) | [samples/SingleFiles/VsCodeTerminalHelper.cs](../../samples/SingleFiles/VsCodeTerminalHelper.cs) |
@@ -73,7 +74,7 @@ flowchart TB
 
 - Terminal emulation, TUI replay, or faithful screen-buffer rendering
 - Cast / asciinema recording (embedder responsibility; scenetake for example)
-- Windows ConPTY `clear()` (requires the conpty.dll signal pipe; not reachable via public Win32 API)
+- Shipping or downloading ConPTY binaries: the out-of-band ConPTY is supplied by the application ([Out-of-band ConPTY](specs/core_session.md#out-of-band-conpty)), and `Clear()` is a no-op on the in-box ConPTY, which exposes no clear operation
 - Remote shells (`ssh`)
 - Spilling capture to disk when memory is exhausted
 - Capture tuning such as max chunk size or chunk timestamp modes

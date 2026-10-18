@@ -6,14 +6,14 @@ Implemented public platform support, verification constraints, and platform-leve
 
 | OS | Backend | Minimum |
 |---|---|---|
-| Windows | ConPTY (`CreatePseudoConsole`) | Windows 10 1809+, Windows 11 |
+| Windows | ConPTY (`CreatePseudoConsole`), or an out-of-band ConPTY the application supplies (`PtyStartInfo.ConPty`) | Windows 10 1809+, Windows 11 |
 | Linux | `forkpty` + `execve` through native shim | Common glibc/musl targets |
 | macOS | `posix_spawn` + `minipty_spawn_helper` through native shim | Supported runners; helper bundled in `runtimes/osx-*/native/` |
 | FreeBSD | `forkpty` + `execve` through native shim | `libutil` |
 
 Pipe redirect without ConPTY is not a PTY. On Windows, TUI tools require ConPTY-backed spawn.
 
-MiniPty does not use winpty or third-party PTY binaries. Backends are in-process interop plus the small Unix native shim.
+MiniPty does not use winpty or third-party PTY binaries. Backends are in-process interop plus the small Unix native shim. The out-of-band ConPTY (`conpty.dll` plus `OpenConsole.exe` from the `Microsoft.Windows.Console.ConPTY` package) is supplied by the application, never shipped by MiniPty; MiniPty is verified against package version `1.25.260930003`, pinned in `Directory.Packages.props` for its tests and Windows samples only ([Out-of-band ConPTY](core_session.md#out-of-band-conpty)).
 
 ## Verification
 
@@ -28,6 +28,7 @@ CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows.
 | Multiple capture chunks + ANSI | Confirms concurrent read and timestamps. |
 | `WaitForExitAsync` cancel vs `CompleteAsync` cancel | Confirms cancellation contract. |
 | Resize | Confirms `TIOCSWINSZ` / `ResizePseudoConsole`. |
+| Out-of-band ConPTY (Windows) | Confirms the loaded library's exports and host detection, which host process a session runs under (a Toolhelp census of this process's children), forwarding of the modes the in-box host consumes, end of output on the pipe break, no startup wait for the device attributes answer, and `Clear`. |
 
 Tests use property assertions, not golden byte captures, to reduce OS and timing flake.
 

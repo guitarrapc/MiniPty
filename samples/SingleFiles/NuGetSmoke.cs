@@ -26,6 +26,28 @@ try
             Size = new PtySize(80, 24),
         };
 
+    // Windows: the smoke project references the out-of-band ConPTY package, and the MiniPty package's build targets
+    // must have staged OpenConsole.exe beside conpty.dll, in the portable layout under `dotnet run` and the
+    // runtime-specific one after publish. conpty.dll without its host silently runs the in-box conhost, so the host
+    // is required here, not just the DLL.
+    var conPty = ConPtyLibrary.TryLoadFromApplicationDirectory();
+    if (OperatingSystem.IsWindows())
+    {
+        if (conPty is null)
+        {
+            Console.Error.WriteLine($"FAIL NuGet smoke: conpty.dll was not staged under {AppContext.BaseDirectory}.");
+            return 1;
+        }
+
+        if (!conPty.HasConsoleHost)
+        {
+            Console.Error.WriteLine($"FAIL NuGet smoke: OpenConsole.exe was not staged beside {conPty.Path}.");
+            return 1;
+        }
+
+        startInfo = startInfo with { ConPty = conPty };
+    }
+
     var result = await PtyCapture.RunAsync(startInfo);
     if (result.ExitCode != 0)
     {
@@ -39,7 +61,8 @@ try
         return 1;
     }
 
-    Console.Error.WriteLine($"ok NuGet smoke: exit={result.ExitCode} bytes={result.Output.Length}");
+    var host = conPty is null ? string.Empty : $" conpty={conPty.FileVersion} host={conPty.ConsoleHostPath}";
+    Console.Error.WriteLine($"ok NuGet smoke: exit={result.ExitCode} bytes={result.Output.Length}{host}");
     return 0;
 }
 catch (Exception ex)

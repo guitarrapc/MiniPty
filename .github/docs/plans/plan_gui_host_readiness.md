@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phase C: G9 (explicit Unix termios with `IUTF8`) and G10 (hang-up before kill on Unix dispose) are implemented (2026-10-17); G6 is deferred until an embedder needs dozens of concurrent sessions, since G1 already removed every observed failure. Phase D: G8 (opt-in process-tree cleanup) is implemented (2026-10-18); G7 (opt-in out-of-band ConPTY) is designed and not started.
+**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phase C: G9 (explicit Unix termios with `IUTF8`) and G10 (hang-up before kill on Unix dispose) are implemented (2026-10-17); G6 is deferred until an embedder needs dozens of concurrent sessions, since G1 already removed every observed failure. Phase D: G8 (opt-in process-tree cleanup) is implemented (2026-10-18), and G7 (opt-in out-of-band ConPTY supplied by the application) is implemented (2026-10-19).
 
 ## Background
 
@@ -83,7 +83,7 @@ Causes 1–3 share one structure:
 | G4 | **P1** | Terminal size clamped to 512 (F7) | [Platform size limits](#g4-platform-size-limits-p1) |
 | G5 | **P1** | No guidance for GUI hosts; README patterns are unsafe on a UI thread | [GUI host guidance](#g5-gui-host-guidance-p1) |
 | G6 | **P2** | After G1, each session still holds one dedicated reader thread, and a pending read cannot be canceled at the OS level | [Thread-free async I/O](#g6-thread-free-async-io-p2); deferred until an embedder needs it |
-| G7 | **P2** | Windows is limited to the in-box ConPTY (F10); `PtyTerminal.Clear()` is a no-op | [Opt-in out-of-band ConPTY](#g7-opt-in-out-of-band-conpty-p2): `PtyStartInfo.ConPty` with a host-supplied `conpty.dll`; designed, not started |
+| G7 | **P2** | Windows is limited to the in-box ConPTY (F10); `PtyTerminal.Clear()` is a no-op | [Opt-in out-of-band ConPTY](#g7-opt-in-out-of-band-conpty-p2): `PtyStartInfo.ConPty` with a host-supplied `conpty.dll`; implemented |
 | G8 | **P2** | No process-tree cleanup on Windows | [Opt-in job object](#g8-opt-in-process-tree-cleanup-p2): `PtyStartInfo.KillProcessTree` (implemented) |
 | G9 | **P2** | Unix termios relies on kernel defaults; `IUTF8` is missing | [Explicit termios](#g9-explicit-unix-termios-p2) (implemented) |
 | G11 | **P1** | On Windows, end of output can wait for an unrelated process the host spawned (F12) | [Bounded end of output after close](#g11-bounded-end-of-output-on-windows-p1) |
@@ -708,7 +708,7 @@ Large.
 
 ## G7: Opt-in out-of-band ConPTY (P2)
 
-**Status:** designed (2026-10-18), not started. The design below replaces the earlier sketch; its open points are in [Open Questions](#open-questions).
+**Status:** implemented (2026-10-19) as designed below; see [Result](#g7-result). The design replaced an earlier sketch; its remaining open point (in-box release) is in [Open Questions](#open-questions).
 
 ### Why P2
 
@@ -820,6 +820,32 @@ public sealed class PtySession { public void Clear(); }   // PtyTerminal.Clear()
 ### Estimate
 
 Large in verification, medium in code.
+
+### G7 result
+
+Delivered in one step rather than three: `ConPtyLibrary` and `PtyStartInfo.ConPty`, dispatch through unmanaged function pointers, release after spawn, `PtySession.Clear()` and `PtyTerminal.Clear()`, `buildTransitive/MiniPty.ConPty.targets`, the package pin, the two GUI samples opted in, and documentation ([Out-of-band ConPTY](../specs/core_session.md#out-of-band-conpty), [reference](../references/pty_crossplatform.md#out-of-band-conpty)).
+
+Measured on Windows 11 build 26200 with package `1.25.260930003`:
+
+| Acceptance item | Result |
+|---|---|
+| Exports and host detection | `Load` resolves the five exports and reports file version `1.25.2609.30003`; `HasConsoleHost` is true for the staged DLL and false for a copy of the DLL alone, whose sessions a census shows on `conhost.exe` (`WithoutItsHostTheLibraryReportsSoAndSessionsRunOnConhost`) |
+| Census | An out-of-band session runs under an `OpenConsole.exe` child of the calling process, an in-box one under `conhost.exe`, and each ends with its session (`SessionRunsUnderTheHostOfItsImplementation`) |
+| F10 probe set | All 18 sequences forwarded out-of-band; in-box drops 9 (mouse 1000/1003/1006, DECCKM, OSC 11, DECRQSS, XTGETTCAP, Kitty graphics, Sixel). The 7 the in-box host consumes are asserted (`ForwardsTheSequencesTheInBoxHostConsumes`), the full table is in the reference |
+| End of output | 2.4 ms after exit (min 2.0, max 2.6, 10 sessions) against 114 ms in-box (`OutputEndsOnThePipeBreakAfterExit` asserts the order under the same load) |
+| Read-only startup | `CompleteAsync` of `cmd /c echo` in 40 ms, the `ESC[c` query in the output (`ReadOnlyCompletionDoesNotWaitForTheDeviceAttributesAnswer`) |
+| Clear | The host emits nothing; the next output starts at `ESC[1;1H` (`ClearEmptiesTheHostBufferSoTheNextOutputStartsAtTheTop`); in-box and Unix no-ops and the disposed case are covered |
+| Inherit cursor | Answered: continues from the report without clearing. Unanswered: the host gives up after its 1 s wait and runs the child, 1043 ms measured, where in-box had produced nothing after 8 s |
+| Layouts | A portable test build stages all three `runtimes\win-<arch>\native\` pairs and `TryLoadFromApplicationDirectory` finds the process architecture's; a RID-specific publish puts both files at the root; a NativeAOT publish (`PublishAot`, win-x64) builds without trim or AOT warnings, loads the library, hosts under `OpenConsole.exe`, and forwards 18 of 18 |
+| Leaks | `StartAndTeardownLeakNothing` on the out-of-band path |
+| Suite | Windows 338 of 338 after the census fix below; Linux: the ConPTY, pump, and terminal classes pass (the type refuses to load, `Clear` is a no-op) |
+
+Lessons learned:
+
+- **Tell console hosts apart by process id, not by count.** The first census compared child counts before and after the start; the hosts of other sessions in the same class, starting and ending meanwhile, made "one more than before" false, and the test failed only in the full suite. The census now takes the set of child ids before the start and waits for a new id to appear and later disappear.
+- **The clear and input travel on different pipes.** `ConptyClearPseudoConsole` writes to the host's signal pipe and keystrokes to its input pipe, with no ordering between the two, so a command typed in the same instant as the clear was processed first (1 of 1 runs). A frontend's user types long after; the test waits 500 ms.
+- **The package's own build files do not stage the host for a .NET project.** They derive `ConptyRequires<arch>Host` from `PlatformTarget`, which is `AnyCPU`, so a consumer gets `conpty.dll` alone and a silent conhost fallback. Staging from the resolved DLL's package directory with the DLL's `DestinationSubDirectory` covers both layouts; publish needs its own item, since it recomputes its file list from the package assets.
+- **A session without the library pays nothing.** The in-box path keeps its `LibraryImport` calls behind a null check on the pseudo-console handle's owner; the out-of-band path adds one indirect call per create, resize, clear, and close, and nothing per read or write.
 
 ---
 
@@ -1108,8 +1134,8 @@ flowchart LR
 - ~~**Unix fallback interval:** the `waitpid` polling interval for the fallback exit watcher on kernels without pidfd.~~ Resolved in step 2: 10 ms, on the single watcher thread, for unregistrable children only.
 - **`ClosePseudoConsole` blocking:** whether `ClosePseudoConsole` can block on older Windows builds when output is not being drained. G1 makes `Dispose` non-blocking, so if it can block, the call must run off the caller's thread. Step 3 still closes on the caller's thread but switches the reader to discarding output first, so the final frame always has a reader. Verify on Windows 10 and Windows 11 builds before 24H2. PR review flagged the same risk for `Dispose` and `DisposeAsync`: if the close can wait, move it off the calling thread and include it in the `DisposeAsync` wait. On build 26200 the close returned within 1 ms in all 90 G11 probe sessions, including those where an unrelated process held the output pipe open (F12). It is still unverified whether, on builds where the close waits for the host process, such a process keeps the host alive and so makes the close wait for it as well.
 - ~~**G7 API shape:** a `PtyStartInfo` property, a process-wide setting, or a separate start method.~~ Resolved: a `PtyStartInfo.ConPty` property holding a `ConPtyLibrary` loaded by the host application, see [G7](#g7-opt-in-out-of-band-conpty-p2). A process-wide setting would hide which implementation a session ran on and would let a transitively arriving package change every session; a separate start method would duplicate `Pty.Start`.
-- **G7 type name:** `ConPtyLibrary` drops the library's `Pty` prefix because the Windows term already contains it (`PtyConPtyLibrary` reads badly); confirm before the API ships.
-- **G7 clear surface:** whether `Clear()` belongs on `PtySession` (public, so hosts that use the session directly can call it) or only on `PtyTerminal` (which would need internal access to the session). The design puts it on both, `PtyTerminal` forwarding.
+- ~~**G7 type name:** `ConPtyLibrary` drops the library's `Pty` prefix because the Windows term already contains it (`PtyConPtyLibrary` reads badly); confirm before the API ships.~~ Shipped as `ConPtyLibrary`.
+- ~~**G7 clear surface:** whether `Clear()` belongs on `PtySession` (public, so hosts that use the session directly can call it) or only on `PtyTerminal` (which would need internal access to the session). The design puts it on both, `PtyTerminal` forwarding.~~ Shipped on both.
 - **G7 in-box release:** `kernel32.dll` of build 26100 exports `ReleasePseudoConsole`, which would give the in-box path the same pipe-break end of output as the out-of-band one. It needs a runtime export probe (older builds lack it) and a measurement; follow-up after G7.
 - ~~**G5 sample form:** a WinUI sample needs the Windows App SDK, which is a third-party dependency in a sample and cannot run in CI. The alternative is a framework-neutral console sample with a single-threaded context.~~ Resolved: a WinUI 3 sample, with the Windows App SDK as the sample's own dependency. It does run in CI: the Windows runners publish it and run its `--smoke` mode, which exits 0 once the shell's output has been shown on the UI thread.
 

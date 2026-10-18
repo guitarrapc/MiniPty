@@ -44,6 +44,19 @@ cat > "$tmp/nuget.config" <<EOF
 </configuration>
 EOF
 
+# On Windows the consumer also references the out-of-band ConPTY package at the version MiniPty is verified against, so
+# the smoke exercises the packed buildTransitive targets that stage OpenConsole.exe beside conpty.dll, in the portable
+# layout (dotnet run) and the runtime-specific one (publish). NuGetSmoke.cs requires the host to be there on Windows.
+conpty_reference=""
+if [[ -n "${WINDIR:-}" || "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+  conpty_version="$(sed -n 's/.*Include="Microsoft.Windows.Console.ConPTY" Version="\([^"]*\)".*/\1/p' "$root_unix/Directory.Packages.props")"
+  if [[ -z "$conpty_version" ]]; then
+    echo "Microsoft.Windows.Console.ConPTY version not found in Directory.Packages.props" >&2
+    exit 1
+  fi
+  conpty_reference="<PackageReference Include=\"Microsoft.Windows.Console.ConPTY\" Version=\"$conpty_version\" />"
+fi
+
 cat > "$tmp/NuGetSmoke.csproj" <<EOF
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
@@ -56,6 +69,7 @@ cat > "$tmp/NuGetSmoke.csproj" <<EOF
   <ItemGroup>
     <PackageReference Include="MiniPty" Version="$version" />
     <PackageReference Include="MiniPty.Capture" Version="$version" />
+    $conpty_reference
   </ItemGroup>
   <ItemGroup>
     <Compile Include="$root/samples/SingleFiles/NuGetSmoke.cs" Link="NuGetSmoke.cs" />
