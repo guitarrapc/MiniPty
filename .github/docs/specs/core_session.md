@@ -91,7 +91,7 @@ Reading from spawn means early output is never stranded: a child does not stall 
 
 Only one output consumer is active per session (see [Lifecycle](lifecycle.md#output-consumer-exclusivity)). A concurrent reader attempt throws `InvalidOperationException`.
 
-Managed buffering is bounded by the buffer's slot count times its slot size (currently 4 × 4 KiB). Each chunk holds one transport read plus the output that arrives within a short micro-window after it, so bulk output arrives in few full chunks without delaying the first byte of interactive output. The slot geometry and the maximum per-chunk size are implementation details and may change. One-shot `CompleteAsync` and `PtyCapture.RunAsync` are the exception by design: their result holds the whole output, so it grows with it.
+Managed buffering is bounded by the buffer's slot count times its slot size (currently 4 × 4 KiB). Each chunk holds one transport read plus the output that arrives within a short micro-window after it, so bulk output arrives in few full chunks without delaying the first byte of interactive output. Small reads fill the slots sooner: a few separate ConPTY frames can fill the buffer, so a session whose output nobody reads may not reach end of output after exit until a consumer reads, and the consumer then gets all of it. The slot geometry and the maximum per-chunk size are implementation details and may change. One-shot `CompleteAsync` and `PtyCapture.RunAsync` are the exception by design: their result holds the whole output, so it grows with it.
 
 ## Caller Context
 

@@ -116,6 +116,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// <summary>Whether the transport close has started: set before <see cref="IPtyBackend.CloseOutputTransport"/> runs.</summary>
     internal bool IsCloseRequested => (Volatile.Read(ref _flags) & FlagCloseRequested) != 0;
 
+    /// <summary>Whether the reader is parked on a full ring until the consumer frees a slot.</summary>
+    internal bool IsWaitingForFreeSlot => Volatile.Read(ref _producerWaiting) != 0;
+
     /// <summary>The transport failure that ended the pump, if any. Read only after <see cref="IsProducerFinished"/>.</summary>
     internal Exception? Error => _error;
 

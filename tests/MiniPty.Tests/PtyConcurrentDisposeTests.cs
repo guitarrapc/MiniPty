@@ -158,8 +158,9 @@ public sealed class PtyConcurrentDisposeTests
             threads[i] = new Thread(() =>
             {
                 Interlocked.Increment(ref ready);
+                var spinner = new SpinWait();
                 while (Volatile.Read(ref go) == 0)
-                    Thread.SpinWait(1);
+                    spinner.SpinOnce(sleep1Threshold: -1);
 
                 try
                 {
@@ -177,8 +178,11 @@ public sealed class PtyConcurrentDisposeTests
             threads[i].Start();
         }
 
+        // Spinning yields its time slice but never sleeps: on a two-core runner a busy spin kept the threads it waits for
+        // off the cores, and 2000 rounds took minutes, while a sleep would release the threads too far apart to race.
+        var waiter = new SpinWait();
         while (Volatile.Read(ref ready) < actions.Length)
-            Thread.SpinWait(1);
+            waiter.SpinOnce(sleep1Threshold: -1);
 
         Volatile.Write(ref go, 1);
         foreach (var thread in threads)

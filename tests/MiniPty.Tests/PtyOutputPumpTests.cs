@@ -339,6 +339,71 @@ public sealed class PtyOutputPumpTests
         await Assert.That(bytes).IsEqualTo(FlushReads);
     }
 
+    /// <summary>
+    /// The ring holds four reads whatever their size. Under CPU contention ConPTY's frames for a single <c>echo</c> took
+    /// three reads before the post-exit close, and the frame flushed after the close took the fourth slot while nobody
+    /// read, so the reader parked with output still in the transport. Output has not ended then, and a reader that
+    /// starts only now still gets every frame, and then end of output.
+    /// </summary>
+    [Test]
+    public async Task FramesThatFillTheRingAfterTheCloseReachALateReader()
+    {
+        const int BeforeClose = PtyOutputPump.SlotCount - 1;
+        const int AfterClose = 2;
+        var backend = new FramesAroundTheCloseBackend(BeforeClose, AfterClose);
+        await using var session = new PtySession(backend);
+        await backend.WaitingForTheClose.WaitAsync(Timeout);
+
+        backend.Exit(0);
+        await backend.OutputClosed.WaitAsync(Timeout);
+        await Assert.That(await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSlot)).IsTrue();
+        // Past the quiet period after the close: a parked reader is not silence, so the drain does not end output.
+        await Task.Delay(PtyOutputPump.DefaultPostExitQuietMs * 3);
+        await Assert.That(session.OutputPump.IsProducerFinished).IsFalse();
+
+        var bytes = 0;
+        using var cts = new CancellationTokenSource(Timeout);
+        await foreach (var chunk in session.ReadOutputAsync(cts.Token))
+            bytes += chunk.Data.Length;
+
+        await Assert.That(bytes).IsEqualTo(BeforeClose + AfterClose);
+    }
+
+    /// <summary>
+    /// One-shot completion attached after output has ended takes the buffered output on the attaching thread and
+    /// finishes at once. A real child cannot be relied on to reach this state without a consumer, because its frames can
+    /// fill the ring first (<see cref="FramesThatFillTheRingAfterTheCloseReachALateReader"/>).
+    /// </summary>
+    [Test]
+    public async Task CompleteAsyncAfterOutputEndedTakesTheBufferedOutput()
+    {
+        var backend = new FramesAroundTheCloseBackend(beforeClose: 2, afterClose: 1);
+        await using var session = new PtySession(backend);
+        await backend.WaitingForTheClose.WaitAsync(Timeout);
+
+        backend.Exit(7);
+        await Assert.That(await WaitUntilAsync(() => session.OutputPump.IsProducerFinished)).IsTrue();
+
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false }).WaitAsync(Timeout);
+
+        await Assert.That(result.ExitCode).IsEqualTo(7);
+        await Assert.That(result.Output.Length).IsEqualTo(3);
+    }
+
+    private static async Task<bool> WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = Environment.TickCount64 + (long)Timeout.TotalMilliseconds;
+        while (!condition())
+        {
+            if (Environment.TickCount64 >= deadline)
+                return false;
+
+            await Task.Delay(10);
+        }
+
+        return true;
+    }
+
     private const string ReaderThreadName = "MiniPty output reader";
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
@@ -560,6 +625,65 @@ public sealed class PtyOutputPumpTests
         {
             endOfOutput = false;
             return 0;
+        }
+    }
+
+    /// <summary>
+    /// One byte per read, each read its own frame: <c>beforeClose</c> of them at once, then nothing until the transport
+    /// is closed, then <c>afterClose</c> more and end of output, as ConPTY flushes its final frame after the close and
+    /// then breaks the pipe.
+    /// </summary>
+    private sealed class FramesAroundTheCloseBackend(int beforeClose, int afterClose) : FakeBackend
+    {
+        private readonly TaskCompletionSource _waiting = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Read and written only by the reader thread.
+        private int _beforeClose = beforeClose;
+        private int _afterClose = afterClose;
+
+        /// <summary>Completes once every frame before the close has been read and the reader waits for the close.</summary>
+        public Task WaitingForTheClose => _waiting.Task;
+
+        /// <summary>Completes once the post-exit drain has closed the transport.</summary>
+        public Task OutputClosed => _closed.Task;
+
+        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        {
+            if (IsDisposed)
+                return 0;
+
+            if (_beforeClose > 0)
+            {
+                _beforeClose--;
+                buffer[0] = (byte)'x';
+                return 1;
+            }
+
+            if (!IsOutputClosed)
+            {
+                _waiting.TrySetResult();
+                reader.WaitForWake(System.Threading.Timeout.Infinite);
+                return -1;
+            }
+
+            if (_afterClose == 0)
+                return 0;
+
+            _afterClose--;
+            buffer[0] = (byte)'y';
+            return 1;
+        }
+
+        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
+        {
+            endOfOutput = false;
+            return 0;
+        }
+
+        public override void CloseOutputTransport()
+        {
+            base.CloseOutputTransport();
+            _closed.TrySetResult();
         }
     }
 

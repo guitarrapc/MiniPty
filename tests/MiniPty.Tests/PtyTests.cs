@@ -1574,7 +1574,7 @@ public sealed class PtyTests
     /// survives the child's exit and the post-exit transport close, and a reader started afterwards gets all of it.
     /// </summary>
     [Test]
-    public async Task PtyOutputWrittenBeforeAnyReaderIsDeliveredAfterOutputEnded()
+    public async Task PtyOutputWrittenBeforeAnyReaderIsDeliveredAfterExitAndClose()
     {
         const string marker = "lifecycle-read-after-end";
 
@@ -1582,18 +1582,21 @@ public sealed class PtyTests
             ? WindowsCommand($"echo {marker}")
             : UnixShell($"printf {marker}"));
 
-        await WaitUntilOutputEnded(session);
+        await WaitUntilOutputSettled(session);
         var text = await ReadAllOutputTextAsync(session).WaitAsync(TimeSpan.FromSeconds(15));
 
         await Assert.That(text).Contains(marker);
     }
 
     /// <summary>
-    /// One-shot completion attached after the session's output has already ended takes the buffered output and
-    /// finishes its result on the attaching thread.
+    /// One-shot completion attached after the child exited and the transport closed takes the buffered output, and
+    /// what the closed transport still holds. Whether output has fully ended by then depends on how many reads ConPTY's
+    /// frames took (see <see cref="WaitUntilOutputSettled"/>); the attach after a finished pump, which finishes the
+    /// result on the attaching thread, is covered deterministically by
+    /// <c>PtyOutputPumpTests.CompleteAsyncAfterOutputEndedTakesTheBufferedOutput</c>.
     /// </summary>
     [Test]
-    public async Task PtyCompleteAsyncAfterOutputEndedReturnsBufferedOutput()
+    public async Task PtyCompleteAsyncAfterExitAndCloseReturnsBufferedOutput()
     {
         const string marker = "lifecycle-complete-after-end";
 
@@ -1601,7 +1604,7 @@ public sealed class PtyTests
             ? WindowsCommand($"echo {marker}")
             : UnixShell($"printf {marker}"));
 
-        await WaitUntilOutputEnded(session);
+        await WaitUntilOutputSettled(session);
         var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true })
             .WaitAsync(TimeSpan.FromSeconds(15));
 
@@ -1978,14 +1981,29 @@ public sealed class PtyTests
         return Encoding.UTF8.GetString(output.GetBuffer().AsSpan(0, checked((int)output.Length)));
     }
 
-    /// <summary>Waits until the session's reader has seen end of output (after exit and the post-exit drain).</summary>
-    private static async Task WaitUntilOutputEnded(PtySession session)
+    /// <summary>
+    /// Waits until the child has exited and the post-exit drain has closed the transport, with the reader either finished
+    /// or parked on a full ring. Nothing more reaches the session after that until a consumer reads.
+    /// </summary>
+    /// <remarks>
+    /// Output need not have ended. The ring holds four reads whatever their size, and under CPU contention ConPTY's
+    /// frames for a single <c>echo</c> arrive as separate small reads, too far apart for the micro-window to join. When
+    /// they fill the ring, the frame ConPTY flushes after the close waits in the pipe, and the reader waits for a consumer
+    /// to free a slot (<c>PtyOutputPumpTests.FramesThatFillTheRingAfterTheCloseReachALateReader</c>). Waiting for end of
+    /// output timed out at 10 s in 3 of 10 full-suite runs pinned to two cores; the reader had taken three reads before
+    /// the close and was parked on the fourth.
+    /// </remarks>
+    private static async Task WaitUntilOutputSettled(PtySession session)
     {
         await session.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
-        for (var attempt = 0; attempt < 500 && !session.OutputPump.IsProducerFinished; attempt++)
+        var pump = session.OutputPump;
+        for (var attempt = 0; attempt < 500 && !IsSettled(pump); attempt++)
             await Task.Delay(20);
 
-        await Assert.That(session.OutputPump.IsProducerFinished).IsTrue();
+        await Assert.That(IsSettled(pump)).IsTrue();
+
+        static bool IsSettled(MiniPty.Internal.PtyOutputPump pump) =>
+            pump.IsProducerFinished || (pump.IsCloseRequested && pump.IsWaitingForFreeSlot);
     }
 
     private static async Task WaitUntilExited(PtySession session)
