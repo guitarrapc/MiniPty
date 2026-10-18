@@ -30,7 +30,6 @@ Bridging to a browser needs one more layer. The WebSocket protocol has no backpr
 | N4 | Remote shell protocols (`ssh`), user identity/authentication, or multi-user session management. Per-session bridge bearer authentication is included. |
 | N6 | HTTP serving — the embedder accepts the WebSocket (Kestrel, `HttpListener`, …) and hands it to the bridge |
 | N7 | Native Windows ConPTY buffer clear. `PtyTerminal.Clear()` is a safe compatibility no-op because the in-box API exposes no clear operation. The opt-in out-of-band ConPTY (G7 in [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md)) revisits this. |
-| N8 | node-pty `conptyInheritCursor` (`PSEUDOCONSOLE_INHERIT_CURSOR`). VS Code requests it only when the frontend writes `initialText` before the shell starts, so ConPTY does not repaint the viewport over that text. The flag makes ConPTY ask the frontend for the cursor position at startup, so it only suits frontends that answer the query. Deferred until an embedder writes frontend text before the child starts. |
 | N9 | node-pty `open()` (a PTY pair without a spawned child). Neither VS Code nor any known embedder calls it. |
 | N10 | `uid` / `gid` on spawn. Switching identity is security-sensitive and outside a minimal PTY library. |
 | N11 | An `encoding` spawn option that decodes output to strings. The library is bytes-first; frontends decode at their boundary with an incremental decoder. |
@@ -167,6 +166,7 @@ VS Code cannot swap its internal node-pty; integration is a **`vscode.Pseudoterm
 | binary frame | decode with an **incremental `TextDecoder`** → `onDidWrite.fire(string)` — the API is UTF-16 strings and a chunk can split a multi-byte UTF-8 sequence, so per-chunk decoding corrupts output |
 | `setDimensions({columns, rows})` | `resize` control message (dimensions can be `undefined` until the panel is visible — skip until first real value) |
 | `exit` control message | flush pending `onDidWrite`, then `onDidClose.fire(exitCode)` — VS Code buffers pty output on a short timer, so closing immediately after the last write can drop tail output |
+| text written before the shell starts (VS Code's `initialText`) | start with `PtyStartInfo.InheritCursor = true`, as VS Code does in that case, or Windows ConPTY clears it; xterm.js answers the cursor position query as input, so the answer reaches the helper like keystrokes ([Inherited cursor](core_session.md#inherited-cursor)) |
 
 `onDidWrite` has no flow-control hook, so the ACK side of this protocol should live in the extension's transport client (count bytes handed to `onDidWrite` and ACK) to keep server-side watermarks meaningful.
 

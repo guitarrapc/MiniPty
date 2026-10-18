@@ -55,6 +55,11 @@ internal struct WindowsProcessInformation
 internal static class WindowsPtyBackend
 {
     private const int ProcThreadAttributePseudoConsole = 0x00020016;
+    /// <summary>
+    /// <c>PSEUDOCONSOLE_INHERIT_CURSOR</c>, the one <c>CreatePseudoConsole</c> flag whose value has stayed the same
+    /// across in-box and redistributable ConPTY builds. See <see cref="PtyStartInfo.InheritCursor"/>.
+    /// </summary>
+    private const uint PseudoConsoleInheritCursor = 0x1;
     private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const uint StartfUseStdHandles = 0x00000100;
     private static readonly IntPtr InvalidHandleValue = new(-1);
@@ -125,7 +130,8 @@ internal static class WindowsPtyBackend
 
         var size = startInfo.ClampedSize;
         var coord = new WindowsCoord((short)size.Columns, (short)size.Rows);
-        var hr = WindowsInterop.CreatePseudoConsole(coord, inputRead, outputWrite, 0, out var pseudoConsoleHandle);
+        var pseudoConsoleFlags = startInfo.InheritCursor ? PseudoConsoleInheritCursor : 0;
+        var hr = WindowsInterop.CreatePseudoConsole(coord, inputRead, outputWrite, pseudoConsoleFlags, out var pseudoConsoleHandle);
         if (hr < 0)
         {
             inputRead.Dispose();

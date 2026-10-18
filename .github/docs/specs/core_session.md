@@ -17,6 +17,7 @@ Implemented user-facing contract for the **MiniPty** core session API.
 | `Size` | Initial terminal columns x rows. Default is 80x24. Each dimension is clamped to the platform limit at spawn and on `Resize`: 1–32767 on Windows (ConPTY's signed 16-bit `COORD`), 1–65535 on Unix (`winsize`). `PtySession.Size` reports the value applied. |
 | `Environment` | Optional child environment overlay. Null inherits the parent environment. Non-null entries override or remove inherited variables. |
 | `TerminalName` | Optional Unix terminal name for `TERM`. Null or empty uses default behavior. Currently ignored on Windows. |
+| `InheritCursor` | Default `false`. On Windows, start the child at the frontend's cursor instead of on a cleared screen (node-pty `conptyInheritCursor`); the frontend must answer ConPTY's cursor position query. Ignored on Unix, which already starts at the frontend's cursor. See [Inherited cursor](#inherited-cursor). |
 
 ## Spawn Environment
 
@@ -36,6 +37,20 @@ On Unix, MiniPty removes inherited terminal-container and size variables before 
 On Unix, `TerminalName` sets `TERM` after the environment overlay. If `TerminalName` is null or empty and no `TERM` remains, MiniPty sets `TERM=xterm-256color` unless `TERM` was explicitly removed by the overlay. `Environment["TERM"] = ""` is respected as an explicit empty value on Unix. On Windows, `TerminalName` does not set `TERM`; use `Environment["TERM"]` to pass it explicitly.
 
 MiniPty environment inheritance follows normal process-spawn behavior and is not a sandbox. Callers exposing PTYs to untrusted users must isolate the child process outside MiniPty, for example with OS users, containers, sandboxing, or explicit environment removal.
+
+## Inherited Cursor
+
+ConPTY keeps its own screen buffer and starts by assuming that the frontend's screen is empty. By default its first output clears the screen and homes the cursor (`ESC[2J ESC[H`), which erases whatever the frontend showed before the child started: an editor's banner written ahead of the shell (VS Code's `initialText`), or the prompt and earlier lines of the terminal a console host runs in. A Unix PTY passes bytes through without a screen model, so the child simply continues at the frontend's cursor.
+
+`PtyStartInfo.InheritCursor = true` gives Windows the Unix behavior. ConPTY is created with `PSEUDOCONSOLE_INHERIT_CURSOR`, asks the frontend for the cursor position (`ESC[6n`) as its first output, and continues from the reported position without clearing. The option is off by default because it needs an answer:
+
+| Rule | Behavior |
+|---|---|
+| Answer | The frontend writes a cursor position report (`ESC[row;columnR`) to the session input. Terminal emulators (xterm.js, VS Code, Windows Terminal) do this on their own; with [Console](console.md) attach, the host terminal answers and the input pump forwards the answer, provided `Attach` runs before the output pump writes the query. |
+| Until answered | ConPTY holds the child's console output, so a child that writes stalls. The in-box ConPTY has no timeout. A late answer resumes the child normally. |
+| The report | Consumed by ConPTY; the child never reads it. |
+| Never answered | `Kill` and `Dispose` still end the session and its output. |
+| Output-only consumers | `CompleteAsync`, Capture, and similar consumers that never write input must leave it off, or write a report themselves. |
 
 ## Session Contract
 
@@ -139,6 +154,8 @@ Hosts that keep sessions in a non-UI context should know that, with no `Synchron
 - A consumer wait must be completed outside the lock that guards its state. Completing it under the lock runs the consumer's continuation inline, and that continuation's `CancellationTokenRegistration.Dispose` blocks until a concurrently running cancellation callback returns, while the callback blocks on the lock. The output pump claims a wait with a compare-and-swap and completes it without holding any lock.
 - Resize must tolerate child exit. GUI hosts forward layout changes asynchronously to child exit, so a size change can arrive after post-exit drain has closed the transport; throwing there terminated WinUI hosts from a size-changed handler. Defining the no-op by transport state rather than by `HasExited` keeps resize-after-fast-exit working while the transport is still open, and on Windows a reference on the pseudo-console handle keeps a concurrent drain close from invalidating it mid-call.
 - Pixel dimensions fit Unix's 16-bit `winsize` fields. MiniPty clamps larger caller values to `ushort.MaxValue`; zero remains a valid "unknown" pixel dimension.
+- The in-box ConPTY's inherit-cursor wait is unbounded. Measured on Windows 11 build 26200: without an answer to `ESC[6n`, `cmd /c echo` had not exited after 15 s; an answer sent after 3 s resumed it at once. Out-of-band ConPTY 1.25 bounds a related startup wait to 1 s (G7 in [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md)), so the in-box behavior must not be assumed from the redistributable's source. This is why the option stays opt-in rather than defaulting on for terminal frontends.
+- Inherit-cursor was first deferred as a fix for a ConPTY cursor bug that nobody had reported. Its real use is a frontend that already shows content when the child starts: VS Code sets it whenever a terminal has `initialText`, and a console host keeps the user's screen with it (verified in a VT terminal: without it the prompt and earlier lines were erased; with it they stayed and the child's output followed).
 - Foreground process lookup belongs behind the existing Unix native boundary: `tcgetpgrp` supplies the foreground process group without spawning `ps`, preserving NativeAOT and avoiding a helper process on each editor poll. A process-group id is not always a live process id: after a pipeline leader exits, lookup must fall back to a remaining group member rather than reporting no active process.
 - Output must be read on a thread the library owns. The former producer started on the caller's captured context (through `Task.Yield`) and then blocked inside `ReadFile` / `read(2)`, which deadlocked a UI thread before the first chunk and froze it on every idle read; every idle session also parked a thread-pool worker. A per-session reader thread that completes allocation-free waits, whose continuations run asynchronously, removes all three.
 - Reuse reader threads across sessions. A bare thread start allocates 137 bytes, and one pooled-array return on a fresh thread raised that to about 4.9 KB: the array pool allocates a per-thread cache on the first return, and the returned array is stranded in that cache when the thread exits. One-shot completion grows its result buffers on the reader thread, so a thread per session would pay this on every spawn. Parked reader threads serve later sessions and exit after 30 seconds idle.

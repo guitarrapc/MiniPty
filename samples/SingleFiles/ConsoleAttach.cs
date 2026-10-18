@@ -40,18 +40,22 @@ static int RunInteractiveShell()
 {
     using var session = Pty.Start(CreateShellStartInfo());
 
-    // Status on stderr before raw host stdout (Unix OPOST off) and before the PTY output pump.
+    // Status on stderr before Attach makes host stdout raw (Unix OPOST off) and before the PTY output pump.
     Console.Error.WriteLine($"Starting PTY shell (pid {session.ProcessId})...");
     Console.Error.WriteLine("Keyboard input is forwarded to the child; PTY output is written to this terminal.");
     Console.Error.WriteLine("Exit the shell (for example type exit) to end the sample.");
     Console.Error.WriteLine("Attaching host terminal...");
 
-    var pumpTask = PumpOutputToHostAsync(session);
-
     int exitCode;
     using (var attachCts = new CancellationTokenSource())
     using (var consoleInput = PtyConsoleInput.Attach(session))
     {
+        // Attach before pumping output. On Windows the session inherits the cursor, so ConPTY's first output is a
+        // cursor position query, and only a host with VT processing on answers it; Attach turns that on. A query
+        // written before Attach would never be answered and the child would wait forever. ConPTY holds the child's
+        // output until the answer arrives, so nothing can fill the output pipe while attaching.
+        var pumpTask = PumpOutputToHostAsync(session);
+
         var exitTask = session.WaitForExitAsync(attachCts.Token);
         _ = exitTask.ContinueWith(
             static (_, state) => ((CancellationTokenSource)state!).Cancel(),
@@ -110,6 +114,9 @@ static PtyStartInfo CreateShellStartInfo()
             FileName = powershell,
             Arguments = ["-NoLogo", "-NoProfile"],
             Size = new PtySize(80, 24),
+            // Keep the host's existing screen instead of letting ConPTY clear it. The host terminal answers
+            // ConPTY's cursor position query, and the attached input pump forwards that answer to the PTY.
+            InheritCursor = true,
         };
     }
 

@@ -724,7 +724,7 @@ Verified against the console host source (the `winconpty`, `VtIo`, and input-eng
 
 **Exports.** Both builds export the same 14 names: `ConptyCreatePseudoConsole`, `ConptyCreatePseudoConsoleAsUser`, `ConptyResizePseudoConsole`, `ConptyClearPseudoConsole`, `ConptyShowHidePseudoConsole`, `ConptyReparentPseudoConsole`, `ConptyReleasePseudoConsole`, `ConptyClosePseudoConsole`, `ConptyPackPseudoConsole`, and the unprefixed `CreatePseudoConsole`, `ResizePseudoConsole`, `ClosePseudoConsole`, `ClearPseudoConsole`, `ReleasePseudoConsole`. `ConptyClosePseudoConsoleTimeout` appears in some header copies but in no binary and not in the source; nothing may depend on it. `ConptyClearPseudoConsole` takes **two** arguments, `(HPCON, BOOL keepCursorRow)`, in 1.24, 1.25, and main; a caller using a one-argument signature leaves the second register undefined, so the argument is always passed explicitly.
 
-**Flags.** `PSEUDOCONSOLE_INHERIT_CURSOR` (0x1) is stable and exists in-box. The other bits have changed meaning: older headers defined 0x2, 0x4, and 0x8 as resize-quirk, Win32-input-mode, and passthrough; 1.22 and later use 0x08, 0x10, and 0x18 for glyph-width measurement and 1.25 adds 0x20 (ambiguous-is-wide). MiniPty passes 0 and exposes no flags. Inherit-cursor stays deferred ([terminal.md](../specs/terminal.md) N8).
+**Flags.** `PSEUDOCONSOLE_INHERIT_CURSOR` (0x1) is stable and exists in-box. The other bits have changed meaning: older headers defined 0x2, 0x4, and 0x8 as resize-quirk, Win32-input-mode, and passthrough; 1.22 and later use 0x08, 0x10, and 0x18 for glyph-width measurement and 1.25 adds 0x20 (ambiguous-is-wide). MiniPty passes only this flag, when `PtyStartInfo.InheritCursor` asks for it ([core_session.md](../specs/core_session.md#inherited-cursor)), and exposes no other.
 
 **Startup handshake, by version.** On every version the host writes `ESC[c` (DA1), `ESC[?1004h`, and `ESC[?9001h` at startup. What differs is the wait:
 
@@ -779,7 +779,7 @@ public sealed class PtySession { public void Clear(); }   // PtyTerminal.Clear()
 
 **Session lifecycle on the out-of-band path.**
 
-- Create with flags 0, through the library's function pointer; the pipe setup, `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and `CreateProcess` are unchanged.
+- Create with the in-box path's flags (0, or `PSEUDOCONSOLE_INHERIT_CURSOR` for `InheritCursor`), through the library's function pointer; the pipe setup, `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and `CreateProcess` are unchanged.
 - After `CreateProcess` succeeds, call `ConptyReleasePseudoConsole`. The host then exits with its last client and the output pipe breaks, so end of output no longer waits for the post-exit quiet interval; G11's close-after-quiet stays as the bound for a host kept alive by a grandchild. Resize and clear still work after the release, since they use the signal pipe.
 - Resize, clear, and close go through the same library the session was created with; the pseudo-console handle records which one.
 - DA1: nothing. The version floor (below) makes the 3 s wait a non-issue for read-only consumers, and an emulator answers the forwarded query itself.
@@ -794,7 +794,7 @@ public sealed class PtySession { public void Clear(); }   // PtyTerminal.Clear()
 
 **Clear.** `PtySession.Clear()` calls `ConptyClearPseudoConsole(hpc, keepCursorRow: false)` on the out-of-band path and is a no-op otherwise; `PtyTerminal.Clear()` forwards. This revisits the no-op resolution (terminal.md N7) and stays compatible with it because MiniPty still ships nothing.
 
-**Not in G7.** Create-as-user, show/hide, reparent, pack; any flag including inherit-cursor (terminal.md N8); answering DA1; in-box `ReleasePseudoConsole` (follow-up); shipping or downloading binaries.
+**Not in G7.** Create-as-user, show/hide, reparent, pack; any flag other than inherit-cursor; answering DA1; in-box `ReleasePseudoConsole` (follow-up); shipping or downloading binaries.
 
 ### Acceptance
 
@@ -804,6 +804,7 @@ public sealed class PtySession { public void Clear(); }   // PtyTerminal.Clear()
 - End of output after child exit on the out-of-band path arrives on the pipe break, well inside the 100 ms quiet interval the in-box path needs.
 - A read-only `CompleteAsync` of `cmd /c echo` under the pinned version completes without a multi-second startup wait; the 1.24 wait is measured once and recorded, not tested in CI.
 - `Clear()` produces the host's clear and repaint; the exact sequence is recorded during implementation.
+- The `PtyInheritCursorTests` cases pass on the out-of-band path; whether the 1.25 host bounds an unanswered cursor query (it bounds the DA1 wait to 1 s when inherit-cursor is requested) is measured and recorded.
 - A packed consumer in both layouts (RID-specific and portable) loads the out-of-band host, checked by a process census in the NuGet smoke step.
 - A sample published with NativeAOT runs an out-of-band session.
 - No allocation regression: the out-of-band path adds one function-pointer call per operation and nothing per read.
@@ -1100,5 +1101,5 @@ flowchart LR
 ## Related Documents
 
 - [specs/core_session.md](../specs/core_session.md): `ReadOutputAsync` bounded buffering and coalescing (the step 3 pump, which G6 later re-drives).
-- [specs/terminal.md](../specs/terminal.md): `PtyTerminal` contract; N7 (ConPTY clear, revisited by G7) and N8 (inherit-cursor).
+- [specs/terminal.md](../specs/terminal.md): `PtyTerminal` contract; N7 (ConPTY clear, revisited by G7).
 - [references/pty_crossplatform.md](../references/pty_crossplatform.md): ConPTY and Unix spawn details.

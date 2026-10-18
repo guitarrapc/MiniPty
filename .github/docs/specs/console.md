@@ -184,6 +184,8 @@ Typical interactive host flow:
 7. On scope exit, `using` disposes `consoleInput` before `await using` disposes `session` (reverse declaration order)
 8. Unix only (optional): after dispose, write `\r\n` to host stdout so the parent shell prompt starts at column 0
 
+On Windows, start the session with `PtyStartInfo.InheritCursor = true` to keep the host terminal's screen. Without it, ConPTY's first output clears the screen, erasing the prompt and everything above it. With it, ConPTY asks for the cursor position, the host terminal answers on stdin, and the input pump forwards the answer ([Inherited cursor](core_session.md#inherited-cursor)). Swap steps 3 and 4 in that case: `Attach` turns on VT processing for host stdout, and a query the output pump writes before then is never answered, so the child waits forever. Attaching first is safe there because ConPTY holds all child output until the answer, so the pipe cannot fill while attaching. [samples/SingleFiles/ConsoleAttach.cs](../../../samples/SingleFiles/ConsoleAttach.cs) follows this order.
+
 `Attach` returns **`PtyConsoleInputHandle`** (`IDisposable`); do not use `await using` unless a future API adds `IAsyncDisposable`.
 
 Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only. Use case 4 (editor terminal backend) uses **MiniPty.Terminal** ([terminal.md](terminal.md)) without **MiniPty.Console**.
@@ -211,6 +213,8 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 - Start the embedder `ReadOutputAsync` pump before `PtyConsoleInput.Attach` so the child cannot block on a full ConPTY output pipe during startup.
 - On Unix, host stdout with `OPOST` off does not map `\n` to `\r\n`; embedders should not write status to stderr after `Attach`, and may emit `\r\n` on stdout after dispose to realign the parent shell prompt.
 - Resize polling on a separate task is acceptable on Windows; console handles are process-wide.
+- Manual validation (2026-10-18) in a VT terminal on Windows: a ConPTY session started without `InheritCursor` erased the prompt, the command line, and three lines the host had printed; with it they stayed, the terminal's cursor report reached ConPTY through the input pump, and the child exited by itself.
+- With `InheritCursor`, the order of output pump and `Attach` decides whether the session starts. Measured the same day with host stdout's VT processing turned off first (as in a console whose shell never enabled it): when the pump wrote ConPTY's cursor query 300 ms before `Attach`, nothing answered and the child was still waiting 8 s later; attaching first, the child ran and exited. Pump-first without a delay also worked, but only because `Attach` won the race.
 - Optional `IPtyConsoleInputObserver` uses a null check on the input pump hot path; when unset, forwarding matches direct `PtySession.Input.Write` allocation behavior (verified by `PtyConsoleInputForwardBenchmarks`).
 
 ## Related Documents

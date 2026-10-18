@@ -66,5 +66,31 @@ public sealed record PtyStartInfo
     /// </value>
     public string? TerminalName { get; init; }
 
+    /// <summary>
+    /// Gets or sets a value indicating whether the child starts drawing at the frontend's current cursor
+    /// position instead of on a cleared screen.
+    /// </summary>
+    /// <value>
+    /// <see langword="false"/> by default. Applies to Windows only: a Unix PTY passes bytes through without a
+    /// screen model, so the child already starts at the frontend's cursor and the value is ignored there.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// Without it, ConPTY assumes an empty screen and starts its output with a clear and cursor home
+    /// (<c>ESC[2J ESC[H</c>), erasing whatever the frontend showed before the child started, such as an editor's
+    /// banner written ahead of the shell. With it, ConPTY first asks the frontend for the cursor position
+    /// (<c>ESC[6n</c>) and continues from the reported position. Equivalent to node-pty's
+    /// <c>conptyInheritCursor</c> (<c>PSEUDOCONSOLE_INHERIT_CURSOR</c>).
+    /// </para>
+    /// <para>
+    /// The frontend must answer by writing a cursor position report (<c>ESC[row;columnR</c>) to the session input;
+    /// terminal emulators such as xterm.js do this automatically. ConPTY consumes the report, so it never reaches
+    /// the child. Until it arrives, the in-box ConPTY holds the child's console output with no timeout, so a child
+    /// that writes stalls. Leave this off for consumers that only read output, such as
+    /// <see cref="PtySession.CompleteAsync"/>, unless they write the report themselves.
+    /// </para>
+    /// </remarks>
+    public bool InheritCursor { get; init; }
+
     internal PtySize ClampedSize => Internal.PtySizeLimits.Clamp(Size);
 }
