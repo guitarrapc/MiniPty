@@ -44,6 +44,7 @@ internal static partial class UnixPtyBackend
 
         try
         {
+            PtyStartTestHook.Run(PtyStartStage.Spawned, pid);
             return new UnixPtyBackendInstance(master, pid, size, exec);
         }
         catch

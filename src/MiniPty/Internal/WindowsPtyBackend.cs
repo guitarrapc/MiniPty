@@ -216,6 +216,7 @@ internal static class WindowsPtyBackend
                 environmentBlock = IntPtr.Zero;
             }
 
+            PtyStartTestHook.Run(PtyStartStage.Spawned, processInfo.dwProcessId);
             return new WindowsPtyBackendInstance(
                 inputWriteHandle,
                 outputReadHandle,
@@ -231,13 +232,17 @@ internal static class WindowsPtyBackend
                 WindowsInterop.CloseHandle(processInfo.hThread);
             if (processInfo.hProcess != IntPtr.Zero)
                 WindowsInterop.CloseHandle(processInfo.hProcess);
+
+            // The child started but the session could not be built around it: end it now rather than when closing the
+            // pseudo-console below detaches it.
             if (process is not null)
-            {
-                // The child started but the session could not be built around it: end it now rather than when closing
-                // the pseudo-console below detaches it.
                 WindowsInterop.TerminateProcess(process.DangerousGetHandle(), 1);
-                process.Dispose();
-            }
+
+            // The order Dispose closes them in: input, pseudo-console, output, then the process handle.
+            inputWriteHandle.Dispose();
+            hpc.Dispose();
+            outputReadHandle.Dispose();
+            process?.Dispose();
             if (attrList != IntPtr.Zero)
             {
                 WindowsInterop.DeleteProcThreadAttributeList(attrList);
@@ -247,9 +252,6 @@ internal static class WindowsPtyBackend
             if (environmentBlock != IntPtr.Zero)
                 Marshal.FreeHGlobal(environmentBlock);
 
-            hpc.Dispose();
-            inputWriteHandle.Dispose();
-            outputReadHandle.Dispose();
             throw;
         }
     }

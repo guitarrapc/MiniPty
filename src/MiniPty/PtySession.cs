@@ -60,6 +60,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         backend.SetOutputPump(_pump);
         try
         {
+            PtyStartTestHook.Run(PtyStartStage.BackendBuilt, backend.ProcessId);
             _pump.Start();
         }
         catch

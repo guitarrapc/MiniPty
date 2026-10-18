@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -229,6 +230,22 @@ static int spawn_pty_child_forkpty(
 
     if (envp == NULL)
         free(child_envp);
+
+    /*
+     * forkpty opens the master without O_CLOEXEC (glibc's openpty), so every child the host starts later would inherit
+     * it and keep the terminal from hanging up. MiniPty's own children close it in minipty_prepare_fork_child either
+     * way. A fork on another thread before this call can still inherit it; only opening the master with O_CLOEXEC,
+     * which forkpty does not offer, would close that window.
+     */
+    if (fcntl(*master, F_SETFD, FD_CLOEXEC) != 0) {
+        int err = errno > 0 ? errno : EINVAL;
+        kill(pid, SIGKILL);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        close(*master);
+        *master = -1;
+        return err;
+    }
 
     *pid_out = pid;
     return 0;

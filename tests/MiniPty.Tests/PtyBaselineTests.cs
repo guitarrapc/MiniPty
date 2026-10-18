@@ -17,6 +17,8 @@ namespace MiniPty.Tests;
 /// <item>A resize reaches the running child as a notification.</item>
 /// <item>What teardown does to the child's descendants is fixed per platform.</item>
 /// <item>Start failure, exit, and cancellation behave as documented on every platform.</item>
+/// <item>Handles do not leak across the session: the child inherits none of the host's, and other children of the host
+/// inherit none of the session's.</item>
 /// </list>
 /// </summary>
 /// <remarks>
@@ -233,7 +235,7 @@ public sealed class PtyBaselineTests
             var text = await output.WaitAsync(Timeout);
             var elapsed = stopwatch.Elapsed;
 
-            await Assert.That(text).Contains("ready");
+            await Assert.That(text).Contains("ready").Because("the output was: " + Escape(text));
             // The descendant lives 30 s; the bound is loose for a loaded runner.
             await Assert.That(elapsed).IsLessThan(TimeSpan.FromSeconds(15));
             if (!OperatingSystem.IsWindows())
@@ -442,6 +444,119 @@ public sealed class PtyBaselineTests
         await Assert.That(session.HasExited).IsTrue();
     }
 
+    // ---------------------------------------------------------------- 9. Handle inheritance
+
+    /// <summary>
+    /// The child inherits no handle or descriptor of the host. The host here holds one that any child would inherit:
+    /// an inheritable pipe end on Windows, a descriptor without <c>FD_CLOEXEC</c> on Unix. On Windows the pipe reports
+    /// broken as soon as the host closes its end, which it would not while the child or ConPTY's console host held a
+    /// copy. On Unix the child looks for the descriptor's number.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task ChildInheritsNothingFromTheHost()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var attributes = new SecurityAttributes { Length = Marshal.SizeOf<SecurityAttributes>(), InheritHandle = 1 };
+            if (!CreatePipe(out var read, out var write, ref attributes, 0))
+                throw new Win32Exception();
+
+            try
+            {
+                await using var session = Pty.Start(Blocks());
+                CloseHandle(write);
+                write = IntPtr.Zero;
+
+                var peeked = PeekNamedPipe(read, IntPtr.Zero, 0, IntPtr.Zero, out _, IntPtr.Zero);
+                await Assert.That(peeked ? 0 : Marshal.GetLastPInvokeError()).IsEqualTo(ErrorBrokenPipe);
+            }
+            finally
+            {
+                if (write != IntPtr.Zero)
+                    CloseHandle(write);
+                CloseHandle(read);
+            }
+
+            return;
+        }
+
+        using var file = File.OpenHandle("/dev/null");
+        // dup clears FD_CLOEXEC, which .NET sets on every descriptor it opens.
+        var fd = dup((int)file.DangerousGetHandle());
+        try
+        {
+            await using var session = Pty.Start(Shell($"if [ -e /dev/fd/{fd} ]; then printf INHERITED; else printf CLEAN; fi"));
+            await Assert.That(await ReadAllTextAsync(session).WaitAsync(Timeout)).Contains("CLEAN");
+        }
+        finally
+        {
+            close(fd);
+        }
+    }
+
+    /// <summary>
+    /// A session adds no handle or descriptor that the host's other children would inherit. Every one MiniPty keeps is
+    /// non-inheritable on Windows and close-on-exec on Unix, also the PTY master, which glibc's <c>forkpty</c> opens
+    /// without <c>O_CLOEXEC</c>. On Unix a child the host starts itself also finds no terminal descriptor of the session.
+    /// Not covered: the moment inside <c>CreatePseudoConsole</c> when ConPTY briefly holds inheritable pipe ends, and on
+    /// Linux the moment between <c>forkpty</c> returning and MiniPty marking the master, both too short to hit on purpose.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task HostChildrenInheritNothingFromTheSession()
+    {
+        var inheritableBefore = CountInheritableHandles();
+        var terminalsBefore = OperatingSystem.IsWindows() ? "" : await TerminalDescriptorsOfAHostChildAsync();
+
+        await using var session = Pty.Start(Blocks());
+
+        await Assert.That(CountInheritableHandles()).IsLessThanOrEqualTo(inheritableBefore);
+        if (!OperatingSystem.IsWindows())
+            await Assert.That(await TerminalDescriptorsOfAHostChildAsync()).IsEqualTo(terminalsBefore);
+    }
+
+    /// <summary>
+    /// Handles marked inheritable on Windows, descriptors above stdio without <c>FD_CLOEXEC</c> on Unix: what a child
+    /// started with inheritance gets. Windows handle values are multiples of 4, scanned up to a bound far above what a
+    /// test process uses.
+    /// </summary>
+    private static int CountInheritableHandles()
+    {
+        var count = 0;
+        if (OperatingSystem.IsWindows())
+        {
+            for (var value = 4; value < 1 << 20; value += 4)
+            {
+                if (GetHandleInformation(value, out var flags) && (flags & HandleFlagInherit) != 0)
+                    count++;
+            }
+
+            return count;
+        }
+
+        foreach (var entry in Directory.GetFileSystemEntries(OperatingSystem.IsLinux() ? "/proc/self/fd" : "/dev/fd"))
+        {
+            if (int.TryParse(Path.GetFileName(entry), out var fd) && fd > 2 && fcntl(fd, FGetFd, 0) is >= 0 and var flags && (flags & FdCloexec) == 0)
+                count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>The descriptors above stdio that are terminals in a child the host starts with <see cref="Process"/>.</summary>
+    private static async Task<string> TerminalDescriptorsOfAHostChildAsync()
+    {
+        using var probe = Process.Start(new ProcessStartInfo("sh", ["-c", "i=3; while [ $i -lt 1024 ]; do if [ -t $i ]; then printf '%s ' $i; fi; i=$((i+1)); done"])
+        {
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        })!;
+        var terminals = await probe.StandardOutput.ReadToEndAsync().WaitAsync(Timeout);
+        await probe.WaitForExitAsync().WaitAsync(Timeout);
+        return terminals.Trim();
+    }
+
     // ---------------------------------------------------------------- Children
 
     private static string ComSpec => Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
@@ -504,7 +619,8 @@ public sealed class PtyBaselineTests
             foreach (var descendant in descendants)
             {
                 var window = descendant == Descendant.Detached ? "-WindowStyle Hidden" : "-NoNewWindow";
-                script.Append($"$lines += '{descendant} ' + (Start-Process ping.exe -ArgumentList '-n','30','127.0.0.1' {window} -PassThru).Id; ");
+                // waitfor blocks silently until its timeout, so the child's own output is the only output on the console.
+                script.Append($"$lines += '{descendant} ' + (Start-Process waitfor.exe -ArgumentList '/t','30','MiniPtyBaseline{Guid.NewGuid():N}' {window} -PassThru).Id; ");
             }
 
             script.Append($"[IO.File]::WriteAllLines('{pidFile}', [string[]]$lines); ");
@@ -584,27 +700,60 @@ public sealed class PtyBaselineTests
     // ---------------------------------------------------------------- Observation
 
     /// <summary>
-    /// Runs <paramref name="iteration"/> often enough that a handle or descriptor leaked on each run stands out from the
-    /// runtime's own threads coming and going, after a warm-up that fills the pools of reader and watcher threads.
+    /// Runs <paramref name="iteration"/> often enough that a handle or descriptor leaked on each run stands out, after a
+    /// warm-up that lasts until the count has held still for a while.
     /// </summary>
-    private static async Task AssertNoLeakAsync(Func<Task> iteration)
+    /// <remarks>
+    /// Two kinds of growth are not leaks. The first starts in a process add handles that stay: on Windows a few dozen at
+    /// a time, in a few steps over the first dozen or so starts, with the thread count all but unchanged. And on Windows
+    /// a closed pseudo-console lets go of its handles in the background within a second, so starts that fail quickly
+    /// leave dozens still pending when the last one returns. So the warm-up lasts until the count holds still, and the
+    /// count is read once it has settled, before and after. A leak never settles.
+    /// </remarks>
+    internal static async Task AssertNoLeakAsync(Func<Task> iteration)
     {
-        const int WarmUp = 10;
-        const int Iterations = 50;
+        const int MaxWarmUp = 100;
+        const int StillRuns = 10;
+        const int Iterations = 40;
         const int Slack = 20;
 
-        for (var i = 0; i < WarmUp; i++)
+        var last = CountOpenHandles();
+        for (int i = 0, still = 0; i < MaxWarmUp && still < StillRuns; i++)
+        {
             await iteration();
+            var count = CountOpenHandles();
+            still = count <= last ? still + 1 : 0;
+            last = count;
+        }
 
-        var before = CountOpenHandles();
+        var before = await SettledHandleCountAsync();
         for (var i = 0; i < Iterations; i++)
             await iteration();
 
-        await Assert.That(CountOpenHandles() - before).IsLessThan(Slack);
+        var grown = 0;
+        await WaitUntilAsync(() => (grown = CountOpenHandles() - before) < Slack, TimeSpan.FromSeconds(10));
+        await Assert.That(grown).IsLessThan(Slack).Because($"{grown} more handles or descriptors after {Iterations} runs");
+    }
+
+    /// <summary>The handle or descriptor count once it has stopped falling, or after a few seconds.</summary>
+    private static async Task<int> SettledHandleCountAsync()
+    {
+        var count = CountOpenHandles();
+        for (var i = 0; i < 30; i++)
+        {
+            await Task.Delay(100);
+            var next = CountOpenHandles();
+            if (next >= count)
+                return next;
+
+            count = next;
+        }
+
+        return count;
     }
 
     /// <summary>Handles on Windows, descriptors on Unix, of this process.</summary>
-    private static int CountOpenHandles()
+    internal static int CountOpenHandles()
     {
         if (OperatingSystem.IsWindows())
             return GetProcessHandleCount(new IntPtr(-1), out var count) ? (int)count : throw new Win32Exception();
@@ -620,6 +769,11 @@ public sealed class PtyBaselineTests
 
         return Encoding.UTF8.GetString(output.GetBuffer(), 0, checked((int)output.Length));
     }
+
+    /// <summary>Output with its control characters spelled out, for failure messages.</summary>
+    private static string Escape(string text) =>
+        text.Replace("\u001b", "\\e", StringComparison.Ordinal).Replace("\u0007", "\\a", StringComparison.Ordinal)
+            .Replace("\r", "\\r", StringComparison.Ordinal).Replace("\n", "\\n", StringComparison.Ordinal);
 
     private static async Task ReadUntilAsync(IAsyncEnumerator<PtyOutputChunk> reader, StringBuilder output, string text)
     {
@@ -749,6 +903,45 @@ public sealed class PtyBaselineTests
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern unsafe bool ReadConsoleInputW(IntPtr hConsoleInput, InputRecord* lpBuffer, uint nLength, out uint lpNumberOfEventsRead);
 
+    private const int ErrorBrokenPipe = 109;
+    private const uint HandleFlagInherit = 0x00000001;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        public int Length;
+        public IntPtr SecurityDescriptor;
+        public int InheritHandle;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreatePipe(out IntPtr hReadPipe, out IntPtr hWritePipe, ref SecurityAttributes lpPipeAttributes, uint nSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PeekNamedPipe(IntPtr hNamedPipe, IntPtr lpBuffer, uint nBufferSize, IntPtr lpBytesRead, out uint lpTotalBytesAvail, IntPtr lpBytesLeftThisMessage);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetHandleInformation(nint hObject, out uint lpdwFlags);
+
+    private const int FGetFd = 1;
+    private const int FdCloexec = 1;
+
     [DllImport("libc", SetLastError = true)]
     private static extern int kill(int pid, int sig);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int dup(int fd);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int close(int fd);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(int fd, int cmd, int arg);
 }
