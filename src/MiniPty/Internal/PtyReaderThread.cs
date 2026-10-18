@@ -16,11 +16,11 @@ namespace MiniPty.Internal;
 /// buffers on the reader thread).
 /// </para>
 /// <para>
-/// Each thread owns one wake primitive: an auto-reset event on Windows, an eventfd or pipe on Unix. The running
-/// pump waits on it while its ring is full, and on Unix together with the PTY master while it reads, because
-/// closing a descriptor does not interrupt a read blocked on it in another thread. A wake addressed to a pump
-/// that has finished is dropped, so a late signal never reaches another session, and the primitive is never
-/// touched after the thread retires.
+/// Each thread owns one wake primitive: an auto-reset event on Windows, an eventfd on Linux, a kqueue on macOS, a
+/// pipe on FreeBSD. The running pump waits on it while its ring is full, and on Unix together with the PTY master
+/// while it reads, because closing a descriptor does not interrupt a read blocked on it in another thread. A wake
+/// addressed to a pump that has finished is dropped, so a late signal never reaches another session, and the
+/// primitive is never touched after the thread retires.
 /// </para>
 /// <para>
 /// A Windows pump reads its pipe with a blocking <c>ReadFile</c> that no event can interrupt. The thread

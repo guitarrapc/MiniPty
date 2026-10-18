@@ -12,7 +12,9 @@
 #include <unistd.h>
 
 #if defined(__APPLE__)
+#include <sys/event.h>
 #include <sys/select.h>
+#include <time.h>
 #else
 #include <poll.h>
 #endif
@@ -31,16 +33,25 @@
  * input again: the master is non-blocking, and stdin the tty input queue could not take at once is written by
  * the reader thread when it becomes writable.
  *
- * Linux uses one eventfd for both ends; macOS and FreeBSD use a pipe. Every descriptor is close-on-exec and
- * non-blocking, so a signal never blocks the signaler and a drain never blocks the reader.
+ * Linux uses one eventfd for both ends, and macOS one kqueue with an EVFILT_USER event; FreeBSD uses a pipe.
+ * Every descriptor is close-on-exec and non-blocking, so a signal never blocks the signaler and a drain never
+ * blocks the reader. macOS has no pipe2, so a pipe there would be marked close-on-exec only after it opened, and
+ * a child the host forks on another thread in that instant (.NET's Process.Start passes on every descriptor not
+ * marked) would keep both ends. A kqueue is never inherited by a fork child, and select() reports it readable
+ * while its event is triggered.
  */
+
+#if defined(__APPLE__)
+/* The EVFILT_USER event's identifier; it is the only event in the reader's kqueue. */
+#define MINIPTY_WAKE_EVENT_ID 1
+#endif
 
 /* minipty_pty_wait events and results. */
 #define MINIPTY_PTY_READABLE 1
 #define MINIPTY_PTY_WOKEN 2
 #define MINIPTY_PTY_WRITABLE 4
 
-#if !defined(__linux__)
+#if !defined(__linux__) && !defined(__APPLE__)
 static int minipty_output_set_cloexec_nonblock(int fd)
 {
     int fd_flags = fcntl(fd, F_GETFD);
@@ -71,6 +82,33 @@ int minipty_wake_open(int *read_fd, int *write_fd)
     *read_fd = fd;
     *write_fd = fd;
     return 0;
+#elif defined(__APPLE__)
+    struct kevent change;
+    int kq;
+    int saved_errno;
+
+    if (read_fd == NULL || write_fd == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Opened close-on-exec, and dropped from the fork child's table either way. */
+    kq = kqueue();
+    if (kq < 0)
+        return -1;
+
+    /* EV_CLEAR: retrieving the triggered event resets it, which is the drain. */
+    EV_SET(&change, MINIPTY_WAKE_EVENT_ID, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+    if (kevent(kq, &change, 1, NULL, 0, NULL) != 0) {
+        saved_errno = errno;
+        close(kq);
+        errno = saved_errno;
+        return -1;
+    }
+
+    *read_fd = kq;
+    *write_fd = kq;
+    return 0;
 #else
     int fds[2];
     int saved_errno;
@@ -99,6 +137,18 @@ int minipty_wake_open(int *read_fd, int *write_fd)
 
 int minipty_wake_signal(int write_fd)
 {
+#if defined(__APPLE__)
+    struct kevent change;
+    int result;
+
+    /* Triggering an event that is already triggered leaves one pending wake-up. */
+    EV_SET(&change, MINIPTY_WAKE_EVENT_ID, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+    do {
+        result = kevent(write_fd, &change, 1, NULL, 0, NULL);
+    } while (result < 0 && errno == EINTR);
+
+    return result == 0 ? 0 : -1;
+#else
     /* An eventfd takes exactly eight bytes; a pipe takes them atomically (below PIPE_BUF). */
     uint64_t one = 1;
     ssize_t written;
@@ -109,15 +159,25 @@ int minipty_wake_signal(int write_fd)
 
     /* A full pipe already guarantees a pending wake-up. */
     return written == (ssize_t)sizeof(one) || (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) ? 0 : -1;
+#endif
 }
 
 void minipty_wake_drain(int read_fd)
 {
+#if defined(__APPLE__)
+    struct kevent event;
+    struct timespec no_wait = { 0, 0 };
+
+    /* A zero timeout never blocks; retrieving the EV_CLEAR event resets it. */
+    while (kevent(read_fd, NULL, 0, &event, 1, &no_wait) < 0 && errno == EINTR) {
+    }
+#else
     uint64_t buffer[8];
 
     /* One eventfd read resets its counter; a pipe is read until it would block. */
     while (read(read_fd, buffer, sizeof(buffer)) > 0) {
     }
+#endif
 }
 
 void minipty_wake_close(int read_fd, int write_fd)

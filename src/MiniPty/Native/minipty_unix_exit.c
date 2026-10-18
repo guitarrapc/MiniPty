@@ -18,6 +18,10 @@
 #include <sys/event.h>
 #include <sys/time.h>
 #define MINIPTY_CHILD_WATCH_KQUEUE 1
+#if defined(__APPLE__)
+/* macOS has no pipe2, so the wake is an EVFILT_USER event on the kqueue itself; see minipty_child_watch_init. */
+#define MINIPTY_CHILD_WATCH_USER_WAKE 1
+#endif
 #endif
 
 /*
@@ -32,18 +36,25 @@
  * older kernel or under seccomp, or a child that already exited before kqueue registration) makes
  * minipty_child_watch_add fail, and the caller polls waitpid for that child instead.
  *
- * A self-pipe wakes the wait when the caller's polling set changes. Every descriptor is close-on-exec so
- * later children never keep the watcher's descriptors past exec. Until a concurrently forked child execs,
- * though, it holds duplicates of them, which is why pidfd registrations are one-shot and removed explicitly.
+ * A self-pipe wakes the wait when the caller's polling set changes; on macOS an EVFILT_USER event on the
+ * kqueue does instead. Every descriptor is close-on-exec so later children never keep the watcher's
+ * descriptors past exec. Until a concurrently forked child execs, though, it holds duplicates of them, which
+ * is why pidfd registrations are one-shot and removed explicitly.
  */
 
 static int g_watch_fd = -1;
+#if !defined(MINIPTY_CHILD_WATCH_USER_WAKE)
 static int g_wake_read = -1;
 static int g_wake_write = -1;
+#endif
 
 #define MINIPTY_CHILD_WATCH_MAX_EVENTS 16
 #define MINIPTY_CHILD_WATCH_WAKE_TOKEN UINT64_MAX
 
+#if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
+/* The EVFILT_USER event's identifier. Events are keyed by identifier and filter, so it never meets a pid. */
+#define MINIPTY_CHILD_WATCH_WAKE_ID 0
+#else
 static int minipty_set_cloexec_nonblock(int fd)
 {
     int fd_flags = fcntl(fd, F_GETFD);
@@ -63,10 +74,37 @@ static void minipty_drain_wake_pipe(void)
     while (read(g_wake_read, buffer, sizeof(buffer)) > 0) {
     }
 }
+#endif
 
 int minipty_child_watch_init(void)
 {
-#if defined(MINIPTY_CHILD_WATCH_EPOLL) || defined(MINIPTY_CHILD_WATCH_KQUEUE)
+#if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
+    struct kevent change;
+    int saved_errno;
+
+    if (g_watch_fd >= 0)
+        return 0;
+
+    /*
+     * A pipe would be marked close-on-exec only after it opened, and a child the host forks on another thread
+     * in that instant would keep both ends. A kqueue is never inherited by a fork child.
+     */
+    g_watch_fd = kqueue();
+    if (g_watch_fd < 0)
+        return -1;
+
+    /* EV_CLEAR: reporting the event resets it, so one report drains any number of wakes. */
+    EV_SET(&change, MINIPTY_CHILD_WATCH_WAKE_ID, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+    if (kevent(g_watch_fd, &change, 1, NULL, 0, NULL) != 0) {
+        saved_errno = errno;
+        close(g_watch_fd);
+        g_watch_fd = -1;
+        errno = saved_errno;
+        return -1;
+    }
+
+    return 0;
+#elif defined(MINIPTY_CHILD_WATCH_EPOLL) || defined(MINIPTY_CHILD_WATCH_KQUEUE)
     int fds[2];
     int saved_errno;
 
@@ -165,6 +203,17 @@ int minipty_child_watch_add(int pid)
 
 int minipty_child_watch_wake(void)
 {
+#if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
+    struct kevent change;
+    int result;
+
+    EV_SET(&change, MINIPTY_CHILD_WATCH_WAKE_ID, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+    do {
+        result = kevent(g_watch_fd, &change, 1, NULL, 0, NULL);
+    } while (result < 0 && errno == EINTR);
+
+    return result == 0 ? 0 : -1;
+#else
     char byte = 1;
     ssize_t written;
 
@@ -174,6 +223,7 @@ int minipty_child_watch_wake(void)
 
     /* A full pipe already guarantees a pending wake-up. */
     return written == 1 || (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) ? 0 : -1;
+#endif
 }
 
 int minipty_child_watch_wait(int *pids, int capacity, int timeout_ms)
@@ -235,10 +285,15 @@ int minipty_child_watch_wait(int *pids, int capacity, int timeout_ms)
             return errno == EINTR ? 0 : -1;
 
         for (i = 0; i < ready; i++) {
+#if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
+            if (events[i].filter == EVFILT_USER)
+                continue;
+#else
             if (events[i].filter == EVFILT_READ && (int)events[i].ident == g_wake_read) {
                 minipty_drain_wake_pipe();
                 continue;
             }
+#endif
 
             /* NOTE_EXIT and registration errors (EV_ERROR) both tell the caller to check the child now. */
             if (events[i].filter == EVFILT_PROC)
