@@ -234,8 +234,9 @@ static int spawn_pty_child_forkpty(
     /*
      * forkpty opens the master without O_CLOEXEC (glibc's openpty), so every child the host starts later would inherit
      * it and keep the terminal from hanging up. MiniPty's own children close it in minipty_prepare_fork_child either
-     * way. A fork on another thread before this call can still inherit it; only opening the master with O_CLOEXEC,
-     * which forkpty does not offer, would close that window.
+     * way. A fork on another thread before this call can still inherit it. The slave has the same window inside forkpty:
+     * openpty opens it unmarked too, and forkpty closes the parent's copy only after the fork. Only opening both ends
+     * with O_CLOEXEC, which forkpty does not offer, would close those windows; the macOS path does.
      */
     if (fcntl(*master, F_SETFD, FD_CLOEXEC) != 0) {
         int err = errno > 0 ? errno : EINVAL;
