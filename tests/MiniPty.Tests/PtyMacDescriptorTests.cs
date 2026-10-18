@@ -1,59 +1,42 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using MiniPty.Internal;
 
 namespace MiniPty.Tests;
 
 /// <summary>
 /// On macOS no child the host starts can inherit a descriptor of a session, not even one forked on another thread
-/// while MiniPty opens it. The master is opened with <c>O_CLOEXEC</c>. macOS has no <c>pipe2</c>, so every other
-/// descriptor MiniPty keeps is a kqueue, which a fork child never inherits, rather than a pipe marked close-on-exec
-/// only after it opened. .NET's <c>Process.Start</c> passes on every descriptor not marked, so a pipe caught unmarked
-/// would stay open in that child.
+/// while MiniPty opens it. The master is opened with <c>O_CLOEXEC</c>. macOS has no <c>pipe2</c>, so the wake
+/// descriptor each output reader thread opens is a kqueue, which a fork child never inherits, rather than a pipe marked
+/// close-on-exec only after it opened. .NET's <c>Process.Start</c> passes on every descriptor not marked, so a pipe
+/// caught unmarked would stay open in that child.
 /// </summary>
 public sealed partial class PtyMacDescriptorTests
 {
-    private const int FGetFd = 1;
-    private const int MaxSessions = 64;
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
 
     /// <summary>
     /// The instant between opening a descriptor and marking it cannot be hit on purpose, so the test recreates it: it
-    /// duplicates each descriptor a new session added other than its terminal, since <c>dup</c> leaves the copy
-    /// unmarked, and a child the host then starts must find none of the copies. Sessions are started and kept running
-    /// until one has added a descriptor, so reader threads parked by earlier tests are used up and a new one opens its
-    /// wake descriptor. A first session ends before the count, so the assemblies a start loads, which the runtime keeps
-    /// open as plain files, are already open by then.
+    /// opens a wake descriptor the way a new reader thread does and duplicates it, since <c>dup</c> leaves the copy
+    /// unmarked, and a child the host then starts must find none of the copies.
     /// </summary>
+    /// <remarks>
+    /// The primitive is opened directly because a session opens one only when no parked reader thread is left, and
+    /// parked threads from earlier tests outlast any fixed number of sessions started here. The exit watcher's kqueue
+    /// opens once per process, before this test can look, so it is not covered here.
+    /// </remarks>
     [Test]
-    [NotInParallel]
-    public async Task DescriptorsASessionAddsAreNotInheritedEvenWhileUnmarked()
+    public async Task AReaderWakeDescriptorIsNotInheritedEvenWhileUnmarked()
     {
         if (!OperatingSystem.IsMacOS())
             return;
 
-        await using (Pty.Start(Blocks()))
-        {
-        }
+        await Assert.That(OpenWake(out var read, out var write)).IsEqualTo(0);
 
-        var before = OpenDescriptors();
-        var sessions = new List<PtySession>();
-        var added = new List<int>();
         var unmarked = new List<int>();
         try
         {
-            while (added.Count == 0 && sessions.Count < MaxSessions)
-            {
-                sessions.Add(Pty.Start(Blocks()));
-                foreach (var fd in OpenDescriptors())
-                {
-                    if (!before.Contains(fd) && isatty(fd) == 0 && !added.Contains(fd))
-                        added.Add(fd);
-                }
-            }
-
-            await Assert.That(added.Count).IsGreaterThan(0).Because($"no descriptor appeared after {sessions.Count} sessions");
-
-            foreach (var fd in added)
+            foreach (var fd in read == write ? [read] : new[] { read, write })
             {
                 var copy = dup(fd);
                 await Assert.That(copy).IsGreaterThanOrEqualTo(0);
@@ -75,37 +58,24 @@ public sealed partial class PtyMacDescriptorTests
         {
             foreach (var fd in unmarked)
                 close(fd);
-            foreach (var session in sessions)
-                await session.DisposeAsync();
+            UnixInterop.minipty_wake_close(read, write);
         }
     }
 
-    /// <summary>Waits on stdin, which nobody writes, so the session keeps its reader thread until it is disposed.</summary>
-    private static PtyStartInfo Blocks() => new() { FileName = "sh", Arguments = ["-c", "IFS= read -r _"] };
-
-    private static HashSet<int> OpenDescriptors()
+    /// <summary>Opens a wake descriptor pair as <see cref="PtyReaderThread"/> does; returns the native result.</summary>
+    private static unsafe int OpenWake(out int read, out int write)
     {
-        var fds = new HashSet<int>();
-        foreach (var entry in Directory.GetFileSystemEntries("/dev/fd"))
-        {
-            // The listing's own directory descriptor is gone once it returns, so only descriptors still open count.
-            if (int.TryParse(Path.GetFileName(entry), out var fd) && fd > 2 && fcntl(fd, FGetFd, 0) >= 0)
-                fds.Add(fd);
-        }
-
-        return fds;
+        int r;
+        int w;
+        var result = UnixInterop.minipty_wake_open(&r, &w);
+        read = r;
+        write = w;
+        return result;
     }
-
-    // Only F_GETFD, which takes no argument: fcntl is variadic, and Apple arm64 passes variadic arguments on the stack.
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int fcntl(int fd, int cmd, int arg);
 
     [LibraryImport("libc", SetLastError = true)]
     private static partial int dup(int fd);
 
     [LibraryImport("libc", SetLastError = true)]
     private static partial int close(int fd);
-
-    [LibraryImport("libc")]
-    private static partial int isatty(int fd);
 }

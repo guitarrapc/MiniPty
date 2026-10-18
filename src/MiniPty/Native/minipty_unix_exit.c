@@ -1,3 +1,8 @@
+/* Must precede every system header: glibc declares pipe2 only with _GNU_SOURCE. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
+
 #include "minipty_unix_internal.h"
 
 #include <errno.h>
@@ -37,9 +42,10 @@
  * minipty_child_watch_add fail, and the caller polls waitpid for that child instead.
  *
  * A self-pipe wakes the wait when the caller's polling set changes; on macOS an EVFILT_USER event on the
- * kqueue does instead. Every descriptor is close-on-exec so later children never keep the watcher's
- * descriptors past exec. Until a concurrently forked child execs, though, it holds duplicates of them, which
- * is why pidfd registrations are one-shot and removed explicitly.
+ * kqueue does instead. Every descriptor is opened close-on-exec, so no later child ever keeps the watcher's
+ * descriptors past exec: the pipe with pipe2 (macOS has none, hence the event there). Until a concurrently
+ * forked child execs, though, it holds duplicates of them, which is why pidfd registrations are one-shot and
+ * removed explicitly.
  */
 
 static int g_watch_fd = -1;
@@ -55,18 +61,6 @@ static int g_wake_write = -1;
 /* The EVFILT_USER event's identifier. Events are keyed by identifier and filter, so it never meets a pid. */
 #define MINIPTY_CHILD_WATCH_WAKE_ID 0
 #else
-static int minipty_set_cloexec_nonblock(int fd)
-{
-    int fd_flags = fcntl(fd, F_GETFD);
-    int fl_flags = fcntl(fd, F_GETFL);
-
-    if (fd_flags < 0 || fl_flags < 0)
-        return -1;
-    if (fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC) != 0)
-        return -1;
-    return fcntl(fd, F_SETFL, fl_flags | O_NONBLOCK);
-}
-
 static void minipty_drain_wake_pipe(void)
 {
     char buffer[64];
@@ -120,13 +114,15 @@ int minipty_child_watch_init(void)
     if (g_watch_fd < 0)
         return -1;
 
-    if (pipe(fds) != 0)
+    /*
+     * Both flags at open: a pipe marked afterwards would be inherited by a child the host forks on another
+     * thread in between (.NET's Process.Start passes on every descriptor not marked).
+     */
+    if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0)
         goto fail;
 
     g_wake_read = fds[0];
     g_wake_write = fds[1];
-    if (minipty_set_cloexec_nonblock(g_wake_read) != 0 || minipty_set_cloexec_nonblock(g_wake_write) != 0)
-        goto fail;
 
 #if defined(MINIPTY_CHILD_WATCH_EPOLL)
     {

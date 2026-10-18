@@ -35,10 +35,10 @@
  *
  * Linux uses one eventfd for both ends, and macOS one kqueue with an EVFILT_USER event; FreeBSD uses a pipe.
  * Every descriptor is close-on-exec and non-blocking, so a signal never blocks the signaler and a drain never
- * blocks the reader. macOS has no pipe2, so a pipe there would be marked close-on-exec only after it opened, and
- * a child the host forks on another thread in that instant (.NET's Process.Start passes on every descriptor not
- * marked) would keep both ends. A kqueue is never inherited by a fork child, and select() reports it readable
- * while its event is triggered.
+ * blocks the reader. Each is marked as it opens: a child the host forks on another thread before the mark
+ * (.NET's Process.Start passes on every descriptor not marked) would keep it. macOS has no pipe2, so a pipe
+ * there could only be marked after it opened. A kqueue is never inherited by a fork child, and select()
+ * reports it readable while its event is triggered.
  */
 
 #if defined(__APPLE__)
@@ -50,20 +50,6 @@
 #define MINIPTY_PTY_READABLE 1
 #define MINIPTY_PTY_WOKEN 2
 #define MINIPTY_PTY_WRITABLE 4
-
-#if !defined(__linux__) && !defined(__APPLE__)
-static int minipty_output_set_cloexec_nonblock(int fd)
-{
-    int fd_flags = fcntl(fd, F_GETFD);
-    int fl_flags = fcntl(fd, F_GETFL);
-
-    if (fd_flags < 0 || fl_flags < 0)
-        return -1;
-    if (fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC) != 0)
-        return -1;
-    return fcntl(fd, F_SETFL, fl_flags | O_NONBLOCK);
-}
-#endif
 
 int minipty_wake_open(int *read_fd, int *write_fd)
 {
@@ -111,23 +97,15 @@ int minipty_wake_open(int *read_fd, int *write_fd)
     return 0;
 #else
     int fds[2];
-    int saved_errno;
 
     if (read_fd == NULL || write_fd == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (pipe(fds) != 0)
+    /* Both flags at open, so no child forked on another thread catches the pipe unmarked. */
+    if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0)
         return -1;
-
-    if (minipty_output_set_cloexec_nonblock(fds[0]) != 0 || minipty_output_set_cloexec_nonblock(fds[1]) != 0) {
-        saved_errno = errno;
-        close(fds[0]);
-        close(fds[1]);
-        errno = saved_errno;
-        return -1;
-    }
 
     *read_fd = fds[0];
     *write_fd = fds[1];
