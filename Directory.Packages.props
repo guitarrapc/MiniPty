@@ -9,5 +9,11 @@
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.6" />
     <PackageVersion Include="Microsoft.Testing.Platform" Version="2.0.2" />
     <PackageVersion Include="TUnit" Version="1.12.111" />
+    <!--
+      Out-of-band ConPTY (conpty.dll + OpenConsole.exe) for the Windows tests and samples only. MiniPty itself ships no
+      binary and takes no dependency: an application supplies the package and opts in with PtyStartInfo.ConPty. This is
+      the version MiniPty is verified against; bumping it runs the out-of-band tests in CI.
+    -->
+    <PackageVersion Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" />
   </ItemGroup>
 </Project>

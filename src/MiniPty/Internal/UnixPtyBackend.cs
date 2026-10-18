@@ -501,6 +501,9 @@ internal static partial class UnixPtyBackend
             }
         }
 
+        // A Unix PTY has no screen buffer of its own; the frontend owns the display.
+        public void Clear() => ObjectDisposedException.ThrowIf(_disposed, this);
+
         public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);

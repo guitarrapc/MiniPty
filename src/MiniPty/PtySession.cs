@@ -349,6 +349,29 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
+    /// Clears the pseudo-console's screen buffer, for a frontend that has just cleared its own display.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Effective on Windows with an out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>): the console host clears
+    /// its buffer and repaints the frontend, so the two stay in step and the host does not later reprint content the
+    /// frontend has discarded. A frontend calls it when the user clears the terminal's scrollback.
+    /// </para>
+    /// <para>
+    /// A no-op on the in-box ConPTY, which exposes no clear operation, and on Unix, where the frontend owns the display.
+    /// Also a no-op once the child has exited and the post-exit drain has closed the transport, like
+    /// <see cref="Resize(PtySize)"/>.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
+    /// <exception cref="System.ComponentModel.Win32Exception">Windows: the clear failed while the child was running.</exception>
+    public void Clear()
+    {
+        ThrowIfDisposed();
+        _backend.Clear();
+    }
+
+    /// <summary>
     /// Terminates the child process without releasing PTY handles.
     /// </summary>
     /// <remarks>

@@ -1,0 +1,59 @@
+<Project>
+  <!--
+    Stages the console host of a user-supplied out-of-band ConPTY beside its conpty.dll.
+
+    MiniPty ships no ConPTY binary. An application that wants the out-of-band implementation (the one Windows Terminal
+    carries) references the Microsoft.Windows.Console.ConPTY package itself and opts in with PtyStartInfo.ConPty. That
+    package splits its payload: conpty.dll flows to every consumer as an ordinary native asset, while OpenConsole.exe is
+    copied by the package's own build targets only for a direct reference whose PlatformTarget is x86, x64, or ARM64,
+    which a .NET project (AnyCPU) is not. conpty.dll with no host beside it does not fail: it silently launches the
+    in-box conhost.exe instead, which is exactly what the package was taken to avoid.
+
+    conpty.dll looks for OpenConsole.exe first beside itself, so the host is staged into the directory conpty.dll lands
+    in, whatever layout the build produces: the application root for a RID-specific build, runtimes\win-<arch>\native\
+    for a portable one. Each conpty.dll gets the host of its own architecture. The package directory is derived from
+    the resolved conpty.dll, never from a version literal, so the consumer's graph decides which package version wins.
+
+    Nothing here adds a package reference; without conpty.dll among the consumer's copy-local items the targets do
+    nothing. Set MiniPtyStageConPtyHost=false to stage the host yourself.
+  -->
+
+  <Target Name="MiniPtyStageConPtyHost"
+          AfterTargets="ResolveAssemblyReferences"
+          Condition="'$(MiniPtyStageConPtyHost)' != 'false'">
+    <ItemGroup>
+      <_MiniPtyConPtyDll Include="@(ReferenceCopyLocalPaths)"
+                         Condition="'%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'conpty.dll'" />
+
+      <!--
+        <package>\runtimes\win-<arch>\native\conpty.dll -> <package>\build\native\runtimes\<arch>\OpenConsole.exe.
+        The transform carries the DLL's metadata, so DestinationSubDirectory places the host beside it.
+      -->
+      <_MiniPtyConPtyHost Include="@(_MiniPtyConPtyDll->'%(RootDir)%(Directory)..\..\..\build\native\runtimes\x64\OpenConsole.exe')"
+                          Condition="$([System.String]::Copy('%(_MiniPtyConPtyDll.FullPath)').Contains('win-x64')) and Exists('%(_MiniPtyConPtyDll.RootDir)%(_MiniPtyConPtyDll.Directory)..\..\..\build\native\runtimes\x64\OpenConsole.exe')" />
+      <_MiniPtyConPtyHost Include="@(_MiniPtyConPtyDll->'%(RootDir)%(Directory)..\..\..\build\native\runtimes\arm64\OpenConsole.exe')"
+                          Condition="$([System.String]::Copy('%(_MiniPtyConPtyDll.FullPath)').Contains('win-arm64')) and Exists('%(_MiniPtyConPtyDll.RootDir)%(_MiniPtyConPtyDll.Directory)..\..\..\build\native\runtimes\arm64\OpenConsole.exe')" />
+      <_MiniPtyConPtyHost Include="@(_MiniPtyConPtyDll->'%(RootDir)%(Directory)..\..\..\build\native\runtimes\x86\OpenConsole.exe')"
+                          Condition="$([System.String]::Copy('%(_MiniPtyConPtyDll.FullPath)').Contains('win-x86')) and Exists('%(_MiniPtyConPtyDll.RootDir)%(_MiniPtyConPtyDll.Directory)..\..\..\build\native\runtimes\x86\OpenConsole.exe')" />
+
+      <ReferenceCopyLocalPaths Include="@(_MiniPtyConPtyHost)">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ReferenceCopyLocalPaths>
+    </ItemGroup>
+  </Target>
+
+  <!-- Publish computes its file list from the package assets, not from ReferenceCopyLocalPaths, so the host is added again. -->
+  <Target Name="MiniPtyStageConPtyHostForPublish"
+          AfterTargets="ComputeResolvedFilesToPublishList"
+          DependsOnTargets="MiniPtyStageConPtyHost"
+          Condition="'$(MiniPtyStageConPtyHost)' != 'false'">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="@(_MiniPtyConPtyHost)"
+                             Condition="'@(_MiniPtyConPtyHost)' != ''">
+        <RelativePath>%(_MiniPtyConPtyHost.DestinationSubDirectory)OpenConsole.exe</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+</Project>
