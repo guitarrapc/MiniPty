@@ -822,18 +822,24 @@ public sealed class PtyBaselineTests
     /// warm-up that lasts until the count has held still for a while.
     /// </summary>
     /// <remarks>
-    /// Two kinds of growth are not leaks. The first starts in a process add handles that stay: on Windows a few dozen at
-    /// a time, in a few steps over the first dozen or so starts, with the thread count all but unchanged. And on Windows
-    /// a closed pseudo-console lets go of its handles in the background within a second, so starts that fail quickly
-    /// leave dozens still pending when the last one returns. So the warm-up lasts until the count holds still, and the
-    /// count is read once it has settled, before and after. A leak never settles.
+    /// <para>
+    /// Three kinds of growth are not leaks. The first starts in a process add handles that stay: on Windows a few dozen at
+    /// a time, in a few steps over the first dozen or so starts, with the thread count all but unchanged. On Windows a
+    /// closed pseudo-console lets go of its handles in the background within a second, so starts that fail quickly leave
+    /// dozens still pending when the last one returns. So the warm-up lasts until the count holds still, and the count is
+    /// read once it has settled, before and after.
+    /// </para>
+    /// <para>
+    /// And anything else in the process can set itself up at any moment, once: the test platform's telemetry upload opens
+    /// an HTTPS connection, and the certificate chain engine and HTTP stack it brings up add 28 to 49 handles at once
+    /// (certificate store keys, a native thread pool, ETW registrations). A one-time step grows one batch of runs, while a
+    /// leak grows every batch, so a batch that grew is followed by another, and the check fails only when both grew.
+    /// </para>
     /// </remarks>
     internal static async Task AssertNoLeakAsync(Func<Task> iteration)
     {
         const int MaxWarmUp = 100;
         const int StillRuns = 10;
-        const int Iterations = 40;
-        const int Slack = 20;
 
         var last = CountOpenHandles();
         for (int i = 0, still = 0; i < MaxWarmUp && still < StillRuns; i++)
@@ -844,13 +850,29 @@ public sealed class PtyBaselineTests
             last = count;
         }
 
+        var grown = await GrowthOverLeakCheckRunsAsync(iteration);
+        if (grown < LeakCheckSlack)
+            return;
+
+        var grownAgain = await GrowthOverLeakCheckRunsAsync(iteration);
+        await Assert.That(grownAgain).IsLessThan(LeakCheckSlack)
+            .Because($"{grown}, then {grownAgain} more handles or descriptors over two batches of {LeakCheckRuns} runs");
+    }
+
+    private const int LeakCheckRuns = 40;
+    // Under one per two runs: a handle leaked on every run, or every other run, fails the check.
+    private const int LeakCheckSlack = 20;
+
+    /// <summary>How much the settled count grew over <see cref="LeakCheckRuns"/> runs, read once it falls under the slack or after 10 s.</summary>
+    private static async Task<int> GrowthOverLeakCheckRunsAsync(Func<Task> iteration)
+    {
         var before = await SettledHandleCountAsync();
-        for (var i = 0; i < Iterations; i++)
+        for (var i = 0; i < LeakCheckRuns; i++)
             await iteration();
 
         var grown = 0;
-        await WaitUntilAsync(() => (grown = CountOpenHandles() - before) < Slack, TimeSpan.FromSeconds(10));
-        await Assert.That(grown).IsLessThan(Slack).Because($"{grown} more handles or descriptors after {Iterations} runs");
+        await WaitUntilAsync(() => (grown = CountOpenHandles() - before) < LeakCheckSlack, TimeSpan.FromSeconds(10));
+        return grown;
     }
 
     /// <summary>The handle or descriptor count once it has stopped falling, or after a few seconds.</summary>
