@@ -149,7 +149,29 @@ static PtyStartInfo CreateTimedOutputStartInfo()
 
 On Windows, ConPTY clears the frontend's screen when the child starts. Set `PtyStartInfo.InheritCursor = true` to continue below what the frontend already shows, such as an editor's banner or, with MiniPty.Console, the host terminal's prompt (attach before starting the output pump, as [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) does). The frontend must then answer ConPTY's cursor position query, as terminal emulators do on their own; until it does, the child waits. Unix ignores the option because its PTY never clears the screen.
 
-On Windows, ending a session ends the child and the processes attached to its console, but a program the child started in a console of its own keeps running, and if the host crashes, everything the child started does. Set `PtyStartInfo.KillProcessTree = true` to run the child in a kill-on-close job: `Dispose`, `Kill`, and the end of the host process, including a crash, then end the whole tree. It is off by default because it also ends programs the user launched on purpose from the terminal. Unix ignores the option; there disposal hangs the child up, which ends the descendants in the terminal's foreground process group.
+On Windows, ending a session ends the child and the processes attached to its console, but a program the child started in a console of its own keeps running, and if the host crashes, everything the child started does. Set `PtyStartInfo.KillProcessTree = true` to run the child in a kill-on-close job: `Dispose`, `Kill`, and the end of the host process, including a crash, then end the whole tree. Unix ignores the option; there disposal hangs the child up, which ends the descendants in the terminal's foreground process group.
+
+| Session | `KillProcessTree` | Why |
+|---|---|---|
+| A command run for its result: a CI step, a test runner, an agent's tool call, an untrusted script | `true` | Nothing it started is wanted afterwards, and leftovers must not survive a crashed host. |
+| An interactive terminal: an editor's terminal panel, a terminal app's tab | `false` (default) | A window the user opened from the shell (`code .`, `start notepad`) should survive closing the tab, as it does in Windows Terminal and VS Code. |
+
+```csharp
+using MiniPty;
+
+// A build step run for its result. Whatever it starts, even in a console of its own, ends with the session:
+// at disposal, after a timeout too, and if this process crashes.
+await using var session = Pty.Start(new PtyStartInfo
+{
+    FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+    Arguments = ["/c", "npm test"],
+    KillProcessTree = true,
+});
+var result = await session.CompleteAsync(new PtyCompleteOptions { ExitTimeout = TimeSpan.FromMinutes(10) });
+Console.WriteLine($"exit={result.ExitCode}");
+```
+
+The option also ends programs the user started on purpose, which is why it is off by default. No process can leave the job, so a program that asks to (`CREATE_BREAKAWAY_FROM_JOB`, as some installers and updaters do) fails to start inside such a session.
 
 MiniPty is not a sandbox. Processes run with the parent process permissions unless the host application isolates them with OS users, containers, or another security boundary.
 
