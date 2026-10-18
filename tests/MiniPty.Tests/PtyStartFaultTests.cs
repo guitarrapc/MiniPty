@@ -18,13 +18,16 @@ public sealed class PtyStartFaultTests
     /// <summary>
     /// <c>Spawned</c>: no backend owns the child yet, so the start itself ends it; on Unix it also reaps it, since no
     /// exit watcher knows the child. <c>BackendBuilt</c>: the backend owns the child, and the session's failure path
-    /// disposes the backend, which ends it; on Unix the watcher reaps it.
+    /// disposes the backend, which ends it; on Unix the watcher reaps it. With <see cref="PtyStartInfo.KillProcessTree"/>
+    /// the job is released on the same paths (Windows; Unix ignores the option).
     /// </summary>
     [Test]
     [NotInParallel]
-    [Arguments(nameof(PtyStartStage.Spawned))]
-    [Arguments(nameof(PtyStartStage.BackendBuilt))]
-    public async Task AStartThatFailsWithItsChildRunningEndsTheChildAndLeaksNothing(string stage)
+    [Arguments(nameof(PtyStartStage.Spawned), false)]
+    [Arguments(nameof(PtyStartStage.BackendBuilt), false)]
+    [Arguments(nameof(PtyStartStage.Spawned), true)]
+    [Arguments(nameof(PtyStartStage.BackendBuilt), true)]
+    public async Task AStartThatFailsWithItsChildRunningEndsTheChildAndLeaksNothing(string stage, bool killProcessTree)
     {
         var injected = Enum.Parse<PtyStartStage>(stage);
         var children = new List<int>();
@@ -41,7 +44,7 @@ public sealed class PtyStartFaultTests
         {
             await PtyBaselineTests.AssertNoLeakAsync(async () =>
             {
-                StartExpectingTheFault();
+                StartExpectingTheFault(killProcessTree);
                 // Off this thread between starts, so the synchronous loop does not hold a thread-pool worker throughout.
                 await Task.Yield();
             });
@@ -57,11 +60,11 @@ public sealed class PtyStartFaultTests
         }
     }
 
-    private static void StartExpectingTheFault()
+    private static void StartExpectingTheFault(bool killProcessTree)
     {
         try
         {
-            Pty.Start(Blocks()).Dispose();
+            Pty.Start(Blocks() with { KillProcessTree = killProcessTree }).Dispose();
         }
         catch (InjectedStartFault)
         {

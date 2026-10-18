@@ -52,6 +52,38 @@ internal struct WindowsProcessInformation
     public int dwThreadId;
 }
 
+/// <summary><c>JOBOBJECT_BASIC_LIMIT_INFORMATION</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct WindowsJobBasicLimitInformation
+{
+    public long PerProcessUserTimeLimit;
+    public long PerJobUserTimeLimit;
+    public uint LimitFlags;
+    public nuint MinimumWorkingSetSize;
+    public nuint MaximumWorkingSetSize;
+    public uint ActiveProcessLimit;
+    public nuint Affinity;
+    public uint PriorityClass;
+    public uint SchedulingClass;
+}
+
+/// <summary><c>JOBOBJECT_EXTENDED_LIMIT_INFORMATION</c>; only the basic limit flags are set.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct WindowsJobExtendedLimitInformation
+{
+    public WindowsJobBasicLimitInformation BasicLimitInformation;
+    public ulong ReadOperationCount;
+    public ulong WriteOperationCount;
+    public ulong OtherOperationCount;
+    public ulong ReadTransferCount;
+    public ulong WriteTransferCount;
+    public ulong OtherTransferCount;
+    public nuint ProcessMemoryLimit;
+    public nuint JobMemoryLimit;
+    public nuint PeakProcessMemoryUsed;
+    public nuint PeakJobMemoryUsed;
+}
+
 internal static class WindowsPtyBackend
 {
     private const int ProcThreadAttributePseudoConsole = 0x00020016;
@@ -60,6 +92,13 @@ internal static class WindowsPtyBackend
     /// across in-box and redistributable ConPTY builds. See <see cref="PtyStartInfo.InheritCursor"/>.
     /// </summary>
     private const uint PseudoConsoleInheritCursor = 0x1;
+    /// <summary>
+    /// <c>PROC_THREAD_ATTRIBUTE_JOB_LIST</c>: the child starts inside the listed jobs, so it cannot exit or start a
+    /// process of its own before it is assigned. See <see cref="PtyStartInfo.KillProcessTree"/>.
+    /// </summary>
+    private const int ProcThreadAttributeJobList = 0x0002000D;
+    private const int JobObjectExtendedLimitInformationClass = 9;
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const uint StartfUseStdHandles = 0x00000100;
     private static readonly IntPtr InvalidHandleValue = new(-1);
@@ -148,17 +187,32 @@ internal static class WindowsPtyBackend
         var attrList = IntPtr.Zero;
         var environmentBlock = IntPtr.Zero;
         var processInfo = new WindowsProcessInformation();
-        SafeChildProcessHandle? process = null;
+        SafeKernelHandle? process = null;
+        SafeKernelHandle? job = null;
         try
         {
+            if (startInfo.KillProcessTree)
+                job = CreateKillOnCloseJob();
+
+            var attributeCount = job is null ? 1 : 2;
             nuint attrListSize = 0;
-            _ = WindowsInterop.InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attrListSize);
+            _ = WindowsInterop.InitializeProcThreadAttributeList(IntPtr.Zero, attributeCount, 0, ref attrListSize);
             if (attrListSize == 0)
                 throw new Win32Exception(Marshal.GetLastPInvokeError(), "InitializeProcThreadAttributeList size query failed");
 
-            attrList = Marshal.AllocHGlobal((IntPtr)(nint)attrListSize);
-            if (!WindowsInterop.InitializeProcThreadAttributeList(attrList, 1, 0, ref attrListSize))
-                throw new Win32Exception(Marshal.GetLastPInvokeError(), "InitializeProcThreadAttributeList failed");
+            // An attribute's value must stay valid until the list is deleted, which the session does at disposal. The
+            // job list is an array of handles rather than a handle, so its one slot sits after the list in the same
+            // allocation, and freeing the list frees it too.
+            var jobSlotOffset = (attrListSize + (nuint)IntPtr.Size - 1) & ~((nuint)IntPtr.Size - 1);
+            var allocationSize = job is null ? attrListSize : jobSlotOffset + (nuint)IntPtr.Size;
+            attrList = Marshal.AllocHGlobal((IntPtr)(nint)allocationSize);
+            if (!WindowsInterop.InitializeProcThreadAttributeList(attrList, attributeCount, 0, ref attrListSize))
+            {
+                var error = Marshal.GetLastPInvokeError();
+                Marshal.FreeHGlobal(attrList);
+                attrList = IntPtr.Zero;
+                throw new Win32Exception(error, "InitializeProcThreadAttributeList failed");
+            }
 
             if (!WindowsInterop.UpdateProcThreadAttribute(
                     attrList,
@@ -170,6 +224,23 @@ internal static class WindowsPtyBackend
                     IntPtr.Zero))
             {
                 throw new Win32Exception(Marshal.GetLastPInvokeError(), "UpdateProcThreadAttribute failed");
+            }
+
+            if (job is not null)
+            {
+                var jobSlot = attrList + (nint)jobSlotOffset;
+                Marshal.WriteIntPtr(jobSlot, job.DangerousGetHandle());
+                if (!WindowsInterop.UpdateProcThreadAttribute(
+                        attrList,
+                        0,
+                        (IntPtr)ProcThreadAttributeJobList,
+                        jobSlot,
+                        (IntPtr)IntPtr.Size,
+                        IntPtr.Zero,
+                        IntPtr.Zero))
+                {
+                    throw new Win32Exception(Marshal.GetLastPInvokeError(), "UpdateProcThreadAttribute (job list) failed");
+                }
             }
 
             var startupInfo = new WindowsStartupInfoEx
@@ -213,7 +284,7 @@ internal static class WindowsPtyBackend
             // and kills pin while they use it.
             WindowsInterop.CloseHandle(processInfo.hThread);
             processInfo.hThread = IntPtr.Zero;
-            process = new SafeChildProcessHandle(processInfo.hProcess);
+            process = new SafeKernelHandle(processInfo.hProcess);
             processInfo.hProcess = IntPtr.Zero;
 
             if (environmentBlock != IntPtr.Zero)
@@ -229,6 +300,7 @@ internal static class WindowsPtyBackend
                 hpc,
                 attrList,
                 process,
+                job,
                 processInfo.dwProcessId,
                 size);
         }
@@ -244,11 +316,13 @@ internal static class WindowsPtyBackend
             if (process is not null)
                 WindowsInterop.TerminateProcess(process.DangerousGetHandle(), 1);
 
-            // The order Dispose closes them in: input, pseudo-console, output, then the process handle.
+            // The order Dispose closes them in: input, pseudo-console, output, the process handle, then the job, whose
+            // close ends whatever the child had started meanwhile.
             inputWriteHandle.Dispose();
             hpc.Dispose();
             outputReadHandle.Dispose();
             process?.Dispose();
+            job?.Dispose();
             if (attrList != IntPtr.Zero)
             {
                 WindowsInterop.DeleteProcThreadAttributeList(attrList);
@@ -260,6 +334,37 @@ internal static class WindowsPtyBackend
 
             throw;
         }
+    }
+
+    /// <summary>
+    /// Creates the job of <see cref="PtyStartInfo.KillProcessTree"/>: kill-on-close and nothing else, so closing its only
+    /// handle, at disposal or when the host process ends in any way, ends every process in it. Breakaway is not allowed,
+    /// so no descendant can leave. Nested inside a job the host may already run in (Windows 8 and later).
+    /// </summary>
+    private static unsafe SafeKernelHandle CreateKillOnCloseJob()
+    {
+        var job = new SafeKernelHandle(WindowsInterop.CreateJobObjectW(IntPtr.Zero, IntPtr.Zero));
+        if (job.IsInvalid)
+        {
+            var error = Marshal.GetLastPInvokeError();
+            job.Dispose();
+            throw new Win32Exception(error, "CreateJobObject failed");
+        }
+
+        var limits = new WindowsJobExtendedLimitInformation();
+        limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+        if (!WindowsInterop.SetInformationJobObject(
+                job.DangerousGetHandle(),
+                JobObjectExtendedLimitInformationClass,
+                &limits,
+                (uint)sizeof(WindowsJobExtendedLimitInformation)))
+        {
+            var error = Marshal.GetLastPInvokeError();
+            job.Dispose();
+            throw new Win32Exception(error, "SetInformationJobObject failed");
+        }
+
+        return job;
     }
 
     private static unsafe IntPtr AllocEnvironmentBlock(KeyValuePair<string, string>[] environment)
@@ -311,9 +416,11 @@ internal static class WindowsPtyBackend
         private readonly SafeFileHandle _outputReadHandle;
         private readonly SafePseudoConsoleHandle _hpc;
         private readonly IntPtr _attrList;
-        // Pinned for every native call (see TryPinProcess), because Dispose can release it while the exit watcher, the
+        // Pinned for every native call (see TryPin), because Dispose can release it while the exit watcher, the
         // EOF timer, or a caller is still using it.
-        private readonly SafeChildProcessHandle _process;
+        private readonly SafeKernelHandle _process;
+        // The kill-on-close job of PtyStartInfo.KillProcessTree, or null. Pinned like the process handle.
+        private readonly SafeKernelHandle? _job;
         private readonly int _processId;
         // Mutable struct: used only through this field, never copied.
         private PtyExitSignal _exitSignal;
@@ -350,7 +457,8 @@ internal static class WindowsPtyBackend
             SafeFileHandle outputReadHandle,
             SafePseudoConsoleHandle hpc,
             IntPtr attrList,
-            SafeChildProcessHandle process,
+            SafeKernelHandle process,
+            SafeKernelHandle? job,
             int processId,
             PtySize size)
         {
@@ -359,6 +467,7 @@ internal static class WindowsPtyBackend
             _hpc = hpc;
             _attrList = attrList;
             _process = process;
+            _job = job;
             _processId = processId;
             _size = size;
             Input = new PtyInputStream(this);
@@ -909,7 +1018,18 @@ internal static class WindowsPtyBackend
 
         public void Kill()
         {
-            if (_disposed || TryRefreshExitState())
+            if (_disposed)
+                return;
+
+            // With a job, the tree ends as it does at disposal, also after the child itself has exited: its descendants
+            // may still run.
+            if (_job is not null)
+            {
+                KillCore();
+                return;
+            }
+
+            if (TryRefreshExitState())
                 return;
 
             KillCore();
@@ -929,38 +1049,43 @@ internal static class WindowsPtyBackend
         }
 
         /// <summary>
-        /// Terminates the child unless Dispose has released its handle, in which case Dispose has already ended it.
+        /// Terminates the child, or with a job every process in it, unless Dispose has released the handle, in which
+        /// case Dispose has already ended them. Either way the child's exit code is 1.
         /// </summary>
         private void KillCore()
         {
-            if (!TryPinProcess())
+            var target = _job ?? _process;
+            if (!TryPin(target))
                 return;
 
             try
             {
-                WindowsInterop.TerminateProcess(_process.DangerousGetHandle(), 1);
+                if (_job is not null)
+                    WindowsInterop.TerminateJobObject(target.DangerousGetHandle(), 1);
+                else
+                    WindowsInterop.TerminateProcess(target.DangerousGetHandle(), 1);
             }
             finally
             {
-                _process.DangerousRelease();
+                target.DangerousRelease();
             }
         }
 
         /// <summary>
-        /// Pins the process handle for a native call, so a Dispose on another thread defers the close until the
+        /// Pins the process or job handle for a native call, so a Dispose on another thread defers the close until the
         /// matching <see cref="SafeHandle.DangerousRelease"/>. Returns <see langword="false"/> once Dispose has
         /// released it. A raw handle would let the call reach whatever object reused the released value.
         /// </summary>
-        private bool TryPinProcess()
+        private static bool TryPin(SafeHandle handle)
         {
             // Checked first, so polling exit after disposal does not throw.
-            if (_process.IsClosed)
+            if (handle.IsClosed)
                 return false;
 
             var pinned = false;
             try
             {
-                _process.DangerousAddRef(ref pinned);
+                handle.DangerousAddRef(ref pinned);
             }
             catch (ObjectDisposedException)
             {
@@ -1151,6 +1276,8 @@ internal static class WindowsPtyBackend
 
             // Closes at once, or when a concurrent exit query or kill unpins it.
             _process.Dispose();
+            // Kill-on-close: ends every process still in the job, such as a descendant of a child that already exited.
+            _job?.Dispose();
             if (_attrList != IntPtr.Zero)
             {
                 WindowsInterop.DeleteProcThreadAttributeList(_attrList);
@@ -1174,7 +1301,7 @@ internal static class WindowsPtyBackend
             if (_exited)
                 return true;
 
-            if (!TryPinProcess())
+            if (!TryPin(_process))
                 return _exited;
 
             try
@@ -1543,10 +1670,13 @@ internal static class WindowsPtyBackend
         }
     }
 
-    /// <summary>The child's process handle; see <c>WindowsPtyBackendInstance.TryPinProcess</c>.</summary>
-    private sealed class SafeChildProcessHandle : SafeHandle
+    /// <summary>
+    /// A kernel object handle closed with <c>CloseHandle</c>: the child's process and, with
+    /// <see cref="PtyStartInfo.KillProcessTree"/>, its job. See <c>WindowsPtyBackendInstance.TryPin</c>.
+    /// </summary>
+    private sealed class SafeKernelHandle : SafeHandle
     {
-        public SafeChildProcessHandle(IntPtr value) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(value);
+        public SafeKernelHandle(IntPtr value) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(value);
 
         public override bool IsInvalid => handle == IntPtr.Zero;
 

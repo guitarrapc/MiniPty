@@ -92,5 +92,29 @@ public sealed record PtyStartInfo
     /// </remarks>
     public bool InheritCursor { get; init; }
 
+    /// <summary>
+    /// Gets or sets a value indicating whether ending the session ends every process the child started, not only the
+    /// child.
+    /// </summary>
+    /// <value>
+    /// <see langword="false"/> by default. Applies to Windows only; Unix ignores it, and there disposal hangs the child
+    /// up, which ends the descendants in the terminal's foreground process group.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// Without it, ending the session ends the child and the processes attached to its pseudo-console, while a
+    /// descendant in a console of its own, or a GUI program, keeps running, and so does every descendant when the host
+    /// process crashes. With it, the child runs in a job object that is closed when the session is disposed and when
+    /// the host process ends in any way, including a crash, and closing it ends every process in it.
+    /// <see cref="PtySession.Kill()"/> then ends them too, also after the child itself has exited.
+    /// </para>
+    /// <para>
+    /// The option is off by default because it also ends programs the user started from the terminal on purpose, such
+    /// as an editor window. No process can leave the job: a program that asks to (<c>CREATE_BREAKAWAY_FROM_JOB</c>)
+    /// fails to start inside such a session. A host that itself runs inside a job can still use it, because jobs nest.
+    /// </para>
+    /// </remarks>
+    public bool KillProcessTree { get; init; }
+
     internal PtySize ClampedSize => Internal.PtySizeLimits.Clamp(Size);
 }

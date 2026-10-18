@@ -170,12 +170,13 @@ MiniPty does not fall back to pipe redirect when PTY creation fails.
 
 ## Descendants
 
-MiniPty ends only the child; it has no process-tree cleanup. What disposal, or the child's own exit, does to the processes the child started follows from the terminal:
+By default MiniPty ends only the child. What disposal, or the child's own exit, does to the processes the child started follows from the terminal:
 
 | Platform | Descendant ends | Descendant keeps running |
 |---|---|---|
 | Unix | One in the terminal's foreground process group: when the child (the session leader) exits, the system hangs that group up. An interactive shell also hangs up its jobs. | One that ignores `SIGHUP` (`nohup`), was disowned, or started its own session. |
-| Windows | One attached to the pseudo-console: closing it, at disposal or by the post-exit drain, ends every attached process. | One in a console of its own, or a GUI process. Also one still starting when the pseudo-console closes: a process attaches during its own startup, after `CreateProcess` has returned, and one that finds the pseudo-console closed never attaches. Opt-in job-object cleanup is planned (G8 in [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md)). |
+| Windows | One attached to the pseudo-console: closing it, at disposal or by the post-exit drain, ends every attached process. | One in a console of its own, or a GUI process. Also one still starting when the pseudo-console closes: a process attaches during its own startup, after `CreateProcess` has returned, and one that finds the pseudo-console closed never attaches. |
+| Windows, `KillProcessTree` | Every one, whatever its console: at `Dispose`, at `Kill`, and when the host process ends in any way, including a crash ([Process tree](core_session.md#process-tree)). | None, except while the session lives: the child's own exit leaves the tree running until disposal. |
 
 A surviving descendant belongs to the host from then on. It never holds end of output: output ends shortly after the child exits even while a descendant keeps the terminal open (see [Drain, kill, and disposal](#drain-kill-and-disposal)).
 

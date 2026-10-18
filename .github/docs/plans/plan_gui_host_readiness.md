@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phase C: G9 (explicit Unix termios with `IUTF8`) and G10 (hang-up before kill on Unix dispose) are implemented (2026-10-17); G6 is deferred until an embedder needs dozens of concurrent sessions, since G1 already removed every observed failure. Phase D: G7 (opt-in out-of-band ConPTY) is designed (2026-10-18) and not started; G8 is proposed.
+**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phase C: G9 (explicit Unix termios with `IUTF8`) and G10 (hang-up before kill on Unix dispose) are implemented (2026-10-17); G6 is deferred until an embedder needs dozens of concurrent sessions, since G1 already removed every observed failure. Phase D: G8 (opt-in process-tree cleanup) is implemented (2026-10-18); G7 (opt-in out-of-band ConPTY) is designed and not started.
 
 ## Background
 
@@ -84,7 +84,7 @@ Causes 1–3 share one structure:
 | G5 | **P1** | No guidance for GUI hosts; README patterns are unsafe on a UI thread | [GUI host guidance](#g5-gui-host-guidance-p1) |
 | G6 | **P2** | After G1, each session still holds one dedicated reader thread, and a pending read cannot be canceled at the OS level | [Thread-free async I/O](#g6-thread-free-async-io-p2); deferred until an embedder needs it |
 | G7 | **P2** | Windows is limited to the in-box ConPTY (F10); `PtyTerminal.Clear()` is a no-op | [Opt-in out-of-band ConPTY](#g7-opt-in-out-of-band-conpty-p2): `PtyStartInfo.ConPty` with a host-supplied `conpty.dll`; designed, not started |
-| G8 | **P2** | No process-tree cleanup on Windows | [Opt-in job object](#g8-opt-in-process-tree-cleanup-p2) |
+| G8 | **P2** | No process-tree cleanup on Windows | [Opt-in job object](#g8-opt-in-process-tree-cleanup-p2): `PtyStartInfo.KillProcessTree` (implemented) |
 | G9 | **P2** | Unix termios relies on kernel defaults; `IUTF8` is missing | [Explicit termios](#g9-explicit-unix-termios-p2) (implemented) |
 | G11 | **P1** | On Windows, end of output can wait for an unrelated process the host spawned (F12) | [Bounded end of output after close](#g11-bounded-end-of-output-on-windows-p1) |
 | G10 | **P2** | Unix `Dispose` kills with `SIGKILL` immediately | [Graceful Unix termination](#g10-graceful-unix-termination-on-dispose-p2) (implemented) |
@@ -827,21 +827,56 @@ Large in verification, medium in code.
 
 ### Why P2
 
-When a host crashes or is killed, descendants that detached from the console, or that ignore console close, can outlive the terminal. A Windows job object with kill-on-close removes the whole tree.
+Closing the pseudo-console ends only the processes attached to it ([lifecycle.md](../specs/lifecycle.md#descendants)). A descendant in a console of its own, or a GUI program, outlives the session, and when the host crashes or is killed nothing ends anything it started. Windows has a kernel mechanism for this: a job object with kill-on-close, whose last handle the kernel closes even when the host dies. Unix has no equivalent short of cgroups, which is why the option is Windows only.
 
-### Decision
+### Findings
 
-- **Opt-in, off by default.** A job also terminates GUI applications the user launched from the terminal, which hosts usually do not want.
-- **Spawn order:** spawn suspended, assign to the job, then resume. Assigning after the child is already running loses a race against fast-exiting children under load, and then the spawn fails.
+Measured with a throwaway spike on Windows 11 build 26200, from a host that itself runs inside a job (the desktop app's):
+
+- `PROC_THREAD_ATTRIBUTE_JOB_LIST` (0x2000D) in the same attribute list as `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`: `CreateProcess` succeeds, and the child is in the job from its first instruction. Nested jobs (Windows 8 and later) let a host that is already in a job put the child in a job of its own.
+- Descendants inherit the job: a `ping` attached to the pseudo-console and a `ping` in a console of its own (`Start-Process -WindowStyle Hidden`) were both in it.
+- Closing the job's only handle, `TerminateJobObject`, and a host crash (`Environment.FailFast` with the job never closed) each ended the child and both descendants within one second.
+- ConPTY's console host is created by `CreatePseudoConsole` before the child, so it is not in the job; it ends when the pseudo-console closes, as it does without G8.
+
+### Decision (implemented)
+
+```csharp
+public sealed record PtyStartInfo { public bool KillProcessTree { get; init; } }   // Windows only; Unix ignores it
+```
+
+- **Opt-in, off by default.** A job also ends GUI programs the user launched from the terminal, which hosts usually do not want. Unix ignores the option and keeps its hang-up policy, the same pattern as `InheritCursor`.
+- **The child joins the job at creation**, through `PROC_THREAD_ATTRIBUTE_JOB_LIST`, replacing the earlier plan to spawn suspended, assign, and resume. There is no suspended state, no window in which a fast child exits or spawns before it is assigned, and no primary-thread handle to keep (MiniPty closes it right after `CreateProcess`). The attribute list grows from one entry to two only when the option is set.
+- **Kill-on-close only, no breakaway.** Neither `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is set, so every descendant ends with the tree, and a program that asks to break away (`CREATE_BREAKAWAY_FROM_JOB`) fails to start inside such a session. Documented with the option.
+- **When the tree ends:** at `Dispose` (the job handle closes), at `Kill()` (`TerminateJobObject`, so `Kill` and `Dispose` end the same set), and at the host's exit or crash (the kernel closes the handle). Not at the child's own exit: the session owns the tree until it is disposed, so a descendant of a finished child runs until then.
+- **No silent fallback.** If the job cannot be created or configured, or `CreateProcess` rejects the job list, `Pty.Start` throws and leaks nothing, as PTY creation does not fall back to pipes.
+- **Ownership follows the process handle:** a `SafeHandle` the session releases once at disposal, pinned for each native call, so a `Kill` racing `Dispose` never uses a released handle.
+- **Independent of G7:** the attribute rides on the `CreateProcess` call that the in-box and out-of-band paths share.
 
 ### Acceptance
 
-- Enabled: a grandchild is terminated on dispose and on host process exit.
-- Disabled: behavior is unchanged.
+- Enabled: the child, a descendant attached to the pseudo-console, and a descendant in a console of its own all end at `Dispose`, at `Kill()`, and when the host process exits, including a crash (the test executable started as a host that fails fast without disposing).
+- Enabled: after the child exits by itself, a descendant in a console of its own keeps running until `Dispose`.
+- Enabled: a host that already runs inside a job (CI runners, the test host) starts sessions normally.
+- Enabled: a failed start leaks no handle (the `PtyBaselineTests` leak check and the `PtyStartFaultTests` stages), and `Kill` racing `Dispose` uses no released handle (the `PtyConcurrentDisposeTests` pattern).
+- Disabled: behavior is unchanged; `TeardownEndsOnlyTheDescendantsOnTheTerminal` still passes, and a session creates no job and no extra attribute.
+- Unix: the option is accepted and changes nothing.
+
+### Implementation order
+
+1. Create and configure the job, and add the job-list attribute, in the Windows start path, with cleanup in its failure path.
+2. Session ownership of the job handle: released at disposal after the child is terminated; `Kill` uses `TerminateJobObject` when there is a job.
+3. `PtyStartInfo.KillProcessTree`, and the docs: the option in [core_session.md](../specs/core_session.md), its row in the [lifecycle.md](../specs/lifecycle.md#descendants) descendants table, and README.
+4. Tests for the acceptance list, reusing the baseline descendant helpers and the test executable's host mode.
 
 ### Estimate
 
-Small–medium.
+Small–medium: one attribute and one handle; the tests reuse the existing descendant, host-process, leak, and fault patterns.
+
+### Lessons Learned
+
+- **An attribute value must outlive the attribute list, not only `CreateProcess`.** The job list is an array of handles, and the session keeps its attribute list until disposal, so the array lives in a slot after the list in the same allocation and is freed with it.
+- **With a job, `Kill` cannot stop at the child's exit.** Without the option a kill after exit has nothing to do, but with it the child's descendants may still run, so `Kill` terminates the job whether or not the child has exited; otherwise `Kill` and `Dispose` would end different sets.
+- **The host-crash guarantee holds only while the session's handle is the job's only one.** The child is created without handle inheritance, and the job handle is never duplicated, so the kernel's close at host exit is the last one.
 
 ---
 
