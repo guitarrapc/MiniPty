@@ -106,10 +106,13 @@ The client counts binary payload bytes it has fed through `term.write` callbacks
 |---|---|
 | Child exits | drain → final output frame → `exit` text message → `NormalClosure` (bounded by `CloseTimeout`) → dispose → return status |
 | Client closes the socket | kill child → drain (output discarded) → close response → return killed status |
+| Child outlasts the kill after a client close (Unix: it ignores the hang-up) | wait up to twice `CloseTimeout` → dispose, which still ends the child → `TimeoutException` |
 | Protocol violation | `PolicyViolation` close → kill → `InvalidDataException` |
 | Socket send failure | the pump's handler fault kills the child (`Kill()`) → the socket exception propagates from `RunAsync` |
 | Cancellation | kill → dispose → `OperationCanceledException` |
 | Invalid options / null args | `ArgumentOutOfRangeException` / `ArgumentNullException` before spawn |
+
+Hosts stop `RunAsync` by canceling its token. The bridge notices a socket that was closed or aborted, by the client or by the host, only when it next reads from the socket or sends to it. It reads no further frames while it waits to write client input to a child that is not reading its input, so a host passes a token that is also canceled when the connection ends, such as ASP.NET Core's `HttpContext.RequestAborted`.
 
 `PtyWebSocketBridge.RunAsync` retains its one-shot behavior: disconnect hangs up and disposes its child. Persistent/reconnect behavior is opt-in through `PtyWebSocketSessionManager`, so existing bridge callers do not accidentally leave detached shells running.
 
@@ -194,6 +197,7 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 ## Lessons Learned
 
 - Disposing a `PtySession` immediately after canceling an active `ReadOutputAsync` races the session's internal buffer teardown (`ManualResetValueTaskSourceCore` double-signal). The facade cancels, awaits its pump to unwind, and only then disposes the session.
+- So the pump's wait for the exit after output ends must observe the pump token. On Unix output also ends when the child closes the terminal and keeps running. A wait that ignored cancellation held `DisposeAsync`, and with it every bridge, until the child exited on its own. The session was disposed only after that, so a child that ignores `SIGHUP` was never hung up or killed. Verified red/green on Linux with a child that runs `trap '' HUP; exec >/dev/null 2>&1 </dev/null; exec sleep 60`.
 - A client that stops reading wedges `SendAsync` via transport backpressure, and a wedged send parks the pump beyond the reach of `Kill()`. Bridge sends use a bridge-lifetime teardown token, but some `ManagedWebSocket` stream waits do not observe cancellation promptly; caller cancellation must also abort the WebSocket transport. Client-initiated close remains graceful and must not be aborted eagerly. Verified red/green with a bounded in-memory pipe simulating a full TCP send buffer.
 - `Task.WaitAsync(CancellationToken)` cannot assert "does not hang" in tests: its timeout also surfaces as `OperationCanceledException`, masking a hang. Use `WaitAsync(TimeSpan)` so a hang fails as `TimeoutException`.
 - Close frames are send-type operations under the WebSocket one-outstanding-send rule; a `PolicyViolation` close issued from the receive loop must take the same send lock as the output pump (bounded by the close timeout).

@@ -1,7 +1,9 @@
+using System.Globalization;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using MiniPty.Terminal;
 using MiniPty.Terminal.Internal;
 
@@ -372,6 +374,130 @@ public sealed class PtyWebSocketBridgeTests
         // whose timeout would also throw an OperationCanceledException and mask the hang.
         await Assert.ThrowsAsync<OperationCanceledException>(async () => await bridgeTask.WaitAsync(TimeSpan.FromSeconds(15)));
         await Assert.That(bridgeTask.IsCompleted).IsTrue();
+    }
+
+    /// <summary>
+    /// The bridge disposes its terminal before it returns. A child that left the terminal and ignores the hang-up must
+    /// not hold that disposal, so canceling ends the bridge and the kill that disposal schedules ends the child.
+    /// </summary>
+    [Test]
+    public async Task BridgeCancellationEndsAChildThatLeftTheTerminal()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var bridgeTask = PtyWebSocketBridge.RunAsync(
+            Spawn("sh", ["-c", "trap '' HUP; printf 'PID:%s\\n' $$; exec >/dev/null 2>&1 </dev/null; exec sleep 60"]),
+            serverSocket,
+            cancellationToken: cts.Token);
+        var pid = await ReadChildPidAsync(clientSocket, timeout.Token);
+        try
+        {
+            // Long enough for output to end and the terminal's pump to wait for the exit.
+            await Task.Delay(500);
+            await cts.CancelAsync();
+
+            // WaitAsync(TimeSpan) so a hang surfaces as TimeoutException rather than as the expected cancellation.
+            await Assert.ThrowsAsync<OperationCanceledException>(async () => await bridgeTask.WaitAsync(TimeSpan.FromSeconds(15)));
+            await Assert.That(await PtyBaselineTests.WaitUntilAsync(() => !PtyBaselineTests.IsRunning(pid), TimeSpan.FromSeconds(10))).IsTrue();
+        }
+        finally
+        {
+            PtyBaselineTests.KillAll([pid]);
+        }
+    }
+
+    /// <summary>
+    /// A child that never reads its input lets the terminal's input queue fill, so the bridge waits in an input write
+    /// and reads no further frames. The input is newline-terminated lines, which the terminal queues instead of
+    /// discarding an overlong line. Canceling still ends the bridge, because that write observes the token.
+    /// </summary>
+    [Test]
+    public async Task BridgeCancellationEndsTheRunWhileInputWaitsForTheChild()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var bridgeTask = PtyWebSocketBridge.RunAsync(
+            Spawn("sh", ["-c", "stty -echo; printf 'PID:%s\\n' $$; exec sleep 60"]),
+            serverSocket,
+            cancellationToken: cts.Token);
+        var pid = await ReadChildPidAsync(clientSocket, timeout.Token);
+        try
+        {
+            // Far more than a terminal's input queue holds.
+            var input = Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat(new string('x', 63) + "\n", 4096)));
+            await clientSocket.SendAsync(input, WebSocketMessageType.Binary, endOfMessage: true, timeout.Token);
+            await Task.Delay(500);
+            await Assert.That(bridgeTask.IsCompleted).IsFalse();
+
+            await cts.CancelAsync();
+
+            // WaitAsync(TimeSpan) so a hang surfaces as TimeoutException rather than as the expected cancellation.
+            await Assert.ThrowsAsync<OperationCanceledException>(async () => await bridgeTask.WaitAsync(TimeSpan.FromSeconds(15)));
+        }
+        finally
+        {
+            PtyBaselineTests.KillAll([pid]);
+        }
+    }
+
+    /// <summary>
+    /// A client close makes the bridge hang the child up and wait for its exit. A child that ignores the hang-up
+    /// outlasts that wait, so the bridge throws <see cref="TimeoutException"/>. It still disposes the session before it
+    /// returns, so the kill that disposal schedules ends the child.
+    /// </summary>
+    [Test]
+    public async Task BridgeClientCloseThrowsTimeoutWhenTheChildIgnoresTheHangup()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var options = new PtyBridgeOptions { CloseTimeout = TimeSpan.FromMilliseconds(500) };
+        var bridgeTask = PtyWebSocketBridge.RunAsync(
+            Spawn("sh", ["-c", "trap '' HUP; printf 'PID:%s\\n' $$; exec sleep 60"]),
+            serverSocket,
+            options,
+            timeout.Token);
+        var pid = await ReadChildPidAsync(clientSocket, timeout.Token);
+        try
+        {
+            await clientSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", timeout.Token);
+
+            // Not WaitAsync(TimeSpan): its own TimeoutException would hide a hang.
+            await Task.WhenAny(bridgeTask, Task.Delay(TimeSpan.FromSeconds(15)));
+            await Assert.That(bridgeTask.IsCompleted).IsTrue();
+            await Assert.That(bridgeTask.Exception?.InnerException).IsTypeOf<TimeoutException>();
+            await Assert.That(await PtyBaselineTests.WaitUntilAsync(() => !PtyBaselineTests.IsRunning(pid), TimeSpan.FromSeconds(10))).IsTrue();
+        }
+        finally
+        {
+            PtyBaselineTests.KillAll([pid]);
+        }
+    }
+
+    /// <summary>Reads output until the child's <c>PID:</c> line. The shell execs, so its pid stays the child's.</summary>
+    private static async Task<int> ReadChildPidAsync(WebSocket socket, CancellationToken cancellationToken)
+    {
+        var received = new StringBuilder();
+        var buffer = new byte[1024];
+        while (true)
+        {
+            var match = Regex.Match(received.ToString(), @"PID:(\d+)\r?\n");
+            if (match.Success)
+                return int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+
+            var result = await socket.ReceiveAsync(buffer.AsMemory(), cancellationToken);
+            received.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+        }
     }
 
     [Test]

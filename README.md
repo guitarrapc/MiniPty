@@ -349,6 +349,7 @@ using MiniPty;
 using MiniPty.Terminal;
 
 // webSocket: any System.Net.WebSockets.WebSocket (Kestrel accept, HttpListener, ...)
+// ct: also canceled when the connection ends (for example HttpContext.RequestAborted), so the bridge stops
 var status = await PtyWebSocketBridge.RunAsync(
     new PtyStartInfo { FileName = "/bin/bash", Arguments = ["-i"], Size = new PtySize(120, 30) },
     webSocket,

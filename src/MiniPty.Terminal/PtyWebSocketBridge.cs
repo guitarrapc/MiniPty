@@ -38,8 +38,20 @@ public static class PtyWebSocketBridge
     /// <param name="options">Bridge behavior, or <see langword="null"/> for defaults.</param>
     /// <param name="cancellationToken">When canceled, the child is killed and the session torn down.</param>
     /// <returns>The child exit status.</returns>
+    /// <remarks>
+    /// Cancel <paramref name="cancellationToken"/> to stop the bridge. The bridge notices a socket that was closed or
+    /// aborted, by the client or by the host, only when it next reads from the socket or sends to it. It reads no
+    /// further frames while it waits to write client input to a child that is not reading its input. So pass a token
+    /// that is also canceled when the connection ends, such as ASP.NET Core's <c>HttpContext.RequestAborted</c>.
+    /// </remarks>
     /// <exception cref="InvalidDataException">The client sent a malformed or oversize control message.</exception>
-    /// <exception cref="OperationCanceledException">The bridge was canceled.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// The bridge was canceled, or the socket was aborted while the bridge was reading from it.
+    /// </exception>
+    /// <exception cref="TimeoutException">
+    /// The socket closed, and the child did not exit within twice <see cref="PtyBridgeOptions.CloseTimeout"/> of the
+    /// hang-up. The session is still disposed before this method returns, which ends the child.
+    /// </exception>
     public static Task<PtyExitStatus> RunAsync(
         PtyStartInfo startInfo,
         WebSocket webSocket,
