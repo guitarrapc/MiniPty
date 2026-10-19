@@ -22,8 +22,13 @@
           AfterTargets="ResolveAssemblyReferences"
           Condition="'$(MiniPtyStageConPtyHost)' != 'false'">
     <ItemGroup>
+      <!--
+        Only the DLL that Microsoft's package resolved, by package id as well as by name: the host staged beside it
+        comes from that package's directory, so a conpty.dll some other package or a stray copy-local item carries
+        must not have a host staged for it by these targets.
+      -->
       <_MiniPtyConPtyDll Include="@(ReferenceCopyLocalPaths)"
-                         Condition="'%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'conpty.dll'" />
+                         Condition="'%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'conpty.dll' and '%(ReferenceCopyLocalPaths.NuGetPackageId)' == 'Microsoft.Windows.Console.ConPTY'" />
 
       <!--
         <package>\runtimes\win-<arch>\native\conpty.dll -> <package>\build\native\runtimes\<arch>\OpenConsole.exe.

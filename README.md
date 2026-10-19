@@ -204,6 +204,7 @@ What to know before you ship it:
 - **A missing host is silent.** `conpty.dll` without `OpenConsole.exe` beside it runs the in-box `conhost.exe` without any error; `ConPtyLibrary.HasConsoleHost` tells you before the first session, as in the snippet above.
 - **Each session gets an `OpenConsole.exe` child process** instead of `conhost.exe`, which matters to process monitoring and allow lists.
 - The library is loaded by absolute path only (a bare `conpty.dll` could bind a copy an operating system ships), once per path, and `Load` fails if the DLL lacks the exports MiniPty uses. On Unix a `ConPtyLibrary` cannot be loaded and `Clear()` is a no-op.
+- **It is native code running as your application.** Give `Load` only a path you control, never one from configuration, the environment, or a command line, and install the two files where your own binaries are protected: whoever can write that directory runs code as your application, since `conpty.dll` also launches the `OpenConsole.exe` beside it. Both files in Microsoft's package are Authenticode-signed by Microsoft; verify the signature before `Load` if your deployment requires it. `TryLoadFromApplicationDirectory` looks nowhere but the application directory, and MiniPty's build targets stage the host only for the DLL that package resolved.
 
 Details and measurements: [Out-of-band ConPTY](.github/docs/specs/core_session.md#out-of-band-conpty).
 

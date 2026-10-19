@@ -96,6 +96,16 @@ public sealed unsafe class ConPtyLibrary
     /// </summary>
     /// <param name="path">Absolute path of <c>conpty.dll</c>. Never a bare file name: a name would be searched for
     /// along the loader's path and could bind a copy of the DLL that the operating system ships.</param>
+    /// <remarks>
+    /// This loads native code into the process and runs it with the process's own token, like any P/Invoke. Pass only
+    /// a path the application controls, such as a file it ships, and never one taken from configuration, the
+    /// environment, a command line, or another untrusted source. The DLL also launches the <c>OpenConsole.exe</c>
+    /// beside it, so whoever can write that directory runs code as the application; install the files where the
+    /// application's own binaries are protected. A path on a network share or removable media is accepted, not
+    /// rejected: an application that runs from such a place loads its own code from there too, so the decision is
+    /// the application's. The files in Microsoft's package are Authenticode-signed by Microsoft, and an application
+    /// that wants to require that can verify the signature before calling this method.
+    /// </remarks>
     /// <returns>The loaded library, shared by every session that names it.</returns>
     /// <exception cref="ArgumentException"><paramref name="path"/> is empty or not an absolute path.</exception>
     /// <exception cref="PlatformNotSupportedException">The current operating system is not Windows.</exception>
