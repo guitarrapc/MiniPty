@@ -31,7 +31,8 @@ namespace MiniPty;
 /// Disposing or awaiting <see cref="DisposeAsync"/> ends a child that is still running and releases handles without
 /// waiting for the child to exit. On Unix the child is hung up first (<c>SIGHUP</c>), so a shell can save its history.
 /// It is killed after a short grace period if it is still running, or at once if the host process exits normally
-/// first. On Windows it is terminated.
+/// first. A host ended within the grace by a crash or by a signal it does not cancel sends no kill, as
+/// <see cref="Dispose"/> describes. On Windows the child is terminated.
 /// </para>
 /// </remarks>
 public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
@@ -77,7 +78,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// Runs on the thread that observed child exit (usually a process-wide watcher), so it only hands the
+    /// Runs on the thread that observed child exit (usually the background exit watcher), so it only hands the
     /// event to the output pump, which schedules its post-exit drain instead of running it here.
     /// </summary>
     void IPtyExitListener.OnChildExited() => _pump.OnChildExited();
@@ -168,7 +169,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// Gets a value indicating whether the child process has exited.
     /// </summary>
     /// <value>
-    /// <see langword="true"/> after the process-wide exit watcher has observed the exit. Reading it never blocks.
+    /// <see langword="true"/> after the background exit watcher has observed the exit. Reading it never blocks.
     /// </value>
     /// <remarks>
     /// On Unix the watcher keeps observing after <see cref="Dispose"/>, so this can become <see langword="true"/>
@@ -375,8 +376,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </summary>
     /// <remarks>
     /// Uses <c>TerminateProcess</c> on Windows and <c>SIGKILL</c> on Unix.
-    /// Call <see cref="Dispose"/> afterward to release resources. A kill that races disposal on another thread either
-    /// ends the child or throws <see cref="ObjectDisposedException"/>; either way disposal ends the child.
+    /// Call <see cref="Dispose"/> afterward to release resources. A kill that races disposal on another thread ends
+    /// the child, throws <see cref="ObjectDisposedException"/>, or returns without signaling because disposal has
+    /// begun. In the last two cases disposal ends the child as <see cref="Dispose"/> describes.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     public void Kill()
@@ -389,9 +391,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// Sends a signal to the child process without releasing PTY handles.
     /// </summary>
     /// <remarks>
-    /// On Unix the mapped native signal is delivered via <c>kill(2)</c>; the child may handle or
-    /// ignore catchable signals, so termination is not guaranteed. On Windows the signal is
-    /// advisory and the child is terminated unconditionally, matching node-pty semantics.
+    /// On Unix the mapped native signal is delivered to the child, through its pidfd on Linux when the kernel provides
+    /// one. No signal is sent once MiniPty has reaped the child. Without a pidfd, MiniPty cannot tell the child from
+    /// another child of the host that got its pid after other code reaped it. The child may handle or ignore
+    /// catchable signals, so termination is not guaranteed. On Windows the signal is advisory and the child is
+    /// terminated unconditionally, because Windows has no POSIX signals.
     /// Call <see cref="Dispose"/> afterward to release resources.
     /// </remarks>
     /// <param name="signal">Signal to deliver.</param>
@@ -416,7 +420,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <remarks>
     /// <para>
     /// Without a cancelable token every call returns the same task, so waiting allocates nothing beyond the first
-    /// call. The wait holds no thread: the task completes when the process-wide exit watcher observes the exit.
+    /// call. The wait holds no thread: the task completes when the background exit watcher observes the exit.
     /// </para>
     /// <para>
     /// Waiting does not affect output: a concurrent output reader keeps receiving output until end of output,
@@ -475,13 +479,19 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <remarks>
     /// <para>
     /// On Unix a running child is hung up with <c>SIGHUP</c>, the signal a shell receives when its terminal window
-    /// closes. The signal is sent without blocking. If the child has not exited one second later, a background thread
-    /// kills it with <c>SIGKILL</c>. If the process exits normally before then, by returning from <c>Main</c> or calling
-    /// <see cref="Environment.Exit(int)"/>, the kill is sent at exit. A host ended by a crash or by a signal it does not
-    /// handle, such as <c>SIGTERM</c> to a console app, cannot send it, so a child that ignores the hang-up survives.
-    /// Call <see cref="Kill()"/> first to end the child immediately. MiniPty signals only the child. When it exits, the
-    /// system hangs up the terminal's foreground process group, so a descendant in that group ends too unless it
-    /// ignores <c>SIGHUP</c>. On Windows the child is terminated.
+    /// closes. The signal is sent without blocking. The terminal stays open until the child exits or is killed, so a
+    /// shell gets that one hang-up while it saves its history, and what the child writes meanwhile is discarded. If the
+    /// child has not exited one second later, a background thread kills it with <c>SIGKILL</c>. If the process exits
+    /// normally before then, by returning from <c>Main</c> or calling <see cref="Environment.Exit(int)"/>, the kill is
+    /// sent at exit. A host ended within that second by a crash or by a signal it does not cancel, such as
+    /// <c>SIGTERM</c> to a console app, never sends the kill, so a child that ignores the hang-up survives. Calling
+    /// <see cref="Kill()"/> first ends the child at once but skips the hang-up.
+    /// An interactive shell killed this way cannot resend the hang-up to its jobs, so a running background job keeps
+    /// running. A host can instead cancel such a signal, hang up each session with <see cref="Kill(PtySignal)"/>, wait
+    /// a bounded time for the child to exit, dispose the session even when the wait times out, and exit normally. The
+    /// wait gives a shell time to resend the hang-up to its jobs, and the kills are sent at exit. MiniPty signals only
+    /// the child. When the child exits, the system hangs up the terminal's foreground process group, so a descendant in
+    /// that group ends too unless it ignores <c>SIGHUP</c>. On Windows the child is terminated.
     /// </para>
     /// <para>
     /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. The background

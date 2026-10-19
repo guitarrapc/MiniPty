@@ -4,8 +4,8 @@ using System.Runtime.InteropServices;
 namespace MiniPty.Internal;
 
 /// <summary>
-/// Process-wide observer of ConPTY child exits: background threads that each wait on up to 63 child
-/// process handles with <c>WaitForMultipleObjects</c>, so observing exit adds no thread per
+/// Observer of the exits of the ConPTY children this load of MiniPty starts: background threads that each wait
+/// on up to 63 child process handles with <c>WaitForMultipleObjects</c>, so observing exit adds no thread per
 /// session and never occupies a thread-pool worker.
 /// </summary>
 /// <remarks>

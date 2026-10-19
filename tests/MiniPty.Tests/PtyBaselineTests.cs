@@ -932,7 +932,7 @@ public sealed class PtyBaselineTests
     }
 
     /// <summary>Output with its control characters spelled out, for failure messages.</summary>
-    private static string Escape(string text) =>
+    internal static string Escape(string text) =>
         text.Replace("\u001b", "\\e", StringComparison.Ordinal).Replace("\u0007", "\\a", StringComparison.Ordinal)
             .Replace("\r", "\\r", StringComparison.Ordinal).Replace("\n", "\\n", StringComparison.Ordinal);
 

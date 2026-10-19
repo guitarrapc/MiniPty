@@ -580,9 +580,10 @@ internal sealed class PtyOutputPump : IValueTaskSource
     }
 
     /// <summary>
-    /// Second half of session disposal, after the backend closed the transport: wakes a Unix reader to observe the
-    /// close, releases a Windows read that the closed pseudo-console did not end (the output pipe held open by
-    /// another process), and drops the session's reference to the ring.
+    /// Second half of session disposal, after the backend was disposed: wakes a Unix reader to observe the disposal,
+    /// which ends reading even while the master stays open for a hung-up child, releases a Windows read that the
+    /// closed pseudo-console did not end (the output pipe held open by another process), and drops the session's
+    /// reference to the ring.
     /// </summary>
     internal void OnSessionDisposed()
     {

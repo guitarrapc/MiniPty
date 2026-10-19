@@ -5,25 +5,32 @@ namespace MiniPty.Internal;
 internal static partial class UnixPtyBackend
 {
     /// <summary>
-    /// Process-wide observer of MiniPty child exits: one dedicated background thread for every Unix
-    /// session, so observing exit adds no per-session thread and never occupies a thread-pool worker.
+    /// Observer of the exits of every child this load of MiniPty starts: one dedicated background thread for every
+    /// Unix session, so observing exit adds no per-session thread and never occupies a thread-pool worker.
     /// </summary>
     /// <remarks>
     /// <para>
     /// The native shim reports exits through pidfd + epoll (Linux 5.3+) or <c>kqueue</c>
-    /// <c>EVFILT_PROC</c> (macOS, FreeBSD). A child the shim cannot register — no pidfd support, a
-    /// seccomp filter, or a child that exited before <c>kqueue</c> registration — joins a polling set
-    /// that the same thread checks with <c>waitpid(WNOHANG)</c> every <see cref="PollIntervalMs"/>.
-    /// When the shim is unavailable altogether, every child is polled.
+    /// <c>EVFILT_PROC</c> (macOS, FreeBSD). A child the shim cannot register joins a polling set that the same
+    /// thread checks every <see cref="PollIntervalMs"/>. On Linux that is a child the spawn got no pidfd for, because
+    /// the kernel gave none, a seccomp filter blocked it, or the pidfd named no child. With <c>kqueue</c> it is a child
+    /// that exited before its registration. When the watcher's descriptors could not be opened, every child is polled.
     /// </para>
     /// <para>
-    /// This thread is the only code that reaps MiniPty children. A single reaper reads each wait status
+    /// The epoll or kqueue and its wake descriptors belong to this class, not to the shim. A second
+    /// <see cref="System.Runtime.Loader.AssemblyLoadContext"/> that loads MiniPty gets its own watcher but shares the
+    /// shim, and a watcher kept in the shim handed one load's exits to the other load's thread.
+    /// </para>
+    /// <para>
+    /// This thread is the only code that reaps a session's child. A single reaper reads each wait status
     /// exactly once, and reaping a disposed session's child prevents zombies without blocking the
-    /// thread that disposed it.
+    /// thread that disposed it. On Linux it also closes each reaped child's pidfd, which the session signals through.
     /// </para>
     /// <para>
     /// It also sends the kill that follows a disposal's hang-up. The deadline joins this thread's wait timeout
-    /// rather than getting a timer of its own, so disposal allocates no timer. When the process exits normally,
+    /// rather than getting a timer of its own, so disposal allocates no timer. Until the child is reaped or killed, this
+    /// thread also discards its output on the polling interval, because the session's reader has stopped and the master
+    /// stays open for the hang-up. When the process exits normally,
     /// hung-up children are killed at once, and so is a child disposed after that, because the process may end
     /// before any deadline passes.
     /// </para>
@@ -42,6 +49,11 @@ internal static partial class UnixPtyBackend
         private static bool s_started;
         private static bool s_nativeWatch;
         private static bool s_exiting;
+        // This watcher's epoll or kqueue and its wake pipe, or -1 when they could not be opened. macOS wakes through an
+        // event on the kqueue and has no pipe.
+        private static int s_watchFd = -1;
+        private static int s_wakeRead = -1;
+        private static int s_wakeWrite = -1;
 
         /// <summary>Starts watching <paramref name="child"/>; its exit task completes once the child is reaped.</summary>
         internal static void Register(UnixPtyBackendInstance child)
@@ -55,6 +67,7 @@ internal static partial class UnixPtyBackend
                 if (s_children.TryGetValue(child.ProcessId, out var stale) && stale != child)
                 {
                     stale.OnReapedElsewhere();
+                    ReleaseLocked(stale);
                     // Its polling entry would otherwise outlive the new child and keep this thread polling, and its
                     // hang-up entry would keep waking this thread for a kill that its exit already cancels.
                     s_polled.Remove(child.ProcessId);
@@ -62,10 +75,20 @@ internal static partial class UnixPtyBackend
                 }
 
                 s_children[child.ProcessId] = child;
-                if (!s_nativeWatch || minipty_child_watch_add(child.ProcessId) != 0)
+                try
                 {
-                    s_polled.Add(child.ProcessId);
-                    WakeLocked();
+                    if (!s_nativeWatch || minipty_child_watch_add(s_watchFd, child.Pidfd, child.ProcessId) != 0)
+                    {
+                        s_polled.Add(child.ProcessId);
+                        WakeLocked();
+                    }
+                }
+                catch
+                {
+                    // The failed start closes the child's pidfd, so this class must not keep a child whose pidfd
+                    // number another descriptor may get next.
+                    s_children.Remove(child.ProcessId);
+                    throw;
                 }
             }
         }
@@ -119,7 +142,17 @@ internal static partial class UnixPtyBackend
             if (s_started)
                 return;
 
-            s_nativeWatch = minipty_child_watch_init() == 0;
+            // The descriptors are opened only once. A thread start that fails below leaves them open for the next
+            // registration, and opening a second set then would leak the first.
+            if (s_watchFd < 0 && minipty_child_watch_open(out var watchFd, out var wakeRead, out var wakeWrite) == 0)
+            {
+                s_watchFd = watchFd;
+                s_wakeRead = wakeRead;
+                s_wakeWrite = wakeWrite;
+            }
+
+            s_nativeWatch = s_watchFd >= 0;
+
             var thread = new Thread(Run)
             {
                 IsBackground = true,
@@ -134,48 +167,68 @@ internal static partial class UnixPtyBackend
         private static void WakeLocked()
         {
             if (s_nativeWatch)
-                _ = minipty_child_watch_wake();
+                _ = minipty_child_watch_wake(s_watchFd, s_wakeWrite);
             else
                 Monitor.PulseAll(s_lock);
+        }
+
+        /// <summary>
+        /// Closes a reaped child's pidfd. Its registration is removed first: a child forked concurrently holds a
+        /// duplicate of the pidfd until it execs, and epoll drops a registration only when every duplicate is closed.
+        /// Caller holds <see cref="s_lock"/>.
+        /// </summary>
+        private static void ReleaseLocked(UnixPtyBackendInstance child)
+        {
+            if (child.Pidfd < 0)
+                return;
+
+            minipty_child_watch_remove(s_watchFd, child.Pidfd);
+            child.ClosePidfd();
         }
 
         private static void Run()
         {
             Span<int> signaled = stackalloc int[WaitCapacity];
+            Span<int> signaledPidfds = stackalloc int[WaitCapacity];
             List<int> polledSnapshot = [];
             while (true)
             {
-                var count = s_nativeWatch ? WaitNative(signaled) : WaitManaged();
+                var count = s_nativeWatch ? WaitNative(signaled, signaledPidfds) : WaitManaged();
                 for (var i = 0; i < count; i++)
-                    Reap(signaled[i]);
+                    Reap(signaled[i], signaledPidfds[i]);
 
                 PollFallbackChildren(polledSnapshot);
-                KillExpiredHangups();
+                ServeHangups();
             }
         }
 
         /// <summary>
-        /// The longest the thread may wait: forever, the polling interval while any child is polled, or until the
-        /// earliest hang-up deadline. Caller holds <see cref="s_lock"/>.
+        /// The longest the thread may wait: forever, or the polling interval while any child is polled or hung up, or
+        /// until the earliest hang-up deadline if that comes first. Caller holds <see cref="s_lock"/>.
         /// </summary>
         private static int WaitTimeoutLocked()
         {
-            var timeout = s_polled.Count > 0 ? PollIntervalMs : Timeout.Infinite;
             if (s_hangups.Count == 0)
-                return timeout;
+                return s_polled.Count > 0 ? PollIntervalMs : Timeout.Infinite;
 
+            // A hung-up child's output is discarded on every pass, so this thread wakes at the polling interval.
+            var timeout = PollIntervalMs;
             var now = Environment.TickCount64;
             foreach (var child in s_hangups)
             {
                 var remaining = (int)Math.Clamp(child.HangupKillDeadline - now, 0, int.MaxValue);
-                if (timeout == Timeout.Infinite || remaining < timeout)
+                if (remaining < timeout)
                     timeout = remaining;
             }
 
             return timeout;
         }
 
-        private static void KillExpiredHangups()
+        /// <summary>
+        /// Kills each hung-up child whose deadline has passed, and discards the output of the others. Runs on every
+        /// pass of this thread.
+        /// </summary>
+        private static void ServeHangups()
         {
             lock (s_lock)
             {
@@ -187,7 +240,10 @@ internal static partial class UnixPtyBackend
                 {
                     var child = s_hangups[i];
                     if (child.HangupKillDeadline > now)
+                    {
+                        child.DiscardOutputAfterHangup();
                         continue;
+                    }
 
                     child.KillAfterHangup();
                     s_hangups.RemoveAt(i);
@@ -196,7 +252,7 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>Blocks in the native watcher until a child exits, the wait timeout elapses, or a wake-up.</summary>
-        private static unsafe int WaitNative(Span<int> signaled)
+        private static unsafe int WaitNative(Span<int> signaled, Span<int> signaledPidfds)
         {
             int timeout;
             lock (s_lock)
@@ -204,7 +260,8 @@ internal static partial class UnixPtyBackend
 
             int count;
             fixed (int* pids = signaled)
-                count = minipty_child_watch_wait(pids, signaled.Length, timeout);
+            fixed (int* pidfds = signaledPidfds)
+                count = minipty_child_watch_wait(s_watchFd, s_wakeRead, pids, pidfds, signaled.Length, timeout);
 
             if (count >= 0)
                 return count;
@@ -232,11 +289,20 @@ internal static partial class UnixPtyBackend
             return 0;
         }
 
-        private static void Reap(int pid)
+        /// <summary>
+        /// Reaps the child with <paramref name="pid"/> if it has exited. <paramref name="pidfd"/> is the pidfd the
+        /// native watcher reported for it, or -1 when the report came from polling or from kqueue.
+        /// </summary>
+        private static void Reap(int pid, int pidfd)
         {
             lock (s_lock)
             {
                 if (!s_children.TryGetValue(pid, out var child))
+                    return;
+
+                // A report for a pidfd this class has since closed, such as a stale child's whose pid a new child
+                // reused, is not about this child.
+                if (pidfd >= 0 && pidfd != child.Pidfd)
                     return;
 
                 if (child.TryReapExitedChild())
@@ -244,10 +310,11 @@ internal static partial class UnixPtyBackend
                     s_children.Remove(pid);
                     s_polled.Remove(pid);
                     s_hangups.Remove(child);
+                    ReleaseLocked(child);
                 }
                 else if (!s_polled.Contains(pid))
                 {
-                    // Reported but not yet reapable: keep checking until waitpid returns it.
+                    // Reported but not yet reapable: keep checking until the reap succeeds.
                     s_polled.Add(pid);
                 }
             }
@@ -265,19 +332,22 @@ internal static partial class UnixPtyBackend
             }
 
             foreach (var pid in snapshot)
-                Reap(pid);
+                Reap(pid, -1);
         }
 
         [LibraryImport("minipty_unix", SetLastError = true)]
-        private static partial int minipty_child_watch_init();
+        private static partial int minipty_child_watch_open(out int watchFd, out int wakeRead, out int wakeWrite);
 
         [LibraryImport("minipty_unix", SetLastError = true)]
-        private static partial int minipty_child_watch_add(int pid);
+        private static partial int minipty_child_watch_add(int watchFd, int pidfd, int pid);
+
+        [LibraryImport("minipty_unix")]
+        private static partial void minipty_child_watch_remove(int watchFd, int pidfd);
 
         [LibraryImport("minipty_unix", SetLastError = true)]
-        private static partial int minipty_child_watch_wake();
+        private static partial int minipty_child_watch_wake(int watchFd, int wakeWrite);
 
         [LibraryImport("minipty_unix", SetLastError = true)]
-        private static unsafe partial int minipty_child_watch_wait(int* pids, int capacity, int timeoutMs);
+        private static unsafe partial int minipty_child_watch_wait(int watchFd, int wakeRead, int* pids, int* pidfds, int capacity, int timeoutMs);
     }
 }

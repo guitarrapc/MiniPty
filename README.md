@@ -86,7 +86,7 @@ dotnet add package MiniPty.Terminal
 - **Persistent stream**: `ReadOutputAsync` + `WriteInputAsync` + `WaitForExitAsync`
 - **One-shot run**: `CompleteAsync`
 
-Disposing a session ends the child if it is still running: on Unix it is hung up first (`SIGHUP`, so a shell can save its history) and killed after a one-second grace period if it has not exited, or at once if the host process exits normally before then. On Windows it is terminated. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that. Try `dotnet samples/SingleFiles/README_MiniPty.cs` to run this sample.
+Disposing a session ends the child if it is still running: on Unix it is hung up first (`SIGHUP`, so a shell can save its history) and killed after a one-second grace period if it has not exited, or at once if the host process exits normally before then. A host ended within that second by a crash or by a signal it does not cancel sends no kill, so a child that ignores the hang-up keeps running. On Windows the child is terminated. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that. Try `dotnet samples/SingleFiles/README_MiniPty.cs` to run this sample.
 
 ```csharp
 using System.Diagnostics;
@@ -349,6 +349,7 @@ using MiniPty;
 using MiniPty.Terminal;
 
 // webSocket: any System.Net.WebSockets.WebSocket (Kestrel accept, HttpListener, ...)
+// ct: also canceled when the connection ends (for example HttpContext.RequestAborted), so the bridge stops
 var status = await PtyWebSocketBridge.RunAsync(
     new PtyStartInfo { FileName = "/bin/bash", Arguments = ["-i"], Size = new PtySize(120, 30) },
     webSocket,

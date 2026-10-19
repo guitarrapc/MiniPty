@@ -289,6 +289,53 @@ public sealed class PtyTerminalTests
         Assert.Throws<ObjectDisposedException>(() => terminal.Clear());
     }
 
+    /// <summary>
+    /// A child that leaves the terminal ends output on Linux while it keeps running, so the pump waits for its exit.
+    /// Disposal must still reach the session instead of waiting for that exit. The child ignores the hang-up, so only
+    /// the kill that disposal schedules ends it. macOS does not end output first, so there it checks only that
+    /// disposal ends the child.
+    /// </summary>
+    [Test]
+    public async Task PtyTerminalDisposeEndsAChildThatLeftTheTerminal()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var received = new StringBuilder();
+        var terminal = PtyTerminal.Start(
+            Spawn("sh", ["-c", "trap '' HUP; printf ready; exec >/dev/null 2>&1 </dev/null; exec sleep 60"]),
+            new PtyTerminalOptions
+            {
+                Output = (data, _) =>
+                {
+                    lock (received)
+                    {
+                        received.Append(Encoding.UTF8.GetString(data.Span));
+                    }
+                    return ValueTask.CompletedTask;
+                },
+            });
+        var pid = terminal.ProcessId;
+        try
+        {
+            await Assert.That(await PtyBaselineTests.WaitUntilAsync(
+                () => { lock (received) return received.ToString().Contains("ready", StringComparison.Ordinal); },
+                TimeSpan.FromSeconds(15))).IsTrue();
+            // Long enough for output to end and the pump to wait for the exit.
+            await Task.Delay(500);
+
+            // WaitAsync(TimeSpan) so a hang surfaces as TimeoutException.
+            await terminal.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+            await Assert.That(terminal.Completion.IsCanceled).IsTrue();
+            await Assert.That(await PtyBaselineTests.WaitUntilAsync(() => !PtyBaselineTests.IsRunning(pid), TimeSpan.FromSeconds(10))).IsTrue();
+        }
+        finally
+        {
+            PtyBaselineTests.KillAll([pid]);
+        }
+    }
+
     [Test]
     public async Task PtyTerminalStartValidatesArguments()
     {

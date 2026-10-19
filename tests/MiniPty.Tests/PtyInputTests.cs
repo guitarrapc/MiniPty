@@ -100,10 +100,11 @@ public sealed class PtyInputTests
             await Task.Delay(EofTicks);
             await Assert.That(queued.IsCompleted).IsFalse();
 
-            var drain = DrainAsync(session);
+            var output = new StringBuilder();
+            var drain = DrainAsync(session, output);
             await queued.AsTask().WaitAsync(Timeout);
             await last.WaitAsync(Timeout);
-            await session.WaitForExitAsync().WaitAsync(Timeout);
+            await WaitForExitAfterEofAsync(session, copyFile, output);
             await drain.WaitAsync(Timeout);
 
             await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, written + 1));
@@ -139,7 +140,7 @@ public sealed class PtyInputTests
 
             session.SendEof();
             var drain = DrainAsync(session);
-            await session.WaitForExitAsync().WaitAsync(Timeout);
+            await WaitForExitAfterEofAsync(session, copyFile);
             await drain.WaitAsync(Timeout);
 
             await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, QueueFillingLines));
@@ -175,7 +176,7 @@ public sealed class PtyInputTests
             await write.AsTask().WaitAsync(Timeout);
 
             session.SendEof();
-            await session.WaitForExitAsync().WaitAsync(Timeout);
+            await WaitForExitAfterEofAsync(session, copyFile);
             await drain.WaitAsync(Timeout);
 
             await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, QueueFillingLines));
@@ -209,7 +210,7 @@ public sealed class PtyInputTests
             await Assert.That(write.IsCompletedSuccessfully).IsTrue();
 
             session.SendEof();
-            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
+            await Assert.That((await WaitForExitAfterEofAsync(session, copyFile)).ExitCode).IsEqualTo(0);
             await drain.WaitAsync(Timeout);
 
             await Assert.That(File.ReadAllLines(copyFile).Length).IsEqualTo(Lines);
@@ -246,10 +247,11 @@ public sealed class PtyInputTests
             await Assert.ThrowsAsync<OperationCanceledException>(async () => await middle.AsTask().WaitAsync(Timeout));
 
             session.SendEof();
-            var drain = DrainAsync(session);
+            var output = new StringBuilder();
+            var drain = DrainAsync(session, output);
             await first.AsTask().WaitAsync(Timeout);
             await third.AsTask().WaitAsync(Timeout);
-            await session.WaitForExitAsync().WaitAsync(Timeout);
+            await WaitForExitAfterEofAsync(session, copyFile, output);
             await drain.WaitAsync(Timeout);
 
             await Assert.That(ReadLines(copyFile)).IsEqualTo(ExpectedLines(0, written + TailLines));
@@ -297,9 +299,10 @@ public sealed class PtyInputTests
         await Assert.ThrowsAsync<OperationCanceledException>(async () => await write.AsTask().WaitAsync(Timeout));
 
         session.SendEof();
-        var drain = DrainAsync(session);
+        var output = new StringBuilder();
+        var drain = DrainAsync(session, output);
         // Exit code 0: a child that ended because input was closed instead, or that never started, exits otherwise.
-        await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
+        await Assert.That((await WaitForExitAfterEofAsync(session, output: output)).ExitCode).IsEqualTo(0);
         await drain.WaitAsync(Timeout);
     }
 
@@ -318,9 +321,10 @@ public sealed class PtyInputTests
             await session.WriteInputAsync(new byte[] { (byte)'x', 0xFF });
             session.SendEof();
 
-            var drain = DrainAsync(session);
+            var output = new StringBuilder();
+            var drain = DrainAsync(session, output);
             // Exit code 0: closing the input pipe after bytes ends the child with STATUS_CONTROL_C_EXIT instead.
-            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
+            await Assert.That((await WaitForExitAfterEofAsync(session, copyFile, output)).ExitCode).IsEqualTo(0);
             await drain.WaitAsync(Timeout);
 
             // A Unix tty passes 0xFF through as data, so both bytes must arrive. The Windows console decodes 0xFF in its
@@ -676,12 +680,96 @@ public sealed class PtyInputTests
         }
     }
 
-    private static async Task DrainAsync(PtySession session)
+    /// <summary>
+    /// Reads output to its end, keeping its last <see cref="OutputTail"/> characters or so in <paramref name="output"/>
+    /// when given, for a failure report. Flooding children echo megabytes, so the rest is dropped as it goes.
+    /// </summary>
+    private static async Task DrainAsync(PtySession session, StringBuilder? output = null)
     {
-        await foreach (var _ in session.ReadOutputAsync())
+        await foreach (var chunk in session.ReadOutputAsync())
         {
+            if (output is null)
+                continue;
+
+            var text = Encoding.UTF8.GetString(chunk.Data.Span);
+            lock (output)
+            {
+                output.Append(text);
+                if (output.Length > OutputTail * 2)
+                    output.Remove(0, output.Length - OutputTail);
+            }
         }
     }
+
+    /// <summary>How much of a child's last output a failure report shows.</summary>
+    private const int OutputTail = 400;
+
+    /// <summary>
+    /// Waits for a child that ends at end of input, after <see cref="PtySession.SendEof"/>. A child that has not exited
+    /// within <see cref="Timeout"/> fails the test with how far each stage got, because such a hang has been seen only
+    /// on a hosted windows-2025 runner (<see cref="SendEofEndsInputWhoseLastByteIs0xFF"/>, once) and never reproduced
+    /// locally, not under CPU oversubscription and not with 960 sessions started in bursts on four cores. The report
+    /// says whether the process had exited without the exit being reported, what the child had copied (nothing means not
+    /// even the CR that submits a pending line reached it), what the console showed last, and whether a second EOF then
+    /// ends the child: if it does, the first never reached the child; if not, the child or its console host is stuck.
+    /// The console echoes what it reads in line mode, <c>^Z</c> included on Windows, so the output also shows whether
+    /// the first EOF reached the console host at all.
+    /// </summary>
+    private static async Task<PtyExitStatus> WaitForExitAfterEofAsync(PtySession session, string? copyFile = null, StringBuilder? output = null)
+    {
+        var exit = session.WaitForExitAsync();
+        if (await Task.WhenAny(exit, Task.Delay(Timeout)) == exit)
+            return await exit;
+
+        var report = new StringBuilder();
+        report.Append("The child did not exit within ").Append(Timeout.TotalSeconds).Append(" s of SendEof. HasExited: ")
+            .Append(session.HasExited).Append('.');
+        if (copyFile is not null)
+            report.Append(" Copied: ").Append(DescribeCopy(copyFile)).Append('.');
+
+        if (output is not null)
+        {
+            string text;
+            lock (output)
+                text = output.ToString();
+
+            report.Append(" Last output: \"").Append(PtyBaselineTests.Escape(text[Math.Max(0, text.Length - OutputTail)..])).Append("\".");
+        }
+
+        try
+        {
+            // The same chord SendEof writes, at the start of a line either way: Windows submits any pending line first.
+            await session.WriteInputAsync(OperatingSystem.IsWindows() ? "\r\u001a\r" : "\u0004\u0004").AsTask().WaitAsync(SecondEofWait);
+            report.Append(await Task.WhenAny(exit, Task.Delay(SecondEofWait)) == exit
+                ? " A second EOF ended it, so the first never reached the child."
+                : " A second EOF did not end it either.");
+        }
+        catch (Exception ex)
+        {
+            report.Append(" Writing a second EOF failed: ").Append(ex.GetType().Name).Append(": ").Append(ex.Message);
+        }
+
+        throw new TimeoutException(report.ToString());
+    }
+
+    /// <summary>How much the child wrote to its copy and how it starts, read while the child may still hold it open.</summary>
+    private static string DescribeCopy(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var head = new byte[(int)Math.Min(stream.Length, 32)];
+            var read = stream.Read(head);
+            return read == 0 ? $"{stream.Length} bytes" : $"{stream.Length} bytes, starting {Convert.ToHexString(head, 0, read)}";
+        }
+        catch (Exception ex)
+        {
+            return ex.GetType().Name;
+        }
+    }
+
+    /// <summary>How long a hung child gets to end after the second EOF of a failure report.</summary>
+    private static readonly TimeSpan SecondEofWait = TimeSpan.FromSeconds(5);
 
     /// <summary>Long enough for a flooding child to fill the output ring and the transport behind it.</summary>
     private static readonly TimeSpan BackUpDelay = TimeSpan.FromMilliseconds(500);

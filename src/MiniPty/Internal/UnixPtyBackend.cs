@@ -32,9 +32,10 @@ internal static partial class UnixPtyBackend
         var exec = UnixExecPayload.Create(startInfo.FileName, arguments, startInfo.WorkingDirectory, environment);
         var pid = 0;
         var master = 0;
+        var pidfd = -1;
         unsafe
         {
-            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid);
+            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd);
             if (spawnError != 0)
             {
                 exec.Dispose();
@@ -45,16 +46,16 @@ internal static partial class UnixPtyBackend
         try
         {
             PtyStartTestHook.Run(PtyStartStage.Spawned, pid);
-            return new UnixPtyBackendInstance(master, pid, size, exec);
+            return new UnixPtyBackendInstance(master, pid, pidfd, size, exec);
         }
         catch
         {
             // The child runs, but no watcher will reap it, because the instance registers with the watcher last. It is
-            // killed and reaped here, so a failed start leaves neither a running child nor a zombie.
-            UnixInterop.kill(pid, UnixInterop.SigKill);
-            while (UnixInterop.waitpid(pid, out _, 0) < 0 && Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
-            {
-            }
+            // killed and reaped here, so a failed start leaves neither a running child, a zombie, nor its pidfd.
+            _ = UnixInterop.minipty_signal_child(pidfd, pid, UnixInterop.SigKill);
+            _ = UnixInterop.minipty_reap_child(pidfd, pid, 1, out _, out _);
+            if (pidfd >= 0)
+                UnixInterop.close(pidfd);
 
             exec.Dispose();
             if (master >= 0)
@@ -70,7 +71,8 @@ internal static partial class UnixPtyBackend
         IntPtr executable,
         IntPtr argv,
         IntPtr envp,
-        int* pid) =>
+        int* pid,
+        int* pidfd) =>
         minipty_fork_pty_exec(
             master,
             winsize,
@@ -78,7 +80,8 @@ internal static partial class UnixPtyBackend
             (byte*)executable,
             (byte**)argv,
             (byte**)envp,
-            pid);
+            pid,
+            pidfd);
 
     private sealed class UnixExecPayload : IDisposable
     {
@@ -143,6 +146,10 @@ internal static partial class UnixPtyBackend
         // Serializes the child's reap with signal delivery, so Kill can never reach a pid the watcher has
         // already released for reuse.
         private readonly Lock _pidLock = new();
+        // The child's pidfd on Linux, opened by the spawn right after the fork, or -1 when there is none. The child's
+        // signals go through it, and so does its reap from Linux 5.4. The watcher closes it once the child is reaped.
+        // Written only by the constructor and, under _pidLock, by ClosePidfd.
+        private int _pidfd = -1;
         // Mutable struct: used only through this field, never copied.
         private PtyExitSignal _exitSignal;
         private Timer? _eofTimer;
@@ -168,10 +175,11 @@ internal static partial class UnixPtyBackend
         private bool _disposed;
         private PtySize _size;
 
-        public UnixPtyBackendInstance(int master, int pid, PtySize size, UnixExecPayload execHold)
+        public UnixPtyBackendInstance(int master, int pid, int pidfd, PtySize size, UnixExecPayload execHold)
         {
             _master = master;
             _pid = pid;
+            _pidfd = pidfd;
             _execHold = execHold;
             _size = size;
             // Non-blocking, so a write takes what the tty input queue accepts and never blocks its caller. The reader
@@ -183,6 +191,9 @@ internal static partial class UnixPtyBackend
             // Last, so the watcher never observes a partially constructed instance.
             ChildWatcher.Register(this);
         }
+
+        /// <summary>The child's pidfd on Linux, or -1. Read by <see cref="ChildWatcher"/> under its lock.</summary>
+        internal int Pidfd => _pidfd;
 
         public Stream Input { get; }
 
@@ -540,14 +551,24 @@ internal static partial class UnixPtyBackend
                     return;
 
                 // Fire-and-forget like KillCore; ESRCH after a racing exit is benign.
-                UnixInterop.kill(_pid, nativeSignal);
+                SignalLocked(nativeSignal);
             }
         }
 
         private void KillCore()
         {
-            UnixInterop.kill(_pid, UnixInterop.SigKill);
+            SignalLocked(UnixInterop.SigKill);
         }
+
+        /// <summary>
+        /// Signals the child. Caller holds <see cref="_pidLock"/> and has checked that the child is not yet reaped.
+        /// </summary>
+        /// <remarks>
+        /// Not <c>kill(pid)</c> alone: code outside MiniPty can reap the child, for example a host that reaps every
+        /// child, and the pid can then belong to another process before the watcher notices. A pidfd names the child
+        /// alone. Without one, the native call sends the signal only while the pid is still an unreaped child of the host.
+        /// </remarks>
+        private void SignalLocked(int signal) => _ = UnixInterop.minipty_signal_child(_pidfd, _pid, signal);
 
         private static int MapSignal(PtySignal signal) => signal switch
         {
@@ -599,7 +620,7 @@ internal static partial class UnixPtyBackend
         {
             while (true)
             {
-                if (IsMasterClosed)
+                if (IsReadingEnded)
                     return 0;
 
                 var events = UnixInterop.PtyReadable | (HasPendingInput ? UnixInterop.PtyWritable : 0);
@@ -632,7 +653,7 @@ internal static partial class UnixPtyBackend
         public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
         {
             endOfOutput = false;
-            if (IsMasterClosed)
+            if (IsReadingEnded)
                 return 0;
 
             var ready = UnixInterop.minipty_pty_wait(_master, UnixInterop.PtyReadable, reader.WakeFd, CoalesceMicroWindowMs);
@@ -702,6 +723,10 @@ internal static partial class UnixPtyBackend
 
         private bool IsMasterClosed => (Volatile.Read(ref _masterState) & MasterClosedBit) != 0;
 
+        // Disposal ends reading even while the master stays open for a hung-up child, so the reader never waits for
+        // that child to exit.
+        private bool IsReadingEnded => IsMasterClosed || Volatile.Read(ref _disposed);
+
         /// <summary>Pins the master for one use. Fails once it is closed; pair a success with <see cref="ReleaseMaster"/>.</summary>
         private bool TryAcquireMaster(out int master)
         {
@@ -754,35 +779,45 @@ internal static partial class UnixPtyBackend
             if (_disposed)
                 return;
 
-            _disposed = true;
+            // Read by the reader thread, which stops on it while the master stays open for a hung-up child.
+            Volatile.Write(ref _disposed, true);
             // Queued writes fail now, on the disposing thread, without waiting for the reader to stop. This comes before
-            // the hang-up and the master close, which end output, so a queued write reports the disposal rather than
+            // the hang-up and the end of reading, which end output, so a queued write reports the disposal rather than
             // the end of output.
             CloseInput(InputDisposed);
             var exitObserved = true;
             lock (_pidLock)
             {
-                // A hang-up rather than a kill, so a shell can save its history and run its exit hooks. Closing the
-                // master below hangs the tty up too, but only once no other process holds a copy of the master, so
-                // the signal is sent explicitly. The deadline is set under the lock, so a racing second Dispose finds
-                // it and schedules no other kill.
+                // A hang-up rather than a kill, so a shell can save its history and run its exit hooks. It is sent
+                // explicitly because the master close, which also hangs the tty up, waits until the child is gone
+                // (below), and does not hang it up at all while another process holds a copy of the master. The
+                // deadline is set under the lock, so a racing second Dispose finds it and schedules no other kill, and
+                // a reap that takes the lock after it closes the master.
                 if (!_exited && _hangupKillDeadline == 0)
                 {
                     exitObserved = false;
-                    UnixInterop.kill(_pid, UnixInterop.SigHup);
+                    SignalLocked(UnixInterop.SigHup);
                     _hangupKillDeadline = Environment.TickCount64 + DisposeHangupGraceMs;
                 }
             }
 
             _eofTimer?.Dispose();
-            if (!exitObserved)
+            if (exitObserved)
+            {
+                CloseTransport();
+            }
+            else
             {
                 _exitSignal.SetDisposedBeforeExit();
+                // The master stays open until the watcher reaps the child or kills it after the grace. Closing it hangs
+                // the tty up, which signals the child a second time, and an interactive bash that gets that signal while
+                // it saves its history dies before it hangs up its jobs. The reader stops now all the same, and the watcher
+                // discards what the child writes meanwhile.
+                SendEotIfPending();
                 // The watcher kills a child that ignores the hang-up and reaps it either way, so disposal never waits.
                 ChildWatcher.ScheduleHangupKill(this);
             }
 
-            CloseTransport();
             _execHold?.Dispose();
         }
 
@@ -799,6 +834,9 @@ internal static partial class UnixPtyBackend
                 if (!_exited)
                     KillCore();
             }
+
+            // Also when the kill finds no child to end, so the master a disposal left open lasts no longer than the grace.
+            CloseMaster();
         }
 
         /// <summary>
@@ -812,13 +850,16 @@ internal static partial class UnixPtyBackend
                 if (_exited)
                     return true;
 
-                if (TryWaitPid(_pid, UnixInterop.WaitNoHang, out var status, out var result))
-                {
-                    if (result != _pid)
-                        return false;
+                // Through the pidfd where there is one (Linux 5.4 and later), so a pid that another child of the host
+                // gets after the pidfd was opened never hands this session that child's exit.
+                var reaped = UnixInterop.minipty_reap_child(_pidfd, _pid, 0, out var exitCode, out var termSignal);
+                if (reaped == 0)
+                    return false;
 
-                    _exitCode = MapWaitStatusToExitCode(status);
-                    _termSignal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+                if (reaped > 0)
+                {
+                    _exitCode = exitCode;
+                    _termSignal = termSignal;
                 }
                 else if (Marshal.GetLastPInvokeError() != UnixInterop.ECHILD)
                 {
@@ -829,6 +870,7 @@ internal static partial class UnixPtyBackend
                 Volatile.Write(ref _exited, true);
             }
 
+            CloseMasterIfHungUp();
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, _termSignal != 0 ? _termSignal : null));
             return true;
         }
@@ -848,7 +890,71 @@ internal static partial class UnixPtyBackend
                 Volatile.Write(ref _exited, true);
             }
 
+            CloseMasterIfHungUp();
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, null));
+        }
+
+        /// <summary>
+        /// Reads and discards what the child wrote since the last call, while the master stays open for a disposal's
+        /// hang-up. The reader stopped at disposal, and without this a child that writes while it handles the hang-up
+        /// would block on a full terminal until the kill. Called only by <see cref="ChildWatcher"/>, on its polling
+        /// interval, and bounded per call so the watcher stays responsive.
+        /// </summary>
+        internal unsafe void DiscardOutputAfterHangup()
+        {
+            if (!TryAcquireMaster(out var master))
+                return;
+
+            try
+            {
+                Span<byte> buffer = stackalloc byte[4096];
+                fixed (byte* ptr = buffer)
+                {
+                    for (var i = 0; i < 16; i++)
+                    {
+                        // Non-blocking: EAGAIN once nothing is left, EIO once every slave descriptor closed.
+                        var read = UnixInterop.Read(master, ptr, (nuint)buffer.Length);
+                        if (read > 0)
+                            continue;
+                        if (read < 0 && Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
+                            continue;
+
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
+        }
+
+        /// <summary>
+        /// Closes the master that a disposal left open for its hang-up, once the child is gone. A session that was not
+        /// disposed keeps its master for the output drain.
+        /// </summary>
+        private void CloseMasterIfHungUp()
+        {
+            // Dispose sets it under the pid lock. A reap that took the lock first sees zero, and Dispose then finds the
+            // child exited and closes the master itself.
+            if (Volatile.Read(ref _hangupKillDeadline) != 0)
+                CloseMaster();
+        }
+
+        /// <summary>
+        /// Closes the pidfd once the child is reaped. Called only by <see cref="ChildWatcher"/>, after it removed the
+        /// pidfd's registration.
+        /// </summary>
+        internal void ClosePidfd()
+        {
+            lock (_pidLock)
+            {
+                if (_pidfd < 0)
+                    return;
+
+                UnixInterop.close(_pidfd);
+                _pidfd = -1;
+            }
         }
 
         /// <summary>Arms the one-shot EOF staging tick; each tick re-arms itself while staging is in progress.</summary>
@@ -1072,39 +1178,6 @@ internal static partial class UnixPtyBackend
         owned.Clear();
     }
 
-    // The exited/signaled wait-status layout (low 7 bits = signal, bits 8-15 = exit code) is
-    // identical on Linux, macOS, and FreeBSD, so decoding stays managed. WIFSIGNALED uses the
-    // explicit form excluding the stopped marker 0x7f: the textbook glibc macro relies on a
-    // signed-char cast that a direct C# transcription loses, which would misclassify a stopped
-    // status as signaled. Unreachable under WNOHANG-only polling today, but load-bearing now
-    // that the termination signal is public API.
-    private static bool WIFEXITED(int status) => (status & 0x7f) == 0;
-    private static int WEXITSTATUS(int status) => (status >> 8) & 0xff;
-    private static bool WIFSIGNALED(int status) => (status & 0x7f) != 0 && (status & 0x7f) != 0x7f;
-    private static int WTERMSIG(int status) => status & 0x7f;
-
-    private static int MapWaitStatusToExitCode(int status)
-    {
-        if (WIFEXITED(status))
-            return WEXITSTATUS(status);
-        if (WIFSIGNALED(status))
-            return 128 + WTERMSIG(status);
-        return 1;
-    }
-
-    private static bool TryWaitPid(int pid, int options, out int status, out int result)
-    {
-        while (true)
-        {
-            result = UnixInterop.waitpid(pid, out status, options);
-            if (result >= 0)
-                return true;
-            if (Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
-                continue;
-            return false;
-        }
-    }
-
     [LibraryImport("minipty_unix")]
     private static unsafe partial int minipty_fork_pty_exec(
         int* master,
@@ -1113,7 +1186,8 @@ internal static partial class UnixPtyBackend
         byte* file,
         byte** argv,
         byte** envp,
-        int* pid_out);
+        int* pid_out,
+        int* pidfd_out);
 
     [LibraryImport("minipty_unix", SetLastError = true)]
     private static partial int minipty_set_winsize(

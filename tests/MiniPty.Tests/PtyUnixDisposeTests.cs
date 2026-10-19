@@ -166,6 +166,153 @@ public sealed class PtyUnixDisposeTests
         await Assert.That(gone).IsTrue();
     }
 
+    /// <summary>
+    /// An interactive bash saves its history before it hangs up its jobs, and a second hang-up during the save kills it
+    /// before it gets to them. Closing the master sends that second hang-up. The large history makes the save outlast
+    /// the moment a close made with the hang-up lands, so the job survives only when the close comes too soon. Linux
+    /// only, where the race was measured.
+    /// </summary>
+    [Test]
+    public async Task DisposeLetsAnInteractiveShellHangUpItsJobs()
+    {
+        if (!OperatingSystem.IsLinux() || !File.Exists("/bin/bash"))
+            return;
+
+        var directory = Directory.CreateTempSubdirectory("minipty-hup-");
+        var history = Path.Combine(directory.FullName, "history");
+        var jobPath = Path.Combine(directory.FullName, "job");
+        var lines = new string[200_000];
+        for (var i = 0; i < lines.Length; i++)
+            lines[i] = $"echo {i}";
+        await File.WriteAllLinesAsync(history, lines);
+
+        var session = Pty.Start(new PtyStartInfo
+        {
+            FileName = "/bin/bash",
+            Arguments = ["--norc", "--noprofile", "-i"],
+            Environment = new Dictionary<string, string?>
+            {
+                ["HISTFILE"] = history,
+                ["HISTSIZE"] = "200000",
+                ["HISTFILESIZE"] = "200000",
+            },
+        });
+        try
+        {
+            // The job ends by itself after 30 s, so a failed run leaves nothing running for long, and the test never
+            // kills a pid that init may already have handed to another process. The split literal keeps the echo of
+            // the typed line from matching "ready" before the shell has run it.
+            session.Input.Write(System.Text.Encoding.UTF8.GetBytes($"sleep 30 & echo $! > '{jobPath}'; printf '%s\\n' re''ady\n"));
+            await WaitForReadyAsync(session);
+            await Assert.That(int.TryParse(await WaitForFileContentAsync(jobPath), out var job)).IsTrue();
+            // Lets the shell get back to its prompt, where a closed terminal window finds it.
+            await Task.Delay(200);
+
+            session.Dispose();
+
+            var gone = await WaitForAsync(() => UnixInterop.kill(job, 0) != 0 && Marshal.GetLastPInvokeError() == ESRCH, UnixPtyBackend.DisposeHangupGraceMs + 15_000);
+            await Assert.That(gone).IsTrue();
+        }
+        finally
+        {
+            session.Dispose();
+            directory.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The master stays open while a hung-up child runs, but the reader stops at disposal, so <c>DisposeAsync</c> does
+    /// not wait for a child that ignores the hang-up. A reader that waited for the master would finish only once the
+    /// grace kill closed it.
+    /// </summary>
+    [Test]
+    public async Task DisposeAsyncDoesNotWaitForAChildThatIgnoresHangup()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var session = Pty.Start(HangupScript("trap '' HUP"));
+        var pid = session.ProcessId;
+        try
+        {
+            await WaitForReadyAsync(session);
+
+            var sw = Stopwatch.StartNew();
+            await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+            await Assert.That(sw.ElapsedMilliseconds).IsLessThan(UnixPtyBackend.DisposeHangupGraceMs);
+
+            await Assert.That(await WaitForProcessGoneAsync(pid)).IsTrue();
+        }
+        finally
+        {
+            session.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The master stays open while a hung-up child runs, and nothing reads the session's output after disposal, so the
+    /// output must still be taken from the terminal. The trap writes far more than a terminal buffers before it records
+    /// that it finished, so a child whose output nobody took would block until the grace kill.
+    /// </summary>
+    [Test]
+    public async Task DisposeDiscardsWhatAHungUpChildWrites()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var marker = NewMarkerPath();
+        var session = Pty.Start(HangupScript($"trap 'yes xxxxxxxxxxxxxxx | head -c 1000000; echo written > \"{marker}\"; exit 0' HUP"));
+        var pid = session.ProcessId;
+        try
+        {
+            await WaitForReadyAsync(session);
+
+            session.Dispose();
+
+            await Assert.That(await WaitForFileContentAsync(marker)).Contains("written");
+            await Assert.That(await WaitForProcessGoneAsync(pid)).IsTrue();
+            await Assert.That(await WaitForExitStatusAsync(session)).IsEqualTo(new PtyExitStatus(0, null));
+        }
+        finally
+        {
+            session.Dispose();
+            File.Delete(marker);
+        }
+    }
+
+    /// <summary>
+    /// A master that disposal leaves open for the hang-up closes once the watcher reaps the child. The child exits on
+    /// the hang-up, so no grace kill comes to close it. A descendant that ignores the hang-up keeps the terminal, so
+    /// the master does not report the end of output on its own, and the terminal's index cannot go to another session
+    /// meanwhile. Linux only, where the master's descriptor names that index.
+    /// </summary>
+    [Test]
+    public async Task DisposeClosesTheMasterOnceTheChildIsGone()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        // The descendant is forked while the shell ignores the hang-up, so it ignores it from its first instruction. It
+        // writes to the terminal every second and ends once a write fails after the close, so it leaves nothing behind.
+        var session = Pty.Start(HangupScript("trap '' HUP; (while printf .; do sleep 1; done) & trap 'exit 0' HUP"));
+        var pid = session.ProcessId;
+        try
+        {
+            await WaitForReadyAsync(session);
+            var index = TerminalIndexOf(FindMasterOf(pid));
+            await Assert.That(index).IsNotNull();
+
+            session.Dispose();
+
+            await Assert.That(await WaitForProcessGoneAsync(pid)).IsTrue();
+            await Assert.That(await WaitForAsync(() => !HoldsMasterFor(index!), 5_000)).IsTrue();
+        }
+        finally
+        {
+            session.Dispose();
+        }
+    }
+
     [Test]
     public async Task PtyTerminalDisposeHangsUpTheChild()
     {
@@ -332,6 +479,43 @@ public sealed class PtyUnixDisposeTests
         }
 
         return -1;
+    }
+
+    /// <summary>The <c>tty-index</c> of this process's master descriptor <paramref name="master"/>, or null (Linux).</summary>
+    private static string? TerminalIndexOf(int master)
+    {
+        if (master < 0)
+            return null;
+
+        foreach (var line in File.ReadLines($"/proc/self/fdinfo/{master}"))
+        {
+            if (line.StartsWith("tty-index:", StringComparison.Ordinal))
+                return line["tty-index:".Length..].Trim();
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether this process still holds a master whose <c>tty-index</c> is <paramref name="index"/> (Linux).</summary>
+    private static bool HoldsMasterFor(string index)
+    {
+        foreach (var path in Directory.EnumerateFileSystemEntries("/proc/self/fd"))
+        {
+            try
+            {
+                if (new FileInfo(path).LinkTarget?.EndsWith("ptmx", StringComparison.Ordinal) == true
+                    && TerminalIndexOf(int.Parse(Path.GetFileName(path))) == index)
+                {
+                    return true;
+                }
+            }
+            catch (IOException)
+            {
+                // The descriptor closed while being listed.
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Observes the child's own output so that the hang-up is never sent before the trap is installed.</summary>

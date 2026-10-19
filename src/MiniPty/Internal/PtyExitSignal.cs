@@ -3,9 +3,9 @@ using System.Threading.Tasks.Sources;
 namespace MiniPty.Internal;
 
 /// <summary>
-/// Receives a child exit synchronously on the thread that observed it, typically a process-wide watcher
-/// thread. Implementations must only record state or queue work; blocking here stalls exit reporting for
-/// every session.
+/// Receives a child exit synchronously on the thread that observed it, typically a background exit watcher
+/// thread. Implementations must only record state or queue work. Blocking here stalls exit reporting for every
+/// session that thread watches.
 /// </summary>
 internal interface IPtyExitListener
 {
