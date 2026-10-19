@@ -28,7 +28,9 @@ internal static partial class UnixPtyBackend
     /// </para>
     /// <para>
     /// It also sends the kill that follows a disposal's hang-up. The deadline joins this thread's wait timeout
-    /// rather than getting a timer of its own, so disposal allocates no timer. When the process exits normally,
+    /// rather than getting a timer of its own, so disposal allocates no timer. Until the child is reaped or killed, this
+    /// thread also discards its output on the polling interval, because the session's reader has stopped and the master
+    /// stays open for the hang-up. When the process exits normally,
     /// hung-up children are killed at once, and so is a child disposed after that, because the process may end
     /// before any deadline passes.
     /// </para>
@@ -196,32 +198,37 @@ internal static partial class UnixPtyBackend
                     Reap(signaled[i], signaledPidfds[i]);
 
                 PollFallbackChildren(polledSnapshot);
-                KillExpiredHangups();
+                ServeHangups();
             }
         }
 
         /// <summary>
-        /// The longest the thread may wait: forever, the polling interval while any child is polled, or until the
-        /// earliest hang-up deadline. Caller holds <see cref="s_lock"/>.
+        /// The longest the thread may wait: forever, or the polling interval while any child is polled or hung up, or
+        /// until the earliest hang-up deadline if that comes first. Caller holds <see cref="s_lock"/>.
         /// </summary>
         private static int WaitTimeoutLocked()
         {
-            var timeout = s_polled.Count > 0 ? PollIntervalMs : Timeout.Infinite;
             if (s_hangups.Count == 0)
-                return timeout;
+                return s_polled.Count > 0 ? PollIntervalMs : Timeout.Infinite;
 
+            // A hung-up child's output is discarded on every pass, so this thread wakes at the polling interval.
+            var timeout = PollIntervalMs;
             var now = Environment.TickCount64;
             foreach (var child in s_hangups)
             {
                 var remaining = (int)Math.Clamp(child.HangupKillDeadline - now, 0, int.MaxValue);
-                if (timeout == Timeout.Infinite || remaining < timeout)
+                if (remaining < timeout)
                     timeout = remaining;
             }
 
             return timeout;
         }
 
-        private static void KillExpiredHangups()
+        /// <summary>
+        /// Kills each hung-up child whose deadline has passed, and discards the output of the others. Runs on every
+        /// pass of this thread.
+        /// </summary>
+        private static void ServeHangups()
         {
             lock (s_lock)
             {
@@ -233,7 +240,10 @@ internal static partial class UnixPtyBackend
                 {
                     var child = s_hangups[i];
                     if (child.HangupKillDeadline > now)
+                    {
+                        child.DiscardOutputAfterHangup();
                         continue;
+                    }
 
                     child.KillAfterHangup();
                     s_hangups.RemoveAt(i);

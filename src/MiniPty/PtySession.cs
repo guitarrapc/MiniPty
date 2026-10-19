@@ -479,11 +479,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <remarks>
     /// <para>
     /// On Unix a running child is hung up with <c>SIGHUP</c>, the signal a shell receives when its terminal window
-    /// closes. The signal is sent without blocking. If the child has not exited one second later, a background thread
-    /// kills it with <c>SIGKILL</c>. If the process exits normally before then, by returning from <c>Main</c> or calling
-    /// <see cref="Environment.Exit(int)"/>, the kill is sent at exit. A host ended within that second by a crash or by
-    /// a signal it does not cancel, such as <c>SIGTERM</c> to a console app, never sends the kill, so a child that
-    /// ignores the hang-up survives. Calling <see cref="Kill()"/> first ends the child at once but skips the hang-up.
+    /// closes. The signal is sent without blocking. The terminal stays open until the child exits or is killed, so a
+    /// shell gets that one hang-up while it saves its history, and what the child writes meanwhile is discarded. If the
+    /// child has not exited one second later, a background thread kills it with <c>SIGKILL</c>. If the process exits
+    /// normally before then, by returning from <c>Main</c> or calling <see cref="Environment.Exit(int)"/>, the kill is
+    /// sent at exit. A host ended within that second by a crash or by a signal it does not cancel, such as
+    /// <c>SIGTERM</c> to a console app, never sends the kill, so a child that ignores the hang-up survives. Calling
+    /// <see cref="Kill()"/> first ends the child at once but skips the hang-up.
     /// An interactive shell killed this way cannot resend the hang-up to its jobs, so a running background job keeps
     /// running. A host can instead cancel such a signal, hang up each session with <see cref="Kill(PtySignal)"/>, wait
     /// a bounded time for the child to exit, dispose the session even when the wait times out, and exit normally. The

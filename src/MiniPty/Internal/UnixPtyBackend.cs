@@ -620,7 +620,7 @@ internal static partial class UnixPtyBackend
         {
             while (true)
             {
-                if (IsMasterClosed)
+                if (IsReadingEnded)
                     return 0;
 
                 var events = UnixInterop.PtyReadable | (HasPendingInput ? UnixInterop.PtyWritable : 0);
@@ -653,7 +653,7 @@ internal static partial class UnixPtyBackend
         public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
         {
             endOfOutput = false;
-            if (IsMasterClosed)
+            if (IsReadingEnded)
                 return 0;
 
             var ready = UnixInterop.minipty_pty_wait(_master, UnixInterop.PtyReadable, reader.WakeFd, CoalesceMicroWindowMs);
@@ -723,6 +723,10 @@ internal static partial class UnixPtyBackend
 
         private bool IsMasterClosed => (Volatile.Read(ref _masterState) & MasterClosedBit) != 0;
 
+        // Disposal ends reading even while the master stays open for a hung-up child, so the reader never waits for
+        // that child to exit.
+        private bool IsReadingEnded => IsMasterClosed || Volatile.Read(ref _disposed);
+
         /// <summary>Pins the master for one use. Fails once it is closed; pair a success with <see cref="ReleaseMaster"/>.</summary>
         private bool TryAcquireMaster(out int master)
         {
@@ -775,18 +779,20 @@ internal static partial class UnixPtyBackend
             if (_disposed)
                 return;
 
-            _disposed = true;
+            // Read by the reader thread, which stops on it while the master stays open for a hung-up child.
+            Volatile.Write(ref _disposed, true);
             // Queued writes fail now, on the disposing thread, without waiting for the reader to stop. This comes before
-            // the hang-up and the master close, which end output, so a queued write reports the disposal rather than
+            // the hang-up and the end of reading, which end output, so a queued write reports the disposal rather than
             // the end of output.
             CloseInput(InputDisposed);
             var exitObserved = true;
             lock (_pidLock)
             {
-                // A hang-up rather than a kill, so a shell can save its history and run its exit hooks. Closing the
-                // master below hangs the tty up too, but only once no other process holds a copy of the master, so
-                // the signal is sent explicitly. The deadline is set under the lock, so a racing second Dispose finds
-                // it and schedules no other kill.
+                // A hang-up rather than a kill, so a shell can save its history and run its exit hooks. It is sent
+                // explicitly because the master close, which also hangs the tty up, waits until the child is gone
+                // (below), and does not hang it up at all while another process holds a copy of the master. The
+                // deadline is set under the lock, so a racing second Dispose finds it and schedules no other kill, and
+                // a reap that takes the lock after it closes the master.
                 if (!_exited && _hangupKillDeadline == 0)
                 {
                     exitObserved = false;
@@ -796,14 +802,22 @@ internal static partial class UnixPtyBackend
             }
 
             _eofTimer?.Dispose();
-            if (!exitObserved)
+            if (exitObserved)
+            {
+                CloseTransport();
+            }
+            else
             {
                 _exitSignal.SetDisposedBeforeExit();
+                // The master stays open until the watcher reaps the child or kills it after the grace. Closing it hangs
+                // the tty up, which signals the child a second time, and an interactive bash that gets that signal while
+                // it saves its history dies before it hangs up its jobs. The reader stops now all the same, and the watcher
+                // discards what the child writes meanwhile.
+                SendEotIfPending();
                 // The watcher kills a child that ignores the hang-up and reaps it either way, so disposal never waits.
                 ChildWatcher.ScheduleHangupKill(this);
             }
 
-            CloseTransport();
             _execHold?.Dispose();
         }
 
@@ -820,6 +834,9 @@ internal static partial class UnixPtyBackend
                 if (!_exited)
                     KillCore();
             }
+
+            // Also when the kill finds no child to end, so the master a disposal left open lasts no longer than the grace.
+            CloseMaster();
         }
 
         /// <summary>
@@ -853,6 +870,7 @@ internal static partial class UnixPtyBackend
                 Volatile.Write(ref _exited, true);
             }
 
+            CloseMasterIfHungUp();
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, _termSignal != 0 ? _termSignal : null));
             return true;
         }
@@ -872,7 +890,55 @@ internal static partial class UnixPtyBackend
                 Volatile.Write(ref _exited, true);
             }
 
+            CloseMasterIfHungUp();
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, null));
+        }
+
+        /// <summary>
+        /// Reads and discards what the child wrote since the last call, while the master stays open for a disposal's
+        /// hang-up. The reader stopped at disposal, and without this a child that writes while it handles the hang-up
+        /// would block on a full terminal until the kill. Called only by <see cref="ChildWatcher"/>, on its polling
+        /// interval, and bounded per call so the watcher stays responsive.
+        /// </summary>
+        internal unsafe void DiscardOutputAfterHangup()
+        {
+            if (!TryAcquireMaster(out var master))
+                return;
+
+            try
+            {
+                Span<byte> buffer = stackalloc byte[4096];
+                fixed (byte* ptr = buffer)
+                {
+                    for (var i = 0; i < 16; i++)
+                    {
+                        // Non-blocking: EAGAIN once nothing is left, EIO once every slave descriptor closed.
+                        var read = UnixInterop.Read(master, ptr, (nuint)buffer.Length);
+                        if (read > 0)
+                            continue;
+                        if (read < 0 && Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
+                            continue;
+
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
+        }
+
+        /// <summary>
+        /// Closes the master that a disposal left open for its hang-up, once the child is gone. A session that was not
+        /// disposed keeps its master for the output drain.
+        /// </summary>
+        private void CloseMasterIfHungUp()
+        {
+            // Dispose sets it under the pid lock. A reap that took the lock first sees zero, and Dispose then finds the
+            // child exited and closes the master itself.
+            if (Volatile.Read(ref _hangupKillDeadline) != 0)
+                CloseMaster();
         }
 
         /// <summary>
