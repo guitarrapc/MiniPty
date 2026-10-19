@@ -30,8 +30,8 @@ namespace MiniPty;
 /// <para>
 /// Disposing or awaiting <see cref="DisposeAsync"/> ends a child that is still running and releases handles without
 /// waiting for the child to exit. On Unix the child is hung up first (<c>SIGHUP</c>), so a shell can save its history.
-/// It is killed after a short grace period if it is still running, or at once if the host process exits normally
-/// first. On Windows it is terminated.
+/// It is killed after a short grace period if it is still running, or at once if the host process exits normally or is
+/// ended by <c>SIGTERM</c>, <c>SIGINT</c>, <c>SIGHUP</c>, or <c>SIGQUIT</c> first. On Windows it is terminated.
 /// </para>
 /// </remarks>
 public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
@@ -477,9 +477,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// On Unix a running child is hung up with <c>SIGHUP</c>, the signal a shell receives when its terminal window
     /// closes. The signal is sent without blocking. If the child has not exited one second later, a background thread
     /// kills it with <c>SIGKILL</c>. If the process exits normally before then, by returning from <c>Main</c> or calling
-    /// <see cref="Environment.Exit(int)"/>, the kill is sent at exit. A host ended by a crash or by a signal it does not
-    /// handle, such as <c>SIGTERM</c> to a console app, cannot send it, so a child that ignores the hang-up survives.
-    /// Call <see cref="Kill()"/> first to end the child immediately. MiniPty signals only the child. When it exits, the
+    /// <see cref="Environment.Exit(int)"/>, the kill is sent at exit, and the same happens when the process is ended by
+    /// <c>SIGTERM</c>, <c>SIGINT</c>, <c>SIGHUP</c>, or <c>SIGQUIT</c>: MiniPty handles those signals without
+    /// cancelling them, so the host still ends as it would without MiniPty. A host that crashes or is killed with
+    /// <c>SIGKILL</c> cannot send it, so a child that ignores the hang-up survives. Call <see cref="Kill()"/> first to end
+    /// the child immediately. MiniPty signals only the child. When it exits, the
     /// system hangs up the terminal's foreground process group, so a descendant in that group ends too unless it
     /// ignores <c>SIGHUP</c>. On Windows the child is terminated.
     /// </para>
