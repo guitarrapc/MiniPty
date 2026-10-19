@@ -124,8 +124,7 @@ Interactive hosts (use case 3) keep a single embedder-owned `ReadOutputAsync` re
 
 | Platform | Behavior |
 |---|---|
-| Windows (bytes written) | Writes Ctrl+Z + CR (`0x1A`, `0x0D`) to the ConPTY input stream after every input byte written before it: while earlier input is still queued because ConPTY stopped reading input, the chord waits for later staging ticks. Keeps the input pipe open until the child exits. Pipe close is not used for this case — it is observed as `STATUS_CONTROL_C_EXIT`, not EOF. |
-| Windows (no bytes) | Closes the ConPTY input pipe after staging (attach deferral). A write during that wait switches EOF to Ctrl+Z + CR, as when bytes were written. |
+| Windows | Writes Ctrl+Z + CR (`0x1A`, `0x0D`) to the ConPTY input stream after every input byte written before it: while earlier input is still queued because ConPTY stopped reading input, the chord waits for later staging ticks. With no bytes written, the chord goes on the first tick. Keeps the input pipe open until the child exits. Pipe close is never used — the console host observes it as `STATUS_CONTROL_C_EXIT` for its clients, not as EOF, and a child about to exit on its own loses that race under load. |
 | Unix | Writes EOT (`0x04`, Ctrl-D) to the PTY master after every input byte written before it: while earlier input is still queued for a child that is not reading, EOT waits for later staging ticks. It does not close the master fd. |
 
 Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-mode shell-wrapped one-shot commands, but not for raw-mode TUI programs. Windows stream EOF uses the legacy console Ctrl+Z + CR convention; when input lacks a trailing line terminator, an extra CR is written first to submit the pending line. Raw/TUI programs are not guaranteed.
@@ -134,7 +133,7 @@ If the slave side is already closed when staged EOT runs, the master write may f
 
 ### ConPTY spawn readiness
 
-EOF staging advances on a per-session 100 ms timer, so it gives the child time to attach and progresses whether or not anyone awaits exit. Milestone 3 validates that immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof` do not cause spurious child failure (for example `STATUS_CONTROL_C_EXIT`). This remains an internal transport concern; there is no public ready-state API.
+EOF staging advances on a per-session 100 ms timer, so it gives the child time to attach and progresses whether or not anyone awaits exit. The console host queues the Ctrl+Z + CR chord for the child whether or not the child has attached yet, so the first tick is enough. Milestone 3 validates that immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof` do not cause spurious child failure (for example `STATUS_CONTROL_C_EXIT`). This remains an internal transport concern; there is no public ready-state API.
 
 ## Drain, kill, and disposal
 

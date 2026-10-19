@@ -24,7 +24,7 @@ CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows.
 | TTY detection (`redirected=False`, `isatty`) | Confirms real PTY semantics. |
 | Simple command output | Confirms spawn and decode. |
 | Stdin + EOF (`cat`, `sort`) | Confirms staged EOF. |
-| Empty stdin EOF | Confirms deferred EOF with no bytes. |
+| Empty stdin EOF | Confirms staged EOF with no bytes: exit code 0, never `STATUS_CONTROL_C_EXIT`. |
 | Multiple capture chunks + ANSI | Confirms concurrent read and timestamps. |
 | `WaitForExitAsync` cancel vs `CompleteAsync` cancel | Confirms cancellation contract. |
 | Resize | Confirms `TIOCSWINSZ` / `ResizePseudoConsole`. |

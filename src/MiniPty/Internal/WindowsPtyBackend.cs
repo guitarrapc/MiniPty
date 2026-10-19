@@ -106,17 +106,14 @@ internal static class WindowsPtyBackend
     private const int EofTickMs = 100;
     private const byte InputEofCtrlZ = 0x1A;
     private const byte InputEofSubmit = 0x0D;
-    private const int EofDeferPollsEmptyInput = 40;
-    // Value of the deferral count once the EOF chord was written. Counts never go below zero.
-    private const int EofChordWrittenMarker = -1;
     private const int ErrorInvalidHandle = 6;
     private const int ErrorBrokenPipe = 109;
     private const int ErrorNoData = WindowsInterop.ErrorNoData;
     private const int ErrorOperationAborted = 995;
     private const int ErrorIoPending = 997;
 
-    // Why the input pipe closed, which decides how queued writes fail.
-    private const int InputClosedByEof = 0;
+    // Why the input pipe closed, which decides how queued writes fail. EOF never closes it: ConPTY observes a closed
+    // input pipe as STATUS_CONTROL_C_EXIT for its clients, not as end of input (see PromoteEofIfPending).
     private const int InputOutputEnded = 1;
     private const int InputDisposed = 2;
 
@@ -447,18 +444,13 @@ internal static class WindowsPtyBackend
         private PtySize _size;
         private bool _inputClosed;
         private bool _outputClosed;
-        private bool _eofSignaled;
-        private bool _eofPending;
         /// <summary>
-        /// Ticks left before an input pipe that never carried bytes is closed, or <see cref="EofChordWrittenMarker"/> once
-        /// the Ctrl+Z / CR chord was written. One field holds both because another field would enlarge every session.
+        /// EOF took effect: the Ctrl+Z / CR chord was written, or the input pipe had closed before it could be. The pipe
+        /// is never closed for EOF; it stays open until the child exits.
         /// </summary>
-        private int _eofDeferPollsRemaining;
-
-        private bool HasInputBytes => _input is { LastStagedByte: >= 0 };
-
-        /// <summary>The Ctrl+Z / CR chord was written. The input pipe then stays open until the child exits.</summary>
-        private bool EofChordWritten => _eofDeferPollsRemaining == EofChordWrittenMarker;
+        private bool _eofSignaled;
+        /// <summary>EOF was requested and the chord is still to be written, by the staging timer or the transport close.</summary>
+        private bool _eofPending;
         private bool _hpcClosed;
         private bool _exited;
         private int _exitCode;
@@ -823,8 +815,7 @@ internal static class WindowsPtyBackend
         /// <summary>
         /// Closes MiniPty's end of the input pipe and fails what is queued: with <see cref="ObjectDisposedException"/>
         /// on disposal, otherwise with <see cref="IOException"/>. A write in flight is canceled, and its completion
-        /// releases the overlapped resources. An EOF close that finds bytes written leaves the pipe open and stages EOF
-        /// again, to be sent as the chord.
+        /// releases the overlapped resources.
         /// </summary>
         private void CloseInputPipe(int reason)
         {
@@ -833,15 +824,6 @@ internal static class WindowsPtyBackend
             {
                 if (_inputClosed)
                     return;
-
-                // A write can land between the unlocked check in CloseInputPipeIfEofSignaled and this lock. Closing the
-                // pipe after bytes is not EOF to the child, so EOF is staged again and sent as the chord.
-                if (reason == InputClosedByEof && HasInputBytes)
-                {
-                    _eofSignaled = false;
-                    _eofPending = true;
-                    return;
-                }
 
                 _inputClosed = true;
                 if (_input is { } input)
@@ -1059,10 +1041,7 @@ internal static class WindowsPtyBackend
         public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState() || _inputClosed || _eofPending || EofChordWritten)
-                return;
-
-            if (_eofSignaled)
+            if (TryRefreshExitState() || _inputClosed || _eofPending || _eofSignaled)
                 return;
 
             // Stage EOF: WriteFile can succeed before ConPTY stdin is attached. The staging timer advances
@@ -1158,8 +1137,8 @@ internal static class WindowsPtyBackend
         }
 
         /// <summary>
-        /// One EOF staging step, the work the exit-wait poll loop used to do on each 100 ms timeout:
-        /// promote a staged EOF, then count down to closing an input pipe that never carried bytes.
+        /// One EOF staging step, the work the exit-wait poll loop used to do on each 100 ms timeout: promote a staged
+        /// EOF once input is idle.
         /// </summary>
         private void OnEofTick()
         {
@@ -1170,8 +1149,7 @@ internal static class WindowsPtyBackend
             try
             {
                 PromoteEofIfPending();
-                CloseInputPipeIfEofSignaled();
-                if (!_disposed && !_inputClosed && (_eofPending || (_eofSignaled && !EofChordWritten)))
+                if (!_disposed && !_inputClosed && _eofPending)
                     _eofTimer?.Change(EofTickMs, Timeout.Infinite);
             }
             catch (Exception)
@@ -1399,48 +1377,21 @@ internal static class WindowsPtyBackend
                 if (!_eofPending)
                     return;
 
-                if (HasInputBytes)
-                {
-                    // EOF goes after every byte written before it: while input is queued or in flight, a later tick
-                    // sends it.
-                    if (!IsInputIdleLocked && !_inputClosed)
-                        return;
-
-                    // ConPTY input pipe close is observed as STATUS_CONTROL_C_EXIT, not EOF.
-                    // Legacy console EOF is Ctrl+Z submitted with CR; keep the pipe open until exit.
-                    _eofPending = false;
-                    WriteStreamEofToInputLocked();
-                    _eofSignaled = true;
+                // EOF goes after every byte written before it: while input is queued or in flight, a later tick
+                // sends it.
+                if (!IsInputIdleLocked && !_inputClosed)
                     return;
-                }
 
+                // ConPTY observes a closed input pipe as STATUS_CONTROL_C_EXIT, not as EOF: the console host ends its
+                // clients, and a child about to exit on its own loses that race under load (exit code 0xC000013A on a
+                // hosted runner, and under CPU oversubscription on a desktop). That held for input that never carried
+                // bytes too, which used to close the pipe after a 4 s wait. Legacy console EOF is Ctrl+Z submitted with
+                // CR; the host queues it for the child whether or not the child has attached yet, so it is written on
+                // the first staging tick in every case, and the pipe stays open until the child exits.
                 _eofPending = false;
+                WriteStreamEofToInputLocked();
                 _eofSignaled = true;
-                _eofDeferPollsRemaining = EofDeferPollsEmptyInput;
             }
-        }
-
-        private void CloseInputPipeIfEofSignaled()
-        {
-            if (!_eofSignaled || EofChordWritten)
-                return;
-
-            // Input that never carried bytes ends by closing the pipe after a wait. Bytes written during the wait rule
-            // that out, because closing the pipe after bytes is not EOF to the child, so EOF is sent as the chord.
-            if (HasInputBytes)
-            {
-                _eofSignaled = false;
-                _eofPending = true;
-                return;
-            }
-
-            if (_eofDeferPollsRemaining > 0)
-            {
-                _eofDeferPollsRemaining--;
-                return;
-            }
-
-            CloseInputPipe(InputClosedByEof);
         }
 
         /// <summary>
@@ -1449,21 +1400,21 @@ internal static class WindowsPtyBackend
         /// </summary>
         private void WriteStreamEofToInputLocked()
         {
-            if (_inputClosed || EofChordWritten)
+            if (_inputClosed || _eofSignaled)
                 return;
 
             // Ctrl+Z alone does not end input on ConPTY. A CR submits the EOF key chord. Ctrl+Z ends input only at the
-            // start of a line, so a pending line is submitted first.
+            // start of a line, so a pending line is submitted first; with no byte written there is no line to submit,
+            // and a leading CR would hand the child an empty line.
             var input = EnsureInputLocked();
             Span<byte> chord = stackalloc byte[3];
             var length = 0;
-            if (input.LastStagedByte is not '\n' and not '\r')
+            if (input.LastStagedByte >= 0 && input.LastStagedByte is not '\n' and not '\r')
                 chord[length++] = InputEofSubmit;
 
             chord[length++] = InputEofCtrlZ;
             chord[length++] = InputEofSubmit;
             StageLocked(input, chord[..length], owner: null);
-            _eofDeferPollsRemaining = EofChordWrittenMarker;
             WriteStagedLocked(input);
         }
 
@@ -1488,7 +1439,6 @@ internal static class WindowsPtyBackend
             try
             {
                 PromoteEofIfPending();
-                CloseInputPipeIfEofSignaled();
             }
             catch (Exception)
             {

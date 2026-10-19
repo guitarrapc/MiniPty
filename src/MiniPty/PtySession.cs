@@ -291,9 +291,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// first. Later calls do nothing.
     /// </para>
     /// <para>
-    /// Windows: after bytes were written, writes Ctrl+Z + CR to the ConPTY input stream and leaves the pipe open until
-    /// the child exits. With no prior bytes, closes the input pipe after a further wait, unless a write arrives during
-    /// that wait, which switches to Ctrl+Z + CR.
+    /// Windows: writes Ctrl+Z + CR to the ConPTY input stream and leaves the pipe open until the child exits, with or
+    /// without prior bytes. The input pipe is never closed to signal EOF.
     /// </para>
     /// <para>Unix: writes EOT (<c>0x04</c>, Ctrl-D) to the PTY master. It does not close the master fd.</para>
     /// </remarks>
