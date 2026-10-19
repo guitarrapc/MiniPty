@@ -18,12 +18,16 @@
 #include <sys/epoll.h>
 #include <sys/syscall.h>
 #ifndef SYS_pidfd_open
-/* pidfd_open has the same number on every architecture since Linux 5.3 (unified syscall table). */
+/* 434 on every architecture .NET runs on. Only alpha, ia64 and MIPS number it differently. */
 #define SYS_pidfd_open 434
 #endif
 #ifndef SYS_pidfd_send_signal
-/* pidfd_send_signal has the same number on every architecture since Linux 5.1 (unified syscall table). */
+/* 424 on every architecture .NET runs on. Only alpha, ia64 and MIPS number it differently. */
 #define SYS_pidfd_send_signal 424
+#endif
+#ifndef P_PIDFD
+/* waitid by pidfd, Linux 5.4 and later. */
+#define P_PIDFD 3
 #endif
 #define MINIPTY_CHILD_WATCH_EPOLL 1
 #elif defined(__APPLE__) || defined(__FreeBSD__)
@@ -37,21 +41,22 @@
 #endif
 
 /*
- * Child exit watcher and child signaling.
+ * Child exit watcher, child signaling and reaping.
  *
  * One managed thread blocks in minipty_child_watch_wait for every child that one load of the managed assembly
  * starts, so observing exit adds no thread per session. The watcher keeps no state here: the caller holds its
  * descriptors and passes them back. Two loads in one process, such as two AssemblyLoadContexts, share this library,
- * and one shared epoll or kqueue handed one load's exits and wake-ups to the other load's thread. Linux watches
- * pidfds with epoll; macOS and FreeBSD watch EVFILT_PROC NOTE_EXIT with kqueue.
+ * and one shared epoll or kqueue handed one load's exits to the other load's thread. Linux watches pidfds with epoll.
+ * macOS and FreeBSD watch EVFILT_PROC NOTE_EXIT with kqueue.
  *
  * The watcher only reports that a child exited. Reaping stays with the managed caller so the wait status is read
- * exactly once, by one owner. On Linux the caller also owns each child's pidfd. It signals the child through it, and
- * once the child is reaped it removes the registration and then closes the pidfd. A child that cannot be registered
- * (pidfd unavailable on an older kernel or under seccomp, or a child that already exited before kqueue registration)
- * makes minipty_child_watch_add fail, and the caller polls waitpid for that child instead.
+ * exactly once, by one owner. On Linux the caller also owns each child's pidfd, which the spawn opens right after the
+ * fork. It signals and reaps the child through it, and once the child is reaped it removes the registration and then
+ * closes the pidfd. A child that cannot be registered makes minipty_child_watch_add fail, and the caller polls that
+ * child instead. On Linux that is a child without a pidfd, which the kernel did not give or the spawn refused. With
+ * kqueue it is a child that already exited before its registration.
  *
- * A self-pipe wakes the wait when the caller's polling set changes; on macOS an EVFILT_USER event on the kqueue
+ * A self-pipe wakes the wait when the caller's polling set changes. On macOS an EVFILT_USER event on the kqueue
  * does instead. Every descriptor is opened close-on-exec, so no later child ever keeps the watcher's descriptors
  * past exec: the pipe with pipe2 (macOS has none, hence the event there). Until a concurrently forked child execs,
  * though, it holds duplicates of them. epoll drops a registration only when every descriptor for the open file
@@ -335,8 +340,34 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
 int minipty_pidfd_open(int pid)
 {
 #if defined(__linux__)
+    siginfo_t info;
+    int pidfd;
+    int checked;
+    int saved_errno;
+
     /* pidfds are always close-on-exec. */
-    return (int)syscall(SYS_pidfd_open, pid, 0);
+    pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (pidfd < 0)
+        return -1;
+
+    /*
+     * pidfd_open accepts any process, and the pid may name another one by now if code outside MiniPty reaped the
+     * child. WNOWAIT leaves a zombie waitable, so this only checks that the pidfd names a child of this process.
+     * Linux 5.3 has no P_PIDFD, and its pidfd stays unchecked.
+     */
+    do {
+        memset(&info, 0, sizeof(info));
+        checked = waitid((idtype_t)P_PIDFD, (id_t)pidfd, &info, WEXITED | WNOHANG | WNOWAIT);
+    } while (checked < 0 && errno == EINTR);
+
+    if (checked < 0 && errno != EINVAL) {
+        saved_errno = errno;
+        close(pidfd);
+        errno = saved_errno;
+        return -1;
+    }
+
+    return pidfd;
 #else
     (void)pid;
     errno = ENOSYS;
@@ -350,7 +381,10 @@ int minipty_signal_child(int pidfd, int pid, int sig)
     int result;
 
 #if defined(__linux__)
-    /* A pidfd names one process, so a signal through it can never reach another process that reuses the pid. */
+    /*
+     * A pidfd keeps naming the process it was opened for, so a signal through it never reaches a process that gets the
+     * pid later.
+     */
     if (pidfd >= 0)
         return syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) == 0 ? 0 : -1;
 #else
@@ -358,10 +392,10 @@ int minipty_signal_child(int pidfd, int pid, int sig)
 #endif
 
     /*
-     * Without a pidfd the pid is checked first. WNOWAIT leaves the child waitable, so this reports whether pid is
-     * still this process's unreaped child without reaping it. ECHILD means code outside MiniPty reaped it, and the
-     * pid may already belong to another process. A reap between this check and the kill can still free the pid for
-     * reuse, a window only a pidfd closes.
+     * Without a pidfd the pid is checked first. WNOWAIT leaves a zombie waitable, so this reports whether pid is
+     * still an unreaped child of this process without reaping it. ECHILD means code outside MiniPty reaped it, and
+     * the pid may already belong to another process. The check cannot tell the session's child from another child
+     * of this process that got the same pid. Only a pidfd can.
      */
     do {
         memset(&info, 0, sizeof(info));
@@ -372,4 +406,70 @@ int minipty_signal_child(int pidfd, int pid, int sig)
         return -1;
 
     return kill(pid, sig);
+}
+
+static void minipty_set_exit(int exited, int code_or_signal, int *exit_code, int *term_signal)
+{
+    if (exited) {
+        *exit_code = code_or_signal;
+        *term_signal = 0;
+    } else {
+        *exit_code = 128 + code_or_signal;
+        *term_signal = code_or_signal;
+    }
+}
+
+int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_signal)
+{
+    int options = block ? 0 : WNOHANG;
+    int status;
+    pid_t result;
+
+#if defined(__linux__)
+    if (pidfd >= 0) {
+        siginfo_t info;
+        int waited;
+
+        /*
+         * By pidfd rather than by pid: once code outside MiniPty has reaped the child, its pid can name another child
+         * of this process, and a reap by pid would take that child's exit and status.
+         */
+        do {
+            memset(&info, 0, sizeof(info));
+            waited = waitid((idtype_t)P_PIDFD, (id_t)pidfd, &info, WEXITED | options);
+        } while (waited < 0 && errno == EINTR);
+
+        if (waited == 0) {
+            if (info.si_pid == 0)
+                return 0;
+
+            minipty_set_exit(info.si_code == CLD_EXITED, info.si_status, exit_code, term_signal);
+            return 1;
+        }
+
+        /* Linux 5.3 has pidfd_open but not P_PIDFD, and reaps by pid. */
+        if (errno != EINVAL)
+            return -1;
+    }
+#else
+    (void)pidfd;
+#endif
+
+    do {
+        result = waitpid(pid, &status, options);
+    } while (result < 0 && errno == EINTR);
+
+    if (result < 0)
+        return -1;
+    if (result == 0)
+        return 0;
+
+    if (WIFEXITED(status))
+        minipty_set_exit(1, WEXITSTATUS(status), exit_code, term_signal);
+    else if (WIFSIGNALED(status))
+        minipty_set_exit(0, WTERMSIG(status), exit_code, term_signal);
+    else
+        minipty_set_exit(1, 1, exit_code, term_signal);
+
+    return 1;
 }

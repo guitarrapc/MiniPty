@@ -32,9 +32,10 @@ internal static partial class UnixPtyBackend
         var exec = UnixExecPayload.Create(startInfo.FileName, arguments, startInfo.WorkingDirectory, environment);
         var pid = 0;
         var master = 0;
+        var pidfd = -1;
         unsafe
         {
-            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid);
+            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd);
             if (spawnError != 0)
             {
                 exec.Dispose();
@@ -45,16 +46,16 @@ internal static partial class UnixPtyBackend
         try
         {
             PtyStartTestHook.Run(PtyStartStage.Spawned, pid);
-            return new UnixPtyBackendInstance(master, pid, size, exec);
+            return new UnixPtyBackendInstance(master, pid, pidfd, size, exec);
         }
         catch
         {
             // The child runs, but no watcher will reap it, because the instance registers with the watcher last. It is
-            // killed and reaped here, so a failed start leaves neither a running child nor a zombie.
-            _ = UnixInterop.minipty_signal_child(-1, pid, UnixInterop.SigKill);
-            while (UnixInterop.waitpid(pid, out _, 0) < 0 && Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
-            {
-            }
+            // killed and reaped here, so a failed start leaves neither a running child, a zombie, nor its pidfd.
+            _ = UnixInterop.minipty_signal_child(pidfd, pid, UnixInterop.SigKill);
+            _ = UnixInterop.minipty_reap_child(pidfd, pid, 1, out _, out _);
+            if (pidfd >= 0)
+                UnixInterop.close(pidfd);
 
             exec.Dispose();
             if (master >= 0)
@@ -70,7 +71,8 @@ internal static partial class UnixPtyBackend
         IntPtr executable,
         IntPtr argv,
         IntPtr envp,
-        int* pid) =>
+        int* pid,
+        int* pidfd) =>
         minipty_fork_pty_exec(
             master,
             winsize,
@@ -78,7 +80,8 @@ internal static partial class UnixPtyBackend
             (byte*)executable,
             (byte**)argv,
             (byte**)envp,
-            pid);
+            pid,
+            pidfd);
 
     private sealed class UnixExecPayload : IDisposable
     {
@@ -143,8 +146,9 @@ internal static partial class UnixPtyBackend
         // Serializes the child's reap with signal delivery, so Kill can never reach a pid the watcher has
         // already released for reuse.
         private readonly Lock _pidLock = new();
-        // The child's pidfd on Linux, or -1. Every signal goes through it, and the watcher closes it once the child is
-        // reaped. Written only by the constructor and, under _pidLock, by ClosePidfd.
+        // The child's pidfd on Linux, opened by the spawn right after the fork, or -1 when there is none. The child's
+        // signals go through it, and so does its reap from Linux 5.4. The watcher closes it once the child is reaped.
+        // Written only by the constructor and, under _pidLock, by ClosePidfd.
         private int _pidfd = -1;
         // Mutable struct: used only through this field, never copied.
         private PtyExitSignal _exitSignal;
@@ -171,10 +175,11 @@ internal static partial class UnixPtyBackend
         private bool _disposed;
         private PtySize _size;
 
-        public UnixPtyBackendInstance(int master, int pid, PtySize size, UnixExecPayload execHold)
+        public UnixPtyBackendInstance(int master, int pid, int pidfd, PtySize size, UnixExecPayload execHold)
         {
             _master = master;
             _pid = pid;
+            _pidfd = pidfd;
             _execHold = execHold;
             _size = size;
             // Non-blocking, so a write takes what the tty input queue accepts and never blocks its caller. The reader
@@ -183,8 +188,6 @@ internal static partial class UnixPtyBackend
                 throw new IOException($"Setting the PTY master non-blocking failed (errno {Marshal.GetLastPInvokeError()})");
 
             Input = new PtyInputStream(this);
-            // After the last step that can throw, so a failed start never holds a pidfd.
-            _pidfd = UnixInterop.minipty_pidfd_open(pid);
             // Last, so the watcher never observes a partially constructed instance.
             ChildWatcher.Register(this);
         }
@@ -562,8 +565,8 @@ internal static partial class UnixPtyBackend
         /// </summary>
         /// <remarks>
         /// Not <c>kill(pid)</c> alone: code outside MiniPty can reap the child, for example a host that reaps every
-        /// child, and the pid can then belong to another process before the watcher notices. A pidfd names this process
-        /// alone. Without one, the native call sends the signal only while the pid is still this process's unreaped child.
+        /// child, and the pid can then belong to another process before the watcher notices. A pidfd names the child
+        /// alone. Without one, the native call sends the signal only while the pid is still an unreaped child of the host.
         /// </remarks>
         private void SignalLocked(int signal) => _ = UnixInterop.minipty_signal_child(_pidfd, _pid, signal);
 
@@ -830,13 +833,16 @@ internal static partial class UnixPtyBackend
                 if (_exited)
                     return true;
 
-                if (TryWaitPid(_pid, UnixInterop.WaitNoHang, out var status, out var result))
-                {
-                    if (result != _pid)
-                        return false;
+                // Through the pidfd where there is one (Linux 5.4 and later), so a pid that another child of the host
+                // gets after the pidfd was opened never hands this session that child's exit.
+                var reaped = UnixInterop.minipty_reap_child(_pidfd, _pid, 0, out var exitCode, out var termSignal);
+                if (reaped == 0)
+                    return false;
 
-                    _exitCode = MapWaitStatusToExitCode(status);
-                    _termSignal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+                if (reaped > 0)
+                {
+                    _exitCode = exitCode;
+                    _termSignal = termSignal;
                 }
                 else if (Marshal.GetLastPInvokeError() != UnixInterop.ECHILD)
                 {
@@ -1106,39 +1112,6 @@ internal static partial class UnixPtyBackend
         owned.Clear();
     }
 
-    // The exited/signaled wait-status layout (low 7 bits = signal, bits 8-15 = exit code) is
-    // identical on Linux, macOS, and FreeBSD, so decoding stays managed. WIFSIGNALED uses the
-    // explicit form excluding the stopped marker 0x7f: the textbook glibc macro relies on a
-    // signed-char cast that a direct C# transcription loses, which would misclassify a stopped
-    // status as signaled. Unreachable under WNOHANG-only polling today, but load-bearing now
-    // that the termination signal is public API.
-    private static bool WIFEXITED(int status) => (status & 0x7f) == 0;
-    private static int WEXITSTATUS(int status) => (status >> 8) & 0xff;
-    private static bool WIFSIGNALED(int status) => (status & 0x7f) != 0 && (status & 0x7f) != 0x7f;
-    private static int WTERMSIG(int status) => status & 0x7f;
-
-    private static int MapWaitStatusToExitCode(int status)
-    {
-        if (WIFEXITED(status))
-            return WEXITSTATUS(status);
-        if (WIFSIGNALED(status))
-            return 128 + WTERMSIG(status);
-        return 1;
-    }
-
-    private static bool TryWaitPid(int pid, int options, out int status, out int result)
-    {
-        while (true)
-        {
-            result = UnixInterop.waitpid(pid, out status, options);
-            if (result >= 0)
-                return true;
-            if (Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
-                continue;
-            return false;
-        }
-    }
-
     [LibraryImport("minipty_unix")]
     private static unsafe partial int minipty_fork_pty_exec(
         int* master,
@@ -1147,7 +1120,8 @@ internal static partial class UnixPtyBackend
         byte* file,
         byte** argv,
         byte** envp,
-        int* pid_out);
+        int* pid_out,
+        int* pidfd_out);
 
     [LibraryImport("minipty_unix", SetLastError = true)]
     private static partial int minipty_set_winsize(

@@ -24,7 +24,8 @@ int minipty_fork_pty_exec(
     const char *file,
     char *const *argv,
     char *const *envp,
-    int *pid_out);
+    int *pid_out,
+    int *pidfd_out);
 
 int minipty_set_winsize(
     int master,
@@ -41,6 +42,7 @@ int minipty_child_watch_wake(int watch_fd, int wake_write);
 int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds, int capacity, int timeout_ms);
 int minipty_pidfd_open(int pid);
 int minipty_signal_child(int pidfd, int pid, int sig);
+int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_signal);
 
 int minipty_wake_open(int *read_fd, int *write_fd);
 int minipty_wake_signal(int write_fd);

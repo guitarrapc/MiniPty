@@ -11,18 +11,18 @@ internal static partial class UnixPtyBackend
     /// <remarks>
     /// <para>
     /// The native shim reports exits through pidfd + epoll (Linux 5.3+) or <c>kqueue</c>
-    /// <c>EVFILT_PROC</c> (macOS, FreeBSD). A child the shim cannot register — no pidfd support, a
-    /// seccomp filter, or a child that exited before <c>kqueue</c> registration — joins a polling set
-    /// that the same thread checks with <c>waitpid(WNOHANG)</c> every <see cref="PollIntervalMs"/>.
-    /// When the shim is unavailable altogether, every child is polled.
+    /// <c>EVFILT_PROC</c> (macOS, FreeBSD). A child the shim cannot register joins a polling set that the same
+    /// thread checks every <see cref="PollIntervalMs"/>. On Linux that is a child the spawn got no pidfd for, because
+    /// the kernel gave none, a seccomp filter blocked it, or the pidfd named no child. With <c>kqueue</c> it is a child
+    /// that exited before its registration. When the watcher's descriptors could not be opened, every child is polled.
     /// </para>
     /// <para>
     /// The epoll or kqueue and its wake descriptors belong to this class, not to the shim. A second
     /// <see cref="System.Runtime.Loader.AssemblyLoadContext"/> that loads MiniPty gets its own watcher but shares the
-    /// shim, and a watcher kept in the shim handed one load's exits and wake-ups to the other load's thread.
+    /// shim, and a watcher kept in the shim handed one load's exits to the other load's thread.
     /// </para>
     /// <para>
-    /// This thread is the only code that reaps MiniPty children. A single reaper reads each wait status
+    /// This thread is the only code that reaps a session's child. A single reaper reads each wait status
     /// exactly once, and reaping a disposed session's child prevents zombies without blocking the
     /// thread that disposed it. On Linux it also closes each reaped child's pidfd, which the session signals through.
     /// </para>
@@ -47,7 +47,7 @@ internal static partial class UnixPtyBackend
         private static bool s_started;
         private static bool s_nativeWatch;
         private static bool s_exiting;
-        // The shim's epoll or kqueue and its wake pipe, or -1 when the shim is unavailable. macOS wakes through an
+        // This watcher's epoll or kqueue and its wake pipe, or -1 when they could not be opened. macOS wakes through an
         // event on the kqueue and has no pipe.
         private static int s_watchFd = -1;
         private static int s_wakeRead = -1;
@@ -73,10 +73,20 @@ internal static partial class UnixPtyBackend
                 }
 
                 s_children[child.ProcessId] = child;
-                if (!s_nativeWatch || minipty_child_watch_add(s_watchFd, child.Pidfd, child.ProcessId) != 0)
+                try
                 {
-                    s_polled.Add(child.ProcessId);
-                    WakeLocked();
+                    if (!s_nativeWatch || minipty_child_watch_add(s_watchFd, child.Pidfd, child.ProcessId) != 0)
+                    {
+                        s_polled.Add(child.ProcessId);
+                        WakeLocked();
+                    }
+                }
+                catch
+                {
+                    // The failed start closes the child's pidfd, so this class must not keep a child whose pidfd
+                    // number another descriptor may get next.
+                    s_children.Remove(child.ProcessId);
+                    throw;
                 }
             }
         }
@@ -130,13 +140,16 @@ internal static partial class UnixPtyBackend
             if (s_started)
                 return;
 
-            s_nativeWatch = minipty_child_watch_open(out var watchFd, out var wakeRead, out var wakeWrite) == 0;
-            if (s_nativeWatch)
+            // The descriptors are opened only once. A thread start that fails below leaves them open for the next
+            // registration, and opening a second set then would leak the first.
+            if (s_watchFd < 0 && minipty_child_watch_open(out var watchFd, out var wakeRead, out var wakeWrite) == 0)
             {
                 s_watchFd = watchFd;
                 s_wakeRead = wakeRead;
                 s_wakeWrite = wakeWrite;
             }
+
+            s_nativeWatch = s_watchFd >= 0;
 
             var thread = new Thread(Run)
             {
@@ -291,7 +304,7 @@ internal static partial class UnixPtyBackend
                 }
                 else if (!s_polled.Contains(pid))
                 {
-                    // Reported but not yet reapable: keep checking until waitpid returns it.
+                    // Reported but not yet reapable: keep checking until the reap succeeds.
                     s_polled.Add(pid);
                 }
             }

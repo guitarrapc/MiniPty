@@ -63,7 +63,10 @@ internal static partial class UnixInterop
 
     // Child signaling (minipty_unix_exit.c).
 
-    /// <summary>Opens a pidfd for <paramref name="pid"/> on Linux 5.3+. Returns -1 elsewhere or when the kernel refuses.</summary>
+    /// <summary>
+    /// Opens a pidfd for <paramref name="pid"/> on Linux 5.3+. Returns -1 elsewhere or when the kernel refuses, and -1
+    /// with ECHILD when the pidfd names no child of this process, which Linux 5.4 and later can check.
+    /// </summary>
     [LibraryImport("minipty_unix", SetLastError = true)]
     internal static partial int minipty_pidfd_open(int pid);
 
@@ -74,6 +77,16 @@ internal static partial class UnixInterop
     /// </summary>
     [LibraryImport("minipty_unix", SetLastError = true)]
     internal static partial int minipty_signal_child(int pidfd, int pid, int signal);
+
+    /// <summary>
+    /// Reaps a child of this process once it has exited: through <paramref name="pidfd"/> when it is not negative and
+    /// the kernel can wait on a pidfd (Linux 5.4 and later), and otherwise by <paramref name="pid"/>. A nonzero
+    /// <paramref name="block"/> waits for the exit. Returns 1 with the exit code (128 plus the signal for a signaled
+    /// child) and the terminating signal (0 for none), 0 while the child runs, and -1 on failure, with ECHILD when code
+    /// outside MiniPty already reaped it.
+    /// </summary>
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_reap_child(int pidfd, int pid, int block, out int exitCode, out int termSignal);
 
     /// <summary>
     /// Waits until <paramref name="master"/> is ready for the requested <paramref name="events"/>

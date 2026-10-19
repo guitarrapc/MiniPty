@@ -183,7 +183,8 @@ static int spawn_pty_child_forkpty(
     const char *file,
     char *const *argv,
     char *const *envp,
-    pid_t *pid_out)
+    pid_t *pid_out,
+    int *pidfd_out)
 {
     pid_t pid;
     sigset_t newmask;
@@ -192,6 +193,7 @@ static int spawn_pty_child_forkpty(
     char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
     int inherited_fd_scan_limit = 0;
 
+    *pidfd_out = -1;
     if (child_envp == NULL) {
         errno = ENOMEM;
         return ENOMEM;
@@ -240,14 +242,24 @@ static int spawn_pty_child_forkpty(
      */
     if (fcntl(*master, F_SETFD, FD_CLOEXEC) != 0) {
         int err = errno > 0 ? errno : EINVAL;
-        kill(pid, SIGKILL);
-        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
-        }
+        int exit_code;
+        int term_signal;
+
+        minipty_signal_child(-1, (int)pid, SIGKILL);
+        minipty_reap_child(-1, (int)pid, 1, &exit_code, &term_signal);
         close(*master);
         *master = -1;
         return err;
     }
 
+    /*
+     * Here rather than when the managed session is built. A pidfd is opened by pid, so it names another process if the
+     * child has already exited, been reaped by code outside MiniPty, and had its pid reused. Right after the fork that
+     * window is an instant, and on Linux 5.4 and later minipty_pidfd_open refuses a process that is not a child of this
+     * one. Holding the child until the pidfd is open would narrow the window further, but it deadlocks concurrent
+     * spawns on a forkpty that waits for end of file on a pipe of its own.
+     */
+    *pidfd_out = minipty_pidfd_open((int)pid);
     *pid_out = pid;
     return 0;
 }
@@ -588,12 +600,14 @@ static int spawn_pty_child(
     const char *file,
     char *const *argv,
     char *const *envp,
-    pid_t *pid_out)
+    pid_t *pid_out,
+    int *pidfd_out)
 {
 #if defined(__APPLE__)
+    *pidfd_out = -1;
     return spawn_pty_child_darwin(master, winp, cwd, file, argv, envp, pid_out);
 #else
-    return spawn_pty_child_forkpty(master, winp, cwd, file, argv, envp, pid_out);
+    return spawn_pty_child_forkpty(master, winp, cwd, file, argv, envp, pid_out, pidfd_out);
 #endif
 }
 
@@ -604,12 +618,13 @@ int minipty_fork_pty_exec(
     const char *file,
     char *const *argv,
     char *const *envp,
-    int *pid_out)
+    int *pid_out,
+    int *pidfd_out)
 {
     pid_t pid = -1;
     int err;
 
-    err = spawn_pty_child(master, winp, working_directory, file, argv, envp, &pid);
+    err = spawn_pty_child(master, winp, working_directory, file, argv, envp, &pid, pidfd_out);
     if (err != 0)
         return err;
 

@@ -391,9 +391,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// Sends a signal to the child process without releasing PTY handles.
     /// </summary>
     /// <remarks>
-    /// On Unix the mapped native signal is delivered via <c>kill(2)</c>; the child may handle or
-    /// ignore catchable signals, so termination is not guaranteed. On Windows the signal is
-    /// advisory and the child is terminated unconditionally, matching node-pty semantics.
+    /// On Unix the mapped native signal is delivered to the child, through its pidfd on Linux when the kernel provides
+    /// one. No signal is sent once MiniPty has reaped the child. Without a pidfd, MiniPty cannot tell the child from
+    /// another child of the host that got its pid after other code reaped it. The child may handle or ignore
+    /// catchable signals, so termination is not guaranteed. On Windows the signal is advisory and the child is
+    /// terminated unconditionally, because Windows has no POSIX signals.
     /// Call <see cref="Dispose"/> afterward to release resources.
     /// </remarks>
     /// <param name="signal">Signal to deliver.</param>
