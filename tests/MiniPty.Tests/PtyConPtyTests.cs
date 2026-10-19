@@ -294,7 +294,10 @@ public sealed class PtyConPtyTests
 
         await WaitForAsync(output, ">");
         await terminal.WriteInputAsync("echo AAAA\r");
-        await WaitForAsync(output, "AAAA\r\n");
+        // The command's output and then the next prompt: under CPU oversubscription the prompt arrived only after the
+        // clear, so it, not the next command, was what started at the top (1 of 1 loaded runs).
+        var echoed = await WaitForAsync(output, "AAAA\r\n");
+        await WaitForAsync(output, ">", echoed);
         int mark;
         lock (output)
             mark = output.Length;
@@ -330,7 +333,8 @@ public sealed class PtyConPtyTests
         var output = new StringBuilder();
         await ReadUntilAsync(reader, output, ">");
         await session.WriteInputAsync("echo AAAA\r", cancellationToken: cts.Token);
-        await ReadUntilAsync(reader, output, "AAAA\r\n");
+        var echoed = await ReadUntilAsync(reader, output, "AAAA\r\n");
+        await ReadUntilAsync(reader, output, ">", echoed);
         var mark = output.Length;
 
         session.Clear();
@@ -442,15 +446,20 @@ public sealed class PtyConPtyTests
         return latencies[1];
     }
 
-    private static async Task WaitForAsync(StringBuilder output, string text)
+    /// <summary>
+    /// Waits until <paramref name="text"/> appears in <paramref name="output"/> at or after <paramref name="start"/>, and
+    /// returns the index just past it.
+    /// </summary>
+    private static async Task<int> WaitForAsync(StringBuilder output, string text, int start = 0)
     {
         var deadline = Environment.TickCount64 + (long)Timeout.TotalMilliseconds;
         while (true)
         {
             lock (output)
             {
-                if (output.ToString().IndexOf(text, StringComparison.Ordinal) >= 0)
-                    return;
+                var at = output.ToString().IndexOf(text, start, StringComparison.Ordinal);
+                if (at >= 0)
+                    return at + text.Length;
             }
 
             if (Environment.TickCount64 >= deadline)
@@ -460,10 +469,15 @@ public sealed class PtyConPtyTests
         }
     }
 
-    private static async Task ReadUntilAsync(IAsyncEnumerator<PtyOutputChunk> reader, StringBuilder output, string text)
+    /// <summary>Reads until <paramref name="text"/> appears at or after <paramref name="start"/>; returns the index past it.</summary>
+    private static async Task<int> ReadUntilAsync(IAsyncEnumerator<PtyOutputChunk> reader, StringBuilder output, string text, int start = 0)
     {
-        while (output.ToString().IndexOf(text, StringComparison.Ordinal) < 0)
+        while (true)
         {
+            var at = output.ToString().IndexOf(text, start, StringComparison.Ordinal);
+            if (at >= 0)
+                return at + text.Length;
+
             if (!await reader.MoveNextAsync())
                 throw new InvalidOperationException($"Output ended before '{Escape(text)}': {Escape(output.ToString())}");
 
