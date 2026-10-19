@@ -292,7 +292,8 @@ public sealed class PtyTerminalTests
     /// <summary>
     /// A child that leaves the terminal ends output on Linux while it keeps running, so the pump waits for its exit.
     /// Disposal must still reach the session instead of waiting for that exit. The child ignores the hang-up, so only
-    /// the kill that disposal schedules ends it.
+    /// the kill that disposal schedules ends it. macOS does not end output first, so there it checks only that
+    /// disposal ends the child.
     /// </summary>
     [Test]
     public async Task PtyTerminalDisposeEndsAChildThatLeftTheTerminal()

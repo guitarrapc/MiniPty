@@ -378,7 +378,8 @@ public sealed class PtyWebSocketBridgeTests
 
     /// <summary>
     /// The bridge disposes its terminal before it returns. A child that left the terminal and ignores the hang-up must
-    /// not hold that disposal, so canceling ends the bridge and the kill that disposal schedules ends the child.
+    /// not hold that disposal, so canceling ends the bridge and the kill that disposal schedules ends the child. On Linux
+    /// leaving the terminal ends output; macOS does not end output first, so there it checks only that disposal ends the child.
     /// </summary>
     [Test]
     public async Task BridgeCancellationEndsAChildThatLeftTheTerminal()

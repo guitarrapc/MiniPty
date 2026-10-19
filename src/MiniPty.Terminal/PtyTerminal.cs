@@ -267,7 +267,7 @@ public sealed class PtyTerminal : IAsyncDisposable
             }
 
             // Every handler invocation has finished before the exit status is observed and published.
-            // Output usually ends after the child exits, but on Unix it also ends when the child closes
+            // Output usually ends after the child exits, but on Linux it also ends when the child closes
             // the terminal and keeps running. The wait therefore observes disposal, which must still
             // reach the session so the child is hung up and killed.
             return await _session.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
