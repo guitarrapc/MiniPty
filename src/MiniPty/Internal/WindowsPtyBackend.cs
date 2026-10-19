@@ -1213,6 +1213,13 @@ internal static class WindowsPtyBackend
         /// </summary>
         public unsafe int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
         {
+            // Disposal closes the handle under a blocked read and cancels the read; the pump then re-checks its state
+            // and reads again to let the transport end. Reading a closed handle would throw, and that exception cost
+            // every out-of-band session about 330 B (its host exits with the child, so the cancel wins the race with
+            // the pipe break nearly every time; in-box, 2 of 300 sessions). The catch below keeps the race.
+            if (_outputReadHandle.IsClosed)
+                return 0;
+
             try
             {
                 fixed (byte* ptr = buffer)

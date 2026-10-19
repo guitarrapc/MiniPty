@@ -34,6 +34,8 @@ Tests use property assertions, not golden byte captures, to reduce OS and timing
 
 Cross-OS integration benchmarks (`*PtyIntegrationBenchmarks*`, especially `*32KiB*`) use `MiniPty.Benchmarks.Child` for bulk stdout: a shell-free child that writes exactly *n* zero bytes in 4 KiB chunks (`--bytes <n>`). `Echo` and `Exit0` scenarios still use lightweight shell commands where small spawn asymmetry is acceptable. `dotnet build -c Release` copies the child next to the benchmark assembly; missing child fails fast with a rebuild hint.
 
+`PtyConPtyBenchmarks` runs the spawn, echo, and 32 KiB scenarios on the in-box and the out-of-band ConPTY side by side (`[Params] OutOfBand`); it reports 0 where `conpty.dll` is not staged, so it is Windows-only in effect. It is what showed that the out-of-band path ends output about 100 ms earlier per session, and that a caught exception on the disposal path cost each session 330 B ([plan](../plans/plan_gui_host_readiness.md#g7-result)).
+
 Allocation regressions are checked with `scripts/compare-benchmark-allocations.ps1` against
 `BenchmarkDotNet.Artifacts/baselines/integration.json`; the gate is allocated bytes less than or
 equal to the recorded baseline. Refresh that baseline only when an intentional lifecycle change
