@@ -26,6 +26,7 @@ internal sealed class TerminalWindow : Window
     private readonly TextBlock _status;
     private PtySession? _session;
     private string _statusCommand = string.Empty;
+    private ConPtyLibrary? _conPty;
     private string _statusState = "starting";
     private bool _exited;
     private readonly TerminalRun _run = new();
@@ -88,7 +89,7 @@ internal sealed class TerminalWindow : Window
 
     private void UpdateStatus()
     {
-        var backend = OperatingSystem.IsWindows() ? "ConPTY" : "PTY";
+        var backend = _conPty is null ? "ConPTY" : $"ConPTY {_conPty.FileVersion.ToString(2)} ({(_conPty.HasConsoleHost ? "OpenConsole" : "conhost fallback")})";
         var pid = _session is { } session ? $" · pid {session.ProcessId}" : string.Empty;
         _status.Text = $"MiniPty {MiniPtyVersion} hosting {backend}{pid} · {_terminal.Columns}×{_terminal.Rows} · {_statusCommand} · {_statusState}";
     }
@@ -106,6 +107,10 @@ internal sealed class TerminalWindow : Window
             Size = new PtySize(columns, rows),
             // Programs decide between 16 colors and 24-bit color from this; the control renders both.
             Environment = new Dictionary<string, string?> { ["COLORTERM"] = "truecolor" },
+            // The out-of-band ConPTY this project references (Microsoft.Windows.Console.ConPTY): forwards mouse
+            // tracking and terminal queries, which the in-box conhost consumes, and supports Clear. Null, and so the
+            // in-box ConPTY, when conpty.dll is not in the application directory.
+            ConPty = _conPty = ConPtyLibrary.TryLoadFromApplicationDirectory(),
         };
 
         // Spawned, read, and awaited on the UI thread. No Task.Run anywhere in this file.

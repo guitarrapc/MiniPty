@@ -36,6 +36,11 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
     <!-- Immediate-mode drawing for the terminal grid; XAML text elements cannot repaint a full screen per frame. -->
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.2" />
+    <!--
+      The out-of-band ConPTY (conpty.dll + OpenConsole.exe) the terminal runs on through PtyStartInfo.ConPty. A
+      dependency of this sample, not of MiniPty; MiniPty's build targets stage OpenConsole.exe beside conpty.dll.
+    -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" />
   </ItemGroup>
 
   <ItemGroup>

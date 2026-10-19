@@ -116,5 +116,31 @@ public sealed record PtyStartInfo
     /// </remarks>
     public bool KillProcessTree { get; init; }
 
+    /// <summary>
+    /// Gets or sets the out-of-band ConPTY implementation the session runs on, supplied by the application.
+    /// </summary>
+    /// <value>
+    /// <see langword="null"/> by default: the session uses the ConPTY that Windows ships. Applies to Windows only; a
+    /// <see cref="ConPtyLibrary"/> cannot be loaded elsewhere.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// The in-box ConPTY renders the child's output through the <c>conhost.exe</c> of the user's Windows build, which
+    /// decides which VT sequences reach the frontend; the build measured for this option withheld mouse tracking modes,
+    /// several terminal queries, and graphics protocols. The out-of-band implementation, <c>conpty.dll</c> plus
+    /// <c>OpenConsole.exe</c> from the <c>Microsoft.Windows.Console.ConPTY</c> package, behaves the same on every
+    /// Windows build and supports <see cref="PtySession.Clear"/>. MiniPty ships neither file; see
+    /// <see cref="ConPtyLibrary"/> for how an application supplies them.
+    /// </para>
+    /// <para>
+    /// On this implementation the host process exits as soon as its last client has, so output ends when the child
+    /// exits without waiting for the post-exit quiet interval the in-box path needs. Its host also asks the frontend
+    /// what terminal it is (<c>ESC[c</c>) when the session starts; a terminal emulator answers that on its own, and a
+    /// consumer that only reads output can ignore it with package versions from 1.25, which no longer wait for the
+    /// answer.
+    /// </para>
+    /// </remarks>
+    public ConPtyLibrary? ConPty { get; init; }
+
     internal PtySize ClampedSize => Internal.PtySizeLimits.Clamp(Size);
 }

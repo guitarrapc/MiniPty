@@ -29,7 +29,7 @@ Bridging to a browser needs one more layer. The WebSocket protocol has no backpr
 | N3 | Host console attach ([Console](console.md); use case 3) |
 | N4 | Remote shell protocols (`ssh`), user identity/authentication, or multi-user session management. Per-session bridge bearer authentication is included. |
 | N6 | HTTP serving — the embedder accepts the WebSocket (Kestrel, `HttpListener`, …) and hands it to the bridge |
-| N7 | Native Windows ConPTY buffer clear. `PtyTerminal.Clear()` is a safe compatibility no-op because the in-box API exposes no clear operation. The opt-in out-of-band ConPTY (G7 in [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md)) revisits this. |
+| N7 | A buffer clear on the in-box Windows ConPTY, which exposes no clear operation: there `PtyTerminal.Clear()` is a safe no-op. On the out-of-band ConPTY an application supplies ([Out-of-band ConPTY](core_session.md#out-of-band-conpty)) it clears the host's buffer. |
 | N9 | node-pty `open()` (a PTY pair without a spawned child). Neither VS Code nor any known embedder calls it. |
 | N10 | `uid` / `gid` on spawn. Switching identity is security-sensitive and outside a minimal PTY library. |
 | N11 | An `encoding` spawn option that decodes output to strings. The library is bytes-first; frontends decode at their boundary with an incremental decoder. |
@@ -49,7 +49,7 @@ PtyTerminal.Attach(PtySession session, PtyTerminalOptions options)    // transfe
 | `Pause()` / `Resume()` | Stops/resumes output delivery. Paused delivery parks the pump; the session's output buffer fills, its reader stops reading, the OS PTY buffer fills, and the child blocks on write. Managed buffering is bounded by the session's output buffer (4 × 4 KiB, including the in-flight chunk, which stays valid while paused); no drops. |
 | `WriteInputAsync` / `SendEof` / `Resize` / `Kill(PtySignal)` | Pass-through to the owned session; callable concurrently with output delivery. Resize accepts optional pixel dimensions. |
 | `Kill()` | SIGHUP on Unix (node-pty default); process termination on Windows. Core `PtySession.Kill()` remains forceful. |
-| `Clear()` | Safe compatibility no-op pending a public in-box ConPTY clear API. |
+| `Clear()` | Forwards to `PtySession.Clear()`: clears the console host's buffer on an out-of-band ConPTY (`PtyStartInfo.ConPty`), so the host does not reprint what the frontend has discarded; a safe no-op on the in-box ConPTY and on Unix. Equivalent to node-pty's `clear()`. |
 | `ProcessId` / `Size` / `ActiveProcessName` / `HasExited` / `ExitStatus` | Session state. `ActiveProcessName` is polled by the embedder (typically 200 ms on Unix); no library polling task is created. It is null on Windows, where VS Code derives tab titles from its own process-tree lookup rather than from node-pty. |
 | `DisposeAsync` | Stops the pump, ends the child if running (Unix: hang-up, then kill after a grace period; Windows: termination), releases the PTY. |
 

@@ -725,6 +725,7 @@ public sealed class PtyOutputPumpTests
         }
 
         public void Resize(int columns, int rows, int pixelWidth, int pixelHeight) { }
+        public void Clear() { }
         public void SendEof() { }
         public void Kill() { }
         public void Kill(PtySignal signal) { }

@@ -10,6 +10,8 @@
 
   <ItemGroup>
     <PackageReference Include="TUnit" />
+    <!-- The out-of-band ConPTY the PtyConPtyTests load (see Directory.Packages.props); Windows only. -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Capture\MiniPty.Capture.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Console\MiniPty.Console.csproj" />
@@ -24,5 +26,10 @@
   <ItemGroup>
     <Compile Include="..\..\samples\TerminalEmulator\*.cs" Link="TerminalEmulator\%(Filename)%(Extension)" />
   </ItemGroup>
+
+  <!--
+    OpenConsole.exe is staged beside conpty.dll by buildTransitive\MiniPty.ConPty.targets, which the repository's
+    Directory.Build.targets imports into every project here, as the MiniPty package does for a package consumer.
+  -->
 
 </Project>
