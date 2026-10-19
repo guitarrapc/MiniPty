@@ -6,14 +6,14 @@ Implemented public platform support, verification constraints, and platform-leve
 
 | OS | Backend | Minimum |
 |---|---|---|
-| Windows | ConPTY (`CreatePseudoConsole`) | Windows 10 1809+, Windows 11 |
+| Windows | ConPTY (`CreatePseudoConsole`), or an out-of-band ConPTY the application supplies (`PtyStartInfo.ConPty`) | Windows 10 1809+, Windows 11 |
 | Linux | `forkpty` + `execve` through native shim | Common glibc/musl targets |
 | macOS | `posix_spawn` + `minipty_spawn_helper` through native shim | Supported runners; helper bundled in `runtimes/osx-*/native/` |
 | FreeBSD | `forkpty` + `execve` through native shim | `libutil` |
 
 Pipe redirect without ConPTY is not a PTY. On Windows, TUI tools require ConPTY-backed spawn.
 
-MiniPty does not use winpty or third-party PTY binaries. Backends are in-process interop plus the small Unix native shim.
+MiniPty does not use winpty or third-party PTY binaries. Backends are in-process interop plus the small Unix native shim. The out-of-band ConPTY (`conpty.dll` plus `OpenConsole.exe` from the `Microsoft.Windows.Console.ConPTY` package) is supplied by the application, never shipped by MiniPty; MiniPty is verified against package version `1.25.260930003`, pinned in `Directory.Packages.props` for its tests and Windows samples only ([Out-of-band ConPTY](core_session.md#out-of-band-conpty)).
 
 ## Verification
 
@@ -24,14 +24,17 @@ CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows.
 | TTY detection (`redirected=False`, `isatty`) | Confirms real PTY semantics. |
 | Simple command output | Confirms spawn and decode. |
 | Stdin + EOF (`cat`, `sort`) | Confirms staged EOF. |
-| Empty stdin EOF | Confirms deferred EOF with no bytes. |
+| Empty stdin EOF | Confirms staged EOF with no bytes: exit code 0, never `STATUS_CONTROL_C_EXIT`. |
 | Multiple capture chunks + ANSI | Confirms concurrent read and timestamps. |
 | `WaitForExitAsync` cancel vs `CompleteAsync` cancel | Confirms cancellation contract. |
 | Resize | Confirms `TIOCSWINSZ` / `ResizePseudoConsole`. |
+| Out-of-band ConPTY (Windows) | Confirms the loaded library's exports and host detection, which host process a session runs under (a Toolhelp census of this process's children), forwarding of the modes the in-box host consumes, end of output on the pipe break, no startup wait for the device attributes answer, and `Clear`. |
 
 Tests use property assertions, not golden byte captures, to reduce OS and timing flake.
 
 Cross-OS integration benchmarks (`*PtyIntegrationBenchmarks*`, especially `*32KiB*`) use `MiniPty.Benchmarks.Child` for bulk stdout: a shell-free child that writes exactly *n* zero bytes in 4 KiB chunks (`--bytes <n>`). `Echo` and `Exit0` scenarios still use lightweight shell commands where small spawn asymmetry is acceptable. `dotnet build -c Release` copies the child next to the benchmark assembly; missing child fails fast with a rebuild hint.
+
+`PtyConPtyBenchmarks` runs the spawn, echo, and 32 KiB scenarios on the in-box and the out-of-band ConPTY side by side (`[Params] OutOfBand`); it reports 0 where `conpty.dll` is not staged, so it is Windows-only in effect. It is what showed that the out-of-band path ends output about 100 ms earlier per session, and that a caught exception on the disposal path cost each session 330 B ([plan](../plans/plan_gui_host_readiness.md#g7-result)).
 
 Allocation regressions are checked with `scripts/compare-benchmark-allocations.ps1` against
 `BenchmarkDotNet.Artifacts/baselines/integration.json`; the gate is allocated bytes less than or
@@ -56,6 +59,7 @@ These are verification choices, not API requirements, but they document pitfalls
 | Windows | Closing ConPTY stdin while a child is still attaching can yield `STATUS_CONTROL_C_EXIT`. | Empty-stdin EOF is staged; one-shot writes use Ctrl+Z + CR stream EOF instead of wait-loop pipe close. |
 | Windows | Input pipe close after bytes were written yields `STATUS_CONTROL_C_EXIT` for direct stdin readers (`sort`, `more`). | `SendEof` writes Ctrl+Z + CR and keeps the pipe open until exit; tests assert ExitCode 0 for `sort`. |
 | Windows | `pwsh` is optional on runners. | Prefer built-in Windows PowerShell unless pwsh-only behavior is needed. |
+| Windows (CI) | Tests that start the test executable as a descendants child time out on hosted runners when several start it at once, at the moment the parallel suite starts all its children (three at once on ARM64, one on windows-2025; 32 s for one under 3× CPU oversubscription on a desktop). | They share `[NotInParallel(DescendantsGroup)]`, so one such child starts at a time, and the pid-file wait is the 60 s `DescendantsStartTimeout` hang bound rather than the 30 s general one. |
 | Linux (CI) | GitHub-hosted runners (including `ubuntu-24.04-arm`) may mount `/tmp` with `noexec`. Shebang execution of scripts under `/tmp` can fail with exit **127** even when `sh script` would work. | Integration tests that spawn executable fixtures use a directory under the test output (`AppContext.BaseDirectory`), not `Path.GetTempPath()`. PATH-overlay tests for plain scripts exercise the `ENOEXEC` → `sh` fallback, not shebang exec. |
 | Linux (CI) | `PtyUnixPathLookupTreatsEmptyPathEntriesAsCurrentDirectory` can still flake as exit **127** on `ubuntu-24.04-arm` under parallel full-suite load. | `[Retry(3)]` on that test; keep fixtures under `AppContext.BaseDirectory` (see row above). |
 

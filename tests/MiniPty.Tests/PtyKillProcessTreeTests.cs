@@ -22,6 +22,7 @@ public sealed class PtyKillProcessTreeTests
 
     /// <summary>Disposing the session ends the child and both descendants.</summary>
     [Test]
+    [NotInParallel(DescendantsGroup)]
     public async Task DisposeEndsEveryDescendant()
     {
         if (!OperatingSystem.IsWindows())
@@ -33,7 +34,7 @@ public sealed class PtyKillProcessTreeTests
             var session = StartWithDescendants(OnTerminalAndDetached, out var pids, killProcessTree: true);
             await using (session)
             {
-                descendants = await pids.WaitAsync(Timeout);
+                descendants = await pids;
                 await session.DisposeAsync().AsTask().WaitAsync(Timeout);
             }
 
@@ -47,6 +48,7 @@ public sealed class PtyKillProcessTreeTests
 
     /// <summary><see cref="PtySession.Kill()"/> ends the child and both descendants, as disposal does.</summary>
     [Test]
+    [NotInParallel(DescendantsGroup)]
     public async Task KillEndsEveryDescendant()
     {
         if (!OperatingSystem.IsWindows())
@@ -56,7 +58,7 @@ public sealed class PtyKillProcessTreeTests
         try
         {
             await using var session = StartWithDescendants(OnTerminalAndDetached, out var pids, killProcessTree: true);
-            descendants = await pids.WaitAsync(Timeout);
+            descendants = await pids;
 
             session.Kill();
 
@@ -74,6 +76,7 @@ public sealed class PtyKillProcessTreeTests
     /// own keeps running, and disposal or <see cref="PtySession.Kill()"/> then ends it.
     /// </summary>
     [Test]
+    [NotInParallel(DescendantsGroup)]
     [Arguments(true)]
     [Arguments(false)]
     public async Task ADescendantOfAChildThatExitedRunsUntilTeardown(bool dispose)
@@ -87,7 +90,7 @@ public sealed class PtyKillProcessTreeTests
             var session = StartWithDescendants([Descendant.Detached], out var pids, killProcessTree: true);
             await using (session)
             {
-                descendants = await pids.WaitAsync(Timeout);
+                descendants = await pids;
                 await EndChildAsync(session);
                 await ReadAllTextAsync(session).WaitAsync(Timeout);
                 await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
@@ -116,6 +119,7 @@ public sealed class PtyKillProcessTreeTests
     /// job is nested, as it is under CI runners and editors.
     /// </summary>
     [Test]
+    [NotInParallel(DescendantsGroup)]
     [Arguments("exit")]
     [Arguments("killed")]
     public async Task HostEndEndsEveryDescendant(string mode)
@@ -132,7 +136,8 @@ public sealed class PtyKillProcessTreeTests
                 UseShellExecute = false,
                 Environment = { [TreeHostVariable] = mode },
             })!;
-            var line = await host.StandardOutput.ReadLineAsync().WaitAsync(Timeout);
+            // Two starts of this executable in a row (the host, then its descendants child), so the longer bound.
+            var line = await host.StandardOutput.ReadLineAsync().WaitAsync(DescendantsStartTimeout);
             await host.WaitForExitAsync().WaitAsync(Timeout);
 
             await Assert.That(line).StartsWith("PIDS ").Because($"the host wrote '{line}' and exited with {host.ExitCode}");
@@ -179,6 +184,7 @@ public sealed class PtyKillProcessTreeTests
     /// process group ends, and one started with <c>nohup</c> keeps running.
     /// </summary>
     [Test]
+    [NotInParallel(DescendantsGroup)]
     public async Task UnixIgnoresIt()
     {
         if (OperatingSystem.IsWindows())
@@ -190,7 +196,7 @@ public sealed class PtyKillProcessTreeTests
             var session = StartWithDescendants(OnTerminalAndDetached, out var pids, killProcessTree: true);
             await using (session)
             {
-                descendants = await pids.WaitAsync(Timeout);
+                descendants = await pids;
                 await session.DisposeAsync().AsTask().WaitAsync(Timeout);
             }
 
@@ -241,7 +247,7 @@ public sealed class PtyKillProcessTreeTests
         var pidFile = NewPidFilePath();
         var session = Pty.Start(DescendantsChild(OnTerminalAndDetached, pidFile) with { KillProcessTree = true });
         var pids = new int[OnTerminalAndDetached.Length];
-        var deadline = Environment.TickCount64 + 30_000;
+        var deadline = Environment.TickCount64 + (long)DescendantsStartTimeout.TotalMilliseconds;
         while (!TryReadPids(pidFile, OnTerminalAndDetached, pids))
         {
             if (Environment.TickCount64 >= deadline)

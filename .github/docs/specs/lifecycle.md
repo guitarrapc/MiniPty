@@ -124,8 +124,7 @@ Interactive hosts (use case 3) keep a single embedder-owned `ReadOutputAsync` re
 
 | Platform | Behavior |
 |---|---|
-| Windows (bytes written) | Writes Ctrl+Z + CR (`0x1A`, `0x0D`) to the ConPTY input stream after every input byte written before it: while earlier input is still queued because ConPTY stopped reading input, the chord waits for later staging ticks. Keeps the input pipe open until the child exits. Pipe close is not used for this case — it is observed as `STATUS_CONTROL_C_EXIT`, not EOF. |
-| Windows (no bytes) | Closes the ConPTY input pipe after staging (attach deferral). A write during that wait switches EOF to Ctrl+Z + CR, as when bytes were written. |
+| Windows | Writes Ctrl+Z + CR (`0x1A`, `0x0D`) to the ConPTY input stream after every input byte written before it: while earlier input is still queued because ConPTY stopped reading input, the chord waits for later staging ticks. With no bytes written, the chord goes on the first tick. Keeps the input pipe open until the child exits. Pipe close is never used — the console host observes it as `STATUS_CONTROL_C_EXIT` for its clients, not as EOF, and a child about to exit on its own loses that race under load. |
 | Unix | Writes EOT (`0x04`, Ctrl-D) to the PTY master after every input byte written before it: while earlier input is still queued for a child that is not reading, EOT waits for later staging ticks. It does not close the master fd. |
 
 Unix EOT is a terminal convention, not kernel EOF. It is reliable for canonical-mode shell-wrapped one-shot commands, but not for raw-mode TUI programs. Windows stream EOF uses the legacy console Ctrl+Z + CR convention; when input lacks a trailing line terminator, an extra CR is written first to submit the pending line. Raw/TUI programs are not guaranteed.
@@ -134,13 +133,13 @@ If the slave side is already closed when staged EOT runs, the master write may f
 
 ### ConPTY spawn readiness
 
-EOF staging advances on a per-session 100 ms timer, so it gives the child time to attach and progresses whether or not anyone awaits exit. Milestone 3 validates that immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof` do not cause spurious child failure (for example `STATUS_CONTROL_C_EXIT`). This remains an internal transport concern; there is no public ready-state API.
+EOF staging advances on a per-session 100 ms timer, so it gives the child time to attach and progresses whether or not anyone awaits exit. The console host queues the Ctrl+Z + CR chord for the child whether or not the child has attached yet, so the first tick is enough. Milestone 3 validates that immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof` do not cause spurious child failure (for example `STATUS_CONTROL_C_EXIT`). This remains an internal transport concern; there is no public ready-state API.
 
 ## Drain, kill, and disposal
 
 | Behavior | Contract |
 |---|---|
-| `ReadOutputAsync` / `Output` after child exit | Drains remaining output and then completes normally. Where the transport stays open after exit (ConPTY always, Linux when a grandchild holds the slave; macOS revokes the tty when the child exits, so output a grandchild writes afterwards is lost), the post-exit drain closes it once output has been quiet for 100 ms. Where even the close does not end it (Windows, when another process holds ConPTY's output pipe open), output ends once reads have been quiet for another 100 ms after the close; end of output never waits for an unrelated process. |
+| `ReadOutputAsync` / `Output` after child exit | Drains remaining output and then completes normally. Where the transport stays open after exit (the in-box ConPTY always; an out-of-band ConPTY breaks the pipe when its host exits with the child, so output ends at once there; Linux when a grandchild holds the slave; macOS revokes the tty when the child exits, so output a grandchild writes afterwards is lost), the post-exit drain closes it once output has been quiet for 100 ms. Where even the close does not end it (Windows, when another process holds ConPTY's output pipe open), output ends once reads have been quiet for another 100 ms after the close; end of output never waits for an unrelated process. |
 | `WaitForExitAsync` | Observes exit only. It does not close the transport, so a concurrent reader keeps receiving output until end of output. |
 | Output ends before exit | Unix, when the child closes the terminal and keeps running: output ends, the child is not hung up, and its own exit status is reported when it exits. ConPTY cannot end output first, because it ends output only when the pseudo-console closes, which MiniPty does after exit. |
 | `ReadOutputAsync` after `Kill()` | Same as exit: drain remaining output, then complete normally (EOF). |

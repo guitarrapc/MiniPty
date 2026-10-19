@@ -106,17 +106,14 @@ internal static class WindowsPtyBackend
     private const int EofTickMs = 100;
     private const byte InputEofCtrlZ = 0x1A;
     private const byte InputEofSubmit = 0x0D;
-    private const int EofDeferPollsEmptyInput = 40;
-    // Value of the deferral count once the EOF chord was written. Counts never go below zero.
-    private const int EofChordWrittenMarker = -1;
     private const int ErrorInvalidHandle = 6;
     private const int ErrorBrokenPipe = 109;
     private const int ErrorNoData = WindowsInterop.ErrorNoData;
     private const int ErrorOperationAborted = 995;
     private const int ErrorIoPending = 997;
 
-    // Why the input pipe closed, which decides how queued writes fail.
-    private const int InputClosedByEof = 0;
+    // Why the input pipe closed, which decides how queued writes fail. EOF never closes it: ConPTY observes a closed
+    // input pipe as STATUS_CONTROL_C_EXIT for its clients, not as end of input (see PromoteEofIfPending).
     private const int InputOutputEnded = 1;
     private const int InputDisposed = 2;
 
@@ -170,7 +167,16 @@ internal static class WindowsPtyBackend
         var size = startInfo.ClampedSize;
         var coord = new WindowsCoord((short)size.Columns, (short)size.Rows);
         var pseudoConsoleFlags = startInfo.InheritCursor ? PseudoConsoleInheritCursor : 0;
-        var hr = WindowsInterop.CreatePseudoConsole(coord, inputRead, outputWrite, pseudoConsoleFlags, out var pseudoConsoleHandle);
+        // The application's out-of-band ConPTY, or null for the one Windows ships (see PtyStartInfo.ConPty). Every
+        // pseudo-console call of the session goes through the implementation that created it, which the handle
+        // carries; a session on the in-box ConPTY keeps its handle and its allocation unchanged.
+        var library = startInfo.ConPty;
+        IntPtr pseudoConsoleHandle;
+        int hr;
+        if (library is null)
+            hr = WindowsInterop.CreatePseudoConsole(coord, inputRead, outputWrite, pseudoConsoleFlags, out pseudoConsoleHandle);
+        else
+            hr = library.CreatePseudoConsole(coord, inputRead, outputWrite, pseudoConsoleFlags, out pseudoConsoleHandle);
         if (hr < 0)
         {
             inputRead.Dispose();
@@ -180,7 +186,9 @@ internal static class WindowsPtyBackend
             throw new Win32Exception(hr, "CreatePseudoConsole failed");
         }
 
-        var hpc = new SafePseudoConsoleHandle(pseudoConsoleHandle);
+        SafePseudoConsoleHandle hpc = library is null
+            ? new SafePseudoConsoleHandle(pseudoConsoleHandle)
+            : new OutOfBandPseudoConsoleHandle(pseudoConsoleHandle, library);
         inputRead.Dispose();
         outputWrite.Dispose();
 
@@ -292,6 +300,13 @@ internal static class WindowsPtyBackend
                 Marshal.FreeHGlobal(environmentBlock);
                 environmentBlock = IntPtr.Zero;
             }
+
+            // Out-of-band ConPTY: the child holds its own reference to the console server now, so MiniPty drops the one
+            // that kept the host alive until then. The host exits with its last client and breaks the output pipe, which
+            // ends output on this path without the post-exit quiet interval; resize and clear keep working, as they use
+            // the signal pipe. Never fatal: without it the session ends as on the in-box path.
+            if (library is not null)
+                _ = library.ReleasePseudoConsole(hpc.DangerousGetHandle());
 
             PtyStartTestHook.Run(PtyStartStage.Spawned, processInfo.dwProcessId);
             return new WindowsPtyBackendInstance(
@@ -414,6 +429,7 @@ internal static class WindowsPtyBackend
         // MiniPty's end of the input pipe, opened overlapped (see CreateInputPipe).
         private readonly SafeFileHandle _inputWriteHandle;
         private readonly SafeFileHandle _outputReadHandle;
+        // Resizes, clears, and closes through the ConPTY implementation that created the pseudo-console.
         private readonly SafePseudoConsoleHandle _hpc;
         private readonly IntPtr _attrList;
         // Pinned for every native call (see TryPin), because Dispose can release it while the exit watcher, the
@@ -428,18 +444,13 @@ internal static class WindowsPtyBackend
         private PtySize _size;
         private bool _inputClosed;
         private bool _outputClosed;
-        private bool _eofSignaled;
-        private bool _eofPending;
         /// <summary>
-        /// Ticks left before an input pipe that never carried bytes is closed, or <see cref="EofChordWrittenMarker"/> once
-        /// the Ctrl+Z / CR chord was written. One field holds both because another field would enlarge every session.
+        /// EOF took effect: the Ctrl+Z / CR chord was written, or the input pipe had closed before it could be. The pipe
+        /// is never closed for EOF; it stays open until the child exits.
         /// </summary>
-        private int _eofDeferPollsRemaining;
-
-        private bool HasInputBytes => _input is { LastStagedByte: >= 0 };
-
-        /// <summary>The Ctrl+Z / CR chord was written. The input pipe then stays open until the child exits.</summary>
-        private bool EofChordWritten => _eofDeferPollsRemaining == EofChordWrittenMarker;
+        private bool _eofSignaled;
+        /// <summary>EOF was requested and the chord is still to be written, by the staging timer or the transport close.</summary>
+        private bool _eofPending;
         private bool _hpcClosed;
         private bool _exited;
         private int _exitCode;
@@ -804,8 +815,7 @@ internal static class WindowsPtyBackend
         /// <summary>
         /// Closes MiniPty's end of the input pipe and fails what is queued: with <see cref="ObjectDisposedException"/>
         /// on disposal, otherwise with <see cref="IOException"/>. A write in flight is canceled, and its completion
-        /// releases the overlapped resources. An EOF close that finds bytes written leaves the pipe open and stages EOF
-        /// again, to be sent as the chord.
+        /// releases the overlapped resources.
         /// </summary>
         private void CloseInputPipe(int reason)
         {
@@ -814,15 +824,6 @@ internal static class WindowsPtyBackend
             {
                 if (_inputClosed)
                     return;
-
-                // A write can land between the unlocked check in CloseInputPipeIfEofSignaled and this lock. Closing the
-                // pipe after bytes is not EOF to the child, so EOF is staged again and sent as the chord.
-                if (reason == InputClosedByEof && HasInputBytes)
-                {
-                    _eofSignaled = false;
-                    _eofPending = true;
-                    return;
-                }
 
                 _inputClosed = true;
                 if (_input is { } input)
@@ -979,9 +980,7 @@ internal static class WindowsPtyBackend
             int hr;
             try
             {
-                hr = WindowsInterop.ResizePseudoConsole(
-                    _hpc.DangerousGetHandle(),
-                    new WindowsCoord((short)columns, (short)rows));
+                hr = _hpc.Resize(new WindowsCoord((short)columns, (short)rows));
             }
             finally
             {
@@ -1000,13 +999,49 @@ internal static class WindowsPtyBackend
             _size = new PtySize(columns, rows);
         }
 
+        public void Clear()
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            // The in-box ConPTY exposes no clear operation. After the post-exit drain has closed the pseudo-console
+            // there is nothing left to clear, so the call is a no-op, as Resize is.
+            if (!_hpc.CanClear || _hpc.IsClosed)
+                return;
+
+            var addedRef = false;
+            try
+            {
+                _hpc.DangerousAddRef(ref addedRef);
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+
+            int hr;
+            try
+            {
+                hr = _hpc.Clear();
+            }
+            finally
+            {
+                if (addedRef)
+                    _hpc.DangerousRelease();
+            }
+
+            if (hr < 0)
+            {
+                if (_hpc.IsClosed || TryRefreshExitState())
+                    return;
+
+                throw new Win32Exception(hr, "ClearPseudoConsole failed");
+            }
+        }
+
         public void SendEof()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (TryRefreshExitState() || _inputClosed || _eofPending || EofChordWritten)
-                return;
-
-            if (_eofSignaled)
+            if (TryRefreshExitState() || _inputClosed || _eofPending || _eofSignaled)
                 return;
 
             // Stage EOF: WriteFile can succeed before ConPTY stdin is attached. The staging timer advances
@@ -1102,8 +1137,8 @@ internal static class WindowsPtyBackend
         }
 
         /// <summary>
-        /// One EOF staging step, the work the exit-wait poll loop used to do on each 100 ms timeout:
-        /// promote a staged EOF, then count down to closing an input pipe that never carried bytes.
+        /// One EOF staging step, the work the exit-wait poll loop used to do on each 100 ms timeout: promote a staged
+        /// EOF once input is idle.
         /// </summary>
         private void OnEofTick()
         {
@@ -1114,8 +1149,7 @@ internal static class WindowsPtyBackend
             try
             {
                 PromoteEofIfPending();
-                CloseInputPipeIfEofSignaled();
-                if (!_disposed && !_inputClosed && (_eofPending || (_eofSignaled && !EofChordWritten)))
+                if (!_disposed && !_inputClosed && _eofPending)
                     _eofTimer?.Change(EofTickMs, Timeout.Infinite);
             }
             catch (Exception)
@@ -1157,6 +1191,13 @@ internal static class WindowsPtyBackend
         /// </summary>
         public unsafe int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
         {
+            // Disposal closes the handle under a blocked read and cancels the read; the pump then re-checks its state
+            // and reads again to let the transport end. Reading a closed handle would throw, and that exception cost
+            // every out-of-band session about 330 B (its host exits with the child, so the cancel wins the race with
+            // the pipe break nearly every time; in-box, 2 of 300 sessions). The catch below keeps the race.
+            if (_outputReadHandle.IsClosed)
+                return 0;
+
             try
             {
                 fixed (byte* ptr = buffer)
@@ -1336,48 +1377,21 @@ internal static class WindowsPtyBackend
                 if (!_eofPending)
                     return;
 
-                if (HasInputBytes)
-                {
-                    // EOF goes after every byte written before it: while input is queued or in flight, a later tick
-                    // sends it.
-                    if (!IsInputIdleLocked && !_inputClosed)
-                        return;
-
-                    // ConPTY input pipe close is observed as STATUS_CONTROL_C_EXIT, not EOF.
-                    // Legacy console EOF is Ctrl+Z submitted with CR; keep the pipe open until exit.
-                    _eofPending = false;
-                    WriteStreamEofToInputLocked();
-                    _eofSignaled = true;
+                // EOF goes after every byte written before it: while input is queued or in flight, a later tick
+                // sends it.
+                if (!IsInputIdleLocked && !_inputClosed)
                     return;
-                }
 
+                // ConPTY observes a closed input pipe as STATUS_CONTROL_C_EXIT, not as EOF: the console host ends its
+                // clients, and a child about to exit on its own loses that race under load (exit code 0xC000013A on a
+                // hosted runner, and under CPU oversubscription on a desktop). That held for input that never carried
+                // bytes too, which used to close the pipe after a 4 s wait. Legacy console EOF is Ctrl+Z submitted with
+                // CR; the host queues it for the child whether or not the child has attached yet, so it is written on
+                // the first staging tick in every case, and the pipe stays open until the child exits.
                 _eofPending = false;
+                WriteStreamEofToInputLocked();
                 _eofSignaled = true;
-                _eofDeferPollsRemaining = EofDeferPollsEmptyInput;
             }
-        }
-
-        private void CloseInputPipeIfEofSignaled()
-        {
-            if (!_eofSignaled || EofChordWritten)
-                return;
-
-            // Input that never carried bytes ends by closing the pipe after a wait. Bytes written during the wait rule
-            // that out, because closing the pipe after bytes is not EOF to the child, so EOF is sent as the chord.
-            if (HasInputBytes)
-            {
-                _eofSignaled = false;
-                _eofPending = true;
-                return;
-            }
-
-            if (_eofDeferPollsRemaining > 0)
-            {
-                _eofDeferPollsRemaining--;
-                return;
-            }
-
-            CloseInputPipe(InputClosedByEof);
         }
 
         /// <summary>
@@ -1386,21 +1400,21 @@ internal static class WindowsPtyBackend
         /// </summary>
         private void WriteStreamEofToInputLocked()
         {
-            if (_inputClosed || EofChordWritten)
+            if (_inputClosed || _eofSignaled)
                 return;
 
             // Ctrl+Z alone does not end input on ConPTY. A CR submits the EOF key chord. Ctrl+Z ends input only at the
-            // start of a line, so a pending line is submitted first.
+            // start of a line, so a pending line is submitted first; with no byte written there is no line to submit,
+            // and a leading CR would hand the child an empty line.
             var input = EnsureInputLocked();
             Span<byte> chord = stackalloc byte[3];
             var length = 0;
-            if (input.LastStagedByte is not '\n' and not '\r')
+            if (input.LastStagedByte >= 0 && input.LastStagedByte is not '\n' and not '\r')
                 chord[length++] = InputEofSubmit;
 
             chord[length++] = InputEofCtrlZ;
             chord[length++] = InputEofSubmit;
             StageLocked(input, chord[..length], owner: null);
-            _eofDeferPollsRemaining = EofChordWrittenMarker;
             WriteStagedLocked(input);
         }
 
@@ -1425,7 +1439,6 @@ internal static class WindowsPtyBackend
             try
             {
                 PromoteEofIfPending();
-                CloseInputPipeIfEofSignaled();
             }
             catch (Exception)
             {
@@ -1657,15 +1670,49 @@ internal static class WindowsPtyBackend
         return false;
     }
 
-    private sealed class SafePseudoConsoleHandle : SafeHandle
+    /// <summary>
+    /// The pseudo-console handle of the in-box ConPTY, which resizes and closes it through <c>kernel32.dll</c>. Every
+    /// operation on a pseudo-console goes through the implementation that created it, so a handle from the out-of-band
+    /// <c>conpty.dll</c> is an <see cref="OutOfBandPseudoConsoleHandle"/> instead; an in-box session carries nothing for
+    /// the other implementation.
+    /// </summary>
+    private class SafePseudoConsoleHandle : SafeHandle
     {
         public SafePseudoConsoleHandle(IntPtr value) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(value);
 
         public override bool IsInvalid => handle == IntPtr.Zero;
 
+        /// <summary>Whether <see cref="Clear"/> does anything: the in-box ConPTY exposes no clear operation.</summary>
+        public virtual bool CanClear => false;
+
+        public virtual int Resize(WindowsCoord size) => WindowsInterop.ResizePseudoConsole(handle, size);
+
+        public virtual int Clear() => 0;
+
         protected override bool ReleaseHandle()
         {
             WindowsInterop.ClosePseudoConsole(handle);
+            return true;
+        }
+    }
+
+    /// <summary>A pseudo-console created by an out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>).</summary>
+    private sealed class OutOfBandPseudoConsoleHandle : SafePseudoConsoleHandle
+    {
+        private readonly ConPtyLibrary _library;
+
+        public OutOfBandPseudoConsoleHandle(IntPtr value, ConPtyLibrary library) : base(value) => _library = library;
+
+        public override bool CanClear => true;
+
+        public override int Resize(WindowsCoord size) => _library.ResizePseudoConsole(handle, size);
+
+        // The frontend has cleared its own display, so the host's cursor goes to the top with it.
+        public override int Clear() => _library.ClearPseudoConsole(handle, keepCursorRow: false);
+
+        protected override bool ReleaseHandle()
+        {
+            _library.ClosePseudoConsole(handle);
             return true;
         }
     }

@@ -157,15 +157,17 @@ public sealed class PtyTerminal : IAsyncDisposable
     }
 
     /// <summary>
-    /// Synchronizes a cleared frontend buffer when the platform supports it.
+    /// Synchronizes a cleared frontend buffer when the platform supports it. See <see cref="PtySession.Clear"/>.
     /// </summary>
     /// <remarks>
-    /// This is currently a documented no-op. In-box ConPTY exposes no public clear operation and
-    /// Unix frontends own their scrollback, so calling this method is always safe.
+    /// Effective on Windows with an out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>), where the console host
+    /// clears its buffer and repaints. A safe no-op on the in-box ConPTY, which exposes no clear operation, and on
+    /// Unix, where the frontend owns its scrollback. Equivalent to node-pty's <c>clear()</c>.
     /// </remarks>
     public void Clear()
     {
         ThrowIfDisposed();
+        _session.Clear();
     }
 
     /// <summary>

@@ -13,6 +13,7 @@ on:
           - "*categories*Binary*"
           - "*categories*Text*"
           - "*PtyIntegrationBenchmarks*"
+          - "*PtyConPtyBenchmarks*"
           - "*PtyOutputBenchmarks*"
           - "*PtyCaptureDisplayBenchmarks*"
 

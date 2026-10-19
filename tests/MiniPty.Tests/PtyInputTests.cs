@@ -304,40 +304,6 @@ public sealed class PtyInputTests
     }
 
     /// <summary>
-    /// SendEof before any input, then a write while EOF is still staged: the child still gets end of input after the
-    /// write. On Windows, input that never carried bytes ends by closing the pipe after a wait, and a write during
-    /// that wait rules the close out. Unix ends input only with EOT, never by closing the master, so it has no such
-    /// case.
-    /// </summary>
-    [Test]
-    public async Task SendEofEndsInputWhenAWriteFollowsItWhileStaged()
-    {
-        if (!OperatingSystem.IsWindows())
-            return;
-
-        var copyFile = Path.GetTempFileName();
-        try
-        {
-            await using var session = Pty.Start(CopyInputChild(copyFile));
-            session.SendEof();
-            // Past the first staging tick, and well inside the wait before an unused input pipe is closed.
-            await Task.Delay(EofTicks);
-            await session.WriteInputAsync("x" + Newline);
-
-            var drain = DrainAsync(session);
-            // Exit code 0: closing the input pipe after bytes ends the child with STATUS_CONTROL_C_EXIT instead.
-            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
-            await drain.WaitAsync(Timeout);
-
-            await Assert.That(ReadLines(copyFile)).IsEqualTo("x");
-        }
-        finally
-        {
-            DeleteBestEffort(copyFile);
-        }
-    }
-
-    /// <summary>
     /// Input whose last byte is 0xFF still counts as written, so SendEof ends it the way it ends any partial line. A
     /// byte value must not double as the mark for no input, or Windows would treat this input as empty and close the
     /// pipe.

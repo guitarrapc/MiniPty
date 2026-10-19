@@ -46,6 +46,12 @@ internal interface IPtyBackend : IDisposable
     public PtySize Size { get; }
     public string? ActiveProcessName { get; }
     public void Resize(int columns, int rows, int pixelWidth, int pixelHeight);
+    /// <summary>
+    /// Clears the pseudo-console's screen buffer, for a frontend that has cleared its own display. A no-op where the
+    /// platform has no such operation: Unix, and Windows on the in-box ConPTY. Like <see cref="Resize"/>, a no-op once
+    /// the transport is closed.
+    /// </summary>
+    public void Clear();
     public void SendEof();
     public void Kill();
     public void Kill(PtySignal signal);

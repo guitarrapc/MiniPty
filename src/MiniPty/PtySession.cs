@@ -291,9 +291,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// first. Later calls do nothing.
     /// </para>
     /// <para>
-    /// Windows: after bytes were written, writes Ctrl+Z + CR to the ConPTY input stream and leaves the pipe open until
-    /// the child exits. With no prior bytes, closes the input pipe after a further wait, unless a write arrives during
-    /// that wait, which switches to Ctrl+Z + CR.
+    /// Windows: writes Ctrl+Z + CR to the ConPTY input stream and leaves the pipe open until the child exits, with or
+    /// without prior bytes. The input pipe is never closed to signal EOF.
     /// </para>
     /// <para>Unix: writes EOT (<c>0x04</c>, Ctrl-D) to the PTY master. It does not close the master fd.</para>
     /// </remarks>
@@ -346,6 +345,29 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
             size.Rows,
             Math.Min(pixelSize?.Width ?? 0, ushort.MaxValue),
             Math.Min(pixelSize?.Height ?? 0, ushort.MaxValue));
+    }
+
+    /// <summary>
+    /// Clears the pseudo-console's screen buffer, for a frontend that has just cleared its own display.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Effective on Windows with an out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>): the console host clears
+    /// its buffer and repaints the frontend, so the two stay in step and the host does not later reprint content the
+    /// frontend has discarded. A frontend calls it when the user clears the terminal's scrollback.
+    /// </para>
+    /// <para>
+    /// A no-op on the in-box ConPTY, which exposes no clear operation, and on Unix, where the frontend owns the display.
+    /// Also a no-op once the child has exited and the post-exit drain has closed the transport, like
+    /// <see cref="Resize(PtySize)"/>.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
+    /// <exception cref="System.ComponentModel.Win32Exception">Windows: the clear failed while the child was running.</exception>
+    public void Clear()
+    {
+        ThrowIfDisposed();
+        _backend.Clear();
     }
 
     /// <summary>

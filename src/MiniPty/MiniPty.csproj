@@ -51,6 +51,9 @@
     <None Include="$(MSBuildThisFileDirectory)..\..\buildTransitive\MiniPty.targets"
           Pack="true"
           PackagePath="buildTransitive/" />
+    <None Include="$(MSBuildThisFileDirectory)..\..\buildTransitive\MiniPty.ConPty.targets"
+          Pack="true"
+          PackagePath="buildTransitive/" />
   </ItemGroup>
 
   <Target Name="BuildMiniPtyUnixNative" BeforeTargets="AssignTargetPaths"

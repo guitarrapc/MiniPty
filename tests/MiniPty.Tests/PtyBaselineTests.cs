@@ -40,7 +40,22 @@ public sealed class PtyBaselineTests
     private const string DescendantsChildVariable = "MINIPTY_TESTS_DESCENDANTS_CHILD";
     private const string PidFileVariable = "MINIPTY_TESTS_PID_FILE";
 
+    /// <summary>
+    /// Tests that start the descendants child run one at a time. The child is this executable with two descendants
+    /// (on Windows a second .NET start-up, two <c>waitfor.exe</c>, and a console host), and nine such tests starting it
+    /// together, at the moment the whole parallel suite also starts its children, left it unstarted within 30 s on the
+    /// hosted runners (three at once on ARM64, one on windows-2025); under 3× CPU oversubscription on the desktop one
+    /// took 32 s. One at a time, each gets the start-up window to itself.
+    /// </summary>
+    internal const string DescendantsGroup = "descendants";
+
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long the descendants child may take to record its pids. A hang detector, not a performance assertion, so
+    /// it is generous: starting the child is what a loaded hosted runner does slowest.
+    /// </summary>
+    internal static readonly TimeSpan DescendantsStartTimeout = TimeSpan.FromSeconds(60);
 
     // ---------------------------------------------------------------- 1. Start failure
 
@@ -225,6 +240,7 @@ public sealed class PtyBaselineTests
     /// terminal as its output, so it is still running when output ends; on Windows it shares the pseudo-console.
     /// </summary>
     [Test]
+    [NotInParallel(DescendantsGroup)]
     public async Task OutputEndsWithoutWaitingForADescendant()
     {
         int[] descendants = [];
@@ -232,7 +248,7 @@ public sealed class PtyBaselineTests
         {
             await using var session = StartWithDescendants([Descendant.HoldsTerminal], out var pids);
             var output = ReadAllTextAsync(session);
-            descendants = await pids.WaitAsync(Timeout);
+            descendants = await pids;
 
             var stopwatch = Stopwatch.StartNew();
             await EndChildAsync(session);
@@ -396,6 +412,7 @@ public sealed class PtyBaselineTests
     /// that survives belongs to the host from then on.
     /// </summary>
     [Test]
+    [NotInParallel(DescendantsGroup)]
     [Arguments(true)]
     [Arguments(false)]
     public async Task TeardownEndsOnlyTheDescendantsOnTheTerminal(bool dispose)
@@ -406,7 +423,7 @@ public sealed class PtyBaselineTests
             var session = StartWithDescendants([Descendant.OnTerminal, Descendant.Detached], out var pids);
             await using (session)
             {
-                descendants = await pids.WaitAsync(Timeout);
+                descendants = await pids;
                 if (dispose)
                 {
                     await session.DisposeAsync().AsTask().WaitAsync(Timeout);
@@ -746,13 +763,17 @@ public sealed class PtyBaselineTests
     internal static Task EndChildAsync(PtySession session) =>
         session.WriteInputAsync(OperatingSystem.IsWindows() ? "\r\n" : "\n").AsTask().WaitAsync(Timeout);
 
-    /// <summary>Waits until <paramref name="pidFile"/> has a <c>name pid</c> line for each descendant, then deletes it.</summary>
+    /// <summary>
+    /// Waits until <paramref name="pidFile"/> has a <c>name pid</c> line for each descendant, then deletes it. Bounded by
+    /// <see cref="DescendantsStartTimeout"/>, so callers await the task itself rather than wrapping it in the shorter
+    /// general timeout.
+    /// </summary>
     private static async Task<int[]> ReadPidFileAsync(string pidFile, Descendant[] descendants)
     {
         try
         {
             var pids = new int[descendants.Length];
-            var found = await WaitUntilAsync(() => TryReadPids(pidFile, descendants, pids), Timeout);
+            var found = await WaitUntilAsync(() => TryReadPids(pidFile, descendants, pids), DescendantsStartTimeout);
             return found ? pids : throw new TimeoutException("The descendants did not record their pids.");
         }
         finally

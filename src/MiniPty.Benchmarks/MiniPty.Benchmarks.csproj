@@ -8,6 +8,8 @@
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" />
+    <!-- The out-of-band ConPTY that PtyConPtyBenchmarks compares with the in-box one (see Directory.Packages.props); Windows only. -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Capture\MiniPty.Capture.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Console\MiniPty.Console.csproj" />

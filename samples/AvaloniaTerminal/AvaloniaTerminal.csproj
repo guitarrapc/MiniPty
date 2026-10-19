@@ -19,6 +19,11 @@
     <PackageReference Include="Avalonia" Version="12.1.4" />
     <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+    <!--
+      Windows: the out-of-band ConPTY (conpty.dll + OpenConsole.exe) the terminal runs on through PtyStartInfo.ConPty.
+      A dependency of this sample, not of MiniPty; MiniPty's build targets stage OpenConsole.exe beside conpty.dll.
+    -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
   </ItemGroup>
 
   <ItemGroup>
