@@ -176,7 +176,7 @@ The option also ends programs the user started on purpose, which is why it is of
 
 ### Out-of-band ConPTY
 
-Windows ships ConPTY in `kernel32.dll`, backed by the `conhost.exe` of the user's Windows build, which decides what a terminal emulator gets to see: current builds consume mouse tracking modes, DECCKM, and terminal queries instead of forwarding them, so a program's request for mouse events never reaches the frontend, and the behavior changes with Windows updates. Microsoft publishes the implementation Windows Terminal carries as the NuGet package `Microsoft.Windows.Console.ConPTY` (`conpty.dll` plus `OpenConsole.exe`). MiniPty ships neither file and depends on nothing; an application that wants it references the package and opts in per session:
+**If you are building a terminal emulator on Windows, use this.** Windows ships ConPTY in `kernel32.dll`, backed by the `conhost.exe` of the user's Windows build, and that host decides what the frontend gets to see: current builds consume mouse tracking modes, DECCKM, terminal queries, and graphics protocols instead of forwarding them, so a program's request for mouse events never reaches your emulator, and the behavior changes with Windows updates. Microsoft publishes the implementation Windows Terminal carries as the NuGet package `Microsoft.Windows.Console.ConPTY` (`conpty.dll` plus `OpenConsole.exe`): it forwards everything, behaves the same on every Windows build, supports `Clear()`, and ends output the moment the child exits where the in-box path waits for a 100 ms quiet interval (`cmd /c echo` completes in 33 ms against 141 ms in `PtyConPtyBenchmarks`). MiniPty ships neither file and depends on nothing; your application references the package and opts in per session:
 
 ```xml
 <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" />
@@ -197,7 +197,15 @@ await using var session = Pty.Start(new PtyStartInfo
 });
 ```
 
-MiniPty's build targets place `OpenConsole.exe` beside `conpty.dll` in the application's output and publish folders when the package is referenced (the package's own build files do that only for a C++ or architecture-specific project), in both the runtime-specific and the portable layout; `conpty.dll` without its host silently runs `conhost.exe`, which `ConPtyLibrary.HasConsoleHost` reports. The library is loaded by absolute path only, and once per path. Verified with package version `1.25.260930003`; any published version loads, and 1.25 is the recommended floor because earlier hosts wait three seconds at startup for a terminal answer that a consumer reading output never sends. Unix ignores nothing here: a `ConPtyLibrary` cannot be loaded there, and `Clear()` is a no-op. Details and measurements: [Out-of-band ConPTY](.github/docs/specs/core_session.md#out-of-band-conpty).
+What to know before you ship it:
+
+- **Use package 1.25 or later** (verified with `1.25.260930003`). Any published version loads, but the out-of-band host asks the frontend what terminal it is at startup (`ESC[c`), and hosts before 1.25 wait three seconds for the answer. A terminal emulator answers on its own; a consumer that only reads output, such as `CompleteAsync`, never does, and on 1.25+ the host no longer waits for it.
+- **The two files travel with your application.** MiniPty's build targets place `OpenConsole.exe` (about 1 MB per architecture) beside `conpty.dll` in the output and publish folders whenever the package is referenced, in both the runtime-specific and the portable layout; the package's own build files do that only for C++ or architecture-specific projects. Updating them, security fixes included, is a package update in your project, not a MiniPty release.
+- **A missing host is silent.** `conpty.dll` without `OpenConsole.exe` beside it runs the in-box `conhost.exe` without any error; `ConPtyLibrary.HasConsoleHost` tells you before the first session, as in the snippet above.
+- **Each session gets an `OpenConsole.exe` child process** instead of `conhost.exe`, which matters to process monitoring and allow lists.
+- The library is loaded by absolute path only (a bare `conpty.dll` could bind a copy an operating system ships), once per path, and `Load` fails if the DLL lacks the exports MiniPty uses. On Unix a `ConPtyLibrary` cannot be loaded and `Clear()` is a no-op.
+
+Details and measurements: [Out-of-band ConPTY](.github/docs/specs/core_session.md#out-of-band-conpty).
 
 MiniPty is not a sandbox. Processes run with the parent process permissions unless the host application isolates them with OS users, containers, or another security boundary.
 
