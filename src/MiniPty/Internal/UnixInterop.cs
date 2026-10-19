@@ -61,6 +61,20 @@ internal static partial class UnixInterop
     [LibraryImport("minipty_unix", SetLastError = true)]
     internal static partial int minipty_set_nonblocking(int fd);
 
+    // Child signaling (minipty_unix_exit.c).
+
+    /// <summary>Opens a pidfd for <paramref name="pid"/> on Linux 5.3+. Returns -1 elsewhere or when the kernel refuses.</summary>
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_pidfd_open(int pid);
+
+    /// <summary>
+    /// Sends <paramref name="signal"/> to a child of this process: through <paramref name="pidfd"/> when it is not
+    /// negative, and otherwise to <paramref name="pid"/> only while that pid is still this process's unreaped child.
+    /// Returns 0 when the signal was sent, and -1 when the child is gone or the pid is no longer this process's child.
+    /// </summary>
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_signal_child(int pidfd, int pid, int signal);
+
     /// <summary>
     /// Waits until <paramref name="master"/> is ready for the requested <paramref name="events"/>
     /// (<see cref="PtyReadable"/>, <see cref="PtyWritable"/>; hang-up and errors count as ready),

@@ -78,7 +78,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// Runs on the thread that observed child exit (usually a process-wide watcher), so it only hands the
+    /// Runs on the thread that observed child exit (usually the background exit watcher), so it only hands the
     /// event to the output pump, which schedules its post-exit drain instead of running it here.
     /// </summary>
     void IPtyExitListener.OnChildExited() => _pump.OnChildExited();
@@ -169,7 +169,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// Gets a value indicating whether the child process has exited.
     /// </summary>
     /// <value>
-    /// <see langword="true"/> after the process-wide exit watcher has observed the exit. Reading it never blocks.
+    /// <see langword="true"/> after the background exit watcher has observed the exit. Reading it never blocks.
     /// </value>
     /// <remarks>
     /// On Unix the watcher keeps observing after <see cref="Dispose"/>, so this can become <see langword="true"/>
@@ -418,7 +418,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <remarks>
     /// <para>
     /// Without a cancelable token every call returns the same task, so waiting allocates nothing beyond the first
-    /// call. The wait holds no thread: the task completes when the process-wide exit watcher observes the exit.
+    /// call. The wait holds no thread: the task completes when the background exit watcher observes the exit.
     /// </para>
     /// <para>
     /// Waiting does not affect output: a concurrent output reader keeps receiving output until end of output,

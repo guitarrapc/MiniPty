@@ -7,7 +7,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__linux__)
@@ -17,42 +21,42 @@
 /* pidfd_open has the same number on every architecture since Linux 5.3 (unified syscall table). */
 #define SYS_pidfd_open 434
 #endif
+#ifndef SYS_pidfd_send_signal
+/* pidfd_send_signal has the same number on every architecture since Linux 5.1 (unified syscall table). */
+#define SYS_pidfd_send_signal 424
+#endif
 #define MINIPTY_CHILD_WATCH_EPOLL 1
 #elif defined(__APPLE__) || defined(__FreeBSD__)
-#include <sys/types.h>
 #include <sys/event.h>
 #include <sys/time.h>
 #define MINIPTY_CHILD_WATCH_KQUEUE 1
 #if defined(__APPLE__)
-/* macOS has no pipe2, so the wake is an EVFILT_USER event on the kqueue itself; see minipty_child_watch_init. */
+/* macOS has no pipe2, so the wake is an EVFILT_USER event on the kqueue itself; see minipty_child_watch_open. */
 #define MINIPTY_CHILD_WATCH_USER_WAKE 1
 #endif
 #endif
 
 /*
- * Process-wide child exit watcher.
+ * Child exit watcher and child signaling.
  *
- * One managed thread blocks in minipty_child_watch_wait for every MiniPty child in the process, so
- * observing exit adds no thread per session. Linux watches pidfds with epoll; macOS and FreeBSD watch
- * EVFILT_PROC NOTE_EXIT with kqueue.
+ * One managed thread blocks in minipty_child_watch_wait for every child that one load of the managed assembly
+ * starts, so observing exit adds no thread per session. The watcher keeps no state here: the caller holds its
+ * descriptors and passes them back. Two loads in one process, such as two AssemblyLoadContexts, share this library,
+ * and one shared epoll or kqueue handed one load's exits and wake-ups to the other load's thread. Linux watches
+ * pidfds with epoll; macOS and FreeBSD watch EVFILT_PROC NOTE_EXIT with kqueue.
  *
- * The watcher only reports that a child exited. Reaping stays with the managed caller so the wait
- * status is read exactly once, by one owner. A child that cannot be registered (pidfd unavailable on an
- * older kernel or under seccomp, or a child that already exited before kqueue registration) makes
- * minipty_child_watch_add fail, and the caller polls waitpid for that child instead.
+ * The watcher only reports that a child exited. Reaping stays with the managed caller so the wait status is read
+ * exactly once, by one owner. On Linux the caller also owns each child's pidfd. It signals the child through it, and
+ * once the child is reaped it removes the registration and then closes the pidfd. A child that cannot be registered
+ * (pidfd unavailable on an older kernel or under seccomp, or a child that already exited before kqueue registration)
+ * makes minipty_child_watch_add fail, and the caller polls waitpid for that child instead.
  *
- * A self-pipe wakes the wait when the caller's polling set changes; on macOS an EVFILT_USER event on the
- * kqueue does instead. Every descriptor is opened close-on-exec, so no later child ever keeps the watcher's
- * descriptors past exec: the pipe with pipe2 (macOS has none, hence the event there). Until a concurrently
- * forked child execs, though, it holds duplicates of them, which is why pidfd registrations are one-shot and
- * removed explicitly.
+ * A self-pipe wakes the wait when the caller's polling set changes; on macOS an EVFILT_USER event on the kqueue
+ * does instead. Every descriptor is opened close-on-exec, so no later child ever keeps the watcher's descriptors
+ * past exec: the pipe with pipe2 (macOS has none, hence the event there). Until a concurrently forked child execs,
+ * though, it holds duplicates of them. epoll drops a registration only when every descriptor for the open file
+ * description is closed, so pidfd registrations are one-shot and are removed explicitly before the pidfd closes.
  */
-
-static int g_watch_fd = -1;
-#if !defined(MINIPTY_CHILD_WATCH_USER_WAKE)
-static int g_wake_read = -1;
-static int g_wake_write = -1;
-#endif
 
 #define MINIPTY_CHILD_WATCH_MAX_EVENTS 16
 #define MINIPTY_CHILD_WATCH_WAKE_TOKEN UINT64_MAX
@@ -60,58 +64,66 @@ static int g_wake_write = -1;
 #if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
 /* The EVFILT_USER event's identifier. Events are keyed by identifier and filter, so it never meets a pid. */
 #define MINIPTY_CHILD_WATCH_WAKE_ID 0
-#else
-static void minipty_drain_wake_pipe(void)
+#elif defined(MINIPTY_CHILD_WATCH_EPOLL) || defined(MINIPTY_CHILD_WATCH_KQUEUE)
+static void minipty_drain_wake_pipe(int wake_read)
 {
     char buffer[64];
 
-    while (read(g_wake_read, buffer, sizeof(buffer)) > 0) {
+    while (read(wake_read, buffer, sizeof(buffer)) > 0) {
     }
 }
 #endif
 
-int minipty_child_watch_init(void)
+int minipty_child_watch_open(int *watch_fd, int *wake_read, int *wake_write)
 {
 #if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
     struct kevent change;
     int saved_errno;
+    int kq;
 
-    if (g_watch_fd >= 0)
-        return 0;
+    if (watch_fd == NULL || wake_read == NULL || wake_write == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
 
     /*
      * A pipe would be marked close-on-exec only after it opened, and a child the host forks on another thread
      * in that instant would keep both ends. A kqueue is never inherited by a fork child.
      */
-    g_watch_fd = kqueue();
-    if (g_watch_fd < 0)
+    kq = kqueue();
+    if (kq < 0)
         return -1;
 
     /* EV_CLEAR: reporting the event resets it, so one report drains any number of wakes. */
     EV_SET(&change, MINIPTY_CHILD_WATCH_WAKE_ID, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
-    if (kevent(g_watch_fd, &change, 1, NULL, 0, NULL) != 0) {
+    if (kevent(kq, &change, 1, NULL, 0, NULL) != 0) {
         saved_errno = errno;
-        close(g_watch_fd);
-        g_watch_fd = -1;
+        close(kq);
         errno = saved_errno;
         return -1;
     }
 
+    *watch_fd = kq;
+    *wake_read = -1;
+    *wake_write = -1;
     return 0;
 #elif defined(MINIPTY_CHILD_WATCH_EPOLL) || defined(MINIPTY_CHILD_WATCH_KQUEUE)
-    int fds[2];
+    int fds[2] = { -1, -1 };
     int saved_errno;
+    int watch;
 
-    if (g_watch_fd >= 0)
-        return 0;
+    if (watch_fd == NULL || wake_read == NULL || wake_write == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
 
 #if defined(MINIPTY_CHILD_WATCH_EPOLL)
-    g_watch_fd = epoll_create1(EPOLL_CLOEXEC);
+    watch = epoll_create1(EPOLL_CLOEXEC);
 #else
     /* kqueue descriptors are not inherited by fork children. */
-    g_watch_fd = kqueue();
+    watch = kqueue();
 #endif
-    if (g_watch_fd < 0)
+    if (watch < 0)
         return -1;
 
     /*
@@ -121,91 +133,100 @@ int minipty_child_watch_init(void)
     if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0)
         goto fail;
 
-    g_wake_read = fds[0];
-    g_wake_write = fds[1];
-
 #if defined(MINIPTY_CHILD_WATCH_EPOLL)
     {
         struct epoll_event event;
 
         event.events = EPOLLIN;
         event.data.u64 = MINIPTY_CHILD_WATCH_WAKE_TOKEN;
-        if (epoll_ctl(g_watch_fd, EPOLL_CTL_ADD, g_wake_read, &event) != 0)
+        if (epoll_ctl(watch, EPOLL_CTL_ADD, fds[0], &event) != 0)
             goto fail;
     }
 #else
     {
         struct kevent change;
 
-        EV_SET(&change, (uintptr_t)g_wake_read, EVFILT_READ, EV_ADD, 0, 0, NULL);
-        if (kevent(g_watch_fd, &change, 1, NULL, 0, NULL) != 0)
+        EV_SET(&change, (uintptr_t)fds[0], EVFILT_READ, EV_ADD, 0, 0, NULL);
+        if (kevent(watch, &change, 1, NULL, 0, NULL) != 0)
             goto fail;
     }
 #endif
 
+    *watch_fd = watch;
+    *wake_read = fds[0];
+    *wake_write = fds[1];
     return 0;
 
 fail:
     saved_errno = errno;
-    if (g_wake_read >= 0)
-        close(g_wake_read);
-    if (g_wake_write >= 0)
-        close(g_wake_write);
-    close(g_watch_fd);
-    g_wake_read = -1;
-    g_wake_write = -1;
-    g_watch_fd = -1;
+    if (fds[0] >= 0)
+        close(fds[0]);
+    if (fds[1] >= 0)
+        close(fds[1]);
+    close(watch);
     errno = saved_errno;
     return -1;
 #else
+    (void)watch_fd;
+    (void)wake_read;
+    (void)wake_write;
     errno = ENOTSUP;
     return -1;
 #endif
 }
 
-int minipty_child_watch_add(int pid)
+int minipty_child_watch_add(int watch_fd, int pidfd, int pid)
 {
 #if defined(MINIPTY_CHILD_WATCH_EPOLL)
     struct epoll_event event;
-    int saved_errno;
-    /* pidfds are always close-on-exec, and a pidfd for an exited, unreaped child is readable at once. */
-    int pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
 
-    if (pidfd < 0)
+    if (pidfd < 0) {
+        errno = EBADF;
         return -1;
+    }
 
     /* One-shot: the exit is reported once even if a duplicate of the pidfd keeps the registration alive. */
     event.events = EPOLLIN | EPOLLONESHOT;
     event.data.u64 = ((uint64_t)(uint32_t)pidfd << 32) | (uint32_t)pid;
-    if (epoll_ctl(g_watch_fd, EPOLL_CTL_ADD, pidfd, &event) != 0) {
-        saved_errno = errno;
-        close(pidfd);
-        errno = saved_errno;
-        return -1;
-    }
-
-    return 0;
+    return epoll_ctl(watch_fd, EPOLL_CTL_ADD, pidfd, &event) == 0 ? 0 : -1;
 #elif defined(MINIPTY_CHILD_WATCH_KQUEUE)
     struct kevent change;
 
+    (void)pidfd;
     EV_SET(&change, (uintptr_t)pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
-    return kevent(g_watch_fd, &change, 1, NULL, 0, NULL) == 0 ? 0 : -1;
+    return kevent(watch_fd, &change, 1, NULL, 0, NULL) == 0 ? 0 : -1;
 #else
+    (void)watch_fd;
+    (void)pidfd;
     (void)pid;
     errno = ENOTSUP;
     return -1;
 #endif
 }
 
-int minipty_child_watch_wake(void)
+void minipty_child_watch_remove(int watch_fd, int pidfd)
+{
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+    /* ENOENT, a pidfd never registered, is fine: the caller removes before every close. */
+    if (watch_fd >= 0 && pidfd >= 0)
+        epoll_ctl(watch_fd, EPOLL_CTL_DEL, pidfd, NULL);
+#else
+    /* A kqueue EVFILT_PROC registration is one-shot and is dropped when the process exits. */
+    (void)watch_fd;
+    (void)pidfd;
+#endif
+}
+
+int minipty_child_watch_wake(int watch_fd, int wake_write)
 {
 #if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
     struct kevent change;
     int result;
 
+    (void)wake_write;
     EV_SET(&change, MINIPTY_CHILD_WATCH_WAKE_ID, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
     do {
-        result = kevent(g_watch_fd, &change, 1, NULL, 0, NULL);
+        result = kevent(watch_fd, &change, 1, NULL, 0, NULL);
     } while (result < 0 && errno == EINTR);
 
     return result == 0 ? 0 : -1;
@@ -213,8 +234,9 @@ int minipty_child_watch_wake(void)
     char byte = 1;
     ssize_t written;
 
+    (void)watch_fd;
     do {
-        written = write(g_wake_write, &byte, 1);
+        written = write(wake_write, &byte, 1);
     } while (written < 0 && errno == EINTR);
 
     /* A full pipe already guarantees a pending wake-up. */
@@ -222,7 +244,7 @@ int minipty_child_watch_wake(void)
 #endif
 }
 
-int minipty_child_watch_wait(int *pids, int capacity, int timeout_ms)
+int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds, int capacity, int timeout_ms)
 {
 #if defined(MINIPTY_CHILD_WATCH_EPOLL) || defined(MINIPTY_CHILD_WATCH_KQUEUE)
     int max_events = capacity < MINIPTY_CHILD_WATCH_MAX_EVENTS ? capacity : MINIPTY_CHILD_WATCH_MAX_EVENTS;
@@ -230,7 +252,7 @@ int minipty_child_watch_wait(int *pids, int capacity, int timeout_ms)
     int ready;
     int i;
 
-    if (pids == NULL || max_events <= 0) {
+    if (pids == NULL || pidfds == NULL || max_events <= 0) {
         errno = EINVAL;
         return -1;
     }
@@ -239,29 +261,24 @@ int minipty_child_watch_wait(int *pids, int capacity, int timeout_ms)
     {
         struct epoll_event events[MINIPTY_CHILD_WATCH_MAX_EVENTS];
 
-        ready = epoll_wait(g_watch_fd, events, max_events, timeout_ms);
+        ready = epoll_wait(watch_fd, events, max_events, timeout_ms);
         if (ready < 0)
             return errno == EINTR ? 0 : -1;
 
         for (i = 0; i < ready; i++) {
-            int pidfd;
-
             if (events[i].data.u64 == MINIPTY_CHILD_WATCH_WAKE_TOKEN) {
-                minipty_drain_wake_pipe();
+                minipty_drain_wake_pipe(wake_read);
                 continue;
             }
 
             /*
-             * Remove the registration explicitly before closing. Closing alone is not enough: a child forked
-             * concurrently still holds a duplicate of this pidfd until it execs, and epoll drops a
-             * registration only when every descriptor for the open file description is closed. A stale
-             * registration would report this exit again with a pidfd number that may since have been
-             * reused for an unrelated descriptor.
+             * The one-shot registration is now disarmed. It stays until the caller removes it, and the pidfd stays
+             * open, because the caller signals the child through it until the reap. The pidfd is reported too, so
+             * the caller can tell this report from one for a pidfd it has since closed.
              */
-            pidfd = (int)(events[i].data.u64 >> 32);
-            epoll_ctl(g_watch_fd, EPOLL_CTL_DEL, pidfd, NULL);
-            close(pidfd);
-            pids[count++] = (int)(uint32_t)events[i].data.u64;
+            pids[count] = (int)(uint32_t)events[i].data.u64;
+            pidfds[count] = (int)(events[i].data.u64 >> 32);
+            count++;
         }
     }
 #else
@@ -276,34 +293,83 @@ int minipty_child_watch_wait(int *pids, int capacity, int timeout_ms)
             timeout_ptr = &timeout;
         }
 
-        ready = kevent(g_watch_fd, NULL, 0, events, max_events, timeout_ptr);
+        ready = kevent(watch_fd, NULL, 0, events, max_events, timeout_ptr);
         if (ready < 0)
             return errno == EINTR ? 0 : -1;
 
         for (i = 0; i < ready; i++) {
 #if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
+            (void)wake_read;
             if (events[i].filter == EVFILT_USER)
                 continue;
 #else
-            if (events[i].filter == EVFILT_READ && (int)events[i].ident == g_wake_read) {
-                minipty_drain_wake_pipe();
+            if (events[i].filter == EVFILT_READ && (int)events[i].ident == wake_read) {
+                minipty_drain_wake_pipe(wake_read);
                 continue;
             }
 #endif
 
             /* NOTE_EXIT and registration errors (EV_ERROR) both tell the caller to check the child now. */
-            if (events[i].filter == EVFILT_PROC)
-                pids[count++] = (int)events[i].ident;
+            if (events[i].filter == EVFILT_PROC) {
+                pids[count] = (int)events[i].ident;
+                pidfds[count] = -1;
+                count++;
+            }
         }
     }
 #endif
 
     return count;
 #else
+    (void)watch_fd;
+    (void)wake_read;
     (void)pids;
+    (void)pidfds;
     (void)capacity;
     (void)timeout_ms;
     errno = ENOTSUP;
     return -1;
 #endif
+}
+
+int minipty_pidfd_open(int pid)
+{
+#if defined(__linux__)
+    /* pidfds are always close-on-exec. */
+    return (int)syscall(SYS_pidfd_open, pid, 0);
+#else
+    (void)pid;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+int minipty_signal_child(int pidfd, int pid, int sig)
+{
+    siginfo_t info;
+    int result;
+
+#if defined(__linux__)
+    /* A pidfd names one process, so a signal through it can never reach another process that reuses the pid. */
+    if (pidfd >= 0)
+        return syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) == 0 ? 0 : -1;
+#else
+    (void)pidfd;
+#endif
+
+    /*
+     * Without a pidfd the pid is checked first. WNOWAIT leaves the child waitable, so this reports whether pid is
+     * still this process's unreaped child without reaping it. ECHILD means code outside MiniPty reaped it, and the
+     * pid may already belong to another process. A reap between this check and the kill can still free the pid for
+     * reuse, a window only a pidfd closes.
+     */
+    do {
+        memset(&info, 0, sizeof(info));
+        result = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+    } while (result < 0 && errno == EINTR);
+
+    if (result < 0)
+        return -1;
+
+    return kill(pid, sig);
 }

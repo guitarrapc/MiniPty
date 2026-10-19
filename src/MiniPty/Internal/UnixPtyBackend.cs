@@ -51,7 +51,7 @@ internal static partial class UnixPtyBackend
         {
             // The child runs, but no watcher will reap it, because the instance registers with the watcher last. It is
             // killed and reaped here, so a failed start leaves neither a running child nor a zombie.
-            UnixInterop.kill(pid, UnixInterop.SigKill);
+            _ = UnixInterop.minipty_signal_child(-1, pid, UnixInterop.SigKill);
             while (UnixInterop.waitpid(pid, out _, 0) < 0 && Marshal.GetLastPInvokeError() == UnixInterop.EINTR)
             {
             }
@@ -143,6 +143,9 @@ internal static partial class UnixPtyBackend
         // Serializes the child's reap with signal delivery, so Kill can never reach a pid the watcher has
         // already released for reuse.
         private readonly Lock _pidLock = new();
+        // The child's pidfd on Linux, or -1. Every signal goes through it, and the watcher closes it once the child is
+        // reaped. Written only by the constructor and, under _pidLock, by ClosePidfd.
+        private int _pidfd = -1;
         // Mutable struct: used only through this field, never copied.
         private PtyExitSignal _exitSignal;
         private Timer? _eofTimer;
@@ -180,9 +183,14 @@ internal static partial class UnixPtyBackend
                 throw new IOException($"Setting the PTY master non-blocking failed (errno {Marshal.GetLastPInvokeError()})");
 
             Input = new PtyInputStream(this);
+            // After the last step that can throw, so a failed start never holds a pidfd.
+            _pidfd = UnixInterop.minipty_pidfd_open(pid);
             // Last, so the watcher never observes a partially constructed instance.
             ChildWatcher.Register(this);
         }
+
+        /// <summary>The child's pidfd on Linux, or -1. Read by <see cref="ChildWatcher"/> under its lock.</summary>
+        internal int Pidfd => _pidfd;
 
         public Stream Input { get; }
 
@@ -540,14 +548,24 @@ internal static partial class UnixPtyBackend
                     return;
 
                 // Fire-and-forget like KillCore; ESRCH after a racing exit is benign.
-                UnixInterop.kill(_pid, nativeSignal);
+                SignalLocked(nativeSignal);
             }
         }
 
         private void KillCore()
         {
-            UnixInterop.kill(_pid, UnixInterop.SigKill);
+            SignalLocked(UnixInterop.SigKill);
         }
+
+        /// <summary>
+        /// Signals the child. Caller holds <see cref="_pidLock"/> and has checked that the child is not yet reaped.
+        /// </summary>
+        /// <remarks>
+        /// Not <c>kill(pid)</c> alone: code outside MiniPty can reap the child, for example a host that reaps every
+        /// child, and the pid can then belong to another process before the watcher notices. A pidfd names this process
+        /// alone. Without one, the native call sends the signal only while the pid is still this process's unreaped child.
+        /// </remarks>
+        private void SignalLocked(int signal) => _ = UnixInterop.minipty_signal_child(_pidfd, _pid, signal);
 
         private static int MapSignal(PtySignal signal) => signal switch
         {
@@ -769,7 +787,7 @@ internal static partial class UnixPtyBackend
                 if (!_exited && _hangupKillDeadline == 0)
                 {
                     exitObserved = false;
-                    UnixInterop.kill(_pid, UnixInterop.SigHup);
+                    SignalLocked(UnixInterop.SigHup);
                     _hangupKillDeadline = Environment.TickCount64 + DisposeHangupGraceMs;
                 }
             }
@@ -849,6 +867,22 @@ internal static partial class UnixPtyBackend
             }
 
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, null));
+        }
+
+        /// <summary>
+        /// Closes the pidfd once the child is reaped. Called only by <see cref="ChildWatcher"/>, after it removed the
+        /// pidfd's registration.
+        /// </summary>
+        internal void ClosePidfd()
+        {
+            lock (_pidLock)
+            {
+                if (_pidfd < 0)
+                    return;
+
+                UnixInterop.close(_pidfd);
+                _pidfd = -1;
+            }
         }
 
         /// <summary>Arms the one-shot EOF staging tick; each tick re-arms itself while staging is in progress.</summary>
