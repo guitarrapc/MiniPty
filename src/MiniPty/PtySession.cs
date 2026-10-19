@@ -30,8 +30,9 @@ namespace MiniPty;
 /// <para>
 /// Disposing or awaiting <see cref="DisposeAsync"/> ends a child that is still running and releases handles without
 /// waiting for the child to exit. On Unix the child is hung up first (<c>SIGHUP</c>), so a shell can save its history.
-/// It is killed after a short grace period if it is still running, or at once if the host process exits normally or is
-/// ended by <c>SIGTERM</c>, <c>SIGINT</c>, <c>SIGHUP</c>, or <c>SIGQUIT</c> first. On Windows it is terminated.
+/// It is killed after a short grace period if it is still running, or at once if the host process exits normally
+/// first. A host ended within the grace by a crash or by a signal it does not cancel sends no kill, as
+/// <see cref="Dispose"/> describes. On Windows the child is terminated.
 /// </para>
 /// </remarks>
 public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
@@ -375,8 +376,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </summary>
     /// <remarks>
     /// Uses <c>TerminateProcess</c> on Windows and <c>SIGKILL</c> on Unix.
-    /// Call <see cref="Dispose"/> afterward to release resources. A kill that races disposal on another thread either
-    /// ends the child or throws <see cref="ObjectDisposedException"/>; either way disposal ends the child.
+    /// Call <see cref="Dispose"/> afterward to release resources. A kill that races disposal on another thread ends
+    /// the child, throws <see cref="ObjectDisposedException"/>, or returns without signaling because disposal has
+    /// begun. In the last two cases disposal ends the child as <see cref="Dispose"/> describes.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     public void Kill()
@@ -477,13 +479,15 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// On Unix a running child is hung up with <c>SIGHUP</c>, the signal a shell receives when its terminal window
     /// closes. The signal is sent without blocking. If the child has not exited one second later, a background thread
     /// kills it with <c>SIGKILL</c>. If the process exits normally before then, by returning from <c>Main</c> or calling
-    /// <see cref="Environment.Exit(int)"/>, the kill is sent at exit, and the same happens when the process is ended by
-    /// <c>SIGTERM</c>, <c>SIGINT</c>, <c>SIGHUP</c>, or <c>SIGQUIT</c>: MiniPty handles those signals without
-    /// cancelling them, so the host still ends as it would without MiniPty. A host that crashes or is killed with
-    /// <c>SIGKILL</c> cannot send it, so a child that ignores the hang-up survives. Call <see cref="Kill()"/> first to end
-    /// the child immediately. MiniPty signals only the child. When it exits, the
-    /// system hangs up the terminal's foreground process group, so a descendant in that group ends too unless it
-    /// ignores <c>SIGHUP</c>. On Windows the child is terminated.
+    /// <see cref="Environment.Exit(int)"/>, the kill is sent at exit. A host ended within that second by a crash or by
+    /// a signal it does not cancel, such as <c>SIGTERM</c> to a console app, never sends the kill, so a child that
+    /// ignores the hang-up survives. Calling <see cref="Kill()"/> first ends the child at once but skips the hang-up.
+    /// An interactive shell killed this way cannot resend the hang-up to its jobs, so a running background job keeps
+    /// running. A host can instead cancel such a signal, hang up each session with <see cref="Kill(PtySignal)"/>, wait
+    /// a bounded time for the child to exit, dispose the session even when the wait times out, and exit normally. The
+    /// wait gives a shell time to resend the hang-up to its jobs, and the kills are sent at exit. MiniPty signals only
+    /// the child. When the child exits, the system hangs up the terminal's foreground process group, so a descendant in
+    /// that group ends too unless it ignores <c>SIGHUP</c>. On Windows the child is terminated.
     /// </para>
     /// <para>
     /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. The background

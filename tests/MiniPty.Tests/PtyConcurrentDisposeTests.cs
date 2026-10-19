@@ -43,9 +43,10 @@ public sealed class PtyConcurrentDisposeTests
     }
 
     /// <summary>
-    /// Disposal, kills, and exit queries on real sessions, all at once. A kill that loses the race to disposal either
-    /// ends the child or reports the disposal, and exit queries never fail. With <see cref="PtyStartInfo.KillProcessTree"/>
-    /// the kill uses the job handle that disposal releases, pinned the same way.
+    /// Disposal, kills, and exit queries on real sessions, all at once. A kill that races disposal ends the child,
+    /// reports the disposal, or returns once disposal has begun, and exit queries never fail. On Windows the kill pins
+    /// the handle that disposal releases, which is the job handle with <see cref="PtyStartInfo.KillProcessTree"/> and
+    /// the process handle without it. Unix ignores the option.
     /// </summary>
     [Test]
     [Arguments(false)]
@@ -78,7 +79,7 @@ public sealed class PtyConcurrentDisposeTests
             }
             catch (ObjectDisposedException)
             {
-                // Disposal got there first, which is one of the two allowed outcomes.
+                // Disposal got there first, which is one of the allowed outcomes.
             }
         }
 

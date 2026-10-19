@@ -17,7 +17,6 @@ public sealed class PtyUnixDisposeTests
     private const int ESRCH = 3;
     private const int SigHup = 1;
     private const int SigKill = 9;
-    private const int SigTerm = 15;
     // Set on a copy of this test executable to make it the host that HostExitKillsAChildStillInItsHangupGrace starts.
     // The value names how the host exits.
     private const string DisposeHostVariable = "MINIPTY_TESTS_DISPOSE_HOST";
@@ -167,52 +166,6 @@ public sealed class PtyUnixDisposeTests
         await Assert.That(gone).IsTrue();
     }
 
-    /// <summary>
-    /// The host disposes a session whose child ignores the hang-up, and is then ended by a signal it does not handle,
-    /// within the grace period. Such a host raises no <c>ProcessExit</c>, so MiniPty's own handler for the signal must
-    /// send the kill. The handler does not cancel the signal: the host ends with the same status it would without it.
-    /// </summary>
-    /// <remarks>
-    /// <c>SIGINT</c> and <c>SIGQUIT</c> share the handler and are left out: a process started from a background job
-    /// ignores <c>SIGINT</c>, and <c>SIGQUIT</c> writes a core dump. A signal that a loaded machine delays past the grace
-    /// lets the watcher's own kill pass this test, so it can pass without the handler then, but never fail with it.
-    /// </remarks>
-    [Test]
-    [Arguments(SigTerm)]
-    [Arguments(SigHup)]
-    public async Task HostEndedBySignalKillsAChildStillInItsHangupGrace(int signal)
-    {
-        if (OperatingSystem.IsWindows())
-            return;
-
-        var hostPath = Path.Combine(AppContext.BaseDirectory, "MiniPty.Tests");
-        using var host = Process.Start(new ProcessStartInfo(hostPath)
-        {
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            Environment = { [DisposeHostVariable] = "dispose-then-wait" },
-        })!;
-        try
-        {
-            var pidLine = await host.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(30));
-            var disposed = await host.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(30));
-            await Assert.That(disposed).IsEqualTo("disposed");
-            await Assert.That(UnixInterop.kill(host.Id, signal)).IsEqualTo(0);
-
-            await host.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
-            await Assert.That(host.ExitCode).IsEqualTo(128 + signal);
-            await Assert.That(int.TryParse(pidLine, out var pid)).IsTrue();
-
-            var gone = await WaitForAsync(() => UnixInterop.kill(pid, 0) != 0 && Marshal.GetLastPInvokeError() == ESRCH, 5_000);
-            await Assert.That(gone).IsTrue();
-        }
-        finally
-        {
-            if (!host.HasExited)
-                host.Kill();
-        }
-    }
-
     [Test]
     public async Task PtyTerminalDisposeHangsUpTheChild()
     {
@@ -279,8 +232,7 @@ public sealed class PtyUnixDisposeTests
     }
 
     /// <summary>
-    /// Makes this test executable the host of <see cref="HostExitKillsAChildStillInItsHangupGrace"/> and
-    /// <see cref="HostEndedBySignalKillsAChildStillInItsHangupGrace"/> when
+    /// Makes this test executable the host of <see cref="HostExitKillsAChildStillInItsHangupGrace"/> when
     /// <see cref="DisposeHostVariable"/> is set. It runs before the test framework starts and exits the process, so no
     /// test runs in the host. In a test run the variable is unset and this returns at once.
     /// </summary>
@@ -299,8 +251,7 @@ public sealed class PtyUnixDisposeTests
 
     /// <summary>
     /// Starts a session whose child ignores the hang-up, prints the child's pid once the child is ready, and disposes
-    /// the session now, from an exit handler, or now and then waits for the test to end the host with a signal.
-    /// Returns the exit code for the host.
+    /// the session either now or from an exit handler. Returns the exit code for the host.
     /// </summary>
     private static int RunDisposeHost(string mode)
     {
@@ -329,13 +280,6 @@ public sealed class PtyUnixDisposeTests
                 // at once, because the deadline it would otherwise wait for never comes.
                 AppDomain.CurrentDomain.ProcessExit += (_, _) => session.Dispose();
                 return 0;
-            case "dispose-then-wait":
-                // The test ends this host with a signal while the child is still in its grace period.
-                session.Dispose();
-                System.Console.WriteLine("disposed");
-                System.Console.Out.Flush();
-                Thread.Sleep(30_000);
-                return 4;
             default:
                 System.Console.Error.WriteLine($"Unknown mode '{mode}'.");
                 return 2;

@@ -25,8 +25,7 @@ internal static partial class UnixPtyBackend
     /// It also sends the kill that follows a disposal's hang-up. The deadline joins this thread's wait timeout
     /// rather than getting a timer of its own, so disposal allocates no timer. When the process exits normally,
     /// hung-up children are killed at once, and so is a child disposed after that, because the process may end
-    /// before any deadline passes. A signal that ends a process by default (<c>SIGTERM</c>, <c>SIGINT</c>,
-    /// <c>SIGHUP</c>, <c>SIGQUIT</c>) runs no exit handler, so it kills the hung-up children too.
+    /// before any deadline passes.
     /// </para>
     /// </remarks>
     private static partial class ChildWatcher
@@ -43,8 +42,6 @@ internal static partial class UnixPtyBackend
         private static bool s_started;
         private static bool s_nativeWatch;
         private static bool s_exiting;
-        // Held for the life of the process: disposing a registration removes its handler.
-        private static PosixSignalRegistration[]? s_terminationSignals;
 
         /// <summary>Starts watching <paramref name="child"/>; its exit task completes once the child is reaped.</summary>
         internal static void Register(UnixPtyBackendInstance child)
@@ -109,35 +106,12 @@ internal static partial class UnixPtyBackend
             lock (s_lock)
             {
                 s_exiting = true;
-                KillHungUpChildrenLocked();
+                // Same lock order as the reap: this lock, then the child's pid lock.
+                foreach (var child in s_hangups)
+                    child.KillAfterHangup();
+
+                s_hangups.Clear();
             }
-        }
-
-        /// <summary>
-        /// Kills every hung-up child when a signal that ends a process by default arrives. A host ended by such a
-        /// signal raises no <see cref="AppDomain.ProcessExit"/>, so without this a child it disposed less than a grace
-        /// period earlier, and that ignores the hang-up, would outlive it.
-        /// </summary>
-        /// <remarks>
-        /// The handler never cancels the signal, so the host ends exactly as it would without it, with the same exit
-        /// status (128 + signal). It also does not mark the process as exiting: another handler may cancel the signal,
-        /// such as a daemon that reloads on <c>SIGHUP</c> or a console app that handles Ctrl+C, and the host then keeps
-        /// running, with later disposals keeping their grace period. Only the children already hung up lose the rest of
-        /// theirs.
-        /// </remarks>
-        private static void OnTerminationSignal(PosixSignalContext context)
-        {
-            lock (s_lock)
-                KillHungUpChildrenLocked();
-        }
-
-        private static void KillHungUpChildrenLocked()
-        {
-            // Same lock order as the reap: this lock, then the child's pid lock.
-            foreach (var child in s_hangups)
-                child.KillAfterHangup();
-
-            s_hangups.Clear();
         }
 
         private static void EnsureStarted()
@@ -154,12 +128,6 @@ internal static partial class UnixPtyBackend
             thread.Start();
             // This thread stops with the process, so the exit itself must send the pending kills.
             AppDomain.CurrentDomain.ProcessExit += static (_, _) => OnProcessExit();
-            // The same for a signal that ends the process by default, which runs no exit handler.
-            s_terminationSignals = new PosixSignalRegistration[4];
-            s_terminationSignals[0] = PosixSignalRegistration.Create(PosixSignal.SIGTERM, OnTerminationSignal);
-            s_terminationSignals[1] = PosixSignalRegistration.Create(PosixSignal.SIGINT, OnTerminationSignal);
-            s_terminationSignals[2] = PosixSignalRegistration.Create(PosixSignal.SIGHUP, OnTerminationSignal);
-            s_terminationSignals[3] = PosixSignalRegistration.Create(PosixSignal.SIGQUIT, OnTerminationSignal);
             s_started = true;
         }
 
