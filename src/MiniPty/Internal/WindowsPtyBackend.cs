@@ -159,6 +159,8 @@ internal static class WindowsPtyBackend
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
+        // Decided before any handle exists, so a batch file's rejected argument or missing script fails without cleanup.
+        var (applicationName, commandLine) = BuildLaunch(startInfo);
 
         CreateConPtyPipes(out var inputRead, out var inputWrite, out var outputRead, out var outputWrite);
         var inputWriteHandle = inputWrite;
@@ -264,7 +266,6 @@ internal static class WindowsPtyBackend
                 lpAttributeList = attrList,
             };
 
-            var commandLine = BuildCommandLine(startInfo);
             var environment = PtyEnvironment.BuildWindows(startInfo);
             var creationFlags = ExtendedStartupInfoPresent;
             if (environment is not null)
@@ -274,7 +275,7 @@ internal static class WindowsPtyBackend
             }
 
             if (!WindowsInterop.CreateProcessW(
-                    null,
+                    applicationName,
                     commandLine,
                     IntPtr.Zero,
                     IntPtr.Zero,
@@ -1534,6 +1535,32 @@ internal static class WindowsPtyBackend
                 throw new Win32Exception(error, "Opening the ConPTY end of the input pipe failed");
             }
         }
+    }
+
+    /// <summary>
+    /// The <c>CreateProcessW</c> application name and command line for <paramref name="startInfo"/>. A batch file
+    /// without a raw <see cref="PtyStartInfo.CommandLine"/> runs through <c>cmd.exe</c> with its arguments escaped for
+    /// it (<see cref="WindowsBatchFile"/>). A program image named like a batch file runs as a program from the file
+    /// the same lookup found, with the file name quoted by the MSVCRT rules and the quoted arguments after it. Anything
+    /// else is left to <c>CreateProcessW</c>'s own lookup, with the quoted arguments or the raw command line after the
+    /// quoted file name.
+    /// </summary>
+    internal static (string? ApplicationName, char[] CommandLine) BuildLaunch(PtyStartInfo startInfo)
+    {
+        if (startInfo.CommandLine is not { Length: > 0 } && WindowsBatchFile.IsBatchFile(startInfo.FileName))
+        {
+            WindowsBatchFile.ValidateName(startInfo.FileName);
+            var script = WindowsBatchFile.ResolveScript(startInfo.FileName);
+            if (!WindowsBatchFile.IsExecutableImage(script))
+                return (WindowsBatchFile.CommandInterpreterPath, WindowsBatchFile.BuildCommandLine(script, startInfo.Arguments));
+
+            // A program named like a batch file runs as itself, from the file whose header was read. Left to its own
+            // lookup, CreateProcess could find another file of the name, or the file could have become a script in
+            // the meantime, and either would reach cmd.exe with the arguments quoted for a program instead.
+            return (script, BuildCommandLine(startInfo));
+        }
+
+        return (null, BuildCommandLine(startInfo));
     }
 
     /// <summary>
