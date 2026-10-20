@@ -82,6 +82,196 @@ public sealed class WindowsCommandLineTests
         }
     }
 
+    // ---------------------------------------------------------------- Batch files (WindowsBatchFile)
+
+    [Test]
+    [Arguments("x.bat", true)]
+    [Arguments("X.CMD", true)]                 // the extension is case-insensitive
+    [Arguments("C:\\dir\\x.Cmd", true)]        // with a directory
+    [Arguments("x.cmd.", true)]                // Windows drops trailing dots...
+    [Arguments("x.cmd ", true)]                // ...and spaces, so these open x.cmd
+    [Arguments("x.cmd. .", true)]
+    [Arguments("x.exe", false)]
+    [Arguments("x.cmdx", false)]
+    [Arguments("x.bat.txt", false)]
+    [Arguments("C:\\x.cmd\\app.exe", false)]   // a directory named like a batch file
+    [Arguments("cmd", false)]
+    public async Task BatchFileIsRecognizedByItsEffectiveExtension(string fileName, bool expected)
+    {
+        await Assert.That(WindowsBatchFile.IsBatchFile(fileName)).IsEqualTo(expected);
+    }
+
+    [Test]
+    [Arguments("plain", "plain")]                              // letters only: unquoted
+    [Arguments("C:\\dir\\file", "C:\\dir\\file")]              // backslash and colon need no quotes
+    [Arguments("--name=1", "\"--name=1\"")]                    // '=' is a cmd delimiter: quoted
+    [Arguments("", "\"\"")]                                    // empty
+    [Arguments("a b", "\"a b\"")]                              // space
+    [Arguments("a\tb", "\"a\tb\"")]                            // control character
+    [Arguments("x\" & calc & \"", "\"x\"\" & calc & \"\"\"")]  // a quote doubles, so cmd's quoting never closes
+    [Arguments("a\\\"b", "\"a\\\\\"\"b\"")]                    // a backslash before a quote doubles for MSVCRT
+    [Arguments("C:\\dir\\", "\"C:\\dir\\\\\"")]                // a trailing backslash forces quotes and doubles
+    [Arguments("50%", "\"50%%cd:~,%\"")]                       // percent cannot start an expansion
+    [Arguments("%PATH%", "\"%%cd:~,%PATH%%cd:~,%\"")]
+    [Arguments("a&b|c<d>e^f(g)", "\"a&b|c<d>e^f(g)\"")]        // cmd metacharacters stay inside quotes
+    [Arguments("!PATH!", "\"!PATH!\"")]                        // inert under /v:OFF, quoted like any symbol
+    [Arguments("日本語", "日本語")]                              // non-ASCII text: unquoted
+    public async Task BatchArgumentIsEscapedForCmd(string argument, string expected)
+    {
+        var commandLine = BuildBatch("C:\\s\\x.cmd", [argument]);
+
+        await Assert.That(commandLine).IsEqualTo("cmd.exe /e:ON /v:OFF /d /c \"\"C:\\s\\x.cmd\" " + expected + "\"");
+    }
+
+    [Test]
+    public async Task BatchCommandLineWithoutArgumentsWrapsTheScriptInTheOuterQuotes()
+    {
+        await Assert.That(BuildBatch("C:\\s\\x.cmd", [])).IsEqualTo("cmd.exe /e:ON /v:OFF /d /c \"\"C:\\s\\x.cmd\"\"");
+    }
+
+    [Test]
+    public async Task BatchScriptPathEscapesPercent()
+    {
+        var commandLine = BuildBatch("C:\\100%\\x.cmd", ["a"]);
+
+        await Assert.That(commandLine).IsEqualTo("cmd.exe /e:ON /v:OFF /d /c \"\"C:\\100%%cd:~,%\\x.cmd\" a\"");
+    }
+
+    [Test]
+    [Arguments("a\rb")]
+    [Arguments("a\nb")]
+    [Arguments("a\0b")]
+    public async Task BatchArgumentThatCmdCannotReceiveIsRejected(string argument)
+    {
+        Assert.Throws<ArgumentException>(() => WindowsBatchFile.BuildCommandLine("C:\\s\\x.cmd", ["ok", argument]));
+        await Task.CompletedTask;
+    }
+
+    [Test]
+    [Arguments("C:\\s\\x\".cmd")]
+    [Arguments("C:\\s\\")]
+    public async Task BatchScriptPathThatCannotBeQuotedIsRejected(string scriptPath)
+    {
+        Assert.Throws<ArgumentException>(() => WindowsBatchFile.BuildCommandLine(scriptPath, []));
+        await Task.CompletedTask;
+    }
+
+    [Test]
+    public async Task BatchBufferIsExactlyTheCommandLinePlusOneNul()
+    {
+        var buffer = WindowsBatchFile.BuildCommandLine("C:\\1%\\x.cmd", ["a\\\"b", "x y\\", "50%", ""]);
+
+        await Assert.That(buffer[^1]).IsEqualTo('\0');
+        await Assert.That(Array.IndexOf(buffer, '\0')).IsEqualTo(buffer.Length - 1);
+    }
+
+    [Test]
+    public async Task BatchEscapingMatchesReferenceForRandomArguments()
+    {
+        // Characters that drive every branch: safe, unsafe ASCII, quote, backslash, percent, non-ASCII.
+        const string Alphabet = "ab \t\"\\%&=!日";
+        var random = new Random(20261020);
+        for (var iteration = 0; iteration < 2000; iteration++)
+        {
+            var arguments = new string[random.Next(0, 4)];
+            for (var i = 0; i < arguments.Length; i++)
+            {
+                var chars = new char[random.Next(0, 8)];
+                for (var c = 0; c < chars.Length; c++)
+                    chars[c] = Alphabet[random.Next(Alphabet.Length)];
+                arguments[i] = new string(chars);
+            }
+
+            var expected = "cmd.exe /e:ON /v:OFF /d /c \"\"C:\\s\\x.cmd\"";
+            foreach (var argument in arguments)
+                expected += " " + ReferenceBatchQuote(argument);
+            expected += "\"";
+
+            await Assert.That(BuildBatch("C:\\s\\x.cmd", arguments)).IsEqualTo(expected);
+        }
+    }
+
+    [Test]
+    public async Task BatchFileWithArgumentsLaunchesTheSystemCommandInterpreter()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var (applicationName, commandLine) = WindowsPtyBackend.BuildLaunch(
+            new PtyStartInfo { FileName = "C:\\s\\x.cmd", Arguments = ["a b"] });
+
+        await Assert.That(applicationName).IsEqualTo(Path.Combine(Environment.SystemDirectory, "cmd.exe"));
+        await Assert.That(new string(commandLine, 0, commandLine.Length - 1))
+            .IsEqualTo("cmd.exe /e:ON /v:OFF /d /c \"\"C:\\s\\x.cmd\" \"a b\"\"");
+    }
+
+    [Test]
+    public async Task BatchFileWithARawCommandLineIsLeftToCreateProcess()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // CommandLine is documented as passed without escaping; the caller owns cmd's rules for it.
+        var (applicationName, commandLine) = WindowsPtyBackend.BuildLaunch(
+            new PtyStartInfo { FileName = "C:\\s\\x.cmd", CommandLine = "\"a b\"" });
+
+        await Assert.That(applicationName).IsNull();
+        await Assert.That(new string(commandLine, 0, commandLine.Length - 1)).IsEqualTo("\"C:\\s\\x.cmd\" \"a b\"");
+    }
+
+    [Test]
+    public async Task ProgramIsLeftToCreateProcess()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var (applicationName, commandLine) = WindowsPtyBackend.BuildLaunch(
+            new PtyStartInfo { FileName = "app.exe", Arguments = ["a b"] });
+
+        await Assert.That(applicationName).IsNull();
+        await Assert.That(new string(commandLine, 0, commandLine.Length - 1)).IsEqualTo("app.exe \"a b\"");
+    }
+
+    private static string BuildBatch(string scriptPath, IReadOnlyList<string> arguments)
+    {
+        var buffer = WindowsBatchFile.BuildCommandLine(scriptPath, arguments);
+        return new string(buffer, 0, buffer.Length - 1);
+    }
+
+    /// <summary>A straightforward StringBuilder version of the batch escaping, the oracle for the measured writer.</summary>
+    private static string ReferenceBatchQuote(string arg)
+    {
+        var quote = arg.Length == 0 || arg[^1] == '\\';
+        foreach (var c in arg)
+            quote |= char.IsControl(c) || (char.IsAscii(c) && !char.IsAsciiLetterOrDigit(c) && !"#$*+-./:?@\\_".Contains(c));
+
+        var sb = new System.Text.StringBuilder();
+        if (quote)
+            sb.Append('"');
+        var backslashes = 0;
+        foreach (var c in arg)
+        {
+            if (c == '\\')
+            {
+                backslashes++;
+            }
+            else
+            {
+                if (c == '"')
+                    sb.Append('\\', backslashes).Append('"');
+                else if (c == '%')
+                    sb.Append("%%cd:~,");
+                backslashes = 0;
+            }
+
+            sb.Append(c);
+        }
+
+        if (quote)
+            sb.Append('\\', backslashes).Append('"');
+        return sb.ToString();
+    }
+
     private static string Build(PtyStartInfo startInfo)
     {
         var buffer = WindowsPtyBackend.BuildCommandLine(startInfo);

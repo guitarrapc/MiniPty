@@ -105,6 +105,19 @@ Without this, command output can appear on the parent's console instead of the c
 
 ConPTY requires Windows 10 1809+ / Windows 11. MiniPty does not use winpty.
 
+### Batch files and `cmd.exe` parsing
+
+`CreateProcess` with a `.bat` or `.cmd` file starts `cmd.exe` on the given command line, and `cmd.exe` toggles its quoting on every `"`, ignoring the MSVCRT `\"` escape. `"x\" & echo INJECTED & \""` therefore leaves `& echo INJECTED &` outside quotes, and `cmd.exe` runs it. MiniPty starts `cmd.exe` itself for a batch file and escapes for it; the rules are in [Batch files](../specs/core_session.md#batch-files-windows). Points that took measurement or the console host's behavior to settle:
+
+| Point | Finding |
+|---|---|
+| `""` inside quotes | Keeps `cmd.exe`'s quoting intact (it closes and reopens), and a program that receives the arguments through `%*` reads it as one quote under the UCRT parser that .NET's apphost uses. |
+| `%` | Expands inside quotes too: without the `%%cd:~,%` escape, `%PATH%` reached the forwarded program as the PATH value. |
+| `/v:OFF`, `/e:ON`, `/d` | Defaults that a user's registry can change (`DelayedExpansion`, `EnableExtensions`, `AutoRun`), so they are passed explicitly; with the defaults in place, no test can tell them apart from leaving them off. |
+| Trailing spaces and dots | Windows opens `script.cmd.` as `script.cmd`, so detection trims them first; without that, the name with a dot ran on the unescaped path and the injection worked. |
+| `%1` versus `%~1` | `%1` and `%*` keep MiniPty's quotes; `%~1` strips them, so a script that uses `%~1` unquoted in a command reopens the injection inside the script. |
+| `NoDefaultCurrentDirectoryInExePath` | A shell can set it (the one these measurements ran in did). Without it, a bare `FileName` such as `whoami` ran a `whoami.exe` planted in the host's current directory instead of the System32 one. |
+
 ### Out-of-band ConPTY
 
 `PtyStartInfo.ConPty` runs a session on `conpty.dll` plus `OpenConsole.exe` supplied by the application ([Out-of-band ConPTY](../specs/core_session.md#out-of-band-conpty)). What differs from the in-box path, verified against the console host source of the 1.22, 1.24, 1.25, and main branches, the export tables of the 1.22 and 1.25 builds, and package `1.25.260930003` on Windows 11 build 26200:

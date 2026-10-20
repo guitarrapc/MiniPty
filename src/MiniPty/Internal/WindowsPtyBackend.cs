@@ -159,6 +159,8 @@ internal static class WindowsPtyBackend
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
+        // Decided before any handle exists, so a batch file's rejected argument or missing script fails without cleanup.
+        var (applicationName, commandLine) = BuildLaunch(startInfo);
 
         CreateConPtyPipes(out var inputRead, out var inputWrite, out var outputRead, out var outputWrite);
         var inputWriteHandle = inputWrite;
@@ -264,7 +266,6 @@ internal static class WindowsPtyBackend
                 lpAttributeList = attrList,
             };
 
-            var commandLine = BuildCommandLine(startInfo);
             var environment = PtyEnvironment.BuildWindows(startInfo);
             var creationFlags = ExtendedStartupInfoPresent;
             if (environment is not null)
@@ -274,7 +275,7 @@ internal static class WindowsPtyBackend
             }
 
             if (!WindowsInterop.CreateProcessW(
-                    null,
+                    applicationName,
                     commandLine,
                     IntPtr.Zero,
                     IntPtr.Zero,
@@ -1534,6 +1535,23 @@ internal static class WindowsPtyBackend
                 throw new Win32Exception(error, "Opening the ConPTY end of the input pipe failed");
             }
         }
+    }
+
+    /// <summary>
+    /// The <c>CreateProcessW</c> application name and command line for <paramref name="startInfo"/>. A batch file with
+    /// arguments from <see cref="PtyStartInfo.Arguments"/> runs through <c>cmd.exe</c> with cmd-safe escaping
+    /// (<see cref="WindowsBatchFile"/>); everything else, a raw <see cref="PtyStartInfo.CommandLine"/> included, is
+    /// left to <c>CreateProcessW</c>'s own lookup with the MSVCRT-quoted command line.
+    /// </summary>
+    internal static (string? ApplicationName, char[] CommandLine) BuildLaunch(PtyStartInfo startInfo)
+    {
+        if (startInfo.CommandLine is not { Length: > 0 } && WindowsBatchFile.IsBatchFile(startInfo.FileName))
+        {
+            var script = WindowsBatchFile.ResolveScript(startInfo.FileName);
+            return (WindowsBatchFile.CommandInterpreterPath, WindowsBatchFile.BuildCommandLine(script, startInfo.Arguments));
+        }
+
+        return (null, BuildCommandLine(startInfo));
     }
 
     /// <summary>

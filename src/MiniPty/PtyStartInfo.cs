@@ -8,12 +8,26 @@ public sealed record PtyStartInfo
     /// <summary>
     /// Gets or sets the executable file name or full path of the child process.
     /// </summary>
+    /// <remarks>
+    /// On Windows, a batch file (<c>.bat</c> or <c>.cmd</c>, judged after trailing spaces and dots) runs through the
+    /// system directory's <c>cmd.exe</c>, and <see cref="Arguments"/> are escaped for <c>cmd.exe</c> instead of quoted
+    /// with the MSVCRT rules, so an argument cannot run a command of its own. It is looked up where
+    /// <c>CreateProcess</c> looks up a program.
+    /// </remarks>
     public required string FileName { get; init; }
 
     /// <summary>
     /// Gets or sets command-line arguments passed to the child (excluding <see cref="FileName"/>).
     /// </summary>
     /// <value>An empty list when no arguments are required. Default is an empty list.</value>
+    /// <remarks>
+    /// Each element reaches the child as one argument. On Windows it is quoted with the MSVCRT rules for a program
+    /// and escaped for <c>cmd.exe</c> for a batch file, and a program a batch file forwards <c>%*</c> to receives it
+    /// unchanged. An argument for a batch file cannot contain a carriage return, a line feed, or a NUL, which
+    /// <c>cmd.exe</c> cannot receive; <see cref="Pty.Start"/> throws <see cref="ArgumentException"/> for one. When
+    /// the child is <c>cmd.exe</c> itself, what follows <c>/c</c> is a command for it to parse: never pass user input
+    /// there.
+    /// </remarks>
     public IReadOnlyList<string> Arguments { get; init; } = [];
 
     /// <summary>
@@ -25,7 +39,8 @@ public sealed record PtyStartInfo
     /// </value>
     /// <remarks>
     /// No quoting or escaping is applied to this value. The caller must follow the parsing rules
-    /// of the target executable, matching node-pty's Windows string-arguments overload.
+    /// of the target executable, matching node-pty's Windows string-arguments overload. For a batch file those are
+    /// <c>cmd.exe</c>'s rules; use <see cref="Arguments"/> to have MiniPty escape for it.
     /// </remarks>
     public string? CommandLine { get; init; }
 

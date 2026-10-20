@@ -10,9 +10,9 @@ Implemented user-facing contract for the **MiniPty** core session API.
 
 | Member | Behavior |
 |---|---|
-| `FileName` | Executable path or name. Required. |
-| `Arguments` | Arguments after the executable. Default is empty. |
-| `CommandLine` | Optional pre-escaped Windows argument command line. Mutually exclusive with `Arguments`; unsupported on Unix. |
+| `FileName` | Executable path or name. Required. On Windows a `.bat` or `.cmd` file runs through `cmd.exe` with its arguments escaped for it; see [Batch files](#batch-files-windows). |
+| `Arguments` | Arguments after the executable. Default is empty. Each reaches the child as one argument: quoted with the MSVCRT rules for a program, escaped for `cmd.exe` for a batch file. |
+| `CommandLine` | Optional pre-escaped Windows argument command line. Mutually exclusive with `Arguments`; unsupported on Unix. Passed without any escaping, also to a batch file. |
 | `WorkingDirectory` | Optional child working directory. Null inherits the parent working directory. |
 | `Size` | Initial terminal columns x rows. Default is 80x24. Each dimension is clamped to the platform limit at spawn and on `Resize`: 1–32767 on Windows (ConPTY's signed 16-bit `COORD`), 1–65535 on Unix (`winsize`). `PtySession.Size` reports the value applied. |
 | `Environment` | Optional child environment overlay. Null inherits the parent environment. Non-null entries override or remove inherited variables. |
@@ -20,6 +20,25 @@ Implemented user-facing contract for the **MiniPty** core session API.
 | `InheritCursor` | Default `false`. On Windows, start the child at the frontend's cursor instead of on a cleared screen (node-pty `conptyInheritCursor`); the frontend must answer ConPTY's cursor position query. Ignored on Unix, which already starts at the frontend's cursor. See [Inherited cursor](#inherited-cursor). |
 | `KillProcessTree` | Default `false`. On Windows, run the child in a kill-on-close job, so `Dispose`, `Kill`, and the end of the host process, including a crash, end every process the child started. Ignored on Unix. See [Process tree](#process-tree). |
 | `ConPty` | Default `null`: the ConPTY Windows ships. A `ConPtyLibrary` the application loaded runs the session on the out-of-band ConPTY (`conpty.dll` plus `OpenConsole.exe`) it supplies. Windows only. See [Out-of-band ConPTY](#out-of-band-conpty). |
+
+## Batch Files (Windows)
+
+`CreateProcess` runs a batch file by starting `cmd.exe` on the command line it is given, and `cmd.exe` does not parse that line by the MSVCRT rules every other program follows. An argument quoted by those rules could therefore close `cmd.exe`'s quoting and run a command: `x" & echo INJECTED & "` printed `INJECTED` from a `.cmd` file that only echoed its first argument. A host that passes user input to a tool's `.cmd` shim would run that user's commands.
+
+When `FileName` names a batch file and `Arguments` supplies the arguments, MiniPty starts the interpreter itself:
+
+| Rule | Behavior |
+|---|---|
+| Interpreter | `cmd.exe` from the system directory, never from `ComSpec`, run as `cmd.exe /e:ON /v:OFF /d /c ""script" args"`. `/d` skips the registry's AutoRun commands, `/v:OFF` keeps `!name!` from expanding, and `/e:ON` enables the extensions the percent escape needs; the registry can change all three defaults. `/c` strips the outer pair of quotes. |
+| Quoting | An argument is quoted when it is empty, ends with a backslash, or contains a control character or any ASCII character other than a letter, a digit, or `#$*+-./:?@\_`, so every character `cmd.exe` treats specially is inside quotes. A quote inside is doubled. Backslashes before a quote, and before the closing quote, are doubled. |
+| Percent | Each `%`, in an argument or in the script path, is written as `%%cd:~,%`. `%cd:~,%` is an empty substring of the current directory, so the first `%` survives and no `%name%` expands. |
+| Rejected | An argument that contains a carriage return, a line feed, or a NUL throws `ArgumentException` before anything starts: `cmd.exe` ends or cuts its command line there, so no quoting can deliver it. A script path that contains a quote or ends with a backslash is rejected the same way. |
+| Detection | By the extension after trailing spaces and dots, which Windows drops from a file name: `script.cmd.` is a batch file. |
+| Lookup | Where `CreateProcess` would have found it, since `cmd.exe`'s own lookup (its working directory, then `PATH` with `PATHEXT`) differs: a name with a directory is relative to the host's current directory; a bare name is searched for in the host executable's directory, the host's current directory (skipped when `NoDefaultCurrentDirectoryInExePath` is set), the system directories, the Windows directory, and the host's `PATH`. A bare name that is not found fails with `Win32Exception` (`ERROR_FILE_NOT_FOUND`), as before. |
+| Delivered | A program the script forwards `%*` to, as tool shims do, receives each argument exactly; verified for quotes, backslashes, `%`, `!`, `& | < > ^ ( )`, `= , ;`, tabs, empty arguments, and non-ASCII text. The script itself sees the escaped form in `%1` (`%~1` drops only the outer quotes). |
+| Not covered | A raw `CommandLine` is passed unchanged, as its contract says. A script that uses an argument unquoted in a command (`%~1` in `call %~1`, for example) can still be made to run something; only the script can prevent that. Starting `cmd.exe` directly with `/c` and user input in `Arguments` is likewise `cmd.exe` parsing that input. |
+
+Escaping was chosen over rejecting `cmd.exe`'s special characters: shims are called with paths, URLs, version ranges, and JSON, which contain `&`, `%`, `^`, and quotes, and the escaping above delivers all of them. Only the three characters no quoting can deliver are rejected.
 
 ## Spawn Environment
 
@@ -200,6 +219,7 @@ Hosts that keep sessions in a non-UI context should know that, with no `Synchron
 - Inherit-cursor was first deferred as a fix for a ConPTY cursor bug that nobody had reported. Its real use is a frontend that already shows content when the child starts: VS Code sets it whenever a terminal has `initialText`, and a console host keeps the user's screen with it (verified in a VT terminal: without it the prompt and earlier lines were erased; with it they stayed and the child's output followed).
 - Foreground process lookup belongs behind the existing Unix native boundary: `tcgetpgrp` supplies the foreground process group without spawning `ps`, preserving NativeAOT and avoiding a helper process on each editor poll. A process-group id is not always a live process id: after a pipeline leader exits, lookup must fall back to a remaining group member rather than reporting no active process.
 - Output must be read on a thread the library owns. The former producer started on the caller's captured context (through `Task.Yield`) and then blocked inside `ReadFile` / `read(2)`, which deadlocked a UI thread before the first chunk and froze it on every idle read; every idle session also parked a thread-pool worker. A per-session reader thread that completes allocation-free waits, whose continuations run asynchronously, removes all three.
+- A batch file's arguments are parsed by `cmd.exe`, not by MSVCRT rules, so the quoting that is correct for every program was an injection for `.bat` and `.cmd`. Two details only show up when trying: an injected `echo` can print its text with a stray quote after it (`INJECTED"`), so a test that looks for the exact line misses a working injection; and detecting the batch file by the name as given misses `script.cmd.` and `script.cmd `, which Windows opens as `script.cmd`.
 - Never blocking is not enough for a UI consumer; it must also give the thread back. A read that completes synchronously never returns to the dispatcher, so a handler slower than the child's output found the next chunk buffered every time and kept the UI thread for the whole flood: with 2 ms of work per chunk, a callback posted to the UI context waited over a second (G12 in [plan_gui_host_readiness.md](../plans/plan_gui_host_readiness.md)). A yield must also be completed only after the awaiter has registered: a value task that is already complete when it is awaited runs the continuation inline, so the reader completes the yield from `OnCompleted`, which makes the core post it to the captured context.
 - Reuse reader threads across sessions. A bare thread start allocates 137 bytes, and one pooled-array return on a fresh thread raised that to about 4.9 KB: the array pool allocates a per-thread cache on the first return, and the returned array is stranded in that cache when the thread exits. One-shot completion grows its result buffers on the reader thread, so a thread per session would pay this on every spawn. Parked reader threads serve later sessions and exit after 30 seconds idle.
 - One-shot completion writes into a sink on the reader thread instead of draining the buffer from a consumer task. With a bounded buffer, a consumer that only started draining after exit would block a bulk-output child before it could exit. Writing on the reader thread needs no consumer thread and removed the pump task, the polling drain, and the timeout tasks: about 0.7 KB less per `CompleteAsync`.

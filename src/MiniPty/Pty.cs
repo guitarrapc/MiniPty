@@ -42,6 +42,10 @@ public static class Pty
     /// <param name="startInfo">Executable, arguments, working directory, and initial terminal size.</param>
     /// <returns>A <see cref="PtySession"/> that owns the child process and PTY handles. Does not wait for exit.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="startInfo"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">
+    /// Both <see cref="PtyStartInfo.CommandLine"/> and <see cref="PtyStartInfo.Arguments"/> are set; or, on Windows, an
+    /// argument for a batch file contains a carriage return, a line feed, or a NUL.
+    /// </exception>
     /// <exception cref="PlatformNotSupportedException">The current operating system is not supported.</exception>
     /// <exception cref="System.ComponentModel.Win32Exception">Windows: process or ConPTY creation failed.</exception>
     /// <exception cref="IOException">Unix: <c>openpty</c>, <c>fork</c>, or <c>exec</c> failed.</exception>
