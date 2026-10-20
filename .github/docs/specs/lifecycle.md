@@ -157,7 +157,7 @@ EOF staging advances on a per-session 100 ms timer, so it gives the child time t
 | Condition | Behavior |
 |---|---|
 | Unsupported OS | `PlatformNotSupportedException` from `Pty.Start`. |
-| Program not found, or working directory missing | Windows: `Win32Exception` from `Pty.Start` (`ERROR_FILE_NOT_FOUND` 2, `ERROR_DIRECTORY` 267), because `CreateProcess` fails. Unix: `Pty.Start` succeeds, because the fork has already happened when `exec` or `chdir` fails in the child; the child exits with 127 or 126, the shell convention. |
+| Program not found, or working directory missing | Windows: `Win32Exception` from `Pty.Start` (`ERROR_FILE_NOT_FOUND` 2, `ERROR_DIRECTORY` 267), because `CreateProcess` fails. A batch file that is not found, or that cannot be opened, fails the same way from MiniPty's lookup, which follows `CreateProcess` ([Batch files](core_session.md#batch-files-windows)). Unix: `Pty.Start` succeeds, because the fork has already happened when `exec` or `chdir` fails in the child; the child exits with 127 or 126, the shell convention. |
 | Spawn, ConPTY, `openpty`, or `forkpty` failure | OS exception with error code; run aborts. What the start had created is released, and a child it had already started is killed (and reaped on Unix). |
 | Child non-zero exit | Returned as `ExitCode`; MiniPty does not throw for non-zero child exits. |
 | Second output consumer | `InvalidOperationException`. |

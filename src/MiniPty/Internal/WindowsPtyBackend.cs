@@ -1538,17 +1538,20 @@ internal static class WindowsPtyBackend
     }
 
     /// <summary>
-    /// The <c>CreateProcessW</c> application name and command line for <paramref name="startInfo"/>. A batch file with
-    /// arguments from <see cref="PtyStartInfo.Arguments"/> runs through <c>cmd.exe</c> with cmd-safe escaping
-    /// (<see cref="WindowsBatchFile"/>); everything else, a raw <see cref="PtyStartInfo.CommandLine"/> included, is
-    /// left to <c>CreateProcessW</c>'s own lookup with the MSVCRT-quoted command line.
+    /// The <c>CreateProcessW</c> application name and command line for <paramref name="startInfo"/>. A batch file
+    /// without a raw <see cref="PtyStartInfo.CommandLine"/> runs through <c>cmd.exe</c> with its arguments escaped for
+    /// it (<see cref="WindowsBatchFile"/>). Anything else is left to <c>CreateProcessW</c>'s own lookup, with the file
+    /// name quoted by the MSVCRT rules and the quoted arguments or the raw command line after it.
     /// </summary>
     internal static (string? ApplicationName, char[] CommandLine) BuildLaunch(PtyStartInfo startInfo)
     {
         if (startInfo.CommandLine is not { Length: > 0 } && WindowsBatchFile.IsBatchFile(startInfo.FileName))
         {
+            WindowsBatchFile.ValidateName(startInfo.FileName);
             var script = WindowsBatchFile.ResolveScript(startInfo.FileName);
-            return (WindowsBatchFile.CommandInterpreterPath, WindowsBatchFile.BuildCommandLine(script, startInfo.Arguments));
+            // A program named like a batch file runs as itself under CreateProcess, which finds the same file.
+            if (!WindowsBatchFile.IsExecutableImage(script))
+                return (WindowsBatchFile.CommandInterpreterPath, WindowsBatchFile.BuildCommandLine(script, startInfo.Arguments));
         }
 
         return (null, BuildCommandLine(startInfo));

@@ -9,10 +9,16 @@ public sealed record PtyStartInfo
     /// Gets or sets the executable file name or full path of the child process.
     /// </summary>
     /// <remarks>
-    /// On Windows, a batch file (<c>.bat</c> or <c>.cmd</c>, judged after trailing spaces and dots) runs through the
-    /// system directory's <c>cmd.exe</c>, and <see cref="Arguments"/> are escaped for <c>cmd.exe</c> instead of quoted
-    /// with the MSVCRT rules, so an argument cannot run a command of its own. It is looked up where
-    /// <c>CreateProcess</c> looks up a program.
+    /// On Windows, a batch file (<c>.bat</c> or <c>.cmd</c>, judged by the name Windows opens, after <c>.</c> and
+    /// <c>..</c> segments and trailing spaces and dots) runs through the system directory's <c>cmd.exe</c> with AutoRun
+    /// commands skipped, delayed expansion off, and command extensions on (<c>/d /v:OFF /e:ON</c>).
+    /// <see cref="Arguments"/> are escaped for <c>cmd.exe</c> instead of quoted with the MSVCRT rules, so
+    /// <c>cmd.exe</c> reads each one as data. A script can still run what an argument holds, for example with
+    /// <c>cmd /c %1</c> or <c>echo %~1</c>. The script is the file <c>CreateProcess</c> would find for this name,
+    /// looked up from this process's directories and <c>PATH</c> as for a program. A file that starts with the
+    /// <c>MZ</c> header runs as a program. Without a raw <see cref="CommandLine"/>, a batch file name cannot contain a
+    /// quote, a carriage return, a line feed, or a NUL. With one, <c>CreateProcess</c> starts <c>cmd.exe</c> with its
+    /// own defaults instead.
     /// </remarks>
     public required string FileName { get; init; }
 
@@ -21,14 +27,19 @@ public sealed record PtyStartInfo
     /// </summary>
     /// <value>An empty list when no arguments are required. Default is an empty list.</value>
     /// <remarks>
-    /// Each element reaches the child as one argument. On Windows it is quoted with the MSVCRT rules for a program
-    /// and escaped for <c>cmd.exe</c> for a batch file, and a program a batch file forwards <c>%*</c> to receives it
-    /// unchanged. An argument for a batch file cannot contain a carriage return, a line feed, or a NUL, which
-    /// <c>cmd.exe</c> cannot receive, and the whole <c>cmd.exe</c> command line, escaping included (each <c>%</c> takes
-    /// 8 characters), cannot exceed the 8191 characters <c>cmd.exe</c> runs; <see cref="Pty.Start"/> throws
-    /// <see cref="ArgumentException"/> for either. When
-    /// the child is <c>cmd.exe</c> itself, what follows <c>/c</c> is a command for it to parse: never pass user input
-    /// there.
+    /// Each element reaches a program as one argument. On Windows it is quoted by the MSVCRT rules, which the UCRT,
+    /// <c>msvcrt.dll</c>, and <c>CommandLineToArgvW</c> parsers all read back the same. For a batch file it is
+    /// escaped for <c>cmd.exe</c> instead and becomes one parameter of the script (<c>%1</c>, <c>%2</c>, and so on).
+    /// A program the script forwards <c>%*</c> to reads each element back unchanged when it parses its command line
+    /// with the UCRT. The pre-2008 rules, which <c>CommandLineToArgvW</c> and <c>msvcrt.dll</c> follow, read a quote
+    /// inside an element as one that also ends the quoting. After such an element the boundaries move: later elements
+    /// can merge into it, and its spaces can start new arguments.
+    /// An argument for a batch file cannot contain a carriage return, a line feed, or a NUL, which <c>cmd.exe</c>
+    /// cannot receive. The batch file's whole <c>cmd.exe</c> command line cannot exceed the 8191 characters
+    /// <c>cmd.exe</c> runs. The count includes the script's full path and the escaping: the quotes around an argument,
+    /// a doubled quote and the backslashes doubled before it, and 8 characters for each <c>%</c>.
+    /// <see cref="Pty.Start"/> throws <see cref="ArgumentException"/> for either. When the child is <c>cmd.exe</c>
+    /// itself, what follows <c>/c</c> is a command for it to parse, so never pass user input there.
     /// </remarks>
     public IReadOnlyList<string> Arguments { get; init; } = [];
 
@@ -40,9 +51,9 @@ public sealed record PtyStartInfo
     /// <see cref="Arguments"/> must be empty. Unsupported on Unix.
     /// </value>
     /// <remarks>
-    /// No quoting or escaping is applied to this value. The caller must follow the parsing rules
-    /// of the target executable, matching node-pty's Windows string-arguments overload. For a batch file those are
-    /// <c>cmd.exe</c>'s rules; use <see cref="Arguments"/> to have MiniPty escape for it.
+    /// No quoting or escaping is applied to this value. The caller must follow the parsing rules of the target
+    /// executable. For a batch file those are <c>cmd.exe</c>'s rules, and <c>CreateProcess</c> starts <c>cmd.exe</c>
+    /// with its defaults, AutoRun commands included. Use <see cref="Arguments"/> to have MiniPty escape for it.
     /// </remarks>
     public string? CommandLine { get; init; }
 

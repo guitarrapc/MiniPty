@@ -1,16 +1,17 @@
+using System.Buffers;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 namespace MiniPty.Internal;
 
 /// <summary>
-/// Starts a batch file (<c>.bat</c>, <c>.cmd</c>) so that its arguments reach it as data, never as commands.
+/// Starts a batch file (<c>.bat</c>, <c>.cmd</c>) so that <c>cmd.exe</c> reads its arguments as data, not as commands.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <c>CreateProcess</c> runs a batch file by starting <c>cmd.exe</c> on the command line it was given, and
-/// <c>cmd.exe</c> does not parse arguments by the MSVCRT rules every other program uses. An argument quoted by those
-/// rules can close <c>cmd.exe</c>'s quoting and run a command of its own: <c>x" &amp; calc &amp; "</c>, quoted as
+/// <c>cmd.exe</c> does not parse arguments by the MSVCRT rules. An argument quoted by those rules can close
+/// <c>cmd.exe</c>'s quoting and run a command of its own: <c>x" &amp; calc &amp; "</c>, quoted as
 /// <c>"x\" &amp; calc &amp; \""</c>, runs <c>calc</c>. A host that passes user input as an argument to a batch file,
 /// such as a tool's <c>.cmd</c> shim, would run that user's commands.
 /// </para>
@@ -21,102 +22,273 @@ namespace MiniPty.Internal;
 /// <list type="bullet">
 /// <item><c>/d</c> skips the AutoRun commands from the registry, <c>/v:OFF</c> turns delayed expansion off so
 /// <c>!name!</c> is not expanded, and <c>/e:ON</c> turns on the command extensions the percent escape relies on.
-/// The registry can change all three defaults, so they are explicit.</item>
-/// <item>The outer pair of quotes is the one <c>cmd.exe /c</c> strips when the command line holds more than two
-/// quotes; the script path and every argument keep their own.</item>
-/// <item>An argument is quoted when it is empty, ends with a backslash, or contains a control character or any ASCII
-/// character other than a letter, a digit, or <c>#$*+-./:?@\_</c>, so every character <c>cmd.exe</c> treats specially
-/// is inside quotes. A quote inside is doubled (<c>""</c>), which keeps <c>cmd.exe</c>'s quoting intact and is read
-/// as one quote by a program that receives the arguments through the script (<c>%*</c>); backslashes before it, and
-/// before the closing quote, are doubled for that program's MSVCRT parser.</item>
-/// <item>Each <c>%</c>, also in the script path, is written as <c>%%cd:~,%</c>: <c>%cd:~,%</c> is an empty substring
+/// The registry can add AutoRun commands and change the other two defaults, so all three switches are explicit.</item>
+/// <item><c>cmd.exe /c</c> strips the first and last quote of a line that starts with a quote and holds more than
+/// two. The outer pair is there to be stripped, so the script path and every argument keep their own.</item>
+/// <item>An argument is quoted when it is empty, ends with a backslash, or holds any character other than an ASCII
+/// letter, an ASCII digit, or one of <c>#$*+-./:?@\_</c>. Every character <c>cmd.exe</c> treats specially is then
+/// inside quotes, and so is every non-ASCII space it splits parameters on.</item>
+/// <item>A quote inside an argument is doubled, so <c>cmd.exe</c>'s quoting closes and reopens around it with nothing
+/// in between. A program the script forwards <c>%*</c> to reads the pair as one quote when it parses its command line
+/// with the UCRT. The pre-2008 rules, which <c>CommandLineToArgvW</c> and <c>msvcrt.dll</c> follow, read the pair as
+/// a quote that also ends the quoting, so the argument boundaries after it move. Backslashes before a quote, and
+/// before the closing quote, are doubled for the program's parser.</item>
+/// <item>Each <c>%</c>, also in the script path, is written as <c>%%cd:~,%</c>. <c>%cd:~,%</c> is an empty substring
 /// of the current directory, so the first <c>%</c> survives and no <c>%name%</c> can expand.</item>
-/// <item>An argument with a carriage return, a line feed, or a NUL is rejected: <c>cmd.exe</c> ends or cuts its
-/// command line there, so no quoting can deliver it.</item>
-/// <item>A command line longer than <see cref="CommandLineLimit"/> characters is rejected. <c>cmd.exe</c> counts the
-/// whole line as written, its own switches and every escape included, and refuses a longer one with "The command
-/// line is too long"; the session would start and fail with nothing pointing at the cause.</item>
+/// <item>A carriage return, a line feed, or a NUL in an argument is rejected, and so is any of them or a quote in the
+/// file name. <c>cmd.exe</c> drops a carriage return and ends its command line at a line feed or a NUL, so no quoting
+/// can deliver them.</item>
+/// <item>A command line longer than <see cref="CommandLineLimit"/> characters is rejected. Otherwise the session would
+/// start and <c>cmd.exe</c> would fail with "The command line is too long", with nothing pointing at the cause.</item>
 /// </list>
 /// <para>
-/// A file is a batch file by its extension after trailing spaces and dots, which Windows drops from a file name: a
-/// check on the name as given lets <c>script.cmd.</c> run unescaped. The script is located where <c>CreateProcess</c>
-/// would have found it, because <c>cmd.exe</c>'s own lookup (its working directory, then <c>PATH</c> with
-/// <c>PATHEXT</c>) differs from it.
+/// A file is a batch file by the extension of the name Windows opens (<see cref="IsBatchFile"/>). A check on the name
+/// as given would let <c>script.cmd.</c> or <c>script.cmd\.</c> run unescaped. The script is the file
+/// <c>CreateProcess</c> would find for the name, and <c>cmd.exe</c> gets its full path. So <c>cmd.exe</c>'s own lookup,
+/// which starts in the child's working directory, never picks another file. A file that starts with the <c>MZ</c>
+/// header is a program image, which <c>CreateProcess</c> runs or refuses itself.
 /// </para>
 /// <para>
-/// What the script does with its arguments is its own: one that uses <c>%1</c> unquoted in a command can still be
-/// made to run something, and no caller can prevent that. A raw <see cref="PtyStartInfo.CommandLine"/> is passed
-/// unchanged, as its contract says.
+/// What the script does with its arguments is up to the script. One that hands an argument to <c>cmd /c</c>, or uses
+/// it without its quotes as <c>%~1</c>, can still be made to run something, and no caller can prevent that. A raw
+/// <see cref="PtyStartInfo.CommandLine"/> is passed unchanged, as its contract says.
 /// </para>
 /// </remarks>
 internal static partial class WindowsBatchFile
 {
     /// <summary>
-    /// The longest command line <c>cmd.exe</c> runs, in characters without the terminating NUL. Measured on Windows 11
-    /// build 26200: 8191 characters ran and 8192 did not, for any script path length and with or without escaped
-    /// <c>%</c> (the limit applies before expansion).
+    /// The longest command line <c>cmd.exe</c> runs, in characters without the terminating NUL. <c>cmd.exe</c> counts
+    /// the whole line as written: its program name, its switches, and every escape.
     /// </summary>
     internal const int CommandLineLimit = 8191;
 
     private const int ErrorFileNotFound = 2;
+    private const int ErrorAccessDenied = 5;
+    private const int ErrorBadExeFormat = 193;
+    private const uint InvalidFileAttributes = 0xFFFFFFFF;
+    private const uint FileAttributeDirectory = 0x10;
     private const string CommandPrefix = "cmd.exe /e:ON /v:OFF /d /c \"";
     private const string PercentEscape = "%%cd:~,";
-    private const string UnquotedSymbols = "#$*+-./:?@\\_";
+
+    // An argument made only of these needs no quotes: cmd.exe treats none of them specially or as a separator.
+    private static readonly SearchValues<char> s_unquoted =
+        SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#$*+-./:?@\\_");
+
+    private static string? s_systemDirectory;
+    private static string? s_windowsDirectory;
+    private static string? s_processDirectory;
+    private static string? s_commandInterpreterPath;
 
     /// <summary>Gets the interpreter that runs a batch file: <c>cmd.exe</c> in the system directory.</summary>
-    internal static string CommandInterpreterPath => Path.Combine(Environment.SystemDirectory, "cmd.exe");
+    internal static string CommandInterpreterPath => s_commandInterpreterPath ??= Path.Combine(SystemDirectory, "cmd.exe");
+
+    private static string SystemDirectory => s_systemDirectory ??= Environment.SystemDirectory;
+
+    private static string WindowsDirectory => s_windowsDirectory ??= Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+
+    private static string? ProcessDirectory => s_processDirectory ??= Path.GetDirectoryName(Environment.ProcessPath);
 
     /// <summary>
-    /// Whether <paramref name="fileName"/> names a batch file, judged as Windows opens it: by the extension after
-    /// trailing spaces and dots.
+    /// Whether <paramref name="fileName"/> names a batch file: whether the last component left after <c>.</c> and
+    /// <c>..</c> segments, with its trailing spaces and dots dropped, ends in <c>.bat</c> or <c>.cmd</c>.
     /// </summary>
+    /// <remarks>
+    /// Windows removes those segments and trailing characters before it opens a name, and <c>CreateProcess</c> starts
+    /// <c>cmd.exe</c> for <c>x.cmd\.</c>, <c>x.cmd\sub\..</c> and <c>x.cmd\. </c>. <c>GetFullPathNameW</c> turns the
+    /// last one into <c>x.cmd\</c>, so it cannot decide this, and the rule is lexical instead. It also counts a name
+    /// such as <c>x.cmd\</c>, which no file can match. The lookup then fails, where the name taken as a program could
+    /// have reached <c>cmd.exe</c> unescaped.
+    /// </remarks>
     internal static bool IsBatchFile(string fileName)
     {
-        var name = fileName.AsSpan().TrimEnd(" .");
-        return name.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
-            || name.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase);
+        var name = fileName.AsSpan();
+        var pendingParents = 0;
+        while (true)
+        {
+            var separator = name.LastIndexOfAny('\\', '/');
+            var component = name[(separator + 1)..];
+            var trimmed = component.TrimEnd(" .");
+            if (trimmed.IsEmpty)
+            {
+                // Only dots and spaces: ".." goes up a level, and any other form such as "." or ". " is dropped.
+                if (component.TrimEnd(' ').SequenceEqual(".."))
+                    pendingParents++;
+            }
+            else if (pendingParents > 0)
+            {
+                pendingParents--;
+            }
+            else
+            {
+                return trimmed.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
+                    || trimmed.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (separator < 0)
+                return false;
+
+            name = name[..separator];
+        }
+    }
+
+    /// <summary>Rejects a batch file name that <c>cmd.exe</c> cannot receive as written.</summary>
+    /// <exception cref="ArgumentException">
+    /// The name contains a quote, a carriage return, a line feed, or a NUL.
+    /// </exception>
+    internal static void ValidateName(string fileName)
+    {
+        if (fileName.AsSpan().IndexOfAny("\"\r\n\0") >= 0)
+        {
+            throw new ArgumentException(
+                "A batch file name cannot contain a quote, a carriage return, a line feed, or a NUL character.",
+                "startInfo");
+        }
     }
 
     /// <summary>
-    /// Locates the script as <c>CreateProcess</c> locates a program: a name with a directory is relative to the host's
-    /// current directory, and a bare name is searched for in the host's own directory, the host's current directory
-    /// (unless <c>NoDefaultCurrentDirectoryInExePath</c> is set), the system directories, the Windows directory, and
-    /// the host's <c>PATH</c>.
+    /// Whether the script at <paramref name="path"/> is a program image rather than a script, by its <c>MZ</c> header.
     /// </summary>
-    /// <returns>The script's full path.</returns>
-    /// <exception cref="Win32Exception">A bare name was not found (<c>ERROR_FILE_NOT_FOUND</c>), as from <c>CreateProcess</c>.</exception>
-    internal static string ResolveScript(string fileName)
+    /// <remarks>
+    /// <c>CreateProcess</c> hands a <c>.bat</c> or <c>.cmd</c> file to <c>cmd.exe</c> only when the file is not empty
+    /// and does not start with this header. It runs a file that does as a program, or refuses it when it is not a
+    /// valid one. It fails when another handle denies reading the file or holds it for writing, so the file is opened
+    /// the same way here. A file that cannot be opened, or an empty one, then fails before the session starts, where
+    /// <c>cmd.exe</c> would report it only in its output.
+    /// </remarks>
+    /// <exception cref="Win32Exception">
+    /// The file cannot be opened, with the error <c>CreateProcess</c> would report, or it is empty
+    /// (<c>ERROR_BAD_EXE_FORMAT</c>).
+    /// </exception>
+    internal static bool IsExecutableImage(string path)
     {
-        if (Path.IsPathRooted(fileName) || fileName.AsSpan().IndexOfAny('\\', '/') >= 0)
-            return Path.GetFullPath(fileName);
-
-        var processDirectory = Path.GetDirectoryName(Environment.ProcessPath);
-        if (TryCandidate(processDirectory, fileName, out var found))
-            return found;
-
-        if (NeedCurrentDirectoryForExePathW(fileName) && TryCandidate(Environment.CurrentDirectory, fileName, out found))
-            return found;
-
-        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-        if (TryCandidate(Environment.SystemDirectory, fileName, out found)
-            || TryCandidate(Path.Combine(windows, "System"), fileName, out found)
-            || TryCandidate(windows, fileName, out found))
+        int read;
+        Span<byte> header = stackalloc byte[2];
+        try
         {
-            return found;
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            read = RandomAccess.Read(handle, header, 0);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // An HRESULT from a Win32 error carries that error in its low 16 bits.
+            var error = (e.HResult & unchecked((int)0xFFFF0000)) == unchecked((int)0x80070000) ? e.HResult & 0xFFFF : e.HResult;
+            throw new Win32Exception(error, "CreateProcess failed");
         }
 
-        var path = Environment.GetEnvironmentVariable("PATH");
+        if (read == 0)
+            throw new Win32Exception(ErrorBadExeFormat, "CreateProcess failed");
+
+        return read == 2 && header[0] == (byte)'M' && header[1] == (byte)'Z';
+    }
+
+    /// <summary>
+    /// The places a lookup searches, in <c>CreateProcess</c>'s order. <see cref="ResolveScript(string)"/> reads them
+    /// from the process.
+    /// </summary>
+    /// <param name="ProcessDirectory">The directory of the host executable, or null when unknown.</param>
+    /// <param name="CurrentDirectory">The host's current directory.</param>
+    /// <param name="SearchCurrentDirectory">Whether the current directory is searched, as
+    /// <c>NeedCurrentDirectoryForExePath</c> decides for the name.</param>
+    /// <param name="SystemDirectory">
+    /// The system directory. The 16-bit one is <c>System</c> under the Windows directory.
+    /// </param>
+    /// <param name="WindowsDirectory">The Windows directory.</param>
+    /// <param name="Path">
+    /// The host's <c>PATH</c>, or null when unset. <see cref="ResolveScript(string)"/> leaves it null and reads
+    /// <c>PATH</c> only when the fixed locations miss.
+    /// </param>
+    internal readonly record struct SearchLocations(
+        string? ProcessDirectory,
+        string CurrentDirectory,
+        bool SearchCurrentDirectory,
+        string SystemDirectory,
+        string WindowsDirectory,
+        string? Path);
+
+    /// <summary>Locates the script as <c>CreateProcess</c> locates a program, from this process's locations.</summary>
+    /// <returns>The script's full path.</returns>
+    /// <exception cref="Win32Exception">
+    /// No such file (<c>ERROR_FILE_NOT_FOUND</c>), or a directory found first (<c>ERROR_ACCESS_DENIED</c>), as from
+    /// <c>CreateProcess</c>.
+    /// </exception>
+    internal static string ResolveScript(string fileName)
+    {
+        // A rooted or dot-relative name is not searched for, so it reads neither the current directory nor PATH.
+        if (Path.IsPathRooted(fileName) || IsCurrentDirectoryRelative(fileName))
+            return Accept(Path.GetFullPath(fileName));
+
+        var locations = new SearchLocations(
+            ProcessDirectory,
+            Environment.CurrentDirectory,
+            NeedCurrentDirectoryForExePathW(fileName),
+            SystemDirectory,
+            WindowsDirectory,
+            Path: null);
+
+        // PATH, the longest string the lookup reads, is read only when the fixed locations miss.
+        if (TryFixedLocations(fileName, locations, out var found)
+            || TryPathEntries(fileName, Environment.GetEnvironmentVariable("PATH"), locations, out found))
+        {
+            return Accept(found);
+        }
+
+        throw new Win32Exception(ErrorFileNotFound, "CreateProcess failed");
+    }
+
+    /// <summary>
+    /// Locates the script as <c>CreateProcess</c> locates a program. A rooted name is taken as it is, and a name that
+    /// starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is relative to the current directory. A drive-relative
+    /// or root-relative name such as <c>C:x.cmd</c> or <c>\x.cmd</c> counts as rooted, and Windows resolves it from this
+    /// process's own current directories. Any other name, with a directory part
+    /// or without, is searched for in the host executable's directory, the current directory when it is searched, the
+    /// system directory, the 16-bit system directory, the Windows directory, and then each <c>PATH</c> entry as
+    /// written. An empty entry stands for the current directory, except one after the last semicolon, and a relative
+    /// entry is relative to the current directory. The first match decides, and a directory there fails the launch.
+    /// </summary>
+    /// <returns>The script's full path.</returns>
+    /// <exception cref="Win32Exception">
+    /// No such file (<c>ERROR_FILE_NOT_FOUND</c>), or a directory found first (<c>ERROR_ACCESS_DENIED</c>), as from
+    /// <c>CreateProcess</c>.
+    /// </exception>
+    internal static string ResolveScript(string fileName, in SearchLocations locations)
+    {
+        if (Path.IsPathRooted(fileName))
+            return Accept(Path.GetFullPath(fileName));
+
+        if (IsCurrentDirectoryRelative(fileName))
+            return Accept(Path.GetFullPath(fileName, locations.CurrentDirectory));
+
+        if (TryFixedLocations(fileName, locations, out var found) || TryPathEntries(fileName, locations.Path, locations, out found))
+            return Accept(found);
+
+        throw new Win32Exception(ErrorFileNotFound, "CreateProcess failed");
+    }
+
+    private static bool TryFixedLocations(string fileName, in SearchLocations locations, out string found) =>
+        (!string.IsNullOrEmpty(locations.ProcessDirectory) && TryCandidate(locations.ProcessDirectory, fileName, locations, out found))
+        || (locations.SearchCurrentDirectory && TryCandidate(locations.CurrentDirectory, fileName, locations, out found))
+        || TryCandidate(locations.SystemDirectory, fileName, locations, out found)
+        || TryCandidate(Path.Join(locations.WindowsDirectory, "System"), fileName, locations, out found)
+        || TryCandidate(locations.WindowsDirectory, fileName, locations, out found);
+
+    private static bool TryPathEntries(string fileName, string? path, in SearchLocations locations, out string found)
+    {
         if (path is not null)
         {
             foreach (var range in path.AsSpan().Split(';'))
             {
-                var entry = path.AsSpan(range).Trim().Trim('"');
-                if (!entry.IsEmpty && TryCandidate(entry.ToString(), fileName, out found))
-                    return found;
+                var entry = path.AsSpan(range);
+                // The list ends at its last semicolon, so a final empty entry is not the current directory.
+                if (entry.IsEmpty && range.End.GetOffset(path.Length) == path.Length)
+                    break;
+
+                if (TryCandidate(entry.IsEmpty ? locations.CurrentDirectory : entry, fileName, locations, out found))
+                    return true;
             }
         }
 
-        throw new Win32Exception(ErrorFileNotFound, "CreateProcess failed");
+        found = "";
+        return false;
     }
 
     /// <summary>
@@ -132,7 +304,10 @@ internal static partial class WindowsBatchFile
         if (scriptPath.Contains('"') || scriptPath.EndsWith('\\'))
             throw new ArgumentException("A batch file path cannot contain a quote or end with a backslash.", "startInfo");
 
-        var length = CommandPrefix.Length + 2 + EscapedPercentLength(scriptPath) + 1;
+        // A long sum, checked after each argument: escaping takes up to 8 characters per character, so an int total
+        // could wrap around to a length that passes the check.
+        long length = CommandPrefix.Length + 2 + EscapedPercentLength(scriptPath) + 1;
+        ThrowIfTooLong(length);
         for (var i = 0; i < arguments.Count; i++)
         {
             var argument = arguments[i];
@@ -144,13 +319,7 @@ internal static partial class WindowsBatchFile
             }
 
             length += 1 + ArgumentLength(argument);
-        }
-
-        if (length > CommandLineLimit)
-        {
-            throw new ArgumentException(
-                $"The command line for the batch file would be {length} characters, more than the {CommandLineLimit} cmd.exe accepts. Escaping counts: each % takes 8 characters.",
-                "startInfo");
+            ThrowIfTooLong(length);
         }
 
         var commandLine = new char[length + 1];
@@ -171,39 +340,82 @@ internal static partial class WindowsBatchFile
         return commandLine;
     }
 
-    private static bool TryCandidate(string? directory, string fileName, out string found)
+    private static void ThrowIfTooLong(long length)
     {
-        if (!string.IsNullOrEmpty(directory))
+        if (length > CommandLineLimit)
         {
-            var candidate = Path.Join(directory, fileName);
-            if (File.Exists(candidate))
+            throw new ArgumentException(
+                $"The command line for the batch file is at least {length} characters, more than the {CommandLineLimit} cmd.exe accepts. Escaping counts: each % takes 8 characters, and the script's full path is included.",
+                "startInfo");
+        }
+    }
+
+    private static bool IsCurrentDirectoryRelative(string fileName) =>
+        fileName.StartsWith(".\\", StringComparison.Ordinal)
+        || fileName.StartsWith("./", StringComparison.Ordinal)
+        || fileName.StartsWith("..\\", StringComparison.Ordinal)
+        || fileName.StartsWith("../", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Takes the file the lookup found, or fails as <c>CreateProcess</c> does there: it runs the first match and does
+    /// not skip a directory to look for a later file.
+    /// </summary>
+    private static unsafe string Accept(string path)
+    {
+        uint attributes;
+        fixed (char* p = path)
+            attributes = GetFileAttributesW(p);
+
+        if (attributes == InvalidFileAttributes)
+            throw new Win32Exception(ErrorFileNotFound, "CreateProcess failed");
+        if ((attributes & FileAttributeDirectory) != 0)
+            throw new Win32Exception(ErrorAccessDenied, "CreateProcess failed");
+        return path;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="fileName"/> exists, as a file or a directory, under <paramref name="directory"/>. The
+    /// directory is relative to the lookup's current directory unless rooted.
+    /// </summary>
+    /// <remarks>
+    /// The candidate is written into a pooled buffer and probed there, so a search through a long <c>PATH</c> allocates
+    /// nothing until it finds the file.
+    /// </remarks>
+    private static unsafe bool TryCandidate(ReadOnlySpan<char> directory, string fileName, in SearchLocations locations, out string found)
+    {
+        var baseDirectory = Path.IsPathRooted(directory) ? ReadOnlySpan<char>.Empty : locations.CurrentDirectory.AsSpan();
+        var buffer = ArrayPool<char>.Shared.Rent(baseDirectory.Length + directory.Length + fileName.Length + 3);
+        try
+        {
+            var joined = baseDirectory.IsEmpty
+                ? Path.TryJoin(directory, fileName, buffer, out var written)
+                : Path.TryJoin(baseDirectory, directory, fileName, buffer, out written);
+            if (joined && written < buffer.Length)
             {
-                found = Path.GetFullPath(candidate);
-                return true;
+                buffer[written] = '\0';
+                fixed (char* candidate = buffer)
+                {
+                    if (GetFileAttributesW(candidate) != InvalidFileAttributes)
+                    {
+                        found = Path.GetFullPath(new string(buffer, 0, written));
+                        return true;
+                    }
+                }
             }
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(buffer);
         }
 
         found = "";
         return false;
     }
 
-    private static bool NeedsQuoting(string argument)
-    {
-        if (argument.Length == 0 || argument[^1] == '\\')
-            return true;
+    private static bool NeedsQuoting(string argument) =>
+        argument.Length == 0 || argument[^1] == '\\' || argument.AsSpan().ContainsAnyExcept(s_unquoted);
 
-        foreach (var c in argument)
-        {
-            if (char.IsControl(c))
-                return true;
-            if (char.IsAscii(c) && !char.IsAsciiLetterOrDigit(c) && !UnquotedSymbols.Contains(c))
-                return true;
-        }
-
-        return false;
-    }
-
-    private static int EscapedPercentLength(string value) => value.Length + value.AsSpan().Count('%') * PercentEscape.Length;
+    private static long EscapedPercentLength(string value) => value.Length + (long)value.AsSpan().Count('%') * PercentEscape.Length;
 
     private static int WriteEscapedPercent(Span<char> destination, string value)
     {
@@ -223,10 +435,10 @@ internal static partial class WindowsBatchFile
     }
 
     /// <summary>Length of <paramref name="argument"/> after <see cref="WriteArgument"/>.</summary>
-    private static int ArgumentLength(string argument)
+    private static long ArgumentLength(string argument)
     {
         var quote = NeedsQuoting(argument);
-        var length = quote ? 2 : 0;
+        long length = quote ? 2 : 0;
         var backslashes = 0;
         foreach (var c in argument)
         {
@@ -268,7 +480,7 @@ internal static partial class WindowsBatchFile
             {
                 if (c == '"')
                 {
-                    // Backslashes before a quote double for the MSVCRT parser, and the quote doubles for cmd.exe.
+                    // Backslashes before a quote double for the program's parser, and the quote doubles for cmd.exe.
                     destination.Slice(position, backslashes).Fill('\\');
                     position += backslashes;
                     destination[position++] = '"';
@@ -299,4 +511,6 @@ internal static partial class WindowsBatchFile
     [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool NeedCurrentDirectoryForExePathW(string exeName);
-}
+
+    [LibraryImport("kernel32.dll")]
+    private static unsafe partial uint GetFileAttributesW(char* fileName);}
