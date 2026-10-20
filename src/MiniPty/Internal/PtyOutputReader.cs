@@ -15,6 +15,12 @@ namespace MiniPty.Internal;
 /// is allocated per call: the wait slot, the registration, and the chunk all live here.
 /// </para>
 /// <para>
+/// A caller under a UI context that has been receiving published chunks synchronously for
+/// <see cref="PtyConsumerYield.BudgetMs"/> gets the next one through a yield instead: a value task that completes
+/// as soon as it is awaited, so the continuation is posted to that context and the dispatcher runs its queue first
+/// (<see cref="PtyConsumerYield"/>).
+/// </para>
+/// <para>
 /// A chunk is the unread part of one ring slot, valid until the next <c>MoveNextAsync</c>, which releases the
 /// slot back to the pump. Enumeration holds the session's single-consumer ownership from
 /// <see cref="GetAsyncEnumerator"/> until end of output, a failure, or <see cref="DisposeAsync"/>, matching the
@@ -38,6 +44,8 @@ internal sealed class PtyOutputReader :
     private PtyOutputChunk _current;
     private bool _holdsChunk;
     private bool _active;
+    // A yield was returned and completes when it is awaited (OnCompleted) or read (GetResult).
+    private bool _yieldPending;
 
     internal PtyOutputReader(PtySession session, PtyOutputPump pump)
     {
@@ -79,6 +87,8 @@ internal sealed class PtyOutputReader :
 
         _holdsChunk = false;
         _current = default;
+        _yieldPending = false;
+        PtyConsumerYield.StartRun();
         _active = true;
         return this;
     }
@@ -96,9 +106,25 @@ internal sealed class PtyOutputReader :
             while (true)
             {
                 if (TryTakeOrEnd(out var hasChunk))
+                {
+                    // End of output is never delayed; only a chunk can be handed over through a yield.
+                    if (hasChunk && PtyConsumerYield.ShouldYield())
+                    {
+                        // Taking only peeked, so the chunk stays published and GetResult takes it again. Until then
+                        // nothing is held, as during any other wait.
+                        _holdsChunk = false;
+                        _current = default;
+                        _core.Reset();
+                        _yieldPending = true;
+                        return new ValueTask<bool>(this, _core.Version);
+                    }
+
                     return new ValueTask<bool>(hasChunk);
+                }
 
                 _core.Reset();
+                // A yield abandoned without being awaited must not complete this wait before the pump signals it.
+                _yieldPending = false;
                 if (!_pump.ArmWait(this, wakeOnData: true))
                     continue;
 
@@ -135,6 +161,11 @@ internal sealed class PtyOutputReader :
         // Dispose, not Unregister: it waits out a cancellation callback still running elsewhere, so that callback
         // can never claim the next wait.
         registration.Dispose();
+        // A yield read without being awaited (blocking on the value task) completes here, as a synchronous
+        // completion would have.
+        CompletePendingYield();
+        // The caller resumed from an asynchronous completion, so its context has run its queue: a new run starts.
+        PtyConsumerYield.StartRun();
 
         try
         {
@@ -155,8 +186,22 @@ internal sealed class PtyOutputReader :
 
     ValueTaskSourceStatus IValueTaskSource<bool>.GetStatus(short token) => _core.GetStatus(token);
 
-    void IValueTaskSource<bool>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
+    void IValueTaskSource<bool>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
+    {
         _core.OnCompleted(continuation, state, token, flags);
+        // Completing a yield only now, with the continuation registered, makes the core post it to the context the
+        // awaiter captured (or queue it, under ConfigureAwait(false)) instead of the awaiter running it inline.
+        CompletePendingYield();
+    }
+
+    private void CompletePendingYield()
+    {
+        if (!_yieldPending)
+            return;
+
+        _yieldPending = false;
+        _core.SetResult(true);
+    }
 
     /// <summary>
     /// Takes the next chunk (<paramref name="hasChunk"/> = <see langword="true"/>) or observes end of output
