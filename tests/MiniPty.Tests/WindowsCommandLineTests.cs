@@ -197,8 +197,13 @@ public sealed class WindowsCommandLineTests
     [Test]
     [Arguments("C:\\s\\x\".cmd")]
     [Arguments("C:\\s\\")]
-    public async Task BatchScriptPathThatCannotBeQuotedIsRejected(string scriptPath)
+    [Arguments("C:\\s\rt\\x.cmd")]
+    [Arguments("C:\\s\nt\\x.cmd")]
+    [Arguments("C:\\s\0t\\x.cmd")]
+    public async Task BatchScriptPathThatCmdCannotReceiveIsRejected(string scriptPath)
     {
+        // The full path joins the name with a PATH entry or the current directory, which ValidateName never saw, so
+        // the characters cmd.exe cannot receive are checked again on the path cmd.exe gets.
         Assert.Throws<ArgumentException>(() => WindowsBatchFile.BuildCommandLine(scriptPath, []));
         await Task.CompletedTask;
     }
@@ -346,18 +351,20 @@ public sealed class WindowsCommandLineTests
     }
 
     [Test]
-    public async Task ProgramImageNamedLikeABatchFileIsLeftToCreateProcess()
+    public async Task ProgramImageNamedLikeABatchFileRunsFromTheFileFound()
     {
         if (!OperatingSystem.IsWindows())
             return;
 
         // CreateProcess loads a file that starts with MZ as an image, or refuses it, and never hands it to cmd.exe.
+        // It gets the file whose header was read as the application name, so no second lookup can pick another
+        // file, and a file that becomes a script after the check cannot reach cmd.exe with program quoting.
         using var image = new TemporaryFile("x.cmd", "MZ"u8);
         var startInfo = new PtyStartInfo { FileName = image.Path, Arguments = ["a b"] };
 
         var (applicationName, commandLine) = WindowsPtyBackend.BuildLaunch(startInfo);
 
-        await Assert.That(applicationName).IsNull();
+        await Assert.That(applicationName).IsEqualTo(image.Path);
         await Assert.That(new string(commandLine, 0, commandLine.Length - 1)).IsEqualTo(Build(startInfo));
     }
 

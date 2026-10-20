@@ -15,10 +15,11 @@ public sealed record PtyStartInfo
     /// <see cref="Arguments"/> are escaped for <c>cmd.exe</c> instead of quoted with the MSVCRT rules, so
     /// <c>cmd.exe</c> reads each one as data. A script can still run what an argument holds, for example with
     /// <c>cmd /c %1</c> or <c>echo %~1</c>. The script is the file <c>CreateProcess</c> would find for this name,
-    /// looked up from this process's directories and <c>PATH</c> as for a program. A file that starts with the
-    /// <c>MZ</c> header runs as a program. Without a raw <see cref="CommandLine"/>, a batch file name cannot contain a
-    /// quote, a carriage return, a line feed, or a NUL. With one, <c>CreateProcess</c> starts <c>cmd.exe</c> with its
-    /// own defaults instead.
+    /// looked up from this process's directories and <c>PATH</c> as for a program, and <c>cmd.exe</c> receives its
+    /// full path, so it does not search the child's <see cref="WorkingDirectory"/> for it. A file that starts with
+    /// the <c>MZ</c> header runs as a program, from that same file. Without a raw <see cref="CommandLine"/>, a batch
+    /// file name, and the full path found for it, cannot contain a quote, a carriage return, a line feed, or a NUL.
+    /// With one, <c>CreateProcess</c> starts <c>cmd.exe</c> with its own defaults instead.
     /// </remarks>
     public required string FileName { get; init; }
 

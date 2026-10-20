@@ -36,8 +36,8 @@ namespace MiniPty.Internal;
 /// <item>Each <c>%</c>, also in the script path, is written as <c>%%cd:~,%</c>. <c>%cd:~,%</c> is an empty substring
 /// of the current directory, so the first <c>%</c> survives and no <c>%name%</c> can expand.</item>
 /// <item>A carriage return, a line feed, or a NUL in an argument is rejected, and so is any of them or a quote in the
-/// file name. <c>cmd.exe</c> drops a carriage return and ends its command line at a line feed or a NUL, so no quoting
-/// can deliver them.</item>
+/// file name and again in the full path the lookup produces. <c>cmd.exe</c> drops a carriage return and ends its
+/// command line at a line feed or a NUL, so no quoting can deliver them.</item>
 /// <item>A command line longer than <see cref="CommandLineLimit"/> characters is rejected. Otherwise the session would
 /// start and <c>cmd.exe</c> would fail with "The command line is too long", with nothing pointing at the cause.</item>
 /// </list>
@@ -46,7 +46,9 @@ namespace MiniPty.Internal;
 /// as given would let <c>script.cmd.</c> or <c>script.cmd\.</c> run unescaped. The script is the file
 /// <c>CreateProcess</c> would find for the name, and <c>cmd.exe</c> gets its full path. So <c>cmd.exe</c>'s own lookup,
 /// which starts in the child's working directory, never picks another file. A file that starts with the <c>MZ</c>
-/// header is a program image, which <c>CreateProcess</c> runs or refuses itself.
+/// header is a program image, which <c>CreateProcess</c> runs or refuses itself, from that same full path: a second
+/// lookup by <c>CreateProcess</c> could find another file, and the file could change between the header check and
+/// the start.
 /// </para>
 /// <para>
 /// What the script does with its arguments is up to the script. One that hands an argument to <c>cmd /c</c>, or uses
@@ -295,14 +297,24 @@ internal static partial class WindowsBatchFile
     /// Builds the NUL-terminated <c>cmd.exe</c> command line that runs <paramref name="scriptPath"/> with
     /// <paramref name="arguments"/> delivered as data (see the type remarks).
     /// </summary>
+    /// <remarks>
+    /// The script path is checked here as well as in <see cref="ValidateName"/>: the lookup joins the name with
+    /// directories from the host's <c>PATH</c> and current directory, so this is the one place that sees every
+    /// character <c>cmd.exe</c> receives.
+    /// </remarks>
     /// <exception cref="ArgumentException">
-    /// The script path contains a quote or ends with a backslash, an argument contains a carriage return, a line feed,
-    /// or a NUL, or the command line would exceed <see cref="CommandLineLimit"/> characters.
+    /// The script path contains a quote, a carriage return, a line feed, or a NUL, or ends with a backslash, an
+    /// argument contains a carriage return, a line feed, or a NUL, or the command line would exceed
+    /// <see cref="CommandLineLimit"/> characters.
     /// </exception>
     internal static char[] BuildCommandLine(string scriptPath, IReadOnlyList<string> arguments)
     {
-        if (scriptPath.Contains('"') || scriptPath.EndsWith('\\'))
-            throw new ArgumentException("A batch file path cannot contain a quote or end with a backslash.", "startInfo");
+        if (scriptPath.AsSpan().IndexOfAny("\"\r\n\0") >= 0 || scriptPath.EndsWith('\\'))
+        {
+            throw new ArgumentException(
+                "A batch file path cannot contain a quote, a carriage return, a line feed, or a NUL character, or end with a backslash.",
+                "startInfo");
+        }
 
         // A long sum, checked after each argument: escaping takes up to 8 characters per character, so an int total
         // could wrap around to a length that passes the check.
