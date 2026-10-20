@@ -156,6 +156,39 @@ public sealed class WindowsCommandLineTests
         await Task.CompletedTask;
     }
 
+    // "cmd.exe /e:ON /v:OFF /d /c \"" (28) + "\"C:\s\x.cmd\"" (12) + the closing quote (1), then " " + each argument.
+    private const int BatchOverheadWithOneArgument = 28 + 12 + 1 + 1;
+
+    [Test]
+    public async Task BatchCommandLineAtTheLimitIsAccepted()
+    {
+        var argument = new string('a', WindowsBatchFile.CommandLineLimit - BatchOverheadWithOneArgument);
+
+        var buffer = WindowsBatchFile.BuildCommandLine("C:\\s\\x.cmd", [argument]);
+
+        await Assert.That(buffer.Length).IsEqualTo(WindowsBatchFile.CommandLineLimit + 1);
+    }
+
+    [Test]
+    public async Task BatchCommandLineOverTheLimitIsRejected()
+    {
+        var argument = new string('a', WindowsBatchFile.CommandLineLimit - BatchOverheadWithOneArgument + 1);
+
+        var error = Assert.Throws<ArgumentException>(() => WindowsBatchFile.BuildCommandLine("C:\\s\\x.cmd", [argument]));
+
+        await Assert.That(error.Message).Contains("8192");
+    }
+
+    [Test]
+    public async Task EscapedPercentCountsTowardTheLimit()
+    {
+        // Written as is, the argument would fit (8185 characters); each escaped % takes 8, quotes included 8192.
+        var argument = new string('a', 8140) + "%";
+
+        Assert.Throws<ArgumentException>(() => WindowsBatchFile.BuildCommandLine("C:\\s\\x.cmd", [argument]));
+        await Assert.That(BatchOverheadWithOneArgument + 2 + argument.Length).IsLessThanOrEqualTo(WindowsBatchFile.CommandLineLimit);
+    }
+
     [Test]
     public async Task BatchBufferIsExactlyTheCommandLinePlusOneNul()
     {

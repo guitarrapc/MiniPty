@@ -24,7 +24,9 @@ public sealed record PtyStartInfo
     /// Each element reaches the child as one argument. On Windows it is quoted with the MSVCRT rules for a program
     /// and escaped for <c>cmd.exe</c> for a batch file, and a program a batch file forwards <c>%*</c> to receives it
     /// unchanged. An argument for a batch file cannot contain a carriage return, a line feed, or a NUL, which
-    /// <c>cmd.exe</c> cannot receive; <see cref="Pty.Start"/> throws <see cref="ArgumentException"/> for one. When
+    /// <c>cmd.exe</c> cannot receive, and the whole <c>cmd.exe</c> command line, escaping included (each <c>%</c> takes
+    /// 8 characters), cannot exceed the 8191 characters <c>cmd.exe</c> runs; <see cref="Pty.Start"/> throws
+    /// <see cref="ArgumentException"/> for either. When
     /// the child is <c>cmd.exe</c> itself, what follows <c>/c</c> is a command for it to parse: never pass user input
     /// there.
     /// </remarks>

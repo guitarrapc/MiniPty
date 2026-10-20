@@ -44,7 +44,8 @@ public static class Pty
     /// <exception cref="ArgumentNullException"><paramref name="startInfo"/> is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentException">
     /// Both <see cref="PtyStartInfo.CommandLine"/> and <see cref="PtyStartInfo.Arguments"/> are set; or, on Windows, an
-    /// argument for a batch file contains a carriage return, a line feed, or a NUL.
+    /// argument for a batch file contains a carriage return, a line feed, or a NUL, or the batch file's
+    /// <c>cmd.exe</c> command line would exceed 8191 characters.
     /// </exception>
     /// <exception cref="PlatformNotSupportedException">The current operating system is not supported.</exception>
     /// <exception cref="System.ComponentModel.Win32Exception">Windows: process or ConPTY creation failed.</exception>

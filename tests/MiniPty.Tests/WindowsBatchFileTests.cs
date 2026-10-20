@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using MiniPty.Internal;
 
 namespace MiniPty.Tests;
 
@@ -113,6 +114,62 @@ public sealed partial class WindowsBatchFileTests
         finally
         {
             File.Delete(shim);
+        }
+    }
+
+    [Test]
+    public async Task ScriptUnderADirectoryWithCmdSpecialCharactersRuns()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // Every character here is legal in a Windows path and special to cmd.exe: the script path is quoted and its
+        // % escaped like an argument's, and CreateProcess's own batch launch fails for a quoted path. %OS% is a
+        // variable every Windows defines, so an unescaped path would expand to another directory; a lone % would not.
+        var directory = Path.Combine(AppContext.BaseDirectory, $"minipty R&D %OS% 100% !x! (a)^b {Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var shim = Path.Combine(directory, "my shim.cmd");
+        File.WriteAllText(shim, $"@\"{PtyBaselineTests.TestExecutable}\" %*\r\n", Encoding.ASCII);
+        try
+        {
+            string[] arguments = ["x\" & echo INJECTED & \"", "%PATH%", "a b", ""];
+            var (text, exitCode) = await RunAsync(new PtyStartInfo { FileName = shim, Arguments = arguments, Environment = ArgvChild });
+
+            await Assert.That(exitCode).IsEqualTo(0);
+            await Assert.That(Argv(text)).IsEquivalentTo(arguments, TUnit.Assertions.Enums.CollectionOrdering.Matching);
+            await Assert.That(HasLine(text, "INJECTED")).IsFalse();
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task CommandLineAtCmdsLimitRunsAndOneMoreIsRejected()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // Checks the constant against the cmd.exe this machine has: at the limit the script runs, one character more
+        // fails before anything starts instead of with cmd.exe's "The command line is too long".
+        var script = WriteScript("@echo OK");
+        try
+        {
+            // "cmd.exe /e:ON /v:OFF /d /c \"" (28), the quoted script, a space, the argument, the closing quote.
+            var atLimit = WindowsBatchFile.CommandLineLimit - (28 + script.Length + 2 + 1 + 1);
+            var (text, exitCode) = await RunAsync(new PtyStartInfo { FileName = script, Arguments = [new string('a', atLimit)] });
+
+            await Assert.That(exitCode).IsEqualTo(0);
+            await Assert.That(text).Contains("OK");
+            await Assert.That(text).DoesNotContain("too long");
+
+            var error = Assert.Throws<ArgumentException>(() => Pty.Start(new PtyStartInfo { FileName = script, Arguments = [new string('a', atLimit + 1)] }));
+            await Assert.That(error.ParamName).IsEqualTo("startInfo");
+        }
+        finally
+        {
+            File.Delete(script);
         }
     }
 

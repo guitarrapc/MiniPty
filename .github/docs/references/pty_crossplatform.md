@@ -112,7 +112,9 @@ ConPTY requires Windows 10 1809+ / Windows 11. MiniPty does not use winpty.
 | Point | Finding |
 |---|---|
 | `""` inside quotes | Keeps `cmd.exe`'s quoting intact (it closes and reopens), and a program that receives the arguments through `%*` reads it as one quote under the UCRT parser that .NET's apphost uses. |
-| `%` | Expands inside quotes too: without the `%%cd:~,%` escape, `%PATH%` reached the forwarded program as the PATH value. |
+| `%` | Expands inside quotes too: without the `%%cd:~,%` escape, `%PATH%` reached the forwarded program as the PATH value. A lone `%` stays literal, because `cmd.exe` finds no variable up to the next `%`, so only a `%name%` that is defined shows the difference: an unescaped script path under a directory named `%OS%` pointed at `Windows_NT` and the script was not found, while one under `100%` still ran. |
+| Length limit | 8191 characters ran and 8192 failed with "The command line is too long", for any script path length (157 and 276 characters measured). The count is the whole line as written, `cmd.exe /e:ON /v:OFF /d /c` included, before `%` expansion: with 100 escaped `%`, the boundary was still 8191 written characters (7491 after expansion). |
+| Quoted path through `CreateProcess` | With the batch file as `lpApplicationName` and its quoted path first on the command line, `cmd.exe /c` stripped the first and last quotes and the command failed ("is not recognized"); unquoted, the same call ran the injected command. Starting `cmd.exe` with the outer pair of quotes avoids both. |
 | `/v:OFF`, `/e:ON`, `/d` | Defaults that a user's registry can change (`DelayedExpansion`, `EnableExtensions`, `AutoRun`), so they are passed explicitly; with the defaults in place, no test can tell them apart from leaving them off. |
 | Trailing spaces and dots | Windows opens `script.cmd.` as `script.cmd`, so detection trims them first; without that, the name with a dot ran on the unescaped path and the injection worked. |
 | `%1` versus `%~1` | `%1` and `%*` keep MiniPty's quotes; `%~1` strips them, so a script that uses `%~1` unquoted in a command reopens the injection inside the script. |

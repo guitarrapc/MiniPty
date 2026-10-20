@@ -33,6 +33,9 @@ namespace MiniPty.Internal;
 /// of the current directory, so the first <c>%</c> survives and no <c>%name%</c> can expand.</item>
 /// <item>An argument with a carriage return, a line feed, or a NUL is rejected: <c>cmd.exe</c> ends or cuts its
 /// command line there, so no quoting can deliver it.</item>
+/// <item>A command line longer than <see cref="CommandLineLimit"/> characters is rejected. <c>cmd.exe</c> counts the
+/// whole line as written, its own switches and every escape included, and refuses a longer one with "The command
+/// line is too long"; the session would start and fail with nothing pointing at the cause.</item>
 /// </list>
 /// <para>
 /// A file is a batch file by its extension after trailing spaces and dots, which Windows drops from a file name: a
@@ -48,6 +51,13 @@ namespace MiniPty.Internal;
 /// </remarks>
 internal static partial class WindowsBatchFile
 {
+    /// <summary>
+    /// The longest command line <c>cmd.exe</c> runs, in characters without the terminating NUL. Measured on Windows 11
+    /// build 26200: 8191 characters ran and 8192 did not, for any script path length and with or without escaped
+    /// <c>%</c> (the limit applies before expansion).
+    /// </summary>
+    internal const int CommandLineLimit = 8191;
+
     private const int ErrorFileNotFound = 2;
     private const string CommandPrefix = "cmd.exe /e:ON /v:OFF /d /c \"";
     private const string PercentEscape = "%%cd:~,";
@@ -114,8 +124,8 @@ internal static partial class WindowsBatchFile
     /// <paramref name="arguments"/> delivered as data (see the type remarks).
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// The script path contains a quote or ends with a backslash, or an argument contains a carriage return, a line
-    /// feed, or a NUL.
+    /// The script path contains a quote or ends with a backslash, an argument contains a carriage return, a line feed,
+    /// or a NUL, or the command line would exceed <see cref="CommandLineLimit"/> characters.
     /// </exception>
     internal static char[] BuildCommandLine(string scriptPath, IReadOnlyList<string> arguments)
     {
@@ -134,6 +144,13 @@ internal static partial class WindowsBatchFile
             }
 
             length += 1 + ArgumentLength(argument);
+        }
+
+        if (length > CommandLineLimit)
+        {
+            throw new ArgumentException(
+                $"The command line for the batch file would be {length} characters, more than the {CommandLineLimit} cmd.exe accepts. Escaping counts: each % takes 8 characters.",
+                "startInfo");
         }
 
         var commandLine = new char[length + 1];
