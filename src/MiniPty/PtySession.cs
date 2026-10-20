@@ -122,6 +122,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// blocks until output arrives, as the <see cref="Stream"/> contract requires.
     /// </para>
     /// <para>
+    /// On a thread with a <see cref="SynchronizationContext"/> or a non-default <see cref="TaskScheduler"/>, such as a
+    /// UI thread, a read that would complete at once after 8 ms of reads that all did completes through that context
+    /// instead, once: the bytes are copied as usual, and the dispatcher runs what it has queued before the caller
+    /// resumes. A consumer that processes output more slowly than the child writes it therefore cannot starve the
+    /// UI thread's input and rendering. Elsewhere reads keep completing at once.
+    /// </para>
+    /// <para>
     /// The first read makes this stream the session's output consumer until a read returns 0 (end of output) or
     /// fails. Meanwhile <see cref="ReadOutputAsync"/> and <see cref="CompleteAsync"/> throw
     /// <see cref="InvalidOperationException"/>.
@@ -150,6 +157,14 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <c>MoveNextAsync</c> completes synchronously while output is buffered and never blocks the calling thread.
     /// When it has to wait, the caller's continuation resumes on its captured context, so <c>await foreach</c> on a
     /// UI thread processes chunks in place on that thread. Enumerating allocates nothing per chunk.
+    /// </para>
+    /// <para>
+    /// On a thread with a <see cref="SynchronizationContext"/> or a non-default <see cref="TaskScheduler"/>, such as a
+    /// UI thread, a chunk that is buffered after 8 ms of <c>MoveNextAsync</c> calls that all completed synchronously
+    /// is delivered through that context instead, once, so the dispatcher runs what it has queued before the loop
+    /// continues. A consumer that processes chunks more slowly than the child writes them therefore cannot starve the
+    /// UI thread's input and rendering. Elsewhere, such as on the thread pool, buffered chunks keep completing
+    /// synchronously.
     /// </para>
     /// <para>Normal PTY EOF completes the sequence after all available output is drained.</para>
     /// </remarks>

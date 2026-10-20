@@ -15,6 +15,12 @@ namespace MiniPty.Internal;
 /// output is published, and a slot is released as soon as it has been copied out.
 /// </para>
 /// <para>
+/// A caller under a UI context that has been receiving published output synchronously for
+/// <see cref="PtyConsumerYield.BudgetMs"/> gets the next read through a yield: the bytes are copied as usual, and the
+/// value task completes when it is awaited, so the continuation is posted to that context and the dispatcher runs
+/// its queue first (<see cref="PtyConsumerYield"/>).
+/// </para>
+/// <para>
 /// The first read takes the session's single-consumer ownership and holds it across reads until end of output
 /// or a failed read, as the raw transport stream did. Like any <see cref="Stream"/>, the view supports one read
 /// at a time.
@@ -33,6 +39,8 @@ internal sealed class PtyOutputStream : Stream, IValueTaskSource<int>, IPtyOutpu
     private bool _holdsOwnership;
     private bool _blockingWait;
     private bool _blockingSignaled;
+    // Bytes already copied by a yielded read, delivered when the yield is awaited (OnCompleted) or read (GetResult).
+    private int _yieldPendingBytes;
 
     internal PtyOutputStream(PtySession session, PtyOutputPump pump)
     {
@@ -126,10 +134,20 @@ internal sealed class PtyOutputStream : Stream, IValueTaskSource<int>, IPtyOutpu
             while (true)
             {
                 var read = TryRead(buffer.Span, out var end);
+                if (read > 0 && PtyConsumerYield.ShouldYield())
+                {
+                    // The bytes are in the caller's buffer already; the yield only delays reporting them.
+                    _core.Reset();
+                    _yieldPendingBytes = read;
+                    return new ValueTask<int>(this, _core.Version);
+                }
+
                 if (read > 0 || end)
                     return new ValueTask<int>(read);
 
                 _core.Reset();
+                // A yield abandoned without being awaited must not complete this wait before the pump signals it.
+                _yieldPendingBytes = 0;
                 _pendingBuffer = buffer;
                 _pendingToken = cancellationToken;
                 if (!_pump.ArmWait(this, wakeOnData: true))
@@ -176,10 +194,19 @@ internal sealed class PtyOutputStream : Stream, IValueTaskSource<int>, IPtyOutpu
         var buffer = _pendingBuffer;
         _pendingBuffer = default;
         _pendingToken = default;
+        // A yield read without being awaited (blocking on the value task) completes here, as a synchronous
+        // completion would have.
+        CompletePendingYield();
+        // The caller resumed from an asynchronous completion, so its context has run its queue: a new run starts.
+        PtyConsumerYield.StartRun();
 
         try
         {
-            _core.GetResult(token);
+            // A yield completes with the bytes it already copied; a signal completes with 0, and the read follows.
+            var yielded = _core.GetResult(token);
+            if (yielded > 0)
+                return yielded;
+
             var read = TryRead(buffer.Span, out var end);
             if (read > 0 || end)
                 return read;
@@ -196,8 +223,23 @@ internal sealed class PtyOutputStream : Stream, IValueTaskSource<int>, IPtyOutpu
 
     ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token) => _core.GetStatus(token);
 
-    void IValueTaskSource<int>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
+    void IValueTaskSource<int>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
+    {
         _core.OnCompleted(continuation, state, token, flags);
+        // Completing a yield only now, with the continuation registered, makes the core post it to the context the
+        // awaiter captured (or queue it, under ConfigureAwait(false)) instead of the awaiter running it inline.
+        CompletePendingYield();
+    }
+
+    private void CompletePendingYield()
+    {
+        var bytes = _yieldPendingBytes;
+        if (bytes == 0)
+            return;
+
+        _yieldPendingBytes = 0;
+        _core.SetResult(bytes);
+    }
 
     /// <summary>
     /// Copies published output. Returns the byte count, or 0 with <paramref name="end"/> set at end of output
@@ -242,6 +284,7 @@ internal sealed class PtyOutputStream : Stream, IValueTaskSource<int>, IPtyOutpu
 
         _session.AcquireOutputConsumer(PtySession.OutputConsumerRawOutput);
         _holdsOwnership = true;
+        PtyConsumerYield.StartRun();
     }
 
     private void ReleaseOwnership()

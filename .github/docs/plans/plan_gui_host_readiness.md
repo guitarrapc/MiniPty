@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phase C: G9 (explicit Unix termios with `IUTF8`) and G10 (hang-up before kill on Unix dispose) are implemented (2026-10-17); G6 is deferred until an embedder needs dozens of concurrent sessions, since G1 already removed every observed failure. Phase D: G8 (opt-in process-tree cleanup) is implemented (2026-10-18), and G7 (opt-in out-of-band ConPTY supplied by the application) is implemented (2026-10-19).
+**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phase C: G9 (explicit Unix termios with `IUTF8`) and G10 (hang-up before kill on Unix dispose) are implemented (2026-10-17); G6 is deferred until an embedder needs dozens of concurrent sessions, since G1 already removed every observed failure. Phase D: G8 (opt-in process-tree cleanup) is implemented (2026-10-18), and G7 (opt-in out-of-band ConPTY supplied by the application) is implemented (2026-10-19). G12 (bounded UI-thread occupancy under output floods, F13) is implemented (2026-10-20).
 
 ## Background
 
@@ -29,6 +29,7 @@ All measurements were taken on Windows 11 build 26200 with 32 logical CPUs, the 
 | F10 | VT sequences written by a child through the in-box ConPTY | See the table below |
 | F11 | `WriteInputAsync` while the child keeps writing output and nobody reads it (the ring, then the output pipe, are full) | ConPTY stops reading input after about 4 KiB. Writes of 1 and 4 KiB completed in 1 ms; 16 and 64 KiB blocked the caller for more than 5 s and completed 27–87 ms after output reading resumed; 2 MiB blocked for more than 15 s. With the same undrained output but an idle child, 225 KB took 311 ms. When the output loop runs on the writing thread, as with `await foreach` on a UI thread, this is a deadlock |
 | F12 | Sessions started while the host runs `Process.Start` with redirected stdio on other threads (48 at a time, each child alive about 1 s or about 3 s) | End of output waits for the unrelated children. Time to the end of `ReadOutputAsync` for `cmd /c echo hi`: p50 139 ms alone, 1052 ms with 1 s children, 3061 ms with 3 s children (27/30 and 30/30 sessions over 600 ms). Making MiniPty's own pipe handles non-inheritable changed nothing (1083 / 3069 ms). `ClosePseudoConsole` returned within 2 ms in every run |
+| F13 | After G1: `await foreach` over `ReadOutputAsync` on the UI thread while the child floods output, with a fixed cost per chunk in the loop | With a handler faster than the child (the samples' VT parser, about 135 µs per 4 KiB chunk), almost every `MoveNextAsync` waits, and the UI thread stays free. With 2 ms or 5 ms per chunk, the next chunk is always buffered: 1,901 of 1,911 and 804 of 806 calls completed synchronously, the loop never returned to the dispatcher, and a callback posted to the UI context waited 945 ms to over 1 s, for as long as the flood lasted |
 
 VT sequences written by the child through the in-box ConPTY (F10):
 
@@ -88,6 +89,7 @@ Causes 1–3 share one structure:
 | G9 | **P2** | Unix termios relies on kernel defaults; `IUTF8` is missing | [Explicit termios](#g9-explicit-unix-termios-p2) (implemented) |
 | G11 | **P1** | On Windows, end of output can wait for an unrelated process the host spawned (F12) | [Bounded end of output after close](#g11-bounded-end-of-output-on-windows-p1) |
 | G10 | **P2** | Unix `Dispose` kills with `SIGKILL` immediately | [Graceful Unix termination](#g10-graceful-unix-termination-on-dispose-p2) (implemented) |
+| G12 | **P1** | A UI-thread consumer slower than the child's output never returns to its dispatcher during a flood (F13) | [Bounded UI-thread occupancy](#g12-bounded-ui-thread-occupancy-under-output-floods-p1) (implemented) |
 
 ---
 
@@ -1074,6 +1076,61 @@ Lessons learned:
 
 ---
 
+## G12: Bounded UI-thread occupancy under output floods (P1)
+
+### Why P1
+
+G1 made every read non-blocking, and `MoveNextAsync` completes synchronously while output is buffered, which keeps bulk reads allocation-free. A synchronous completion never returns to the dispatcher, though. A handler slower than the child's output always finds the next chunk buffered, so an `await foreach` on the UI thread keeps the thread for as long as the child writes: `cat` of a large file or a `yes`-style flood freezes input and rendering although nothing blocks (F13). The samples' parser is fast enough not to trigger this, but a host that does more per chunk (synchronous layout or drawing, a slower machine, a faster Unix producer) would. Nothing freezes for a host that keeps up, so this is P1 rather than P0.
+
+### Decision (implemented)
+
+- **Budget.** Each thread times its run of synchronous completions of `ReadOutputAsync` and `Output.ReadAsync` (`PtyConsumerYield`). A run starts when a consumer starts reading and whenever one resumes from an asynchronous completion. Once a run has lasted 8 ms, the next read that has output completes asynchronously instead, and a new run starts. 8 ms is half a 60 Hz frame: during a flood, each frame's input and rendering still get the thread.
+- **Only with a scheduling context.** The yield applies when the reading thread has a `SynchronizationContext` (other than the base type) or a non-default `TaskScheduler`, the same test an awaiter applies when it captures a context. On a pool thread, or a thread without a context, there is no dispatcher to starve and yielding would only move the loop, so reads keep completing synchronously. `PtyTerminal`, the bridges, and one-shot completion are unchanged.
+- **How it yields.** The read returns a pending value task and completes it from `OnCompleted`, once the awaiter has registered its continuation, so the continuation is posted to the captured context behind whatever the dispatcher has queued. A value task that is already complete when it is awaited would run inline and yield nothing. A caller that blocks on the value task instead of awaiting it gets the result at once from `GetResult`, as before. Under `ConfigureAwait(false)` the continuation goes to the thread pool.
+- **What a yield carries.** `ReadOutputAsync` only peeks the chunk before a yield, so the chunk stays published and nothing is held while the continuation waits; `GetResult` takes it. `Output.ReadAsync` copies the bytes first and reports them through the yield, so the slot is already free for the reader. End of output is never delayed.
+- **Per thread, not per session.** What starves a dispatcher is its thread going without a return to it, and while one consumer completes synchronously no other consumer on that thread can run. A first version kept the run start in each consumer object, which cost every session 8 bytes (`Session_32KiB_OutputStreamBytes` 1.70 → 1.71 KB in 3 of 3 runs); a thread-static costs nothing.
+
+### Measurements
+
+Windows 11 build 26200, 32 logical CPUs, in-box ConPTY unless stated. The child writes 100-character lines without pause for 4 s; the consumer runs `ReadOutputAsync` on a single-threaded `SynchronizationContext` and spends a fixed time per chunk; a probe is posted to that context every 50 ms, and the longest wait is reported (a probe that waited over 1 s is counted as frozen).
+
+| Work per chunk | Before: synchronous completions / chunks, longest probe wait | After |
+|---|---|---|
+| The samples' VT parser (120–145 µs) | 22–47 / 4,482–5,692, 0–17 ms | 28 / 5,679–5,687, 0 ms |
+| 500 µs | 3 / 5,147, 0 ms | 1–4 / 5,504–5,731, 0 ms |
+| 2 ms | 1,901 / 1,911, 945 ms (out-of-band: 2 probes frozen) | 1,497–1,503 / 1,999–2,004, 7–8 ms |
+| 5 ms | 804 / 806, 3 of 4 probes frozen | 401–402 / 804–806, 9–10 ms |
+
+The loop is consumer-bound at 2 and 5 ms, and the chunks it processed stayed at its ceiling (4 s / 2 ms = 2,000 and 4 s / 5 ms = 800), so a yield every 8 ms costs no measurable throughput. Allocation (Windows, `PtyIntegrationBenchmarks`, 3 runs before and after): `Session_Exit0_Bytes` 1.88 KB, `Session_32KiB_StreamBytes` 1.6 KB, `Session_32KiB_OutputStreamBytes` 1.7 KB, unchanged; a benchmark has no context and never yields, and the check is one timestamp per synchronous completion.
+
+### Tests
+
+`PtyOutputYieldTests` drives a scripted backend whose ring is full before the consumer starts, so a read can complete asynchronously only by yielding. Each test spends the budget by waiting past it on the consumer's thread.
+
+| Test | Covers |
+|---|---|
+| `ReadOutputAsyncYieldsToTheContextOnceTheBudgetIsSpent` | Spent budget under a `SynchronizationContext`: the read yields, a callback queued before it runs before the loop resumes, and the chunk is intact |
+| `ReadOutputAsyncCompletesSynchronouslyWhileTheBudgetLasts` | Budget not spent: every buffered chunk completes synchronously (a read that started after the budget had passed, from preemption, is exempt) |
+| `ReadOutputAsyncStartsANewRunAfterAYield` | The read after a yield completes synchronously again |
+| `ReadOutputAsyncDoesNotYieldWithoutASchedulingContext`, `OutputReadAsyncDoesNotYieldWithoutASchedulingContext` | No context: a spent budget changes nothing |
+| `ReadOutputAsyncYieldsUnderANonDefaultTaskScheduler` | A non-default `TaskScheduler` without a `SynchronizationContext` yields through it, behind a task queued before |
+| `ReadOutputAsyncDoesNotDelayEndOfOutputWithASpentBudget`, `OutputReadAsyncDoesNotDelayEndOfOutputWithASpentBudget` | End of output completes synchronously |
+| `ReadOutputAsyncYieldResumesOffTheContextUnderConfigureAwaitFalse` | Under `ConfigureAwait(false)` the yield resumes on another thread, never inline |
+| `ReadOutputAsyncYieldBlockedOnCompletesWithTheChunk`, `OutputReadAsyncYieldBlockedOnCompletesWithTheCopiedBytes` | Blocking on the value task returns the result at once |
+| `ReadOutputAsyncYieldFailsWhenTheSessionIsDisposedBeforeItResumes` | Disposal during a yield fails the read with `ObjectDisposedException` |
+| `OutputReadAsyncYieldsToTheContextWithTheCopiedBytes`, `OutputReadAsyncYieldStillReportsTheCopiedBytesWhenTheSessionIsDisposed` | The stream reports the bytes it copied before the yield, also after a disposal during it |
+
+Each guard was confirmed red against a mutation on Windows: with the yield disabled, the 9 tests that expect one fail; yielding without a context fails the 2 no-context tests; ignoring the budget fails the budget-lasts and new-run tests; and yielding at end of output fails both end-of-output tests. Full suite: Windows 375 pass in 3 runs. NativeAOT: the `Session` sample published without warnings and ran on Windows. Not run on Linux or macOS: the change is platform-independent managed code above the pump, and the tests use a scripted backend, so CI covers it there.
+
+### Lessons Learned
+
+- **A UI consumer needs the thread given back, not only never blocked.** Synchronous completion is the right fast path and the wrong steady state: the same property that makes a buffered read free makes a backlog uninterruptible.
+- **A yield must be completed after the awaiter registers.** A value task that is already complete when awaited continues inline; completing it from `OnCompleted` is what makes the core post the continuation to the captured context.
+- **Time the thread, not the consumer.** The dispatcher starves per thread, several tabs share one UI thread, and a per-consumer timestamp cost every session 8 bytes for no better answer.
+- **A consumer that returns to its dispatcher on its own is not seen doing so.** If it awaits something else between reads, its reads can be more than a budget apart and each then yields once. That costs what a read that had to wait costs, and was accepted rather than tracking the dispatcher.
+
+---
+
 ## Suggested Implementation Order
 
 ```mermaid
@@ -1088,7 +1145,9 @@ flowchart LR
     G7[G7 Out-of-band ConPTY P2]
     G8[G8 Process-tree cleanup P2]
     G11[G11 Bounded Windows end of output P1]
+    G12[G12 Bounded UI-thread occupancy P1]
 
+    G1 --> G12
     G1 --> G5
     G2 --> G5
     G4 --> G5
@@ -1105,6 +1164,7 @@ flowchart LR
 | **Phase B** | G4, G5, G11 | Wide windows work, the threading model is documented with the pull pattern as the GUI recommendation, and Windows output ends even while the host spawns other processes |
 | **Phase C** | G9, G10 (G6 deferred) | Unix canonical editing handles UTF-8, and closing a tab hangs the shell up before it is killed, so it can exit cleanly while the host keeps running |
 | **Phase D** | G7, G8 | Optional Windows VT fidelity and process-tree cleanup for hosts that opt in |
+| **Follow-up** | G12 | A UI-thread consumer slower than the child's output still lets input and rendering run during a flood |
 
 ## Lessons Learned
 
