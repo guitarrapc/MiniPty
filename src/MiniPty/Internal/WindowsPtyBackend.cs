@@ -159,8 +159,11 @@ internal static class WindowsPtyBackend
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
-        // Decided before any handle exists, so a batch file's rejected argument or missing script fails without cleanup.
-        var (applicationName, commandLine) = BuildLaunch(startInfo);
+        // Decided before any handle exists, so an invalid environment entry, a batch file's rejected argument, or a
+        // missing program or script fails without cleanup. The environment comes first because the launch depends on
+        // it: a child PATH the overlay sets or removes is where a program name is looked up.
+        var environment = PtyEnvironment.BuildWindows(startInfo, out var pathOverridden, out var childPath);
+        var (applicationName, commandLine) = BuildLaunch(startInfo, pathOverridden, childPath);
 
         CreateConPtyPipes(out var inputRead, out var inputWrite, out var outputRead, out var outputWrite);
         var inputWriteHandle = inputWrite;
@@ -266,7 +269,6 @@ internal static class WindowsPtyBackend
                 lpAttributeList = attrList,
             };
 
-            var environment = PtyEnvironment.BuildWindows(startInfo);
             var creationFlags = ExtendedStartupInfoPresent;
             if (environment is not null)
             {
@@ -1538,19 +1540,42 @@ internal static class WindowsPtyBackend
     }
 
     /// <summary>
-    /// The <c>CreateProcessW</c> application name and command line for <paramref name="startInfo"/>. A batch file
-    /// without a raw <see cref="PtyStartInfo.CommandLine"/> runs through <c>cmd.exe</c> with its arguments escaped for
-    /// it (<see cref="WindowsBatchFile"/>). A program image named like a batch file runs as a program from the file
-    /// the same lookup found, with the file name quoted by the MSVCRT rules and the quoted arguments after it. Anything
-    /// else is left to <c>CreateProcessW</c>'s own lookup, with the quoted arguments or the raw command line after the
-    /// quoted file name.
+    /// The <c>CreateProcessW</c> application name and command line for <paramref name="startInfo"/>, with the child's
+    /// <c>PATH</c> derived from its environment overlay (see the other overload).
     /// </summary>
     internal static (string? ApplicationName, char[] CommandLine) BuildLaunch(PtyStartInfo startInfo)
     {
-        if (startInfo.CommandLine is not { Length: > 0 } && WindowsBatchFile.IsBatchFile(startInfo.FileName))
+        _ = PtyEnvironment.BuildWindows(startInfo, out var pathOverridden, out var childPath);
+        return BuildLaunch(startInfo, pathOverridden, childPath);
+    }
+
+    /// <summary>
+    /// The <c>CreateProcessW</c> application name and command line for <paramref name="startInfo"/>. A batch file
+    /// without a raw <see cref="PtyStartInfo.CommandLine"/> runs through <c>cmd.exe</c> with its arguments escaped for
+    /// it (<see cref="WindowsBatchFile"/>). A program image named like a batch file runs as a program from the file
+    /// the same lookup found, with the file name quoted by the MSVCRT rules and the quoted arguments after it. A
+    /// program name that <c>CreateProcess</c> would search for is looked up here when the overlay sets or removes
+    /// <c>PATH</c> (<paramref name="pathOverridden"/>), since <c>CreateProcess</c> searches only the host's
+    /// <c>PATH</c>; the file found becomes the application name, so it makes no lookup of its own. Anything else is
+    /// left to <c>CreateProcessW</c>'s own lookup, with the quoted arguments or the raw command line after the quoted
+    /// file name.
+    /// </summary>
+    /// <param name="startInfo">The spawn options.</param>
+    /// <param name="pathOverridden">Whether the overlay sets or removes <c>PATH</c>.</param>
+    /// <param name="childPath">The child's <c>PATH</c>, or null when it has none; read only when overridden.</param>
+    internal static (string? ApplicationName, char[] CommandLine) BuildLaunch(PtyStartInfo startInfo, bool pathOverridden, string? childPath)
+    {
+        var fileName = startInfo.FileName;
+        var isBatchFile = WindowsBatchFile.IsBatchFile(fileName);
+        // Only a name CreateProcess would search for is looked up on the child's PATH; a rooted or dot-relative one
+        // reads neither PATH, and skipping the host locations keeps those reads off that spawn.
+        var searchChildPath = pathOverridden && WindowsProgramLookup.IsSearched(fileName);
+        if (startInfo.CommandLine is not { Length: > 0 } && isBatchFile)
         {
-            WindowsBatchFile.ValidateName(startInfo.FileName);
-            var script = WindowsBatchFile.ResolveScript(startInfo.FileName);
+            WindowsBatchFile.ValidateName(fileName);
+            var script = searchChildPath
+                ? WindowsProgramLookup.ResolveScript(fileName, WindowsProgramLookup.ChildLocations(fileName, childPath))
+                : WindowsProgramLookup.ResolveScriptOnHost(fileName);
             if (!WindowsBatchFile.IsExecutableImage(script))
                 return (WindowsBatchFile.CommandInterpreterPath, WindowsBatchFile.BuildCommandLine(script, startInfo.Arguments));
 
@@ -1558,6 +1583,15 @@ internal static class WindowsPtyBackend
             // lookup, CreateProcess could find another file of the name, or the file could have become a script in
             // the meantime, and either would reach cmd.exe with the arguments quoted for a program instead.
             return (script, BuildCommandLine(startInfo));
+        }
+
+        // A batch file with a raw command line stays with CreateProcess, which starts cmd.exe for it as documented;
+        // given as an application name, CreateProcess rebuilds the command line for cmd.exe and breaks its quoting
+        // (measured: a quoted argv[0] made cmd.exe fail, and "x y" ran x).
+        if (searchChildPath && !isBatchFile)
+        {
+            var program = WindowsProgramLookup.ResolveProgram(fileName, WindowsProgramLookup.ChildLocations(fileName, childPath));
+            return (program, BuildCommandLine(startInfo));
         }
 
         return (null, BuildCommandLine(startInfo));

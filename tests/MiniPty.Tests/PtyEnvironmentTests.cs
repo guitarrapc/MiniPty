@@ -6,6 +6,72 @@ public sealed class PtyEnvironmentTests
 {
     private static PtyStartInfo BaseStartInfo() => new() { FileName = "sh", Arguments = ["-c", "true"] };
 
+    private static readonly Dictionary<string, string> WindowsParent = new() { ["PATH"] = "C:\\Windows", ["OTHER"] = "1" };
+
+    [Test]
+    public async Task BuildWindows_ReportsPathOverriddenWhenSet()
+    {
+        var result = PtyEnvironment.BuildWindows(
+            BaseStartInfo() with { Environment = new Dictionary<string, string?> { ["PATH"] = "C:\\tools" } },
+            out var pathOverridden,
+            out var childPath,
+            WindowsParent);
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(pathOverridden).IsTrue();
+        await Assert.That(childPath).IsEqualTo("C:\\tools");
+    }
+
+    [Test]
+    public async Task BuildWindows_ReportsPathOverriddenWhenRemoved()
+    {
+        _ = PtyEnvironment.BuildWindows(
+            BaseStartInfo() with { Environment = new Dictionary<string, string?> { ["PATH"] = null } },
+            out var pathOverridden,
+            out var childPath,
+            WindowsParent);
+
+        await Assert.That(pathOverridden).IsTrue();
+        await Assert.That(childPath).IsNull();
+    }
+
+    [Test]
+    public async Task BuildWindows_PathOverrideKeyIsCaseInsensitive()
+    {
+        _ = PtyEnvironment.BuildWindows(
+            BaseStartInfo() with { Environment = new Dictionary<string, string?> { ["path"] = "C:\\tools" } },
+            out var pathOverridden,
+            out var childPath,
+            WindowsParent);
+
+        await Assert.That(pathOverridden).IsTrue();
+        await Assert.That(childPath).IsEqualTo("C:\\tools");
+    }
+
+    [Test]
+    public async Task BuildWindows_ReportsPathNotOverriddenWhenTheOverlayLeavesIt()
+    {
+        // The child's PATH is then the host's; it is still reported, for a caller that wants it.
+        _ = PtyEnvironment.BuildWindows(
+            BaseStartInfo() with { Environment = new Dictionary<string, string?> { ["OTHER"] = "2" } },
+            out var pathOverridden,
+            out var childPath,
+            WindowsParent);
+
+        await Assert.That(pathOverridden).IsFalse();
+        await Assert.That(childPath).IsEqualTo("C:\\Windows");
+    }
+
+    [Test]
+    public async Task BuildWindows_ReportsNoPathOverrideWithoutAnOverlay()
+    {
+        var result = PtyEnvironment.BuildWindows(BaseStartInfo(), out var pathOverridden, out var childPath, WindowsParent);
+
+        await Assert.That(result).IsNull();
+        await Assert.That(pathOverridden).IsFalse();
+        await Assert.That(childPath).IsNull();
+    }
+
     [Test]
     public async Task BuildUnix_ReturnsNullWhenOverlayAndTerminalNameAreAbsent()
     {

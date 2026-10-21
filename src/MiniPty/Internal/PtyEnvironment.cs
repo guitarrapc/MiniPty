@@ -52,14 +52,37 @@ internal static class PtyEnvironment
 
     public static KeyValuePair<string, string>[]? BuildWindows(
         PtyStartInfo startInfo,
+        IReadOnlyDictionary<string, string>? parentEnvironment = null) =>
+        BuildWindows(startInfo, out _, out _, parentEnvironment);
+
+    /// <summary>Builds the Windows child environment from <paramref name="startInfo"/> and an optional parent snapshot.</summary>
+    /// <param name="startInfo">Spawn options containing the overlay.</param>
+    /// <param name="pathOverridden">
+    /// Whether the overlay sets or removes <c>PATH</c> (compared ignoring case, as Windows does). The child's
+    /// <c>PATH</c> then differs from the host's, which is what decides whether MiniPty looks a program name up itself
+    /// (<see cref="WindowsProgramLookup"/>); otherwise <c>CreateProcess</c> searches the host's, which is the same one.
+    /// </param>
+    /// <param name="childPath">The child's <c>PATH</c>, or <see langword="null"/> when the child has none.</param>
+    /// <param name="parentEnvironment">
+    /// Optional parent-environment snapshot for tests. When <see langword="null"/>, the current process environment is used.
+    /// </param>
+    public static KeyValuePair<string, string>[]? BuildWindows(
+        PtyStartInfo startInfo,
+        out bool pathOverridden,
+        out string? childPath,
         IReadOnlyDictionary<string, string>? parentEnvironment = null)
     {
         ValidateTerminalName(startInfo.TerminalName);
+        pathOverridden = false;
+        childPath = null;
         if (startInfo.Environment is null)
             return null;
 
         var entries = CreateParentMap(StringComparer.OrdinalIgnoreCase, parentEnvironment);
-        ApplyOverlay(entries, startInfo.Environment, StringComparer.OrdinalIgnoreCase, termKey: null);
+        pathOverridden = ApplyOverlay(entries, startInfo.Environment, StringComparer.OrdinalIgnoreCase, "PATH");
+        if (entries.TryGetValue("PATH", out var path))
+            childPath = path.Value;
+
         return ToArray(entries);
     }
 
@@ -88,21 +111,25 @@ internal static class PtyEnvironment
         return entries;
     }
 
+    /// <summary>
+    /// Applies <paramref name="overlay"/> to <paramref name="entries"/> and reports whether it set or removed
+    /// <paramref name="trackedKey"/>.
+    /// </summary>
     private static bool ApplyOverlay(
         Dictionary<string, EnvironmentEntry> entries,
         IReadOnlyDictionary<string, string?>? overlay,
         StringComparer comparer,
-        string? termKey)
+        string? trackedKey)
     {
         if (overlay is null)
             return false;
 
-        var termTouched = false;
+        var touched = false;
         foreach (var pair in overlay)
         {
             ValidateEnvironmentVariable(pair.Key, pair.Value);
-            if (termKey is not null && comparer.Equals(pair.Key, termKey))
-                termTouched = true;
+            if (trackedKey is not null && comparer.Equals(pair.Key, trackedKey))
+                touched = true;
 
             if (pair.Value is null)
                 entries.Remove(pair.Key);
@@ -112,7 +139,7 @@ internal static class PtyEnvironment
                 entries[pair.Key] = new EnvironmentEntry(pair.Key, pair.Value);
         }
 
-        return termTouched;
+        return touched;
     }
 
     private static KeyValuePair<string, string>[] ToArray(Dictionary<string, EnvironmentEntry> entries)

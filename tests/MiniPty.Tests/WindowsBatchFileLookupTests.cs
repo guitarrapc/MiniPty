@@ -4,7 +4,7 @@ using MiniPty.Internal;
 namespace MiniPty.Tests;
 
 /// <summary>
-/// Where a batch file is found (<c>WindowsBatchFile.ResolveScript</c>): the file <c>CreateProcess</c> would find for a
+/// Where a batch file is found (<c>WindowsProgramLookup.ResolveScript</c>): the file <c>CreateProcess</c> would find for a
 /// program of that name. Every location the lookup reads is a directory of a fresh tree, so each rule is tested apart
 /// from the real system directories and the host's environment.
 /// </summary>
@@ -27,7 +27,7 @@ public sealed class WindowsBatchFileLookupTests
             for (var j = i; j < order.Length; j++)
                 tree.Put(order[j], name);
 
-            await Assert.That(WindowsBatchFile.ResolveScript(name, tree.Locations())).IsEqualTo(Path.Combine(order[i], name));
+            await Assert.That(WindowsProgramLookup.ResolveScript(name, tree.Locations())).IsEqualTo(Path.Combine(order[i], name));
         }
     }
 
@@ -41,7 +41,7 @@ public sealed class WindowsBatchFileLookupTests
         tree.Put(tree.Current, "x.cmd");
         tree.Put(tree.PathEntry, "x.cmd");
 
-        await Assert.That(WindowsBatchFile.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false)))
+        await Assert.That(WindowsProgramLookup.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false)))
             .IsEqualTo(Path.Combine(tree.PathEntry, "x.cmd"));
     }
 
@@ -60,7 +60,7 @@ public sealed class WindowsBatchFileLookupTests
         tree.Put(tree.Host, name);
         tree.Put(tree.Current, name);
 
-        await Assert.That(WindowsBatchFile.ResolveScript(name, tree.Locations()))
+        await Assert.That(WindowsProgramLookup.ResolveScript(name, tree.Locations()))
             .IsEqualTo(Path.GetFullPath(name, tree.Current));
     }
 
@@ -76,7 +76,7 @@ public sealed class WindowsBatchFileLookupTests
         tree.Put(tree.Host, name);
         tree.Put(tree.PathEntry, "x.cmd");
 
-        var error = Assert.Throws<Win32Exception>(() => WindowsBatchFile.ResolveScript(name, tree.Locations()));
+        var error = Assert.Throws<Win32Exception>(() => WindowsProgramLookup.ResolveScript(name, tree.Locations()));
 
         await Assert.That(error.NativeErrorCode).IsEqualTo(2);
     }
@@ -93,7 +93,7 @@ public sealed class WindowsBatchFileLookupTests
         using var tree = new LookupTree();
         tree.Put(tree.Current, "x.cmd");
 
-        await Assert.That(WindowsBatchFile.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false, path: entry + ";" + tree.PathEntry)))
+        await Assert.That(WindowsProgramLookup.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false, path: entry + ";" + tree.PathEntry)))
             .IsEqualTo(Path.Combine(tree.Current, "x.cmd"));
     }
 
@@ -107,7 +107,7 @@ public sealed class WindowsBatchFileLookupTests
         tree.Put(tree.Current, "x.cmd");
 
         var error = Assert.Throws<Win32Exception>(() =>
-            WindowsBatchFile.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false, path: tree.PathEntry + ";")));
+            WindowsProgramLookup.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false, path: tree.PathEntry + ";")));
 
         await Assert.That(error.NativeErrorCode).IsEqualTo(2);
     }
@@ -122,7 +122,7 @@ public sealed class WindowsBatchFileLookupTests
         using var tree = new LookupTree();
         tree.Put(tree.Current, "x.cmd");
 
-        await Assert.That(WindowsBatchFile.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false, path: tree.PathEntry + ";;" + tree.System)))
+        await Assert.That(WindowsProgramLookup.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false, path: tree.PathEntry + ";;" + tree.System)))
             .IsEqualTo(Path.Combine(tree.Current, "x.cmd"));
     }
 
@@ -141,7 +141,7 @@ public sealed class WindowsBatchFileLookupTests
         tree.Put(tree.PathEntry, "x.cmd");
         var locations = tree.Locations(searchCurrentDirectory: false) with { ProcessDirectory = hostDirectory };
 
-        await Assert.That(WindowsBatchFile.ResolveScript("x.cmd", locations)).IsEqualTo(Path.Combine(tree.PathEntry, "x.cmd"));
+        await Assert.That(WindowsProgramLookup.ResolveScript("x.cmd", locations)).IsEqualTo(Path.Combine(tree.PathEntry, "x.cmd"));
     }
 
     [Test]
@@ -154,8 +154,8 @@ public sealed class WindowsBatchFileLookupTests
         tree.Put(tree.Windows, "x.cmd");
         var locations = tree.Locations() with { Path = null };
 
-        await Assert.That(WindowsBatchFile.ResolveScript("x.cmd", locations)).IsEqualTo(Path.Combine(tree.Windows, "x.cmd"));
-        var error = Assert.Throws<Win32Exception>(() => WindowsBatchFile.ResolveScript("y.cmd", locations));
+        await Assert.That(WindowsProgramLookup.ResolveScript("x.cmd", locations)).IsEqualTo(Path.Combine(tree.Windows, "x.cmd"));
+        var error = Assert.Throws<Win32Exception>(() => WindowsProgramLookup.ResolveScript("y.cmd", locations));
         await Assert.That(error.NativeErrorCode).IsEqualTo(2);
     }
 
@@ -170,7 +170,7 @@ public sealed class WindowsBatchFileLookupTests
         using var tree = new LookupTree();
         tree.Put(tree.PathEntry, "sub\\x.cmd");
 
-        await Assert.That(WindowsBatchFile.ResolveScript(name, tree.Locations())).IsEqualTo(Path.Combine(tree.PathEntry, "sub", "x.cmd"));
+        await Assert.That(WindowsProgramLookup.ResolveScript(name, tree.Locations())).IsEqualTo(Path.Combine(tree.PathEntry, "sub", "x.cmd"));
     }
 
     [Test]
@@ -182,7 +182,7 @@ public sealed class WindowsBatchFileLookupTests
         using var tree = new LookupTree();
         tree.Put(Path.Combine(tree.Current, "rel"), "x.cmd");
 
-        await Assert.That(WindowsBatchFile.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false, path: "rel")))
+        await Assert.That(WindowsProgramLookup.ResolveScript("x.cmd", tree.Locations(searchCurrentDirectory: false, path: "rel")))
             .IsEqualTo(Path.Combine(tree.Current, "rel", "x.cmd"));
     }
 
@@ -199,7 +199,7 @@ public sealed class WindowsBatchFileLookupTests
         tree.Put(tree.PathEntry, "x.cmd");
 
         var error = Assert.Throws<Win32Exception>(() =>
-            WindowsBatchFile.ResolveScript("x.cmd", tree.Locations(path: string.Format(shape, tree.PathEntry))));
+            WindowsProgramLookup.ResolveScript("x.cmd", tree.Locations(path: string.Format(shape, tree.PathEntry))));
 
         await Assert.That(error.NativeErrorCode).IsEqualTo(2);
     }
@@ -213,7 +213,7 @@ public sealed class WindowsBatchFileLookupTests
         using var tree = new LookupTree();
         tree.Put(tree.PathEntry, "x.cmd");
 
-        await Assert.That(WindowsBatchFile.ResolveScript("x.cmd", tree.Locations(path: tree.PathEntry + "\\")))
+        await Assert.That(WindowsProgramLookup.ResolveScript("x.cmd", tree.Locations(path: tree.PathEntry + "\\")))
             .IsEqualTo(Path.Combine(tree.PathEntry, "x.cmd"));
     }
 
@@ -232,7 +232,7 @@ public sealed class WindowsBatchFileLookupTests
         tree.Put(tree.PathEntry, "x.cmd");
         var fileName = name == "rooted" ? Path.Combine(tree.Current, "x.cmd") : name;
 
-        var error = Assert.Throws<Win32Exception>(() => WindowsBatchFile.ResolveScript(fileName, tree.Locations()));
+        var error = Assert.Throws<Win32Exception>(() => WindowsProgramLookup.ResolveScript(fileName, tree.Locations()));
 
         await Assert.That(error.NativeErrorCode).IsEqualTo(5);
     }
@@ -250,7 +250,7 @@ public sealed class WindowsBatchFileLookupTests
         tree.Put(tree.Host, "x.cmd");
         var path = Path.Combine(elsewhere, "x.cmd");
 
-        await Assert.That(WindowsBatchFile.ResolveScript(path, tree.Locations())).IsEqualTo(path);
+        await Assert.That(WindowsProgramLookup.ResolveScript(path, tree.Locations())).IsEqualTo(path);
     }
 
     [Test]
@@ -271,7 +271,7 @@ public sealed class WindowsBatchFileLookupTests
             _ => name,
         };
 
-        var error = Assert.Throws<Win32Exception>(() => WindowsBatchFile.ResolveScript(fileName, tree.Locations()));
+        var error = Assert.Throws<Win32Exception>(() => WindowsProgramLookup.ResolveScript(fileName, tree.Locations()));
 
         await Assert.That(error.NativeErrorCode).IsEqualTo(2);
     }
@@ -280,7 +280,7 @@ public sealed class WindowsBatchFileLookupTests
     /// One directory for each place the lookup reads, under a fresh temporary root. The host and current directories
     /// sit under different parents, so a <c>..\</c> name means a different file from each.
     /// </summary>
-    private sealed class LookupTree : IDisposable
+    internal sealed class LookupTree : IDisposable
     {
         private readonly string _root = Path.Combine(Path.GetTempPath(), $"minipty-lookup-{Guid.NewGuid():N}");
 
@@ -304,7 +304,7 @@ public sealed class WindowsBatchFileLookupTests
             File.WriteAllText(path, "@echo off\r\n");
         }
 
-        public WindowsBatchFile.SearchLocations Locations(bool searchCurrentDirectory = true, string? path = null) =>
+        public WindowsProgramLookup.SearchLocations Locations(bool searchCurrentDirectory = true, string? path = null) =>
             new(Host, Current, searchCurrentDirectory, System, Windows, path ?? PathEntry);
 
         public void Dispose() => Directory.Delete(_root, recursive: true);

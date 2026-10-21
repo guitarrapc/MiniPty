@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.ComponentModel;
-using System.Runtime.InteropServices;
 
 namespace MiniPty.Internal;
 
@@ -56,7 +55,7 @@ namespace MiniPty.Internal;
 /// <see cref="PtyStartInfo.CommandLine"/> is passed unchanged, as its contract says.
 /// </para>
 /// </remarks>
-internal static partial class WindowsBatchFile
+internal static class WindowsBatchFile
 {
     /// <summary>
     /// The longest command line <c>cmd.exe</c> runs, in characters without the terminating NUL. <c>cmd.exe</c> counts
@@ -64,11 +63,7 @@ internal static partial class WindowsBatchFile
     /// </summary>
     internal const int CommandLineLimit = 8191;
 
-    private const int ErrorFileNotFound = 2;
-    private const int ErrorAccessDenied = 5;
     private const int ErrorBadExeFormat = 193;
-    private const uint InvalidFileAttributes = 0xFFFFFFFF;
-    private const uint FileAttributeDirectory = 0x10;
     private const string CommandPrefix = "cmd.exe /e:ON /v:OFF /d /c \"";
     private const string PercentEscape = "%%cd:~,";
 
@@ -76,19 +71,10 @@ internal static partial class WindowsBatchFile
     private static readonly SearchValues<char> s_unquoted =
         SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#$*+-./:?@\\_");
 
-    private static string? s_systemDirectory;
-    private static string? s_windowsDirectory;
-    private static string? s_processDirectory;
     private static string? s_commandInterpreterPath;
 
     /// <summary>Gets the interpreter that runs a batch file: <c>cmd.exe</c> in the system directory.</summary>
-    internal static string CommandInterpreterPath => s_commandInterpreterPath ??= Path.Combine(SystemDirectory, "cmd.exe");
-
-    private static string SystemDirectory => s_systemDirectory ??= Environment.SystemDirectory;
-
-    private static string WindowsDirectory => s_windowsDirectory ??= Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-
-    private static string? ProcessDirectory => s_processDirectory ??= Path.GetDirectoryName(Environment.ProcessPath);
+    internal static string CommandInterpreterPath => s_commandInterpreterPath ??= Path.Combine(WindowsProgramLookup.SystemDirectory, "cmd.exe");
 
     /// <summary>
     /// Whether <paramref name="fileName"/> names a batch file: whether the last component left after <c>.</c> and
@@ -184,123 +170,13 @@ internal static partial class WindowsBatchFile
     }
 
     /// <summary>
-    /// The places a lookup searches, in <c>CreateProcess</c>'s order. <see cref="ResolveScript(string)"/> reads them
-    /// from the process.
-    /// </summary>
-    /// <param name="ProcessDirectory">The directory of the host executable, or null when unknown.</param>
-    /// <param name="CurrentDirectory">The host's current directory.</param>
-    /// <param name="SearchCurrentDirectory">Whether the current directory is searched, as
-    /// <c>NeedCurrentDirectoryForExePath</c> decides for the name.</param>
-    /// <param name="SystemDirectory">
-    /// The system directory. The 16-bit one is <c>System</c> under the Windows directory.
-    /// </param>
-    /// <param name="WindowsDirectory">The Windows directory.</param>
-    /// <param name="Path">
-    /// The host's <c>PATH</c>, or null when unset. <see cref="ResolveScript(string)"/> leaves it null and reads
-    /// <c>PATH</c> only when the fixed locations miss.
-    /// </param>
-    internal readonly record struct SearchLocations(
-        string? ProcessDirectory,
-        string CurrentDirectory,
-        bool SearchCurrentDirectory,
-        string SystemDirectory,
-        string WindowsDirectory,
-        string? Path);
-
-    /// <summary>Locates the script as <c>CreateProcess</c> locates a program, from this process's locations.</summary>
-    /// <returns>The script's full path.</returns>
-    /// <exception cref="Win32Exception">
-    /// No such file (<c>ERROR_FILE_NOT_FOUND</c>), or a directory found first (<c>ERROR_ACCESS_DENIED</c>), as from
-    /// <c>CreateProcess</c>.
-    /// </exception>
-    internal static string ResolveScript(string fileName)
-    {
-        // A rooted or dot-relative name is not searched for, so it reads neither the current directory nor PATH.
-        if (Path.IsPathRooted(fileName) || IsCurrentDirectoryRelative(fileName))
-            return Accept(Path.GetFullPath(fileName));
-
-        var locations = new SearchLocations(
-            ProcessDirectory,
-            Environment.CurrentDirectory,
-            NeedCurrentDirectoryForExePathW(fileName),
-            SystemDirectory,
-            WindowsDirectory,
-            Path: null);
-
-        // PATH, the longest string the lookup reads, is read only when the fixed locations miss.
-        if (TryFixedLocations(fileName, locations, out var found)
-            || TryPathEntries(fileName, Environment.GetEnvironmentVariable("PATH"), locations, out found))
-        {
-            return Accept(found);
-        }
-
-        throw new Win32Exception(ErrorFileNotFound, "CreateProcess failed");
-    }
-
-    /// <summary>
-    /// Locates the script as <c>CreateProcess</c> locates a program. A rooted name is taken as it is, and a name that
-    /// starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is relative to the current directory. A drive-relative
-    /// or root-relative name such as <c>C:x.cmd</c> or <c>\x.cmd</c> counts as rooted, and Windows resolves it from this
-    /// process's own current directories. Any other name, with a directory part
-    /// or without, is searched for in the host executable's directory, the current directory when it is searched, the
-    /// system directory, the 16-bit system directory, the Windows directory, and then each <c>PATH</c> entry as
-    /// written. An empty entry stands for the current directory, except one after the last semicolon, and a relative
-    /// entry is relative to the current directory. The first match decides, and a directory there fails the launch.
-    /// </summary>
-    /// <returns>The script's full path.</returns>
-    /// <exception cref="Win32Exception">
-    /// No such file (<c>ERROR_FILE_NOT_FOUND</c>), or a directory found first (<c>ERROR_ACCESS_DENIED</c>), as from
-    /// <c>CreateProcess</c>.
-    /// </exception>
-    internal static string ResolveScript(string fileName, in SearchLocations locations)
-    {
-        if (Path.IsPathRooted(fileName))
-            return Accept(Path.GetFullPath(fileName));
-
-        if (IsCurrentDirectoryRelative(fileName))
-            return Accept(Path.GetFullPath(fileName, locations.CurrentDirectory));
-
-        if (TryFixedLocations(fileName, locations, out var found) || TryPathEntries(fileName, locations.Path, locations, out found))
-            return Accept(found);
-
-        throw new Win32Exception(ErrorFileNotFound, "CreateProcess failed");
-    }
-
-    private static bool TryFixedLocations(string fileName, in SearchLocations locations, out string found) =>
-        (!string.IsNullOrEmpty(locations.ProcessDirectory) && TryCandidate(locations.ProcessDirectory, fileName, locations, out found))
-        || (locations.SearchCurrentDirectory && TryCandidate(locations.CurrentDirectory, fileName, locations, out found))
-        || TryCandidate(locations.SystemDirectory, fileName, locations, out found)
-        || TryCandidate(Path.Join(locations.WindowsDirectory, "System"), fileName, locations, out found)
-        || TryCandidate(locations.WindowsDirectory, fileName, locations, out found);
-
-    private static bool TryPathEntries(string fileName, string? path, in SearchLocations locations, out string found)
-    {
-        if (path is not null)
-        {
-            foreach (var range in path.AsSpan().Split(';'))
-            {
-                var entry = path.AsSpan(range);
-                // The list ends at its last semicolon, so a final empty entry is not the current directory.
-                if (entry.IsEmpty && range.End.GetOffset(path.Length) == path.Length)
-                    break;
-
-                if (TryCandidate(entry.IsEmpty ? locations.CurrentDirectory : entry, fileName, locations, out found))
-                    return true;
-            }
-        }
-
-        found = "";
-        return false;
-    }
-
-    /// <summary>
     /// Builds the NUL-terminated <c>cmd.exe</c> command line that runs <paramref name="scriptPath"/> with
     /// <paramref name="arguments"/> delivered as data (see the type remarks).
     /// </summary>
     /// <remarks>
-    /// The script path is checked here as well as in <see cref="ValidateName"/>: the lookup joins the name with
-    /// directories from the host's <c>PATH</c> and current directory, so this is the one place that sees every
-    /// character <c>cmd.exe</c> receives.
+    /// The script path is checked here as well as in <see cref="ValidateName"/>: the lookup
+    /// (<see cref="WindowsProgramLookup"/>) joins the name with directories from a <c>PATH</c> and the current
+    /// directory, so this is the one place that sees every character <c>cmd.exe</c> receives.
     /// </remarks>
     /// <exception cref="ArgumentException">
     /// The script path contains a quote, a carriage return, a line feed, or a NUL, or ends with a backslash, an
@@ -360,68 +236,6 @@ internal static partial class WindowsBatchFile
                 $"The command line for the batch file is at least {length} characters, more than the {CommandLineLimit} cmd.exe accepts. Escaping counts: each % takes 8 characters, and the script's full path is included.",
                 "startInfo");
         }
-    }
-
-    private static bool IsCurrentDirectoryRelative(string fileName) =>
-        fileName.StartsWith(".\\", StringComparison.Ordinal)
-        || fileName.StartsWith("./", StringComparison.Ordinal)
-        || fileName.StartsWith("..\\", StringComparison.Ordinal)
-        || fileName.StartsWith("../", StringComparison.Ordinal);
-
-    /// <summary>
-    /// Takes the file the lookup found, or fails as <c>CreateProcess</c> does there: it runs the first match and does
-    /// not skip a directory to look for a later file.
-    /// </summary>
-    private static unsafe string Accept(string path)
-    {
-        uint attributes;
-        fixed (char* p = path)
-            attributes = GetFileAttributesW(p);
-
-        if (attributes == InvalidFileAttributes)
-            throw new Win32Exception(ErrorFileNotFound, "CreateProcess failed");
-        if ((attributes & FileAttributeDirectory) != 0)
-            throw new Win32Exception(ErrorAccessDenied, "CreateProcess failed");
-        return path;
-    }
-
-    /// <summary>
-    /// Whether <paramref name="fileName"/> exists, as a file or a directory, under <paramref name="directory"/>. The
-    /// directory is relative to the lookup's current directory unless rooted.
-    /// </summary>
-    /// <remarks>
-    /// The candidate is written into a pooled buffer and probed there, so a search through a long <c>PATH</c> allocates
-    /// nothing until it finds the file.
-    /// </remarks>
-    private static unsafe bool TryCandidate(ReadOnlySpan<char> directory, string fileName, in SearchLocations locations, out string found)
-    {
-        var baseDirectory = Path.IsPathRooted(directory) ? ReadOnlySpan<char>.Empty : locations.CurrentDirectory.AsSpan();
-        var buffer = ArrayPool<char>.Shared.Rent(baseDirectory.Length + directory.Length + fileName.Length + 3);
-        try
-        {
-            var joined = baseDirectory.IsEmpty
-                ? Path.TryJoin(directory, fileName, buffer, out var written)
-                : Path.TryJoin(baseDirectory, directory, fileName, buffer, out written);
-            if (joined && written < buffer.Length)
-            {
-                buffer[written] = '\0';
-                fixed (char* candidate = buffer)
-                {
-                    if (GetFileAttributesW(candidate) != InvalidFileAttributes)
-                    {
-                        found = Path.GetFullPath(new string(buffer, 0, written));
-                        return true;
-                    }
-                }
-            }
-        }
-        finally
-        {
-            ArrayPool<char>.Shared.Return(buffer);
-        }
-
-        found = "";
-        return false;
     }
 
     private static bool NeedsQuoting(string argument) =>
@@ -519,10 +333,4 @@ internal static partial class WindowsBatchFile
 
         return position;
     }
-
-    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool NeedCurrentDirectoryForExePathW(string exeName);
-
-    [LibraryImport("kernel32.dll")]
-    private static unsafe partial uint GetFileAttributesW(char* fileName);}
+}

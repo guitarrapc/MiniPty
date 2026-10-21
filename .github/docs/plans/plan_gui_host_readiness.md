@@ -2,7 +2,7 @@
 
 Goal: make MiniPty a dependable PTY backend for a terminal control embedded in a desktop GUI application. WinUI is the first target. WPF, WinForms, and Avalonia hosts share the same constraints. The terminal must not freeze the UI, must not starve the thread pool as tabs are added, and must not throw on ordinary GUI lifecycle events. VT fidelity must also be good enough for a terminal emulator.
 
-**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phase C: G9 (explicit Unix termios with `IUTF8`) and G10 (hang-up before kill on Unix dispose) are implemented (2026-10-17); G6 is deferred until an embedder needs dozens of concurrent sessions, since G1 already removed every observed failure. Phase D: G8 (opt-in process-tree cleanup) is implemented (2026-10-18), and G7 (opt-in out-of-band ConPTY supplied by the application) is implemented (2026-10-19). G12 (bounded UI-thread occupancy under output floods, F13) is implemented (2026-10-20).
+**Status:** Phase A (G1 including G3, and G2) and Phase B (G4, G5, G11) are implemented (2026-10-17). G1 was delivered in steps 1 (caller-context test harness), 2 (exit watcher, exit task, EOF staging timer), 3 (output pump and consumer views), 4 (input path), 4b (Windows non-blocking input, F11), and 5 (exit API merged into `WaitForExitAsync`). Phase C: G9 (explicit Unix termios with `IUTF8`) and G10 (hang-up before kill on Unix dispose) are implemented (2026-10-17); G6 is deferred until an embedder needs dozens of concurrent sessions, since G1 already removed every observed failure. Phase D: G8 (opt-in process-tree cleanup) is implemented (2026-10-18), and G7 (opt-in out-of-band ConPTY supplied by the application) is implemented (2026-10-19). G12 (bounded UI-thread occupancy under output floods, F13) is implemented (2026-10-20). G13 (child-PATH program lookup on Windows, F14) is implemented (2026-10-21).
 
 ## Background
 
@@ -29,6 +29,7 @@ All measurements were taken on Windows 11 build 26200 with 32 logical CPUs, the 
 | F10 | VT sequences written by a child through the in-box ConPTY | See the table below |
 | F11 | `WriteInputAsync` while the child keeps writing output and nobody reads it (the ring, then the output pipe, are full) | ConPTY stops reading input after about 4 KiB. Writes of 1 and 4 KiB completed in 1 ms; 16 and 64 KiB blocked the caller for more than 5 s and completed 27–87 ms after output reading resumed; 2 MiB blocked for more than 15 s. With the same undrained output but an idle child, 225 KB took 311 ms. When the output loop runs on the writing thread, as with `await foreach` on a UI thread, this is a deadlock |
 | F12 | Sessions started while the host runs `Process.Start` with redirected stdio on other threads (48 at a time, each child alive about 1 s or about 3 s) | End of output waits for the unrelated children. Time to the end of `ReadOutputAsync` for `cmd /c echo hi`: p50 139 ms alone, 1052 ms with 1 s children, 3061 ms with 3 s children (27/30 and 30/30 sessions over 600 ms). Making MiniPty's own pipe handles non-inheritable changed nothing (1083 / 3069 ms). `ClosePseudoConsole` returned within 2 ms in every run |
+| F14 | A tool placed on the child's `PATH` through `Environment` and started by name (`FileName = "mytool"`) on Windows | `Pty.Start` failed with `Win32Exception` `CreateProcess failed` (`ERROR_FILE_NOT_FOUND`), with or without `NoDefaultCurrentDirectoryInExePath`. `CreateProcess` searches only the host's `PATH`; the same start succeeds on Unix, where the child resolves the name against its own `PATH` |
 | F13 | After G1: `await foreach` over `ReadOutputAsync` on the UI thread while the child floods output, with a fixed cost per chunk in the loop | With a handler faster than the child (the samples' VT parser, about 135 µs per 4 KiB chunk), almost every `MoveNextAsync` waits, and the UI thread stays free. With 2 ms or 5 ms per chunk, the next chunk is always buffered: 1,901 of 1,911 and 804 of 806 calls completed synchronously, the loop never returned to the dispatcher, and a callback posted to the UI context waited 945 ms to over 1 s, for as long as the flood lasted |
 
 VT sequences written by the child through the in-box ConPTY (F10):
@@ -90,6 +91,7 @@ Causes 1–3 share one structure:
 | G11 | **P1** | On Windows, end of output can wait for an unrelated process the host spawned (F12) | [Bounded end of output after close](#g11-bounded-end-of-output-on-windows-p1) |
 | G10 | **P2** | Unix `Dispose` kills with `SIGKILL` immediately | [Graceful Unix termination](#g10-graceful-unix-termination-on-dispose-p2) (implemented) |
 | G12 | **P1** | A UI-thread consumer slower than the child's output never returns to its dispatcher during a flood (F13) | [Bounded UI-thread occupancy](#g12-bounded-ui-thread-occupancy-under-output-floods-p1) (implemented) |
+| G13 | **P2** | On Windows, a program on the child's `PATH` cannot be started by name (F14) | [Child-PATH program lookup](#g13-child-path-program-lookup-on-windows-p2) (implemented) |
 
 ---
 
@@ -1131,6 +1133,80 @@ Each guard was confirmed red against a mutation on Windows: with the yield disab
 
 ---
 
+## G13: Child-PATH program lookup on Windows (P2)
+
+### Why P2
+
+A host that bundles tools, or that builds a `PATH` for the terminal from its own settings, puts that `PATH` in `PtyStartInfo.Environment` and starts the tool by name. On Unix that works, because the native shim resolves the name against the child's final `PATH` before `execve`. On Windows `CreateProcess` searches only the calling process's `PATH`; the environment block passed for the child plays no part, so the same start failed with `ERROR_FILE_NOT_FOUND` (F14). Nothing freezes and a full path works around it, so this is P2, but it is the one remaining difference between the platforms in how a name is resolved, and the batch-file work (#58) had already moved the Windows lookup into MiniPty for scripts.
+
+### Decision (implemented)
+
+- **When.** MiniPty searches for the name itself when the overlay sets or removes `PATH` (compared ignoring case). The condition is the overlay, not a comparison with the host's `PATH`, so the behavior follows what the caller wrote and not the host's environment at spawn time. An overlay that leaves `PATH` alone, or no overlay, changes nothing: `CreateProcess` searches as before, and the spawn pays nothing. Resolving every name in MiniPty was rejected because a spawn that inherits `PATH` would allocate the found path and probe a few directories for a result `CreateProcess` reaches anyway.
+- **Where.** `CreateProcess`'s order, with the child's `PATH` entries in place of the host's: the host executable's directory, the host's current directory (subject to `NeedCurrentDirectoryForExePath`), the system directory, the 16-bit system directory, the Windows directory, then the `PATH` entries. This is the lookup the batch-file work wrote (`WindowsBatchFile.ResolveScript`), moved to `WindowsProgramLookup` and shared by scripts and programs; a batch file is found on the child's `PATH` on the same condition.
+- **`.exe`.** Appended when the last path component has no `.`, by measurement rather than by the documentation (below). `.com` and `PATHEXT` are not consulted, as `CreateProcess` does not consult them for a name without an extension.
+- **No `PATHEXT`, so batch shims carry their extension** (decided after the security review). Resolving `PATHEXT` and routing a `.cmd` or `.bat` result through the batch-file escaping was considered, so that `npm` would find `npm.cmd`. It was rejected: a bare name would become a `cmd.exe` script the caller never wrote, and the result would depend on directory and extension order. A `FileName` ending in `.cmd` or `.bat` stays the one, visible signal for the escaped `cmd.exe` path. `.exe` is still appended, because `CreateProcess` appends it for a spawn without an overlay and the two must agree.
+- **How it is started.** The file found becomes `CreateProcessW`'s application name, so `CreateProcess` makes no lookup of its own; the command line keeps the name as given, so `argv[0]` is unchanged.
+- **Not searched.** Rooted and dot-relative names stay with `CreateProcess`, which does not search for them either. A batch file with a raw `CommandLine` stays with `CreateProcess` and the host's `PATH`: a script given as an application name has its command line rebuilt for `cmd.exe` and its quoting broken.
+- **Only fully qualified entries of the child's `PATH`** (security review). The first version read empty, `.`, and relative entries against the host's current directory, as `CreateProcess` reads the host's `PATH`. `CreateProcess` does that even with `NoDefaultCurrentDirectoryInExePath` set, so with G13 an overlay such as `extra + ";" + path` with an empty `extra` would have started a program planted in the host's current directory, opt-out or not, at spawn time and before the child ran anything. That route did not exist before G13, when the overlay's `PATH` played no part in the spawn. The child's `PATH` now searches only its fully qualified entries; the host's own lookups keep `CreateProcess`'s rule.
+
+### Measurements
+
+Windows 11 build 26200, `CreateProcess(NULL, name)` with the host's `PATH` set to one directory holding copies of `hostname.exe` (exit 0) and `findstr.exe` (exit 2), `NoDefaultCurrentDirectoryInExePath` unset:
+
+| Name | Files present | Result |
+|---|---|---|
+| `tool` | `tool.exe` | ran |
+| `tool` | `tool` | `ERROR_FILE_NOT_FOUND` |
+| `tool` | `tool` (exit 2) and `tool.exe` (exit 0) | `tool.exe` ran |
+| `tool.` | `tool.exe` | `ERROR_FILE_NOT_FOUND` |
+| `tool.` | `tool` | ran (Windows opens `tool.` as `tool`) |
+| `tool.foo` | `tool.foo` | ran; with only `tool.foo.exe`, not found |
+| `sub\tool`, `sub/tool`, `sub.d\tool` | `sub\tool.exe`, `sub.d\tool.exe` | ran; with only the extensionless files, not found; with both, the `.exe` ran |
+| `C:\...\tool` (rooted) | `tool.exe`, or `tool` | ran either way; left to `CreateProcess` |
+| `"my tool"` | `my tool.exe` | ran |
+| `tool` | a directory named `tool.exe` first on `PATH` | `ERROR_ACCESS_DENIED` |
+
+With a script as `lpApplicationName`, `CreateProcess` still started `cmd.exe` but rebuilt the command line: `"s.cmd" a "b c"` failed (exit 1, script not run), `s.cmd a "b c"` ran with `%0` = `s.cmd`, and `"x y" a` ran `x`.
+
+### Tests
+
+| Test | Covers |
+|---|---|
+| `WindowsProgramLookupTests` | The `.exe` rule per equivalence class (bare name, trailing dot, other extension, leading dot, directory part with and without a dot), the search order, that only the given `PATH` is searched, a directory of the name, and the `IsSearched` and `NeedsExecutableExtension` tables |
+| `WindowsProgramLookupTests` (security) | Empty, `.`, middle-empty, relative, and `rel\..` entries of the child's `PATH` are skipped for a program and for a script, while the host's rule finds the same file; fully qualified, trailing-backslash, and `\\?\` device-path entries are searched |
+| `WindowsChildPathLookupTests` (security) | With the host's current directory holding a planted program and `NoDefaultCurrentDirectoryInExePath` set, six relative forms of the overlay's `PATH` all fail with `ERROR_FILE_NOT_FOUND` and the fully qualified form finds the program (`[NotInParallel]`, as it changes the process's current directory) |
+| `WindowsBatchFileTests` (security) | A script named through its data stream (`::$DATA`, any case, trailing dot), searched by the host or found on the child's `PATH`, fails `Pty.Start` with `ERROR_BAD_EXE_FORMAT` and never runs |
+| `WindowsChildPathLookupTests` | `BuildLaunch`: a program and a script found on the child's `PATH`; an overlay without `PATH`, a rooted or dot-relative name, and a batch file with a raw `CommandLine` left to `CreateProcess`; a removed or empty `PATH` searching the fixed locations only; the key matched ignoring case; a missing program failing `Pty.Start` with `ERROR_FILE_NOT_FOUND`. End to end: a copy of `hostname.exe` under a unique name, started without its extension from the child's `PATH`, runs and exits 0; and, with the tool on the host's `PATH` only, the start succeeds without an overlay and fails with an overlay that sets another `PATH` (`[NotInParallel]`, as it edits the process's `PATH`) |
+| `PtyEnvironmentTests` | `BuildWindows` reports `PATH` set, removed, set under another case, untouched, and absent |
+| `WindowsBatchFileLookupTests` | Unchanged rules on the moved lookup |
+
+Confirmed red against mutations on Windows: with the override path disabled, 7 of the 13 child-PATH tests fail; with `.exe` never appended, 12 of the 29 lookup tests and 5 of the child-PATH tests fail. Full suite: Windows 564 pass.
+
+### Security review
+
+Each way the change could make a spawn easier to subvert, and where it stands. Measurements are in [pty_crossplatform.md](../references/pty_crossplatform.md) (program lookup rows).
+
+| Concern | Status |
+|---|---|
+| A program planted in the host's current directory, reached through an empty, `.`, relative, drive-relative, or root-relative entry of the overlay's `PATH`, also with `NoDefaultCurrentDirectoryInExePath` set | **Closed.** New with G13; the child's `PATH` searches only fully qualified entries. Without the skip, the planted program was found for `;dir`, `.;dir`, `dir;;dir`, `empty\..`, `C:empty\..`, and a root-relative `\...\dir`; with it, none |
+| A batch script started through a name batch detection misses, reopening the `cmd.exe` argument injection | **Closed.** A script is never passed as an application name. `.exe` is appended only, never `.cmd` or `.bat`. Stream names (`x.cmd::$DATA`) are refused by `CreateProcess` with `ERROR_BAD_EXE_FORMAT`, pinned by a test; a short name keeps `.CMD` and is detected; dot segments and trailing dots and spaces were already handled by the batch-file work |
+| The overlay's `PATH` choosing the program the host starts | **Inherent, documented.** It is what the feature is, and what a Unix child already does; the same `PATH` decides what the child runs next. The fixed locations come first, so it cannot replace the host's or the system's programs. A host that takes `PATH` from an untrusted source must treat it as code or pass a full path |
+| A UNC entry of the overlay's `PATH` probed from the host, which authenticates to that server | **Inherent, documented.** Probing it is what `CreateProcess` does for the host's `PATH`, and an attacker who can place an entry can also place a program there, which is worse; skipping UNC entries would break tools on network shares without removing that |
+| The host's current directory searched before the system directories | **Unchanged.** `CreateProcess`'s own implicit step, kept for parity with a spawn without an overlay and controlled by `NoDefaultCurrentDirectoryInExePath` (only for names without a backslash). Not new with G13 |
+| The child's `WorkingDirectory` searched | **Never.** Neither MiniPty nor `CreateProcess` reads it for the lookup |
+| Quoted, padded, or NUL-bearing entries | **Inert.** A quoted or padded entry matches nothing, as for `CreateProcess`; NUL is rejected in every environment value |
+| The file changing between the probe and the start | **No new exposure.** `CreateProcess` opens whatever is at the found path when it starts; whoever can replace that file could replace the program itself. A directory of the name found first fails the start | NativeAOT: the `Session` sample published without warnings and ran on Windows. Allocation (Windows, `PtyIntegrationBenchmarks`): unchanged, `Session_Exit0_Bytes` 1.88 KB, `Session_32KiB_StreamBytes` 1.6 KB, `Session_32KiB_OutputStreamBytes` 1.7 KB, `Capture_32KiB_Text` 114.05 KB; a spawn whose overlay leaves `PATH` alone runs no lookup, and the benchmarks set no overlay. Not run on Linux or macOS: the lookup is reached only on Windows, and the Unix environment path changed in a parameter name only.
+
+### Lessons Learned
+
+- **The documentation of `.exe` appending is wrong for names with a path.** `CreateProcess` appended `.exe` to `sub\tool` and to `sub.d\tool`; only a `.` in the last component stops it. A rooted name without an extension found either file, which is not modeled because rooted names are left to `CreateProcess`.
+- **A batch file cannot be passed as an application name.** `CreateProcess` accepts it and starts `cmd.exe`, but rebuilds the command line with the outer-quote stripping `cmd.exe /c` applies, so a quoted `argv[0]` fails and `"x y"` runs `x`. Starting `cmd.exe` explicitly, as the batch-file work does, is the only form that keeps the arguments intact.
+- **`NoDefaultCurrentDirectoryInExePath` does not cover `PATH` entries.** It removes only the implicit current-directory step; an empty, `.`, or relative entry still finds the current directory. A lookup that searches a caller's `PATH` must refuse those entries itself.
+- **A security mutation test needs a target the mutation can reach.** The first drive-relative case, a bare `C:`, was not found even without the skip, because `Path.Join("C:", name)` yields `C:\name`; it passed with and without the fix. `C:empty\..` is the form that reaches the planted file, and the test now lists every form's outcome so a failure names each one.
+- **A mutation revert needs an anchor as narrow as the mutation.** Reverting `return false;` to the original expression by pattern hit two other `return false;` lines in the same file; the tests caught nothing because those methods were not exercised by the filtered run. Revert by line, or by a string that occurs once.
+
+---
+
 ## Suggested Implementation Order
 
 ```mermaid
@@ -1165,6 +1241,7 @@ flowchart LR
 | **Phase C** | G9, G10 (G6 deferred) | Unix canonical editing handles UTF-8, and closing a tab hangs the shell up before it is killed, so it can exit cleanly while the host keeps running |
 | **Phase D** | G7, G8 | Optional Windows VT fidelity and process-tree cleanup for hosts that opt in |
 | **Follow-up** | G12 | A UI-thread consumer slower than the child's output still lets input and rendering run during a flood |
+| **Follow-up** | G13 | A program on the child's `PATH` starts by name on Windows as it does on Unix |
 
 ## Lessons Learned
 
