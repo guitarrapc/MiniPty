@@ -33,6 +33,17 @@ namespace MiniPty.Internal;
 /// all. Such a name is left to <c>CreateProcess</c> for a program, and taken as it is for a script. Any other name,
 /// with a directory part or without, is searched for.
 /// </para>
+/// <para>
+/// The child's <c>PATH</c> differs from <c>CreateProcess</c> in one rule (<see cref="ChildLocations"/>): only its
+/// fully qualified entries are searched. <c>CreateProcess</c> reads an empty entry, <c>.</c>, and any relative entry
+/// against the current directory, and does so also when <c>NoDefaultCurrentDirectoryInExePath</c> is set (measured on
+/// Windows 11: a program planted in the current directory ran for <c>;dir</c>, <c>.;dir</c>, <c>dir;;x</c>, and
+/// <c>dir\..</c> with the variable set). Applied to a <c>PATH</c> that the host's caller wrote, that would start a
+/// program from the host's current directory, which is neither the child's <see cref="PtyStartInfo.WorkingDirectory"/>
+/// nor anything the caller can see, and would undo the opt-out that protects the host's own lookups. An entry such as
+/// <c>extra + ";" + path</c> with an empty <c>extra</c> produces such an entry by accident. The child still receives its
+/// <c>PATH</c> unchanged and resolves its own commands by its own rules.
+/// </para>
 /// </remarks>
 internal static partial class WindowsProgramLookup
 {
@@ -53,8 +64,8 @@ internal static partial class WindowsProgramLookup
     private static string? ProcessDirectory => s_processDirectory ??= Path.GetDirectoryName(Environment.ProcessPath);
 
     /// <summary>
-    /// The places a lookup searches, in <c>CreateProcess</c>'s order. <see cref="HostLocations"/> reads them from
-    /// the process.
+    /// The places a lookup searches, in <c>CreateProcess</c>'s order. <see cref="ChildLocations"/> and
+    /// <see cref="ResolveScriptOnHost"/> read them from the process.
     /// </summary>
     /// <param name="ProcessDirectory">The directory of the host executable, or null when unknown.</param>
     /// <param name="CurrentDirectory">The host's current directory.</param>
@@ -65,9 +76,14 @@ internal static partial class WindowsProgramLookup
     /// </param>
     /// <param name="WindowsDirectory">The Windows directory.</param>
     /// <param name="Path">
-    /// The <c>PATH</c> whose entries are searched after the fixed locations, or null for none. The child's when it
-    /// differs from the host's; <see cref="ResolveScriptOnHost"/> leaves it null and reads the host's <c>PATH</c>
+    /// The <c>PATH</c> whose entries are searched after the fixed locations, or null for none. The child's when the
+    /// overlay sets or removes it; <see cref="ResolveScriptOnHost"/> leaves it null and reads the host's <c>PATH</c>
     /// only when the fixed locations miss.
+    /// </param>
+    /// <param name="SearchRelativePathEntries">
+    /// Whether an empty, <c>.</c>, or other relative <c>PATH</c> entry is searched, against
+    /// <paramref name="CurrentDirectory"/>, as <c>CreateProcess</c> searches the host's <c>PATH</c>. False for the
+    /// child's <c>PATH</c>, which then searches only its fully qualified entries (see the type remarks).
     /// </param>
     internal readonly record struct SearchLocations(
         string? ProcessDirectory,
@@ -75,7 +91,8 @@ internal static partial class WindowsProgramLookup
         bool SearchCurrentDirectory,
         string SystemDirectory,
         string WindowsDirectory,
-        string? Path);
+        string? Path,
+        bool SearchRelativePathEntries = true);
 
     /// <summary>
     /// Whether <c>CreateProcess</c> searches for <paramref name="fileName"/>: it is neither rooted nor relative to
@@ -85,9 +102,15 @@ internal static partial class WindowsProgramLookup
     internal static bool IsSearched(string fileName) =>
         !Path.IsPathRooted(fileName) && !IsCurrentDirectoryRelative(fileName);
 
-    /// <summary>This process's locations for a lookup of <paramref name="fileName"/>, searching <paramref name="path"/>.</summary>
-    internal static SearchLocations HostLocations(string fileName, string? path) =>
-        new(ProcessDirectory, Environment.CurrentDirectory, NeedCurrentDirectoryForExePathW(fileName), SystemDirectory, WindowsDirectory, path);
+    /// <summary>
+    /// This process's locations for a lookup of <paramref name="fileName"/> on the child's <paramref name="childPath"/>:
+    /// <c>CreateProcess</c>'s fixed locations, then the fully qualified entries of <paramref name="childPath"/>.
+    /// </summary>
+    internal static SearchLocations ChildLocations(string fileName, string? childPath) =>
+        new(ProcessDirectory, Environment.CurrentDirectory, NeedCurrentDirectoryForExePathW(fileName), SystemDirectory, WindowsDirectory, childPath, SearchRelativePathEntries: false);
+
+    private static SearchLocations HostLocations(string fileName) =>
+        new(ProcessDirectory, Environment.CurrentDirectory, NeedCurrentDirectoryForExePathW(fileName), SystemDirectory, WindowsDirectory, Path: null);
 
     /// <summary>
     /// Locates the program <c>CreateProcess</c> would start for <paramref name="fileName"/>, a name that
@@ -119,7 +142,7 @@ internal static partial class WindowsProgramLookup
         if (!IsSearched(fileName))
             return Accept(Path.GetFullPath(fileName));
 
-        var locations = HostLocations(fileName, path: null);
+        var locations = HostLocations(fileName);
 
         // PATH, the longest string the lookup reads, is read only when the fixed locations miss.
         if (TryFixedLocations(fileName, "", locations, out var found)
@@ -188,6 +211,11 @@ internal static partial class WindowsProgramLookup
                 // The list ends at its last semicolon, so a final empty entry is not the current directory.
                 if (entry.IsEmpty && range.End.GetOffset(path.Length) == path.Length)
                     break;
+
+                // An empty entry, ".", "rel", "C:rel", and "\rel" all mean "relative to a current directory"; the
+                // child's PATH searches none of them (see the type remarks).
+                if (!locations.SearchRelativePathEntries && !Path.IsPathFullyQualified(entry))
+                    continue;
 
                 if (TryCandidate(entry.IsEmpty ? locations.CurrentDirectory : entry, fileName, extension, locations, out found))
                     return true;

@@ -227,6 +227,71 @@ public sealed class WindowsChildPathLookupTests
         }
     }
 
+    [Test]
+    [NotInParallel]
+    public async Task ChildPathEntriesRelativeToTheCurrentDirectoryDoNotStartAPlantedProgram()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // The host runs with its current directory where a program was planted, and with the implicit current-directory
+        // search turned off. CreateProcess would still start the planted program for each of these PATH entries, since
+        // they all point at the current directory; MiniPty's child-PATH lookup searches only fully qualified entries.
+        using var tools = new ToolDirectory();
+        var currentDirectory = Environment.CurrentDirectory;
+        var noDefault = Environment.GetEnvironmentVariable("NoDefaultCurrentDirectoryInExePath");
+        var drive = Path.GetPathRoot(tools.Path)!.TrimEnd('\\');
+        var rootRelative = tools.Path[drive.Length..];
+        string[] paths =
+        [
+            ";" + tools.EmptyPath,             // leading empty entry, as extra + ";" + PATH with an empty extra
+            ".;" + tools.EmptyPath,
+            tools.EmptyPath + ";;" + tools.EmptyPath,
+            "empty\\..",                       // relative
+            drive + "empty\\..",               // drive-relative: relative to the current directory of that drive
+            rootRelative,                      // root-relative: the same directory on the current drive
+        ];
+        try
+        {
+            Environment.CurrentDirectory = tools.Path;
+            Environment.SetEnvironmentVariable("NoDefaultCurrentDirectoryInExePath", "1");
+
+            // Every form is tried before asserting, so a failure names each one that started the planted program.
+            var outcomes = new List<string>();
+            foreach (var path in paths)
+            {
+                try
+                {
+                    var (found, _) = WindowsPtyBackend.BuildLaunch(new PtyStartInfo
+                    {
+                        FileName = tools.Name,
+                        Environment = new Dictionary<string, string?> { ["PATH"] = path },
+                    });
+                    outcomes.Add($"{path}: found {found}");
+                }
+                catch (Win32Exception e)
+                {
+                    outcomes.Add($"{path}: error {e.NativeErrorCode}");
+                }
+            }
+
+            await Assert.That(string.Join(" | ", outcomes)).IsEqualTo(string.Join(" | ", paths.Select(static path => $"{path}: error 2")));
+
+            // The same directory as a fully qualified entry is searched.
+            var (applicationName, _) = WindowsPtyBackend.BuildLaunch(new PtyStartInfo
+            {
+                FileName = tools.Name,
+                Environment = new Dictionary<string, string?> { ["PATH"] = tools.Path },
+            });
+            await Assert.That(applicationName).IsEqualTo(tools.Program);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NoDefaultCurrentDirectoryInExePath", noDefault);
+            Environment.CurrentDirectory = currentDirectory;
+        }
+    }
+
     /// <summary>
     /// A fresh directory holding a copy of <c>hostname.exe</c> under a unique name, so that no fixed location and no
     /// entry of the host's <c>PATH</c> holds a file of that name.
@@ -248,6 +313,9 @@ public sealed class WindowsChildPathLookupTests
 
         /// <summary>The directory, for the child's <c>PATH</c>.</summary>
         public string Path { get; }
+
+        /// <summary>A fully qualified directory under <see cref="Path"/> that holds nothing.</summary>
+        public string EmptyPath => System.IO.Path.Combine(Path, "empty");
 
         /// <summary>The full path of the program.</summary>
         public string Program { get; }

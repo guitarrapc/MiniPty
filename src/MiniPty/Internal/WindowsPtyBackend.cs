@@ -1574,7 +1574,7 @@ internal static class WindowsPtyBackend
         {
             WindowsBatchFile.ValidateName(fileName);
             var script = searchChildPath
-                ? WindowsProgramLookup.ResolveScript(fileName, WindowsProgramLookup.HostLocations(fileName, childPath))
+                ? WindowsProgramLookup.ResolveScript(fileName, WindowsProgramLookup.ChildLocations(fileName, childPath))
                 : WindowsProgramLookup.ResolveScriptOnHost(fileName);
             if (!WindowsBatchFile.IsExecutableImage(script))
                 return (WindowsBatchFile.CommandInterpreterPath, WindowsBatchFile.BuildCommandLine(script, startInfo.Arguments));
@@ -1590,7 +1590,7 @@ internal static class WindowsPtyBackend
         // (measured: a quoted argv[0] made cmd.exe fail, and "x y" ran x).
         if (searchChildPath && !isBatchFile)
         {
-            var program = WindowsProgramLookup.ResolveProgram(fileName, WindowsProgramLookup.HostLocations(fileName, childPath));
+            var program = WindowsProgramLookup.ResolveProgram(fileName, WindowsProgramLookup.ChildLocations(fileName, childPath));
             return (program, BuildCommandLine(startInfo));
         }
 

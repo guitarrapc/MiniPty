@@ -149,6 +149,42 @@ public sealed partial class WindowsBatchFileTests
     }
 
     [Test]
+    [Arguments("::$DATA", false)]
+    [Arguments("::$DATA", true)]
+    [Arguments("::$data", true)]
+    [Arguments("::$DATA.", true)]
+    public async Task ScriptNamedThroughItsDataStreamNeverReachesTheCommandInterpreter(string suffix, bool onChildPath)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // "x.cmd::$DATA" opens the script's own content, yet does not end in .cmd, so it is not detected as a batch
+        // file and its arguments are quoted for a program. That is safe only because CreateProcess then refuses it
+        // (ERROR_BAD_EXE_FORMAT, measured on Windows 11) instead of starting cmd.exe, both as a name it searches and as
+        // the application name MiniPty passes after finding it on the child's PATH. This pins that refusal.
+        var shim = WriteScript($"@\"{PtyBaselineTests.TestExecutable}\" %*");
+        try
+        {
+            var startInfo = onChildPath
+                ? new PtyStartInfo
+                {
+                    FileName = Path.GetFileName(shim) + suffix,
+                    Arguments = ["x\" & echo INJECTED & \""],
+                    Environment = new Dictionary<string, string?> { [ArgvChildVariable] = "1", ["PATH"] = Path.GetDirectoryName(shim) },
+                }
+                : new PtyStartInfo { FileName = shim + suffix, Arguments = ["x\" & echo INJECTED & \""], Environment = ArgvChild };
+
+            var error = Assert.Throws<Win32Exception>(() => Pty.Start(startInfo));
+
+            await Assert.That(error.NativeErrorCode).IsEqualTo(193);
+        }
+        finally
+        {
+            File.Delete(shim);
+        }
+    }
+
+    [Test]
     [Arguments("\\. ")]
     [Arguments("\\sub\\.. ")]
     [Arguments("\\")]

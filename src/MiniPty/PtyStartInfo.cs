@@ -29,7 +29,15 @@ public sealed record PtyStartInfo
     /// runs the same search with the child's <c>PATH</c> instead and starts the file it finds, for a program and for a
     /// batch file alike; <c>.exe</c> is appended when the last path component has no <c>.</c>, as <c>CreateProcess</c>
     /// does, and a missing program then fails <see cref="Pty.Start"/> with
-    /// <see cref="System.ComponentModel.Win32Exception"/> before anything is created.
+    /// <see cref="System.ComponentModel.Win32Exception"/> before anything is created. Only the fully qualified entries
+    /// of the child's <c>PATH</c> are searched: an empty, <c>.</c>, or relative entry would point at this process's
+    /// current directory, which <c>CreateProcess</c> searches through such entries even when
+    /// <c>NoDefaultCurrentDirectoryInExePath</c> is set. No extension from <c>PATHEXT</c> is tried, so a batch shim is
+    /// written with its extension, as <c>npm.cmd</c>, not <c>npm</c>.
+    /// </para>
+    /// <para>
+    /// The <c>PATH</c> in <see cref="Environment"/> therefore chooses the program on every platform. Build it only from
+    /// sources you trust, as you would the program itself, or pass a full path here to pin the program.
     /// </para>
     /// </remarks>
     public required string FileName { get; init; }
@@ -97,7 +105,9 @@ public sealed record PtyStartInfo
     /// </value>
     /// <remarks>
     /// On Windows, setting or removing <c>PATH</c> here also decides where a <see cref="FileName"/> without a root is
-    /// looked up: on the child's <c>PATH</c>, as on Unix. See <see cref="FileName"/>.
+    /// looked up: on the fully qualified entries of the child's <c>PATH</c>, as on Unix the child looks it up on its
+    /// own. A <c>PATH</c> taken from an untrusted source thus chooses the program that starts. See
+    /// <see cref="FileName"/>.
     /// </remarks>
     public IReadOnlyDictionary<string, string?>? Environment { get; init; }
 

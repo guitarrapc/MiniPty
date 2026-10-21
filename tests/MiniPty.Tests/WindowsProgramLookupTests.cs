@@ -116,6 +116,66 @@ public sealed class WindowsProgramLookupTests
     }
 
     [Test]
+    [Arguments(";{0}", "")]
+    [Arguments(".;{0}", "")]
+    [Arguments("{0};;{0}", "")]
+    [Arguments("rel;{0}", "rel")]
+    [Arguments("rel\\..;{0}", "")]
+    public async Task RelativeEntriesOfTheChildPathAreNotSearched(string shape, string currentSubdirectory)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // The file sits only where the relative entry points, under the current directory. CreateProcess's own rule,
+        // kept for the host's PATH, finds it there; the child's PATH searches only fully qualified entries.
+        using var tree = new LookupTree();
+        tree.Put(Path.Combine(tree.Current, currentSubdirectory), "tool.exe");
+        var path = string.Format(shape, tree.PathEntry);
+        var host = tree.Locations(searchCurrentDirectory: false, path: path);
+        var child = host with { SearchRelativePathEntries = false };
+
+        await Assert.That(WindowsProgramLookup.ResolveProgram("tool", host))
+            .IsEqualTo(Path.GetFullPath(Path.Combine(tree.Current, currentSubdirectory, "tool.exe")));
+        var error = Assert.Throws<Win32Exception>(() => WindowsProgramLookup.ResolveProgram("tool", child));
+        await Assert.That(error.NativeErrorCode).IsEqualTo(2);
+    }
+
+    [Test]
+    public async Task RelativeEntriesOfTheChildPathAreNotSearchedForAScript()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        using var tree = new LookupTree();
+        tree.Put(tree.Current, "x.cmd");
+        var child = tree.Locations(searchCurrentDirectory: false, path: ";" + tree.PathEntry) with { SearchRelativePathEntries = false };
+
+        var error = Assert.Throws<Win32Exception>(() => WindowsProgramLookup.ResolveScript("x.cmd", child));
+
+        await Assert.That(error.NativeErrorCode).IsEqualTo(2);
+    }
+
+    [Test]
+    [Arguments("{0}")]
+    [Arguments("{0}\\")]
+    [Arguments("\\\\?\\{0}")]
+    public async Task FullyQualifiedEntriesOfTheChildPathAreSearched(string shape)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // A device path (\\?\) is fully qualified too; so is a UNC path, which is not exercised here.
+        using var tree = new LookupTree();
+        tree.Put(tree.PathEntry, "tool.exe");
+        var child = tree.Locations(searchCurrentDirectory: false, path: string.Format(shape, tree.PathEntry)) with { SearchRelativePathEntries = false };
+
+        var found = WindowsProgramLookup.ResolveProgram("tool", child);
+
+        await Assert.That(Path.GetFileName(found)).IsEqualTo("tool.exe");
+        await Assert.That(File.Exists(found)).IsTrue();
+    }
+
+    [Test]
     public async Task DirectoryNamedLikeTheProgramFailsTheLaunch()
     {
         if (!OperatingSystem.IsWindows())
