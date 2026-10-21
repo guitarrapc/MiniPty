@@ -252,7 +252,8 @@ public sealed class PtyUnixDisposeTests
     /// <summary>
     /// The master stays open while a hung-up child runs, and nothing reads the session's output after disposal, so the
     /// output must still be taken from the terminal. The trap writes far more than a terminal buffers before it records
-    /// that it finished, so a child whose output nobody took would block until the grace kill.
+    /// that it finished, so a child whose output nobody took would block until the grace kill. A macOS terminal buffers
+    /// only 1 KiB, so there it also fails when the output is taken only on the watcher's polling interval.
     /// </summary>
     [Test]
     public async Task DisposeDiscardsWhatAHungUpChildWrites()

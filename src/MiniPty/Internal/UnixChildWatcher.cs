@@ -29,10 +29,11 @@ internal static partial class UnixPtyBackend
     /// <para>
     /// It also sends the kill that follows a disposal's hang-up. The deadline joins this thread's wait timeout
     /// rather than getting a timer of its own, so disposal allocates no timer. Until the child is reaped or killed, this
-    /// thread also discards its output on the polling interval, because the session's reader has stopped and the master
-    /// stays open for the hang-up. When the process exits normally,
-    /// hung-up children are killed at once, and so is a child disposed after that, because the process may end
-    /// before any deadline passes.
+    /// thread also discards its output, because the session's reader has stopped and the master stays open for the
+    /// hang-up. The master's output wakes the wait, and the polling interval backs that up. A macOS master buffers
+    /// about 1 KiB, so discarding on the interval alone held a writing child to about 100 KiB/s. When the process exits
+    /// normally, hung-up children are killed at once, and so is a child disposed after that, because the process may
+    /// end before any deadline passes.
     /// </para>
     /// </remarks>
     private static partial class ChildWatcher
@@ -114,6 +115,7 @@ internal static partial class UnixPtyBackend
                 }
 
                 s_hangups.Add(child);
+                child.WatchOutputAfterHangup();
                 // The new deadline may come before the timeout the thread is waiting with.
                 WakeLocked();
             }
@@ -136,6 +138,19 @@ internal static partial class UnixPtyBackend
                 s_hangups.Clear();
             }
         }
+
+        /// <summary>
+        /// Makes this thread wake whenever <paramref name="master"/> has output. Fails when the watcher has no epoll or
+        /// kqueue, which leaves that output to the polling interval. Caller holds <see cref="s_lock"/>.
+        /// </summary>
+        internal static bool TryWatchOutputLocked(int master) =>
+            s_nativeWatch && minipty_child_watch_add_output(s_watchFd, master) == 0;
+
+        /// <summary>
+        /// Undoes <see cref="TryWatchOutputLocked"/>. Called while <paramref name="master"/> is still open, so the call
+        /// can never name a descriptor that reused its number. Caller holds <see cref="s_lock"/>.
+        /// </summary>
+        internal static void UnwatchOutputLocked(int master) => minipty_child_watch_remove_output(s_watchFd, master);
 
         private static void EnsureStarted()
         {
@@ -343,6 +358,12 @@ internal static partial class UnixPtyBackend
 
         [LibraryImport("minipty_unix")]
         private static partial void minipty_child_watch_remove(int watchFd, int pidfd);
+
+        [LibraryImport("minipty_unix", SetLastError = true)]
+        private static partial int minipty_child_watch_add_output(int watchFd, int masterFd);
+
+        [LibraryImport("minipty_unix")]
+        private static partial void minipty_child_watch_remove_output(int watchFd, int masterFd);
 
         [LibraryImport("minipty_unix", SetLastError = true)]
         private static partial int minipty_child_watch_wake(int watchFd, int wakeWrite);

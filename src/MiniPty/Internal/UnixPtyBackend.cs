@@ -155,6 +155,9 @@ internal static partial class UnixPtyBackend
         private Timer? _eofTimer;
         // Zero until Dispose hangs up a running child. Written under _pidLock.
         private long _hangupKillDeadline;
+        // Whether the master's output wakes the watcher while a disposal's hang-up keeps it open. Read and written only
+        // under the watcher's lock.
+        private bool _outputWatched;
         private bool _eofSent;
         private bool _eofPending;
         private int _eofAttachPollsRemaining;
@@ -836,7 +839,52 @@ internal static partial class UnixPtyBackend
             }
 
             // Also when the kill finds no child to end, so the master a disposal left open lasts no longer than the grace.
+            UnwatchOutput();
             CloseMaster();
+        }
+
+        /// <summary>
+        /// Makes the master's output wake <see cref="ChildWatcher"/>, so <see cref="DiscardOutputAfterHangup"/> keeps
+        /// up with a child that writes while it handles the hang-up. Called only by <see cref="ChildWatcher"/>, under its
+        /// lock, once it holds the hang-up.
+        /// </summary>
+        internal void WatchOutputAfterHangup()
+        {
+            if (!TryAcquireMaster(out var master))
+                return;
+
+            try
+            {
+                _outputWatched = ChildWatcher.TryWatchOutputLocked(master);
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
+        }
+
+        /// <summary>
+        /// Undoes <see cref="WatchOutputAfterHangup"/> before the master closes. Called under the watcher's lock. A
+        /// master that something else closed first is skipped, since its number may already belong to another
+        /// descriptor; the close itself dropped a kqueue registration, and epoll drops one with the last descriptor.
+        /// </summary>
+        private void UnwatchOutput()
+        {
+            if (!_outputWatched)
+                return;
+
+            _outputWatched = false;
+            if (!TryAcquireMaster(out var master))
+                return;
+
+            try
+            {
+                ChildWatcher.UnwatchOutputLocked(master);
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
         }
 
         /// <summary>
@@ -897,8 +945,9 @@ internal static partial class UnixPtyBackend
         /// <summary>
         /// Reads and discards what the child wrote since the last call, while the master stays open for a disposal's
         /// hang-up. The reader stopped at disposal, and without this a child that writes while it handles the hang-up
-        /// would block on a full terminal until the kill. Called only by <see cref="ChildWatcher"/>, on its polling
-        /// interval, and bounded per call so the watcher stays responsive.
+        /// would block on a full terminal until the kill. Called only by <see cref="ChildWatcher"/>, whenever the
+        /// master's output (see <see cref="WatchOutputAfterHangup"/>) or the polling interval wakes it, and bounded per
+        /// call so the watcher stays responsive.
         /// </summary>
         internal unsafe void DiscardOutputAfterHangup()
         {
@@ -938,7 +987,10 @@ internal static partial class UnixPtyBackend
             // Dispose sets it under the pid lock. A reap that took the lock first sees zero, and Dispose then finds the
             // child exited and closes the master itself.
             if (Volatile.Read(ref _hangupKillDeadline) != 0)
+            {
+                UnwatchOutput();
                 CloseMaster();
+            }
         }
 
         /// <summary>

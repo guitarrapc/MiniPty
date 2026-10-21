@@ -38,6 +38,8 @@ int minipty_get_active_process_name(int master, char *buffer, int buffer_length)
 int minipty_child_watch_open(int *watch_fd, int *wake_read, int *wake_write);
 int minipty_child_watch_add(int watch_fd, int pidfd, int pid);
 void minipty_child_watch_remove(int watch_fd, int pidfd);
+int minipty_child_watch_add_output(int watch_fd, int master_fd);
+void minipty_child_watch_remove_output(int watch_fd, int master_fd);
 int minipty_child_watch_wake(int watch_fd, int wake_write);
 int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds, int capacity, int timeout_ms);
 int minipty_pidfd_open(int pid);

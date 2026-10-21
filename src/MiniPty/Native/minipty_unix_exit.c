@@ -61,10 +61,16 @@
  * past exec: the pipe with pipe2 (macOS has none, hence the event there). Until a concurrently forked child execs,
  * though, it holds duplicates of them. epoll drops a registration only when every descriptor for the open file
  * description is closed, so pidfd registrations are one-shot and are removed explicitly before the pidfd closes.
+ *
+ * A PTY master that a disposal keeps open for its hang-up can also wake the wait when it has output, so the caller
+ * discards a hung-up child's output as fast as the child writes it (minipty_child_watch_add_output). Such a wake reports
+ * no child.
  */
 
 #define MINIPTY_CHILD_WATCH_MAX_EVENTS 16
 #define MINIPTY_CHILD_WATCH_WAKE_TOKEN UINT64_MAX
+/* A pid token's upper half is a pidfd, never -1, so this never meets one. */
+#define MINIPTY_CHILD_WATCH_OUTPUT_TOKEN (UINT64_MAX - 1)
 
 #if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
 /* The EVFILT_USER event's identifier. Events are keyed by identifier and filter, so it never meets a pid. */
@@ -222,6 +228,48 @@ void minipty_child_watch_remove(int watch_fd, int pidfd)
 #endif
 }
 
+/*
+ * Makes the wait return whenever master_fd has output. A macOS master buffers about 1 KiB, so a caller that read it
+ * only on a timer would hold a writing child to about 1 KiB per tick. Edge-triggered (EPOLLET, EV_CLEAR): a master
+ * whose every slave closed reports that once, not on every wait. Remove it with minipty_child_watch_remove_output
+ * while the master is still open, because epoll keeps a registration as long as any process holds the description.
+ */
+int minipty_child_watch_add_output(int watch_fd, int master_fd)
+{
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+    struct epoll_event event;
+
+    event.events = EPOLLIN | EPOLLET;
+    event.data.u64 = MINIPTY_CHILD_WATCH_OUTPUT_TOKEN;
+    return epoll_ctl(watch_fd, EPOLL_CTL_ADD, master_fd, &event) == 0 ? 0 : -1;
+#elif defined(MINIPTY_CHILD_WATCH_KQUEUE)
+    struct kevent change;
+
+    EV_SET(&change, (uintptr_t)master_fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+    return kevent(watch_fd, &change, 1, NULL, 0, NULL) == 0 ? 0 : -1;
+#else
+    (void)watch_fd;
+    (void)master_fd;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+void minipty_child_watch_remove_output(int watch_fd, int master_fd)
+{
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+    epoll_ctl(watch_fd, EPOLL_CTL_DEL, master_fd, NULL);
+#elif defined(MINIPTY_CHILD_WATCH_KQUEUE)
+    struct kevent change;
+
+    EV_SET(&change, (uintptr_t)master_fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    kevent(watch_fd, &change, 1, NULL, 0, NULL);
+#else
+    (void)watch_fd;
+    (void)master_fd;
+#endif
+}
+
 int minipty_child_watch_wake(int watch_fd, int wake_write)
 {
 #if defined(MINIPTY_CHILD_WATCH_USER_WAKE)
@@ -276,6 +324,10 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
                 continue;
             }
 
+            /* A hung-up child's master has output; returning is the whole report. */
+            if (events[i].data.u64 == MINIPTY_CHILD_WATCH_OUTPUT_TOKEN)
+                continue;
+
             /*
              * The one-shot registration is now disarmed. It stays until the caller removes it, and the pidfd stays
              * open, because the caller signals the child through it until the reap. The pidfd is reported too, so
@@ -314,7 +366,10 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
             }
 #endif
 
-            /* NOTE_EXIT and registration errors (EV_ERROR) both tell the caller to check the child now. */
+            /*
+             * NOTE_EXIT and registration errors (EV_ERROR) both tell the caller to check the child now. Any other
+             * EVFILT_READ is a hung-up child's master with output, and returning is the whole report.
+             */
             if (events[i].filter == EVFILT_PROC) {
                 pids[count] = (int)events[i].ident;
                 pidfds[count] = -1;
