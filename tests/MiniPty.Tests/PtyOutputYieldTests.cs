@@ -264,7 +264,7 @@ public sealed class PtyOutputYieldTests
         var result = await ui.RunAsync(async () =>
         {
             var buffer = new byte[PtyOutputPump.SlotSize];
-            await session.Output.ReadAsync(buffer);
+            await TakeFirstSlotAsync(session.Output, buffer);
             SpendBudget();
 
             Array.Clear(buffer);
@@ -318,7 +318,7 @@ public sealed class PtyOutputYieldTests
         var (completed, read) = await ui.RunAsync(async () =>
         {
             var buffer = new byte[PtyOutputPump.SlotSize];
-            await session.Output.ReadAsync(buffer);
+            await TakeFirstSlotAsync(session.Output, buffer);
             SpendBudget();
             var end = session.Output.ReadAsync(buffer);
             var completed = end.IsCompleted;
@@ -338,7 +338,7 @@ public sealed class PtyOutputYieldTests
         var (yielded, read) = await ui.RunAsync(async () =>
         {
             var buffer = new byte[PtyOutputPump.SlotSize];
-            await session.Output.ReadAsync(buffer);
+            await TakeFirstSlotAsync(session.Output, buffer);
             SpendBudget();
             var next = session.Output.ReadAsync(buffer);
             var yielded = !next.IsCompleted;
@@ -358,7 +358,7 @@ public sealed class PtyOutputYieldTests
         var (yielded, read, intact) = await ui.RunAsync(async () =>
         {
             var buffer = new byte[PtyOutputPump.SlotSize];
-            await session.Output.ReadAsync(buffer);
+            await TakeFirstSlotAsync(session.Output, buffer);
             SpendBudget();
             var next = session.Output.ReadAsync(buffer);
             var yielded = !next.IsCompleted;
@@ -384,6 +384,20 @@ public sealed class PtyOutputYieldTests
         }
 
         return session;
+    }
+
+    /// <summary>
+    /// Takes the first slot through <paramref name="output"/>, which makes the stream the session's output consumer and
+    /// starts the current thread's run, and checks that the full ring handed over a whole slot.
+    /// </summary>
+    /// <remarks>
+    /// Throws instead of asserting: the caller runs on the test's context, and an awaited assertion could resume off it.
+    /// </remarks>
+    private static async Task TakeFirstSlotAsync(Stream output, byte[] buffer)
+    {
+        var read = await output.ReadAsync(buffer);
+        if (read != PtyOutputPump.SlotSize)
+            throw new InvalidOperationException($"The first read took {read} bytes instead of a whole slot.");
     }
 
     /// <summary>Waits on the current thread until more than the budget has passed, as a slow chunk handler does.</summary>

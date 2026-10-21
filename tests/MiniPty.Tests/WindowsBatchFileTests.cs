@@ -59,7 +59,7 @@ public sealed partial class WindowsBatchFileTests
             var (text, exitCode) = await RunAsync(new PtyStartInfo { FileName = shim, Arguments = Tricky, Environment = ArgvChild });
 
             await Assert.That(exitCode).IsEqualTo(0);
-            await Assert.That(Argv(text)).IsEquivalentTo(Tricky, TUnit.Assertions.Enums.CollectionOrdering.Matching);
+            await Assert.That(Argv(text)).IsEquivalentTo(Tricky, StringComparer.Ordinal, TUnit.Assertions.Enums.CollectionOrdering.Matching);
             await Assert.That(HasLine(text, "INJECTED")).IsFalse();
         }
         finally
@@ -113,7 +113,7 @@ public sealed partial class WindowsBatchFileTests
             string[] arguments = ["x\" & echo INJECTED & \""];
             var (text, _) = await RunAsync(new PtyStartInfo { FileName = shim + suffix, Arguments = arguments, Environment = ArgvChild });
 
-            await Assert.That(Argv(text)).IsEquivalentTo(arguments, TUnit.Assertions.Enums.CollectionOrdering.Matching);
+            await Assert.That(Argv(text)).IsEquivalentTo(arguments, StringComparer.Ordinal, TUnit.Assertions.Enums.CollectionOrdering.Matching);
             await Assert.That(HasLine(text, "INJECTED")).IsFalse();
         }
         finally
@@ -139,7 +139,7 @@ public sealed partial class WindowsBatchFileTests
             string[] arguments = ["x\" & echo INJECTED & \""];
             var (text, _) = await RunAsync(new PtyStartInfo { FileName = shim + suffix, Arguments = arguments, Environment = ArgvChild });
 
-            await Assert.That(Argv(text)).IsEquivalentTo(arguments, TUnit.Assertions.Enums.CollectionOrdering.Matching);
+            await Assert.That(Argv(text)).IsEquivalentTo(arguments, StringComparer.Ordinal, TUnit.Assertions.Enums.CollectionOrdering.Matching);
             await Assert.That(HasLine(text, "INJECTED")).IsFalse();
         }
         finally
@@ -254,7 +254,7 @@ public sealed partial class WindowsBatchFileTests
             var (text, exitCode) = await RunAsync(new PtyStartInfo { FileName = shim, Arguments = arguments, Environment = ArgvChild });
 
             await Assert.That(exitCode).IsEqualTo(0);
-            await Assert.That(Argv(text)).IsEquivalentTo(arguments, TUnit.Assertions.Enums.CollectionOrdering.Matching);
+            await Assert.That(Argv(text)).IsEquivalentTo(arguments, StringComparer.Ordinal, TUnit.Assertions.Enums.CollectionOrdering.Matching);
             await Assert.That(HasLine(text, "INJECTED")).IsFalse();
         }
         finally
@@ -481,7 +481,7 @@ public sealed partial class WindowsBatchFileTests
             string[] arguments = ["a b", "50%"];
             var (text, _) = await RunAsync(new PtyStartInfo { FileName = Path.GetFileName(shim), Arguments = arguments, Environment = ArgvChild });
 
-            await Assert.That(Argv(text)).IsEquivalentTo(arguments, TUnit.Assertions.Enums.CollectionOrdering.Matching);
+            await Assert.That(Argv(text)).IsEquivalentTo(arguments, StringComparer.Ordinal, TUnit.Assertions.Enums.CollectionOrdering.Matching);
         }
         finally
         {
