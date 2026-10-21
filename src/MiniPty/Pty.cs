@@ -51,7 +51,9 @@ public static class Pty
     /// <exception cref="PlatformNotSupportedException">The current operating system is not supported.</exception>
     /// <exception cref="System.ComponentModel.Win32Exception">
     /// Windows: process or ConPTY creation failed. For a batch file this includes a script that MiniPty's lookup does
-    /// not find, or cannot open, before anything is created, with the error <c>CreateProcess</c> would report.
+    /// not find, or cannot open, before anything is created, with the error <c>CreateProcess</c> would report; the
+    /// same holds for a program MiniPty looks up itself, when <see cref="PtyStartInfo.Environment"/> sets or removes
+    /// <c>PATH</c>.
     /// </exception>
     /// <exception cref="IOException">Unix: <c>openpty</c>, <c>fork</c>, or <c>exec</c> failed.</exception>
     public static PtySession Start(PtyStartInfo startInfo)

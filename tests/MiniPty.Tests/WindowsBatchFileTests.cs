@@ -514,7 +514,7 @@ public sealed partial class WindowsBatchFileTests
             string resolved;
             try
             {
-                resolved = WindowsBatchFile.ResolveScript(scriptName);
+                resolved = WindowsProgramLookup.ResolveScriptOnHost(scriptName);
             }
             catch (Win32Exception e)
             {

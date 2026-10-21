@@ -9,6 +9,7 @@ public sealed record PtyStartInfo
     /// Gets or sets the executable file name or full path of the child process.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// On Windows, a batch file (<c>.bat</c> or <c>.cmd</c>, judged by the name Windows opens, after <c>.</c> and
     /// <c>..</c> segments and trailing spaces and dots) runs through the system directory's <c>cmd.exe</c> with AutoRun
     /// commands skipped, delayed expansion off, and command extensions on (<c>/d /v:OFF /e:ON</c>).
@@ -20,6 +21,16 @@ public sealed record PtyStartInfo
     /// the <c>MZ</c> header runs as a program, from that same file. Without a raw <see cref="CommandLine"/>, a batch
     /// file name, and the full path found for it, cannot contain a quote, a carriage return, a line feed, or a NUL.
     /// With one, <c>CreateProcess</c> starts <c>cmd.exe</c> with its own defaults instead.
+    /// </para>
+    /// <para>
+    /// A name without a root and without a leading <c>.\</c> or <c>..\</c> is searched for. On Unix the child
+    /// resolves it against its own <c>PATH</c>. On Windows <c>CreateProcess</c> searches its fixed locations and this
+    /// process's <c>PATH</c>, never the child's, so when <see cref="Environment"/> sets or removes <c>PATH</c>, MiniPty
+    /// runs the same search with the child's <c>PATH</c> instead and starts the file it finds, for a program and for a
+    /// batch file alike; <c>.exe</c> is appended when the last path component has no <c>.</c>, as <c>CreateProcess</c>
+    /// does, and a missing program then fails <see cref="Pty.Start"/> with
+    /// <see cref="System.ComponentModel.Win32Exception"/> before anything is created.
+    /// </para>
     /// </remarks>
     public required string FileName { get; init; }
 
@@ -84,6 +95,10 @@ public sealed record PtyStartInfo
     /// the parent environment; null values remove variables and empty strings set empty values on
     /// platforms that preserve empty environment variables.
     /// </value>
+    /// <remarks>
+    /// On Windows, setting or removing <c>PATH</c> here also decides where a <see cref="FileName"/> without a root is
+    /// looked up: on the child's <c>PATH</c>, as on Unix. See <see cref="FileName"/>.
+    /// </remarks>
     public IReadOnlyDictionary<string, string?>? Environment { get; init; }
 
     /// <summary>
