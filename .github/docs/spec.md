@@ -63,6 +63,7 @@ flowchart TB
 | Attach host terminal input to an existing `PtySession` (use case 3) | [Console](specs/console.md) |
 | Exit status with Unix termination signal; `Kill(PtySignal)` | [Core session](specs/core_session.md) |
 | Run on the out-of-band ConPTY an application supplies on Windows (`PtyStartInfo.ConPty`, `ConPtyLibrary`), with `Clear()` | [Core session](specs/core_session.md#out-of-band-conpty) |
+| What an unanswered `InheritCursor` query looks like on the in-box and out-of-band ConPTY | [Core session](specs/core_session.md#inherited-cursor), [samples/SingleFiles/InheritCursorWait.cs](../../samples/SingleFiles/InheritCursorWait.cs) |
 | Backend PTY for frontend terminals: push facade, flow control, WebSocket and stdio bridges (use case 4) | [Terminal](specs/terminal.md) |
 | Browser terminal sample (xterm.js over WebSocket) | [samples/SingleFiles/WebTerminal.cs](../../samples/SingleFiles/WebTerminal.cs) |
 | VS Code helper sample (length-framed stdio) | [samples/SingleFiles/VsCodeTerminalHelper.cs](../../samples/SingleFiles/VsCodeTerminalHelper.cs) |
