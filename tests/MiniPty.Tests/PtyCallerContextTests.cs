@@ -11,10 +11,13 @@ namespace MiniPty.Tests;
 /// not occupy thread-pool workers (Caller Context and GUI Hosts in <c>.github/docs/specs/core_session.md</c>).
 /// </summary>
 /// <remarks>
-/// Every test drives the API from <see cref="SingleThreadSynchronizationContext"/>, which stands in for a
-/// WinUI / WPF dispatcher. Each test's first comment names the failure it reproduced before output was read on a
-/// library-owned thread and exit was observed by the exit watcher. Tests marked as guards passed then too, and
-/// protect behavior that must stay.
+/// The UI-thread tests drive the API from <see cref="SingleThreadSynchronizationContext"/>, which stands in for a
+/// WinUI / WPF dispatcher. Without a synchronization context, <c>Task.Yield</c> and <c>await</c> resume on the
+/// thread pool, so library code that blocks after yielding would never reach the caller's thread. A single posted
+/// probe can slip through between slices of a wait that blocks and then yields, so the tests of operations that stay
+/// pending also measure how long the UI thread spends inside callbacks over an idle window. The dispose tests time the
+/// call instead. <see cref="IdleSessionsDoNotOccupyThreadPoolWorkers"/> needs no UI thread, because it counts
+/// occupied pool workers.
 /// </remarks>
 public sealed class PtyCallerContextTests
 {
@@ -23,7 +26,7 @@ public sealed class PtyCallerContextTests
 
     /// <summary>
     /// Busy time allowed within <see cref="BusyWindow"/>. A free UI thread is busy for well under a
-    /// millisecond; a blocked one is busy for the whole window.
+    /// millisecond. A blocked one is busy for the whole window.
     /// </summary>
     private static readonly TimeSpan BusyBudget = TimeSpan.FromMilliseconds(100);
 
@@ -34,7 +37,8 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task ReadOutputAsyncOnUiThreadDeliversOutputWithoutBlockingIt()
     {
-        // The producer used to start on the caller's context and deadlock it before any chunk arrived.
+        // After READY the child waits for input, so the enumeration has to wait for output. A read that blocked, or
+        // library code that blocked on the captured context, would keep the UI thread busy during that wait.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(ReadyThenLineChild());
         var ready = new MarkerWatch("READY");
@@ -47,7 +51,6 @@ public sealed class PtyCallerContextTests
         try
         {
             await Assert.That(await SeenWithinAsync(ready, consumer)).IsTrue();
-            // The consumer now awaits the next chunk from an idle child.
             await AssertUiThreadStaysFreeAsync(ui);
         }
         finally
@@ -59,7 +62,8 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task OutputReadAsyncOnUiThreadDoesNotBlockItWhileIdle()
     {
-        // Every read after the first used to block the calling thread inside ReadFile / read(2).
+        // The loop keeps reading after READY while the child is idle, so a read that blocked inside ReadFile or
+        // read(2) would hold the UI thread for the whole window.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(ReadyThenLineChild());
         var ready = new MarkerWatch("READY");
@@ -90,7 +94,7 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task WaitForExitAsyncOnUiThreadDoesNotBlockIt()
     {
-        // The exit wait used to poll on the caller's context until the child exited.
+        // The child stays alive until it reads a line, so the exit wait is pending throughout the window.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(ReadyThenLineChild());
         var ready = new MarkerWatch("READY");
@@ -123,7 +127,6 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task CompleteAsyncOnUiThreadDoesNotBlockIt()
     {
-        // One-shot completion used to wait for exit on the caller's context.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(SleepThenDoneChild());
         var completion = ui.RunAsync(() => session.CompleteAsync());
@@ -154,7 +157,7 @@ public sealed class PtyCallerContextTests
         try
         {
             // RunAsync spawns the child synchronously on the UI thread, which can take over 100 ms under load.
-            // That spawn is inherent; the waiting that follows is what must leave the UI thread free.
+            // That spawn is inherent. The waiting that follows is what must leave the UI thread free.
             await Task.Delay(TimeSpan.FromMilliseconds(300));
             await AssertUiThreadStaysFreeAsync(ui);
             await Assert.That(await CompletesWithinAsync(capture, OperationTimeout)).IsTrue();
@@ -261,7 +264,7 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task DisposeOnUiThreadReturnsPromptly()
     {
-        // Guard: closing a tab disposes the session on the UI thread.
+        // The child still waits for input, so Dispose has to end a running child, as closing a tab does.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(ReadyThenLineChild());
         var ready = new MarkerWatch("READY");
@@ -294,7 +297,8 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task DisposeAsyncOnUiThreadDoesNotBlockIt()
     {
-        // Guard: DisposeAsync may wait for teardown, but only by awaiting, never by blocking the UI thread.
+        // The child still waits for input, so DisposeAsync has to end a running child. The bound on the call
+        // catches a long block, but a short synchronous wait for the reader would still pass.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(ReadyThenLineChild());
         var ready = new MarkerWatch("READY");
@@ -308,8 +312,16 @@ public sealed class PtyCallerContextTests
         {
             await Assert.That(await SeenWithinAsync(ready, drain)).IsTrue();
 
-            var dispose = ui.RunAsync(() => session.DisposeAsync().AsTask());
+            var returnedAfter = TimeSpan.Zero;
+            var dispose = ui.RunAsync(() =>
+            {
+                var stopwatch = Stopwatch.StartNew();
+                var task = session.DisposeAsync().AsTask();
+                returnedAfter = stopwatch.Elapsed;
+                return task;
+            });
             await Assert.That(await CompletesWithinAsync(dispose, OperationTimeout)).IsTrue();
+            await Assert.That(returnedAfter).IsLessThan(TimeSpan.FromSeconds(1));
             await Assert.That(await ui.IsResponsiveAsync(ProbeTimeout)).IsTrue();
         }
         finally
@@ -321,13 +333,18 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task PtyTerminalOnUiThreadDeliversOutputWithoutBlockingIt()
     {
-        // Guard: PtyTerminal already detached its pump from the caller's context.
+        // PtyTerminal is started on the UI thread, so a pump that kept the caller's context would run the handler
+        // there.
         using var ui = new SingleThreadSynchronizationContext();
         var ready = new MarkerWatch("READY");
+        var handlerRanOnUiThread = false;
         var terminal = await ui.RunAsync(() => Task.FromResult(PtyTerminal.Start(ReadyThenLineChild(), new PtyTerminalOptions
         {
             Output = (data, _) =>
             {
+                if (SynchronizationContext.Current == ui)
+                    handlerRanOnUiThread = true;
+
                 ready.Append(data.Span);
                 return ValueTask.CompletedTask;
             },
@@ -341,6 +358,7 @@ public sealed class PtyCallerContextTests
             await ui.RunAsync(() => terminal.WriteInputAsync(LineInput).AsTask()).WaitAsync(OperationTimeout);
             var status = await ui.RunAsync(() => terminal.Completion).WaitAsync(OperationTimeout);
             await Assert.That(status.ExitCode).IsEqualTo(0);
+            await Assert.That(handlerRanOnUiThread).IsFalse();
         }
         finally
         {
@@ -358,8 +376,7 @@ public sealed class PtyCallerContextTests
     [NotInParallel]
     public async Task IdleSessionsDoNotOccupyThreadPoolWorkers()
     {
-        // Each idle session used to park two pool workers (the output producer and the exit poller),
-        // so a few terminal tabs starved every other continuation in the host.
+        // With four idle sessions, one pool worker held per session would exceed the bound.
         const int SessionCount = 4;
         await Task.Delay(200);
         var before = BusyWorkerThreads();

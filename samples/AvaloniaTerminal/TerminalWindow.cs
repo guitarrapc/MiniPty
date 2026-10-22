@@ -196,8 +196,9 @@ internal sealed class TerminalWindow : Window
             // Programs decide between 16 colors and 24-bit color from this; the control renders both.
             Environment = new Dictionary<string, string?> { ["COLORTERM"] = "truecolor" },
             // Windows: the out-of-band ConPTY this project references (Microsoft.Windows.Console.ConPTY), which
-            // forwards mouse tracking and terminal queries the in-box conhost consumes, and supports Clear. Null, and
-            // so the in-box ConPTY, when conpty.dll is not in the application directory; always null elsewhere.
+            // forwards graphics, terminal queries, and mouse tracking that the in-box conhost withholds from some
+            // programs, and supports Clear. Null, and so the in-box ConPTY, when conpty.dll is not in the application
+            // directory; always null elsewhere.
             ConPty = _conPty = ConPtyLibrary.TryLoadFromApplicationDirectory(),
         };
     }

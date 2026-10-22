@@ -180,8 +180,8 @@ public sealed record PtyStartInfo
     /// <remarks>
     /// <para>
     /// The in-box ConPTY renders the child's output through the <c>conhost.exe</c> of the user's Windows build, which
-    /// decides which VT sequences reach the frontend; the build measured for this option withheld mouse tracking modes,
-    /// several terminal queries, and graphics protocols. The out-of-band implementation, <c>conpty.dll</c> plus
+    /// decides which VT sequences reach the frontend; the build measured for this option withheld graphics protocols and
+    /// several terminal queries, and forwarded mouse tracking modes only for a child that reads VT input. The out-of-band implementation, <c>conpty.dll</c> plus
     /// <c>OpenConsole.exe</c> from the <c>Microsoft.Windows.Console.ConPTY</c> package, behaves the same on every
     /// Windows build and supports <see cref="PtySession.Clear"/>. MiniPty ships neither file; see
     /// <see cref="ConPtyLibrary"/> for how an application supplies them.

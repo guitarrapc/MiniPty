@@ -48,7 +48,7 @@ All on the UI thread and without `Task.Run`:
 
 The child gets `COLORTERM=truecolor`, which is how programs decide to use 24-bit color.
 
-The session runs on the out-of-band ConPTY: this project references `Microsoft.Windows.Console.ConPTY`, MiniPty's build targets stage `OpenConsole.exe` beside `conpty.dll`, and `PtyStartInfo.ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()` opts in. That host forwards mouse tracking and terminal queries, which the in-box `conhost.exe` consumes, so programs such as `vim` and `htop` get mouse events here, and `Clear()` empties its buffer. Delete `conpty.dll` from the output directory to run on the in-box ConPTY instead; the status line says which one is in use.
+The session runs on the out-of-band ConPTY: this project references `Microsoft.Windows.Console.ConPTY`, MiniPty's build targets stage `OpenConsole.exe` beside `conpty.dll`, and `PtyStartInfo.ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()` opts in. That host forwards graphics, terminal queries, and mouse tracking, which the in-box `conhost.exe` withholds from some programs (it forwards mouse tracking only for a program that reads VT input), and `Clear()` empties its buffer. Delete `conpty.dll` from the output directory to run on the in-box ConPTY instead; the status line says which one is in use.
 
 When the program exits with code 0 (`exit` in the shell) the window closes, as Windows Terminal does by default. Any other exit code prints `[process exited with code N]` in the terminal and the window stays until a key is pressed, so the reason can be read.
 

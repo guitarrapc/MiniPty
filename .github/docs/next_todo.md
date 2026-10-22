@@ -1,4 +1,4 @@
-Milestones 1–5 and the editor terminal backend (use case 4) are implemented. See [specs/core_session.md](specs/core_session.md), [specs/console.md](specs/console.md), [specs/terminal.md](specs/terminal.md), [specs/lifecycle.md](specs/lifecycle.md).
+Spawn options, persistent output streaming, lifecycle hardening, timestamped capture, the interactive sample, MiniPty.Console (use case 3), and the editor terminal backend (use case 4) are implemented. See [specs/core_session.md](specs/core_session.md), [specs/lifecycle.md](specs/lifecycle.md), [specs/capture.md](specs/capture.md), [specs/console.md](specs/console.md), [specs/terminal.md](specs/terminal.md).
 
 GUI host readiness is implemented, and its plan is retired: caller-context safety and thread-pool independence ([Caller context](specs/core_session.md#caller-context)), exit-tolerant resize, platform size limits, GUI host guidance with WinUI 3 and Avalonia samples ([GUI hosts](specs/core_session.md#gui-hosts)), bounded end of output on Windows, explicit Unix termios with `IUTF8`, hang-up before kill on Unix dispose, the opt-in out-of-band ConPTY with `Clear()` ([Out-of-band ConPTY](specs/core_session.md#out-of-band-conpty)), opt-in process-tree cleanup ([Process tree](specs/core_session.md#process-tree)), bounded UI-thread occupancy during output floods, and child-`PATH` program lookup on Windows ([Program lookup](specs/core_session.md#program-lookup-windows)). Its lessons live in those specifications and in [platform_support.md](specs/platform_support.md), [pty_crossplatform.md](references/pty_crossplatform.md), and [gui_terminal_samples.md](references/gui_terminal_samples.md).
 
@@ -12,13 +12,13 @@ GUI host readiness is implemented, and its plan is retired: caller-context safet
 
 ## Deferred Until an Embedder Needs It
 
-### Thread-free async I/O (G6)
+### Thread-free async I/O
 
 After the GUI host work, each session that is still reading holds one dedicated reader thread, taken from a process-wide pool that parks threads between sessions, and a pending read stops only when the transport is closed or the reader is woken. A host that keeps dozens of background tabs, or hands sessions between owners, would benefit from reads that hold no thread and can be canceled at the OS level. Nothing observed fails today, so this is about scale.
 
 The design replaces the reader thread as the output pump's driver and leaves the public API unchanged:
 
-- **Windows:** create MiniPty's end of the output pipe overlapped, as the input pipe already is (a named pipe, since an anonymous pipe cannot be overlapped), keep ConPTY's ends synchronous, complete reads through the I/O completion port, and cancel them with `CancelIoEx`. Disposal and the forced end of output after the close, which today use `CancelSynchronousIo` on the reader thread, become I/O cancellation. Overlapped output was left out of the first restructuring so the API change and the I/O change could each be measured on its own.
+- **Windows:** create MiniPty's end of the output pipe overlapped, as the input pipe already is (a named pipe, since an anonymous pipe cannot be overlapped), keep ConPTY's ends synchronous, complete reads through the I/O completion port, and cancel them with `CancelIoEx`. Disposal and the forced end of output after the close, which today use `CancelSynchronousIo` on the reader thread, become I/O cancellation. Overlapped output means rebuilding the ConPTY coalescing described below, so it was kept out of the change that moved output reading onto the reader thread, and each change could be measured on its own.
 - **Unix:** drive every session's non-blocking master from one shared readiness loop (`epoll` / `kqueue`), the kind of loop the exit watcher already runs.
 - **Coalescing:** redesign the ConPTY continuation reads (`PIPE_NOWAIT` within a 500 µs window) and the Unix ones (1 ms windows), both within a 2 ms budget per slot, around completion and readiness notifications, keeping today's chunking (32 KiB from ConPTY in about 13 full 4 KiB chunks) and first-byte latency.
 - **Pooled buffers:** completions run on pool threads, so keep each pooled buffer's rent and return on one thread ([core_session lessons](specs/core_session.md#lessons-learned)); a return on another thread strands the array in that thread's cache.

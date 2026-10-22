@@ -35,7 +35,8 @@ public sealed class PtyConPtyTests
 
     /// <summary>
     /// Modes and queries that the in-box console host of the measured Windows builds consumes instead of forwarding to
-    /// the frontend, and the start of each as it reaches the frontend through the out-of-band host.
+    /// the frontend when the child leaves its console input in the default mode, as the probe child does, and the start
+    /// of each as it reaches the frontend through the out-of-band host.
     /// </summary>
     private static readonly (string Name, string Sequence, string Needle)[] VtProbes =
     [
@@ -204,8 +205,8 @@ public sealed class PtyConPtyTests
 
     /// <summary>
     /// The in-box console host of the measured Windows builds consumes mouse tracking modes, DECCKM, and terminal
-    /// queries instead of forwarding them, so a terminal emulator never learns that a program wants mouse events. The
-    /// out-of-band host forwards them.
+    /// queries from a child whose console input is in the default mode (it forwards the mouse modes and DECCKM once the
+    /// child enables VT input). The out-of-band host forwards them whatever the input mode.
     /// </summary>
     [Test]
     public async Task ForwardsTheSequencesTheInBoxHostConsumes()

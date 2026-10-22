@@ -1722,12 +1722,10 @@ public sealed class PtyTests
 
     /// <summary>
     /// A process the host starts with handle inheritance while a pseudo-console is being created inherits ConPTY's
-    /// output pipe and keeps it open after the pseudo-console closes, so end of output used to wait for that process.
-    /// The post-exit drain now ends output once reads have been quiet after the close (Post-exit drain in
-    /// <c>.github/docs/references/pty_crossplatform.md</c>). The window is ConPTY's own <c>CreateProcess</c> of its host, a few milliseconds per pseudo-console: a
-    /// steady 16 spawns per second elsewhere in the process hit it in none of 12 sessions, so this test races
-    /// <c>Process.Start</c> around <c>Pty.Start</c> itself. Each leaked handle would otherwise hold end of output for
-    /// the 3 s its child lives.
+    /// output pipe and keeps it open after the pseudo-console closes. End of output must not wait for that process
+    /// (Post-exit drain in <c>.github/docs/references/pty_crossplatform.md</c>). The window is ConPTY's own
+    /// <c>CreateProcess</c> of its host, a few milliseconds per pseudo-console. This test therefore starts processes
+    /// around <c>Pty.Start</c> itself rather than relying on background spawning to land in that window.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -1757,7 +1755,7 @@ public sealed class PtyTests
                         return;
                     }
 
-                    // Process.Start always inherits handles; redirected stdio makes the child hold the pipes it got.
+                    // Process.Start always inherits handles. Redirected stdio makes the child hold the pipes it got.
                     spawned.Add(Process.Start(new ProcessStartInfo("ping.exe", "-n 4 127.0.0.1")
                     {
                         RedirectStandardInput = true,

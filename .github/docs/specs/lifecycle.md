@@ -133,7 +133,7 @@ If the slave side is already closed when staged EOT runs, the master write may f
 
 ### ConPTY spawn readiness
 
-EOF staging advances on a per-session 100 ms timer, so it gives the child time to attach and progresses whether or not anyone awaits exit. The console host queues the Ctrl+Z + CR chord for the child whether or not the child has attached yet, so the first tick is enough. Milestone 3 validates that immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof` do not cause spurious child failure (for example `STATUS_CONTROL_C_EXIT`). This remains an internal transport concern; there is no public ready-state API.
+EOF staging advances on a per-session 100 ms timer, so it gives the child time to attach and progresses whether or not anyone awaits exit. The console host queues the Ctrl+Z + CR chord for the child whether or not the child has attached yet, so the first tick is enough. Tests check that immediate post-`Pty.Start` `WriteInputAsync`, `Resize`, and empty-stdin `SendEof` do not cause spurious child failure (for example `STATUS_CONTROL_C_EXIT`). This remains an internal transport concern; there is no public ready-state API.
 
 ## Drain, kill, and disposal
 
