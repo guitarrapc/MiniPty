@@ -1822,13 +1822,16 @@ public sealed class PtyTests
             KillSpawned(spawned);
         }
 
+        // Kill, not Kill(entireProcessTree: true): a ping's only child is its console host, which exits with it, and the
+        // tree kill enumerates and opens every process on the machine for each call. Under CPU oversubscription that
+        // took up to 8 s per ping, and one run of this test spent 10 minutes here.
         static void KillSpawned(System.Collections.Concurrent.ConcurrentBag<Process> spawned)
         {
             while (spawned.TryTake(out var process))
             {
                 try
                 {
-                    process.Kill(entireProcessTree: true);
+                    process.Kill();
                 }
                 catch (InvalidOperationException)
                 {
