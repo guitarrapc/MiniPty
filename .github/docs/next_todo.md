@@ -1,7 +1,47 @@
 Milestones 1–5 and the editor terminal backend (use case 4) are implemented. See [specs/core_session.md](specs/core_session.md), [specs/console.md](specs/console.md), [specs/terminal.md](specs/terminal.md), [specs/lifecycle.md](specs/lifecycle.md).
 
-GUI host readiness ([plans/plan_gui_host_readiness.md](plans/plan_gui_host_readiness.md)) Phases A, B, and C are implemented: caller-context safety, thread-pool independence, exit-tolerant resize, platform size limits, GUI host guidance with a WinUI sample, bounded end of output on Windows, explicit Unix termios with `IUTF8`, and hang-up before kill on Unix dispose.
+GUI host readiness is implemented, and its plan is retired: caller-context safety and thread-pool independence ([Caller context](specs/core_session.md#caller-context)), exit-tolerant resize, platform size limits, GUI host guidance with WinUI 3 and Avalonia samples ([GUI hosts](specs/core_session.md#gui-hosts)), bounded end of output on Windows, explicit Unix termios with `IUTF8`, hang-up before kill on Unix dispose, the opt-in out-of-band ConPTY with `Clear()` ([Out-of-band ConPTY](specs/core_session.md#out-of-band-conpty)), opt-in process-tree cleanup ([Process tree](specs/core_session.md#process-tree)), bounded UI-thread occupancy during output floods, and child-`PATH` program lookup on Windows ([Program lookup](specs/core_session.md#program-lookup-windows)). Its lessons live in those specifications and in [platform_support.md](specs/platform_support.md), [pty_crossplatform.md](references/pty_crossplatform.md), and [gui_terminal_samples.md](references/gui_terminal_samples.md).
 
-Phase D is implemented as well: G7 (opt-in out-of-band ConPTY supplied by the application, `PtyStartInfo.ConPty` plus `ConPtyLibrary`, with `Clear()`) and G8 (opt-in process-tree cleanup, `PtyStartInfo.KillProcessTree`). G12 bounds how long a UI-thread output consumer can keep the thread during an output flood (8 ms of synchronous completions, then one completion through the dispatcher). G13 looks a program name up on the child's `PATH` on Windows when the environment overlay sets or removes it, as the Unix child does on its own.
+**Next:** No implementation plan is selected. What is left is listed below. Remaining deferred and won't-do node-pty parity items are recorded as non-goals in [specs/terminal.md](specs/terminal.md).
 
-**Next:** No follow-up implementation plan is currently selected. Candidates recorded in the plan's open questions: in-box `ReleasePseudoConsole` on Windows builds that export it, for the same pipe-break end of output as the out-of-band path. G6 (thread-free async I/O) is deferred until an embedder needs dozens of concurrent sessions. Remaining deferred and won't-do node-pty parity items are recorded as non-goals in [specs/terminal.md](specs/terminal.md).
+## Release
+
+- None of the GUI host work is released. `v1.3.0` (2026-07-15) predates it, and `Directory.Build.props` still says `1.3.0`.
+- The release breaks the API: `WaitForExitAsync` returns `Task<PtyExitStatus>`, and `WaitForExitStatusAsync` is removed. Behavior a release note should name: `Dispose` no longer blocks, and chunk memory is invalid after it; output is read from spawn into a bounded buffer; exit waits no longer close the transport, so on the in-box ConPTY output ends about 100 ms after the last output rather than at exit; `Resize` after exit no longer throws, and sizes clamp to the platform limit instead of 512; Unix `Dispose` hangs the child up and kills it one second later instead of killing at once; `SendEof` with no input sends Ctrl+Z + CR instead of closing the pipe; on Windows a `.bat` or `.cmd` runs through `cmd.exe` with its arguments escaped, and a bare `FileName` is looked up on the child's `PATH` when `Environment` sets or removes it.
+- The README samples under `samples/SingleFiles` (`README_MiniPty.cs`, `README_MiniPty.Console.cs`, `README_MiniPty.Capture.cs`) pin `MiniPty@1.2.0`, but the first two already use the new exit API (`(await session.WaitForExitAsync()).ExitCode`), so they do not build until the pins move to the release. CI does not build them.
+
+## Deferred Until an Embedder Needs It
+
+### Thread-free async I/O (G6)
+
+After the GUI host work, each session that is still reading holds one dedicated reader thread, taken from a process-wide pool that parks threads between sessions, and a pending read stops only when the transport is closed or the reader is woken. A host that keeps dozens of background tabs, or hands sessions between owners, would benefit from reads that hold no thread and can be canceled at the OS level. Nothing observed fails today, so this is about scale.
+
+The design replaces the reader thread as the output pump's driver and leaves the public API unchanged:
+
+- **Windows:** create MiniPty's end of the output pipe overlapped, as the input pipe already is (a named pipe, since an anonymous pipe cannot be overlapped), keep ConPTY's ends synchronous, complete reads through the I/O completion port, and cancel them with `CancelIoEx`. Disposal and the forced end of output after the close, which today use `CancelSynchronousIo` on the reader thread, become I/O cancellation. Overlapped output was left out of the first restructuring so the API change and the I/O change could each be measured on its own.
+- **Unix:** drive every session's non-blocking master from one shared readiness loop (`epoll` / `kqueue`), the kind of loop the exit watcher already runs.
+- **Coalescing:** redesign the ConPTY continuation reads (`PIPE_NOWAIT` within a 500 µs window) and the Unix ones (1 ms windows), both within a 2 ms budget per slot, around completion and readiness notifications, keeping today's chunking (32 KiB from ConPTY in about 13 full 4 KiB chunks) and first-byte latency.
+- **Pooled buffers:** completions run on pool threads, so keep each pooled buffer's rent and return on one thread ([core_session lessons](specs/core_session.md#lessons-learned)); a return on another thread strands the array in that thread's cache.
+
+Acceptance: the thread count stays constant with 64 idle sessions, with no throughput, latency, or allocation regression in `PtyIntegrationBenchmarks` (against its baseline), `PtyInputBenchmarks`, and `PtyConPtyBenchmarks`. Estimate: large.
+
+### Unix disposal grace as an option
+
+The one-second hang-up grace before the kill (`UnixPtyBackend.DisposeHangupGraceMs`) is fixed. It can become an option if an embedder needs a different one.
+
+## Follow-up
+
+- **In-box `ReleasePseudoConsole`.** `kernel32.dll` of Windows 11 build 26100 exports it. Calling it after spawn, as the out-of-band path calls `ConptyReleasePseudoConsole`, would end in-box output on the pipe break, 2–3 ms after exit, instead of after the 100 ms post-exit quiet interval (about 114 ms measured). It needs a runtime export probe, since older builds lack it, and a measurement on the in-box host.
+
+## Unverified
+
+- **`ClosePseudoConsole` on older Windows builds.** On build 26200 it returned within 1 ms in every measured session, also while an unrelated process held the output pipe open. Whether it can block on Windows 10, or on Windows 11 before 24H2, while output is not drained is not verified; disposal switches the reader to discarding output before the close for that reason. If it can block, `Dispose` must close off the calling thread and `DisposeAsync` must include the close in its wait. Also unverified: whether, on a build where the close waits for the console host, a process that inherited the output pipe keeps that host alive and makes the close wait for it too.
+- **Minimum macOS version of the native binaries.** `scripts/build-native.sh` passes no `-mmacosx-version-min`, and no workflow sets `MACOSX_DEPLOYMENT_TARGET`, so `libminipty_unix.dylib`, the static archive, and `minipty_spawn_helper` declare the build host's macOS as their minimum (`minos 26.0` in `otool -l`), and the release builds them on `macos-26` runners. Linking a NativeAOT sample against the archive warns about it. Whether an older macOS refuses to load them was not tested.
+- **FreeBSD** is tested neither locally nor in CI. Its termios (`VERASE2`, and `_POSIX_VDISABLE` being 0xff), its reader wake pipe, and whether it revokes the tty when the session leader exits, as macOS does, follow from source only.
+- **Host exit on macOS under NativeAOT.** A host that disposes a session whose child ignores `SIGHUP` and then exits sends the pending kill at exit. On macOS that was probed under CoreCLR and NativeAOT with an earlier version that armed a timer per disposal, not with the current exit-watcher deadline; CI runs the CoreCLR test (`HostExitKillsAChildStillInItsHangupGrace`) there.
+- **Output buffer geometry.** 4 slots × 4 KiB was chosen because every allocation benchmark improved with it, and 32 KiB from ConPTY arrives in 12–13 chunks. Throughput has not been tuned.
+
+## Rare Test Timeouts Under Heavy Load
+
+- **Windows:** in `QueuedInputIsDeliveredInOrderWithEofAfterItWhileOutputIsBackedUp`, a blocking write issued behind a queue that had stayed pending for 500 ms completed within 100 ms once in 11 runs of the EOF tests under 3× CPU oversubscription on a desktop, before `SendEof` was called: the console host took input for a moment while its output was still backed up, so the test's premise did not hold and the EOF path was not involved. Not seen on hosted runners since the flood tests were reworked.
+- **macOS:** `SendEofEndsInputAfterACanceledWriteLeftAPartialLine` timed out once in 48 full-suite runs with 64 busy processes on 8 cores, and once in 20 such runs before an earlier round of fixes. It passed 84 later runs with about 128 busy processes, alone, with its class, or with the suite. The cause is not known.

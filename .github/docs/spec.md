@@ -95,5 +95,6 @@ Implemented contracts and durable design decisions live in [specs/](specs/); OS-
 - [specs/platform_support.md](specs/platform_support.md) — public platform support and verification constraints
 - [references/pty_crossplatform.md](references/pty_crossplatform.md) — ConPTY, `forkpty`, EOF staging, interop details
 - [references/windows_console_input.md](references/windows_console_input.md) — Windows host stdin path for **MiniPty.Console**
+- [references/gui_terminal_samples.md](references/gui_terminal_samples.md) — how the WinUI 3 and Avalonia terminal samples are built, and their lessons
 - [README.md](../../README.md) — quick-start examples
 - [scenetake spec_pty.md](https://github.com/guitarrapc/scenetake/blob/main/.github/docs/spec_pty.md) — `pty: true` YAML and cast integration (use case 2 today)

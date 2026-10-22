@@ -1722,9 +1722,9 @@ public sealed class PtyTests
 
     /// <summary>
     /// A process the host starts with handle inheritance while a pseudo-console is being created inherits ConPTY's
-    /// output pipe and keeps it open after the pseudo-console closes, so end of output used to wait for that process
-    /// (F12 in the GUI host readiness plan). The post-exit drain now ends output once reads have been quiet after the
-    /// close. The window is ConPTY's own <c>CreateProcess</c> of its host, a few milliseconds per pseudo-console: a
+    /// output pipe and keeps it open after the pseudo-console closes, so end of output used to wait for that process.
+    /// The post-exit drain now ends output once reads have been quiet after the close (Post-exit drain in
+    /// <c>.github/docs/references/pty_crossplatform.md</c>). The window is ConPTY's own <c>CreateProcess</c> of its host, a few milliseconds per pseudo-console: a
     /// steady 16 spawns per second elsewhere in the process hit it in none of 12 sessions, so this test races
     /// <c>Process.Start</c> around <c>Pty.Start</c> itself. Each leaked handle would otherwise hold end of output for
     /// the 3 s its child lives.

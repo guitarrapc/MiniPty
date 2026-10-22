@@ -7,14 +7,14 @@ using MiniPty.Terminal;
 namespace MiniPty.Tests;
 
 /// <summary>
-/// Caller-context safety (plan_gui_host_readiness.md G1): awaiting MiniPty from a GUI thread must not block
-/// that thread, and idle sessions must not occupy thread-pool workers.
+/// Caller-context safety: awaiting MiniPty from a GUI thread must not block that thread, and idle sessions must
+/// not occupy thread-pool workers (Caller Context and GUI Hosts in <c>.github/docs/specs/core_session.md</c>).
 /// </summary>
 /// <remarks>
 /// Every test drives the API from <see cref="SingleThreadSynchronizationContext"/>, which stands in for a
-/// WinUI / WPF dispatcher. Findings F1–F4 and F8 in the plan are the failures these tests reproduce. Tests
-/// marked as guards already pass and protect behavior the G1 restructuring must keep. Tests for findings a
-/// later G1 step fixes are skipped, and each skip reason names the step that removes it.
+/// WinUI / WPF dispatcher. Each test's first comment names the failure it reproduced before output was read on a
+/// library-owned thread and exit was observed by the exit watcher. Tests marked as guards passed then too, and
+/// protect behavior that must stay.
 /// </remarks>
 public sealed class PtyCallerContextTests
 {
@@ -34,7 +34,7 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task ReadOutputAsyncOnUiThreadDeliversOutputWithoutBlockingIt()
     {
-        // F1: the producer used to start on the caller's context and deadlock it before any chunk arrived.
+        // The producer used to start on the caller's context and deadlock it before any chunk arrived.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(ReadyThenLineChild());
         var ready = new MarkerWatch("READY");
@@ -59,7 +59,7 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task OutputReadAsyncOnUiThreadDoesNotBlockItWhileIdle()
     {
-        // F2: every read after the first used to block the calling thread inside ReadFile / read(2).
+        // Every read after the first used to block the calling thread inside ReadFile / read(2).
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(ReadyThenLineChild());
         var ready = new MarkerWatch("READY");
@@ -90,7 +90,7 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task WaitForExitAsyncOnUiThreadDoesNotBlockIt()
     {
-        // F3: the exit wait used to poll on the caller's context until the child exited.
+        // The exit wait used to poll on the caller's context until the child exited.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(ReadyThenLineChild());
         var ready = new MarkerWatch("READY");
@@ -123,7 +123,7 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task CompleteAsyncOnUiThreadDoesNotBlockIt()
     {
-        // F4: one-shot completion used to wait for exit on the caller's context.
+        // One-shot completion used to wait for exit on the caller's context.
         using var ui = new SingleThreadSynchronizationContext();
         var session = Pty.Start(SleepThenDoneChild());
         var completion = ui.RunAsync(() => session.CompleteAsync());
@@ -147,7 +147,7 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task PtyCaptureRunAsyncOnUiThreadDoesNotBlockIt()
     {
-        // F4 through MiniPty.Capture, which shares the one-shot completion path.
+        // The same through MiniPty.Capture, which shares the one-shot completion path.
         using var ui = new SingleThreadSynchronizationContext();
         var capture = ui.RunAsync(() => PtyCapture.RunAsync(SleepThenDoneChild()));
 
@@ -321,7 +321,7 @@ public sealed class PtyCallerContextTests
     [Test]
     public async Task PtyTerminalOnUiThreadDeliversOutputWithoutBlockingIt()
     {
-        // Guard: PtyTerminal already detaches its pump from the caller's context (plan F5).
+        // Guard: PtyTerminal already detached its pump from the caller's context.
         using var ui = new SingleThreadSynchronizationContext();
         var ready = new MarkerWatch("READY");
         var terminal = await ui.RunAsync(() => Task.FromResult(PtyTerminal.Start(ReadyThenLineChild(), new PtyTerminalOptions
@@ -358,7 +358,7 @@ public sealed class PtyCallerContextTests
     [NotInParallel]
     public async Task IdleSessionsDoNotOccupyThreadPoolWorkers()
     {
-        // F8: each idle session used to park two pool workers (the output producer and the exit poller),
+        // Each idle session used to park two pool workers (the output producer and the exit poller),
         // so a few terminal tabs starved every other continuation in the host.
         const int SessionCount = 4;
         await Task.Delay(200);
