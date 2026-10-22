@@ -11,10 +11,10 @@ namespace MiniPty.Benchmarks;
 /// staged in the benchmark output, the methods return 0 without spawning.
 /// </summary>
 /// <remarks>
-/// The two implementations differ in where output ends. The in-box path reports end of output only after the
-/// pseudo-console is closed, which the post-exit drain does once reads have been quiet for 100 ms; the out-of-band
-/// path releases MiniPty's reference to the console server after spawn, so its host exits with the child and the pipe
-/// breaks at once. Every scenario that reads to the end therefore pays that interval in-box and not out-of-band.
+/// Both paths release MiniPty's reference to the console server after spawn, so the host exits with the child and the
+/// pipe breaks at once, except the in-box path on Windows builds before 11 24H2 (26100), whose <c>kernel32.dll</c> has no
+/// <c>ReleasePseudoConsole</c>: there output ends only after the pseudo-console is closed, which the post-exit drain does
+/// once reads have been quiet for 100 ms, and every scenario that reads to the end pays that interval in-box.
 /// Allocations include OS process spawn; the console host process (<c>conhost.exe</c> or <c>OpenConsole.exe</c>) is
 /// part of each spawn.
 /// </remarks>

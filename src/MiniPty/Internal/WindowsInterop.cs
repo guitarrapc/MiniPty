@@ -21,6 +21,16 @@ internal static partial class WindowsInterop
         out uint lpNumberOfBytesRead,
         IntPtr lpOverlapped);
 
+    /// <summary>For a handle the caller has already pinned (<see cref="SafeHandle.DangerousAddRef"/>).</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool ReadFile(
+        IntPtr hFile,
+        byte* lpBuffer,
+        uint nNumberOfBytesToRead,
+        out uint lpNumberOfBytesRead,
+        IntPtr lpOverlapped);
+
     /// <summary>Overlapped write: pass a null byte count and read the count from the overlapped structure.</summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -86,10 +96,11 @@ internal static partial class WindowsInterop
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool CancelSynchronousIo(IntPtr hThread);
 
+    /// <summary>For a handle the caller has already pinned (<see cref="SafeHandle.DangerousAddRef"/>).</summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static unsafe partial bool SetNamedPipeHandleState(
-        SafeFileHandle hNamedPipe,
+        IntPtr hNamedPipe,
         uint* lpMode,
         IntPtr lpMaxCollectionCount,
         IntPtr lpCollectDataTimeout);

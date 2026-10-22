@@ -1721,12 +1721,17 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// A process the host starts with handle inheritance while a pseudo-console is being created inherits ConPTY's
-    /// output pipe and keeps it open after the pseudo-console closes. End of output must not wait for that process
-    /// (Post-exit drain in <c>.github/docs/references/pty_crossplatform.md</c>). The window is ConPTY's own
-    /// <c>CreateProcess</c> of its host, a few milliseconds per pseudo-console. This test therefore starts processes
-    /// around <c>Pty.Start</c> itself rather than relying on background spawning to land in that window.
+    /// ConPTY makes inheritable duplicates of its pipe ends while it starts its console host inside
+    /// <c>Pty.Start</c>. A process the host application starts with handle inheritance in that window inherits
+    /// ConPTY's output pipe and keeps it open after the pseudo-console closes. End of output must not wait for that
+    /// process (Post-exit drain in <c>.github/docs/references/pty_crossplatform.md</c>). The spawner threads
+    /// therefore start processes around <c>Pty.Start</c>, and a session in which no spawn lands in the window passes
+    /// without a held-open pipe.
     /// </summary>
+    /// <remarks>
+    /// Timed from the child's exit, not from <c>Pty.Start</c>: under CPU oversubscription <c>cmd /c echo</c> alone took
+    /// up to 3.2 s to exit, before and after any change to end of output, while output ended 0.2–0.6 s after exit.
+    /// </remarks>
     [Test]
     [NotInParallel]
     public async Task PtyWindowsOutputEndsWhileAnotherProcessHoldsTheOutputPipe()
@@ -1756,7 +1761,8 @@ public sealed class PtyTests
                     }
 
                     // Process.Start always inherits handles. Redirected stdio makes the child hold the pipes it got.
-                    spawned.Add(Process.Start(new ProcessStartInfo("ping.exe", "-n 4 127.0.0.1")
+                    // About 10 s, so a held pipe still shows seconds after a slow exit; each session kills them.
+                    spawned.Add(Process.Start(new ProcessStartInfo("ping.exe", "-n 11 127.0.0.1")
                     {
                         RedirectStandardInput = true,
                         RedirectStandardOutput = true,
@@ -1776,7 +1782,6 @@ public sealed class PtyTests
         {
             for (var i = 0; i < 8; i++)
             {
-                var stopwatch = Stopwatch.StartNew();
                 PtySession session;
                 spawnGate.Set();
                 try
@@ -1788,19 +1793,24 @@ public sealed class PtyTests
                     spawnGate.Reset();
                 }
 
+                double afterExitMs;
                 await using (session)
                 {
+                    // Stamped when the exit wait completes, not when it is awaited after the end of output.
+                    var exitedAt = session.WaitForExitAsync().ContinueWith(static _ => Stopwatch.GetTimestamp(), TaskScheduler.Default);
                     await foreach (var _ in session.ReadOutputAsync())
                     {
                     }
+
+                    var endedAt = Stopwatch.GetTimestamp();
+                    afterExitMs = Stopwatch.GetElapsedTime(await exitedAt.WaitAsync(TimeSpan.FromSeconds(30)), endedAt).TotalMilliseconds;
                 }
 
-                var elapsed = stopwatch.ElapsedMilliseconds;
                 KillSpawned(spawned);
 
-                // Exit, 100 ms quiet, close, 100 ms quiet, end: well under a second even on a loaded machine. A
-                // leaked handle holds end of output until the ping child exits, about 3 s after it started.
-                await Assert.That(elapsed).IsLessThan(2000);
+                // Exit, 100 ms quiet, close, 100 ms quiet, end: well under a second after exit even on a loaded
+                // machine. A leaked handle holds end of output until the ping child exits, about 10 s after it started.
+                await Assert.That(afterExitMs).IsLessThan(2000);
             }
         }
         finally
@@ -1812,13 +1822,16 @@ public sealed class PtyTests
             KillSpawned(spawned);
         }
 
+        // Kill, not Kill(entireProcessTree: true): a ping's only child is its console host, which exits with it, and the
+        // tree kill enumerates and opens every process on the machine for each call. Under CPU oversubscription that
+        // took up to 8 s per ping, and one run of this test spent 10 minutes here.
         static void KillSpawned(System.Collections.Concurrent.ConcurrentBag<Process> spawned)
         {
             while (spawned.TryTake(out var process))
             {
                 try
                 {
-                    process.Kill(entireProcessTree: true);
+                    process.Kill();
                 }
                 catch (InvalidOperationException)
                 {
