@@ -304,12 +304,12 @@ internal static class WindowsPtyBackend
                 environmentBlock = IntPtr.Zero;
             }
 
-            // Out-of-band ConPTY: the child holds its own reference to the console server now, so MiniPty drops the one
-            // that kept the host alive until then. The host exits with its last client and breaks the output pipe, which
-            // ends output on this path without the post-exit quiet interval; resize and clear keep working, as they use
-            // the signal pipe. Never fatal: without it the session ends as on the in-box path.
-            if (library is not null)
-                _ = library.ReleasePseudoConsole(hpc.DangerousGetHandle());
+            // The child holds its own reference to the console server now, so MiniPty drops the one that kept the host
+            // alive until then. The host exits with its last client and breaks the output pipe, which ends output without
+            // the post-exit quiet interval; resize and clear keep working, as they use the signal pipe. The out-of-band
+            // ConPTY always can; the in-box one can from Windows 11 24H2 (build 26100), and on older builds the session
+            // ends on the drain's close as before. Never fatal: a failed release leaves the session as if not tried.
+            _ = hpc.ReleaseServerReference();
 
             PtyStartTestHook.Run(PtyStartStage.Spawned, processInfo.dwProcessId);
             return new WindowsPtyBackendInstance(
@@ -1196,8 +1196,9 @@ internal static class WindowsPtyBackend
         {
             // Disposal closes the handle under a blocked read and cancels the read; the pump then re-checks its state
             // and reads again to let the transport end. Reading a closed handle would throw, and that exception cost
-            // every out-of-band session about 330 B (its host exits with the child, so the cancel wins the race with
-            // the pipe break nearly every time; in-box, 2 of 300 sessions). The catch below keeps the race.
+            // every out-of-band session about 330 B (a released host exits with the child, so the cancel wins the race
+            // with the pipe break nearly every time; on an in-box host that was not released, 2 of 300 sessions). The
+            // catch below keeps the race.
             if (_outputReadHandle.IsClosed)
                 return 0;
 
@@ -1231,71 +1232,95 @@ internal static class WindowsPtyBackend
         /// while more is in flight, so this reads with <c>PIPE_NOWAIT</c> and retries until the window ends. The
         /// anonymous pipe cannot be waited on, so the window is a short yield loop.
         /// </summary>
+        /// <remarks>
+        /// The handle is pinned once for the whole window, not by each call: disposal can close it at any moment, and
+        /// every marshalled call that found it closed threw <see cref="ObjectDisposedException"/>, 330 B each once
+        /// caught. A session disposed right after exit, whose console host writes its last frame as the child exits,
+        /// met that in about a third of sessions. Disposal is still noticed between attempts through
+        /// <see cref="SafeHandle.IsClosed"/>, which turns true at once while the close itself waits for the pin.
+        /// </remarks>
         public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
         {
-            var read = TryReadOutputNow(buffer, out endOfOutput);
-            if (read > 0 || endOfOutput)
-                return read;
-
-            var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + s_coalesceWindowTicks;
-            while (System.Diagnostics.Stopwatch.GetTimestamp() < deadline)
-            {
-                Thread.Sleep(0);
-                read = TryReadOutputNow(buffer, out endOfOutput);
-                if (read > 0 || endOfOutput)
-                    return read;
-            }
-
-            return 0;
-        }
-
-        private unsafe int TryReadOutputNow(Span<byte> buffer, out bool endOfOutput)
-        {
-            endOfOutput = false;
+            endOfOutput = true;
             if (_outputReadHandle.IsClosed)
+                return 0;
+
+            var pinned = false;
+            try
             {
-                endOfOutput = true;
+                // Throws only when disposal closes the handle between the check above and here.
+                _outputReadHandle.DangerousAddRef(ref pinned);
+            }
+            catch (ObjectDisposedException)
+            {
                 return 0;
             }
 
-            uint nowait = WindowsInterop.PipeNowait;
             try
             {
-                if (!WindowsInterop.SetNamedPipeHandleState(_outputReadHandle, &nowait, IntPtr.Zero, IntPtr.Zero))
-                    return 0;
+                var pipe = _outputReadHandle.DangerousGetHandle();
+                var read = TryReadOutputNow(pipe, buffer, out endOfOutput);
+                if (read > 0 || endOfOutput)
+                    return read;
 
-                try
+                var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + s_coalesceWindowTicks;
+                while (System.Diagnostics.Stopwatch.GetTimestamp() < deadline)
                 {
-                    fixed (byte* ptr = buffer)
-                    {
-                        if (WindowsInterop.ReadFile(_outputReadHandle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
-                            return (int)read;
-                    }
-
-                    var error = Marshal.GetLastPInvokeError();
-                    // ERROR_OPERATION_ABORTED: a CancelRead aimed at the blocking read landed here instead; nothing
-                    // was transferred, and the pump re-checks its state on its next blocking read.
-                    if (error is WindowsInterop.ErrorNoData or ErrorOperationAborted)
-                        return 0;
-
-                    if (error is ErrorBrokenPipe or ErrorInvalidHandle)
+                    Thread.Sleep(0);
+                    if (_outputReadHandle.IsClosed)
                     {
                         endOfOutput = true;
                         return 0;
                     }
 
-                    throw new IOException($"ReadFile failed (Win32 {error})");
+                    read = TryReadOutputNow(pipe, buffer, out endOfOutput);
+                    if (read > 0 || endOfOutput)
+                        return read;
                 }
-                finally
-                {
-                    uint wait = WindowsInterop.PipeWait;
-                    _ = WindowsInterop.SetNamedPipeHandleState(_outputReadHandle, &wait, IntPtr.Zero, IntPtr.Zero);
-                }
-            }
-            catch (ObjectDisposedException)
-            {
-                endOfOutput = true;
+
                 return 0;
+            }
+            finally
+            {
+                if (pinned)
+                    _outputReadHandle.DangerousRelease();
+            }
+        }
+
+        /// <summary>One non-blocking read of the output pipe, which the caller has pinned.</summary>
+        private static unsafe int TryReadOutputNow(IntPtr pipe, Span<byte> buffer, out bool endOfOutput)
+        {
+            endOfOutput = false;
+            uint nowait = WindowsInterop.PipeNowait;
+            if (!WindowsInterop.SetNamedPipeHandleState(pipe, &nowait, IntPtr.Zero, IntPtr.Zero))
+                return 0;
+
+            try
+            {
+                fixed (byte* ptr = buffer)
+                {
+                    if (WindowsInterop.ReadFile(pipe, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
+                        return (int)read;
+                }
+
+                var error = Marshal.GetLastPInvokeError();
+                // ERROR_OPERATION_ABORTED: a CancelRead aimed at the blocking read landed here instead; nothing
+                // was transferred, and the pump re-checks its state on its next blocking read.
+                if (error is WindowsInterop.ErrorNoData or ErrorOperationAborted)
+                    return 0;
+
+                if (error is ErrorBrokenPipe or ErrorInvalidHandle)
+                {
+                    endOfOutput = true;
+                    return 0;
+                }
+
+                throw new IOException($"ReadFile failed (Win32 {error})");
+            }
+            finally
+            {
+                uint wait = WindowsInterop.PipeWait;
+                _ = WindowsInterop.SetNamedPipeHandleState(pipe, &wait, IntPtr.Zero, IntPtr.Zero);
             }
         }
 
@@ -1750,6 +1775,14 @@ internal static class WindowsPtyBackend
 
         public virtual int Clear() => 0;
 
+        /// <summary>
+        /// Drops MiniPty's reference to the console server once the child has attached, so the host exits with its
+        /// last client and breaks the output pipe. Returns the HRESULT, or 0 without a call where this Windows build's
+        /// <c>kernel32.dll</c> has no <c>ReleasePseudoConsole</c>.
+        /// </summary>
+        public virtual int ReleaseServerReference() =>
+            WindowsInterop.CanReleasePseudoConsole ? WindowsInterop.ReleasePseudoConsole(handle) : 0;
+
         protected override bool ReleaseHandle()
         {
             WindowsInterop.ClosePseudoConsole(handle);
@@ -1770,6 +1803,8 @@ internal static class WindowsPtyBackend
 
         // The frontend has cleared its own display, so the host's cursor goes to the top with it.
         public override int Clear() => _library.ClearPseudoConsole(handle, keepCursorRow: false);
+
+        public override int ReleaseServerReference() => _library.ReleasePseudoConsole(handle);
 
         protected override bool ReleaseHandle()
         {
@@ -1841,6 +1876,32 @@ internal static partial class WindowsInterop
 
     [LibraryImport("kernel32.dll")]
     internal static partial void ClosePseudoConsole(IntPtr hPC);
+
+    /// <summary>
+    /// <c>HRESULT ReleasePseudoConsole(HPCON hPC)</c> from <c>kernel32.dll</c>, or null on a Windows build that does not
+    /// export it; Windows 11 24H2 (build 26100) is the first that does. Resolved once, on first use, rather than
+    /// imported: an import of a missing export fails each call with <c>EntryPointNotFoundException</c>, which would make
+    /// every session on an older build pay for an exception.
+    /// </summary>
+    private static readonly unsafe delegate* unmanaged[Stdcall]<IntPtr, int> s_releasePseudoConsole = FindReleasePseudoConsole();
+
+    /// <summary>Whether this Windows build's in-box ConPTY can release a pseudo-console's server reference.</summary>
+    internal static unsafe bool CanReleasePseudoConsole => s_releasePseudoConsole != null;
+
+    /// <summary>Calls <c>ReleasePseudoConsole</c>; only when <see cref="CanReleasePseudoConsole"/>.</summary>
+    internal static unsafe int ReleasePseudoConsole(IntPtr hPC) => s_releasePseudoConsole(hPC);
+
+    private static unsafe delegate* unmanaged[Stdcall]<IntPtr, int> FindReleasePseudoConsole()
+    {
+        // kernel32.dll is loaded in every Windows process and is a known DLL, so this binds the system copy and only
+        // adds a reference to it. The reference is never dropped, as the function stays in use for the process.
+        if (!OperatingSystem.IsWindows() || !NativeLibrary.TryLoad("kernel32.dll", out var kernel32))
+            return null;
+
+        return NativeLibrary.TryGetExport(kernel32, "ReleasePseudoConsole", out var address)
+            ? (delegate* unmanaged[Stdcall]<IntPtr, int>)address
+            : null;
+    }
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

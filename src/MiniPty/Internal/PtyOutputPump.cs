@@ -33,7 +33,9 @@ internal interface IPtyOutputWaiter
 /// </para>
 /// <para>
 /// <b>End of output.</b> Unix PTYs report end of output once every slave descriptor closes. ConPTY reports it
-/// only after the pseudo-console closes, and a Linux grandchild can hold the slave open, so after child exit
+/// when its host exits, which a released pseudo-console's host does with its last client (the out-of-band ConPTY,
+/// and the in-box one from Windows 11 24H2) and an older in-box host does only once the pseudo-console closes; a
+/// grandchild can keep either host, or a Linux slave, open. So after child exit
 /// <see cref="PtyOutputDrainScheduler"/> closes the transport once reads have been quiet for
 /// <see cref="DefaultPostExitQuietMs"/> (one-shot completion also bounds this by its grace and close timeouts). When
 /// even the close does not end the transport, because another process holds ConPTY's output pipe open, the

@@ -176,7 +176,7 @@ The option also ends programs the user started on purpose, which is why it is of
 
 ### Out-of-band ConPTY
 
-**If you are building a terminal emulator on Windows, use this.** Windows ships ConPTY in `kernel32.dll`, backed by the `conhost.exe` of the user's Windows build, and that host decides what the frontend gets to see: current builds drop graphics protocols (Sixel, Kitty) and some terminal queries (OSC 11, XTGETTCAP), answer others themselves, forward mouse tracking only for programs that read VT input, and reorder sequences relative to text, and the behavior changes with Windows updates. Microsoft publishes the implementation Windows Terminal carries as the NuGet package `Microsoft.Windows.Console.ConPTY` (`conpty.dll` plus `OpenConsole.exe`): it forwards everything, behaves the same on every Windows build, supports `Clear()`, and ends output the moment the child exits where the in-box path waits for a 100 ms quiet interval (`cmd /c echo` completes in 33 ms against 141 ms in `PtyConPtyBenchmarks`). MiniPty ships neither file and depends on nothing; your application references the package and opts in per session:
+**If you are building a terminal emulator on Windows, use this.** Windows ships ConPTY in `kernel32.dll`, backed by the `conhost.exe` of the user's Windows build, and that host decides what the frontend gets to see: current builds drop graphics protocols (Sixel, Kitty) and some terminal queries (OSC 11, XTGETTCAP), answer others themselves, forward mouse tracking only for programs that read VT input, and reorder sequences relative to text, and the behavior changes with Windows updates. Microsoft publishes the implementation Windows Terminal carries as the NuGet package `Microsoft.Windows.Console.ConPTY` (`conpty.dll` plus `OpenConsole.exe`): it forwards everything, behaves the same on every Windows build, supports `Clear()`, and ends output the moment the child exits on every Windows build. The in-box ConPTY does that too from Windows 11 24H2; before it, the in-box path waits for a 100 ms quiet interval after exit (`cmd /c echo` completes in 33 ms against 141 ms there in `PtyConPtyBenchmarks`). MiniPty ships neither file and depends on nothing; your application references the package and opts in per session:
 
 ```xml
 <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" />
@@ -193,7 +193,7 @@ if (conpty is { HasConsoleHost: false })
 await using var session = Pty.Start(new PtyStartInfo
 {
     FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-    ConPty = conpty,   // forwards mouse tracking and queries, supports Clear(), ends output as soon as the child exits
+    ConPty = conpty,   // forwards mouse tracking and queries, supports Clear(), ends output as soon as the child exits on every build
 });
 ```
 

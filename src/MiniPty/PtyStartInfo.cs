@@ -188,10 +188,10 @@ public sealed record PtyStartInfo
     /// </para>
     /// <para>
     /// On this implementation the host process exits as soon as its last client has, so output ends when the child
-    /// exits without waiting for the post-exit quiet interval the in-box path needs. Its host also asks the frontend
-    /// what terminal it is (<c>ESC[c</c>) when the session starts; a terminal emulator answers that on its own, and a
-    /// consumer that only reads output can ignore it with package versions from 1.25, which no longer wait for the
-    /// answer.
+    /// exits without waiting for the post-exit quiet interval, which the in-box path needs on Windows builds before
+    /// 11 24H2 (26100). Its host also asks the frontend what terminal it is (<c>ESC[c</c>) when the session starts; a
+    /// terminal emulator answers that on its own, and a consumer that only reads output can ignore it with package
+    /// versions from 1.25, which no longer wait for the answer.
     /// </para>
     /// </remarks>
     public ConPtyLibrary? ConPty { get; init; }

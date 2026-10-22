@@ -1721,11 +1721,12 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// A process the host starts with handle inheritance while a pseudo-console is being created inherits ConPTY's
-    /// output pipe and keeps it open after the pseudo-console closes. End of output must not wait for that process
-    /// (Post-exit drain in <c>.github/docs/references/pty_crossplatform.md</c>). The window is ConPTY's own
-    /// <c>CreateProcess</c> of its host, a few milliseconds per pseudo-console. This test therefore starts processes
-    /// around <c>Pty.Start</c> itself rather than relying on background spawning to land in that window.
+    /// ConPTY makes inheritable duplicates of its pipe ends while it starts its console host inside
+    /// <c>Pty.Start</c>. A process the host application starts with handle inheritance in that window inherits
+    /// ConPTY's output pipe and keeps it open after the pseudo-console closes. End of output must not wait for that
+    /// process (Post-exit drain in <c>.github/docs/references/pty_crossplatform.md</c>). The spawner threads
+    /// therefore start processes around <c>Pty.Start</c>, and a session in which no spawn lands in the window passes
+    /// without a held-open pipe.
     /// </summary>
     [Test]
     [NotInParallel]

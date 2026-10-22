@@ -133,7 +133,8 @@ public sealed class PtyCallerContextTests
 
         try
         {
-            // The child runs for about two seconds without output, so the measurement window is idle.
+            // The child sleeps for about two seconds before it prints DONE, so the completion stays pending through
+            // the measurement window.
             await AssertUiThreadStaysFreeAsync(ui);
             await Assert.That(await CompletesWithinAsync(completion, OperationTimeout)).IsTrue();
 

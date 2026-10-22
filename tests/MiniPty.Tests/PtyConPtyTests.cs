@@ -250,22 +250,102 @@ public sealed class PtyConPtyTests
             .Because("the host must not wait for a device attributes answer that never comes");
     }
 
+    // ---------------------------------------------------------------- Release of the server reference
+
     /// <summary>
-    /// On the out-of-band path MiniPty releases its reference to the console server once the child is attached, so
-    /// the host exits with its last client and the output pipe breaks: output ends on the pipe break, not after the
-    /// post-exit quiet interval the in-box path needs.
+    /// MiniPty releases its reference to the console server once the child is attached, so the host exits with its
+    /// last client and the output pipe breaks: output ends on the pipe break, and the post-exit drain never has to
+    /// close the pseudo-console. Always on the out-of-band ConPTY; on the in-box one where <c>kernel32.dll</c> exports
+    /// <c>ReleasePseudoConsole</c> (Windows 11 24H2, build 26100, and later), and elsewhere every in-box session still
+    /// ends on the drain's close.
     /// </summary>
+    /// <remarks>
+    /// Told by what ended output, not by how long it took. A timed version (median exit-to-end latency under half the
+    /// 100 ms quiet interval) failed under CPU oversubscription: the continuations it timed were delayed by more than
+    /// the interval itself, and the exit continuation often resumed after the end of output. Under the same load the
+    /// drain's close, which stays as the bound, still won the race with a released host's exit in 1 of 25 in-box
+    /// sessions, so a released implementation passes when any session ended on the pipe break, which a host that was
+    /// not released never does: it keeps the pipe open until the close.
+    /// </remarks>
     [Test]
-    public async Task OutputEndsOnThePipeBreakAfterExit()
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task OutputEndsOnThePipeBreakAfterExit(bool outOfBand)
     {
         if (!OperatingSystem.IsWindows())
             return;
 
-        var outOfBand = await MedianEndOfOutputLatencyAsync(Library());
-        var inBox = await MedianEndOfOutputLatencyAsync(null);
+        var canRelease = outOfBand || InBoxExportsRelease();
+        await Assert.That(WindowsInterop.CanReleasePseudoConsole).IsEqualTo(InBoxExportsRelease());
 
-        await Assert.That(outOfBand).IsLessThan(inBox)
-            .Because($"output ended {outOfBand:F1} ms after exit out-of-band and {inBox:F1} ms in-box, whose quiet interval is {PtyOutputPump.DefaultPostExitQuietMs} ms");
+        const int sessions = 5;
+        var closedByDrain = 0;
+        for (var i = 0; i < sessions; i++)
+        {
+            await using var session = Pty.Start(WindowsCommand("echo hi") with { ConPty = outOfBand ? Library() : null });
+            await ReadAllTextAsync(session).WaitAsync(Timeout);
+            // Read before disposal, which closes the transport on its own.
+            if (session.OutputPump.IsCloseRequested)
+                closedByDrain++;
+        }
+
+        var because = $"{closedByDrain} of {sessions} sessions ended output only once the post-exit drain closed the pseudo-console";
+        if (canRelease)
+            await Assert.That(closedByDrain).IsLessThan(sessions).Because(because);
+        else
+            await Assert.That(closedByDrain).IsEqualTo(sessions).Because(because);
+    }
+
+    /// <summary>
+    /// A released host exits as soon as its last client has, so it must still write the child's last output before
+    /// it goes: a child that writes and exits at once loses nothing, session after session.
+    /// </summary>
+    [Test]
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task OutputWrittenJustBeforeExitArrivesAfterTheRelease(bool outOfBand)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var library = outOfBand ? Library() : null;
+        for (var i = 0; i < 20; i++)
+        {
+            await using var session = Pty.Start(WindowsCommand($"echo LAST_OUTPUT_{i}") with { ConPty = library });
+            var text = await ReadAllTextAsync(session).WaitAsync(Timeout);
+            await Assert.That(text).Contains($"LAST_OUTPUT_{i}")
+                .Because($"session {i} ended its output without the child's last line: {Escape(text)}");
+        }
+    }
+
+    /// <summary>
+    /// The release leaves the signal pipe in place, so a resize after it still reaches the child. The child blocks on
+    /// input until after the resize, so it cannot read its size before the host has applied it.
+    /// </summary>
+    [Test]
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task ResizeReachesTheChildAfterTheRelease(bool outOfBand)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+        if (!File.Exists(powershell))
+            return;
+
+        await using var session = Pty.Start(new PtyStartInfo
+        {
+            FileName = powershell,
+            Arguments = ["-NoLogo", "-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null; $s = $Host.UI.RawUI.WindowSize; Write-Output (\"SIZE:{0}:{1}\" -f $s.Width, $s.Height)"],
+            Size = new(120, 30),
+            ConPty = outOfBand ? Library() : null,
+        });
+        session.Resize(new(100, 40));
+        var result = await session.CompleteAsync(new PtyCompleteOptions { Input = "go\r" }).WaitAsync(Timeout);
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(result.GetText().ToString()).Contains("SIZE:100:40");
     }
 
     // ---------------------------------------------------------------- Clear
@@ -421,31 +501,12 @@ public sealed class PtyConPtyTests
 
     private static string Escape(string text) => text.Replace("\e", "\\e").Replace("\r", "\\r").Replace("\n", "\\n");
 
-    /// <summary>Median over three sessions of the time from the child's exit to the end of output, in milliseconds.</summary>
-    private static async Task<double> MedianEndOfOutputLatencyAsync(ConPtyLibrary? library)
-    {
-        var latencies = new double[3];
-        for (var i = 0; i < latencies.Length; i++)
-        {
-            await using var session = Pty.Start(WindowsCommand("echo hi") with { ConPty = library });
-            long endOfOutputAt = 0;
-            var read = Task.Run(async () =>
-            {
-                await foreach (var _ in session.ReadOutputAsync())
-                {
-                }
-
-                endOfOutputAt = Stopwatch.GetTimestamp();
-            });
-            await session.WaitForExitAsync().WaitAsync(Timeout);
-            var exitAt = Stopwatch.GetTimestamp();
-            await read.WaitAsync(Timeout);
-            latencies[i] = (endOfOutputAt - exitAt) * 1000.0 / Stopwatch.Frequency;
-        }
-
-        Array.Sort(latencies);
-        return latencies[1];
-    }
+    /// <summary>
+    /// Whether this Windows build's <c>kernel32.dll</c> exports <c>ReleasePseudoConsole</c>, probed here independently of
+    /// MiniPty's own lookup so that a lookup that silently fails is caught.
+    /// </summary>
+    private static bool InBoxExportsRelease() =>
+        NativeLibrary.TryGetExport(NativeLibrary.Load("kernel32.dll"), "ReleasePseudoConsole", out _);
 
     /// <summary>
     /// Waits until <paramref name="text"/> appears in <paramref name="output"/> at or after <paramref name="start"/>, and

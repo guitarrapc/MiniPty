@@ -7,7 +7,7 @@ GUI host readiness is implemented, and its plan is retired: caller-context safet
 ## Release
 
 - None of the GUI host work is released. `v1.3.0` (2026-07-15) predates it, and `Directory.Build.props` still says `1.3.0`.
-- The release breaks the API: `WaitForExitAsync` returns `Task<PtyExitStatus>`, and `WaitForExitStatusAsync` is removed. Behavior a release note should name: `Dispose` no longer blocks, and chunk memory is invalid after it; output is read from spawn into a bounded buffer; exit waits no longer close the transport, so on the in-box ConPTY output ends about 100 ms after the last output rather than at exit; `Resize` after exit no longer throws, and sizes clamp to the platform limit instead of 512; Unix `Dispose` hangs the child up and kills it one second later instead of killing at once; `SendEof` with no input sends Ctrl+Z + CR instead of closing the pipe; on Windows a `.bat` or `.cmd` runs through `cmd.exe` with its arguments escaped, and a bare `FileName` is looked up on the child's `PATH` when `Environment` sets or removes it.
+- The release breaks the API: `WaitForExitAsync` returns `Task<PtyExitStatus>`, and `WaitForExitStatusAsync` is removed. Behavior a release note should name: `Dispose` no longer blocks, and chunk memory is invalid after it; output is read from spawn into a bounded buffer; exit waits no longer close the transport, so on the in-box ConPTY before Windows 11 24H2 output ends about 100 ms after the last output rather than at exit (from 24H2 it ends at exit, as on the out-of-band ConPTY); `Resize` after exit no longer throws, and sizes clamp to the platform limit instead of 512; Unix `Dispose` hangs the child up and kills it one second later instead of killing at once; `SendEof` with no input sends Ctrl+Z + CR instead of closing the pipe; on Windows a `.bat` or `.cmd` runs through `cmd.exe` with its arguments escaped, and a bare `FileName` is looked up on the child's `PATH` when `Environment` sets or removes it.
 - The README samples under `samples/SingleFiles` (`README_MiniPty.cs`, `README_MiniPty.Console.cs`, `README_MiniPty.Capture.cs`) pin `MiniPty@1.2.0`, but the first two already use the new exit API (`(await session.WaitForExitAsync()).ExitCode`), so they do not build until the pins move to the release. CI does not build them.
 
 ## Deferred Until an Embedder Needs It
@@ -18,7 +18,7 @@ After the GUI host work, each session that is still reading holds one dedicated 
 
 The design replaces the reader thread as the output pump's driver and leaves the public API unchanged:
 
-- **Windows:** create MiniPty's end of the output pipe overlapped, as the input pipe already is (a named pipe, since an anonymous pipe cannot be overlapped), keep ConPTY's ends synchronous, complete reads through the I/O completion port, and cancel them with `CancelIoEx`. Disposal and the forced end of output after the close, which today use `CancelSynchronousIo` on the reader thread, become I/O cancellation. Overlapped output means rebuilding the ConPTY coalescing described below, so it was kept out of the change that moved output reading onto the reader thread, and each change could be measured on its own.
+- **Windows:** create MiniPty's end of the output pipe overlapped, as the input pipe already is (a named pipe, since an anonymous pipe cannot be overlapped), keep ConPTY's ends synchronous, complete reads through the I/O completion port, and cancel them with `CancelIoEx`. Disposal and the forced end of output after the close, which today use `CancelSynchronousIo` on the reader thread, become I/O cancellation. Overlapped output means rebuilding the ConPTY coalescing described below. It was kept out of the change that moved output reading onto the reader thread so that each change can be measured on its own.
 - **Unix:** drive every session's non-blocking master from one shared readiness loop (`epoll` / `kqueue`), the kind of loop the exit watcher already runs.
 - **Coalescing:** redesign the ConPTY continuation reads (`PIPE_NOWAIT` within a 500 µs window) and the Unix ones (1 ms windows), both within a 2 ms budget per slot, around completion and readiness notifications, keeping today's chunking (32 KiB from ConPTY in about 13 full 4 KiB chunks) and first-byte latency.
 - **Pooled buffers:** completions run on pool threads, so keep each pooled buffer's rent and return on one thread ([core_session lessons](specs/core_session.md#lessons-learned)); a return on another thread strands the array in that thread's cache.
@@ -28,10 +28,6 @@ Acceptance: the thread count stays constant with 64 idle sessions, with no throu
 ### Unix disposal grace as an option
 
 The one-second hang-up grace before the kill (`UnixPtyBackend.DisposeHangupGraceMs`) is fixed. It can become an option if an embedder needs a different one.
-
-## Follow-up
-
-- **In-box `ReleasePseudoConsole`.** `kernel32.dll` of Windows 11 build 26100 exports it. Calling it after spawn, as the out-of-band path calls `ConptyReleasePseudoConsole`, would end in-box output on the pipe break, 2–3 ms after exit, instead of after the 100 ms post-exit quiet interval (about 114 ms measured). It needs a runtime export probe, since older builds lack it, and a measurement on the in-box host.
 
 ## Unverified
 
