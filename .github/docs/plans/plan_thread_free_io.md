@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23); their macOS test runs are pending. Phase 4 has not started. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23); their macOS test runs are pending. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -53,7 +53,7 @@ The common ground:
 | F3 | Same, zero-byte `ReceiveAsync` | Completes at once with 0, which cannot be told apart from end of output. A pty cannot be waited on this way: `read(fd, buf, 0)` returns immediately |
 | F4 | Windows 11 26200: zero-byte overlapped `ReadFile` on a byte-mode named pipe whose server end is overlapped, bound with `ThreadPoolBoundHandle` | Pending (`ERROR_IO_PENDING`) until data arrives, then completes with 0 bytes and leaves the data in the pipe. A closed writer completes it with `ERROR_BROKEN_PIPE`. 300 idle pending reads added no thread. A pipe can be waited on without committing a buffer |
 
-Not probed: a real ConPTY on an overlapped output pipe inside MiniPty (the input pipe and Porta.Pty already run ConPTY on overlapped named pipes), macOS and FreeBSD readiness on a pty master, and any effect on latency or chunk counts.
+Not probed here: a real ConPTY on an overlapped output pipe inside MiniPty (the input pipe and Porta.Pty already run ConPTY on overlapped named pipes), and any effect on latency or chunk counts. macOS and FreeBSD readiness on a pty master is the [Phase 4 result](#phase-4-result).
 
 ## Constraints
 
@@ -108,7 +108,7 @@ Unix PTY master ───── one readiness loop per load (today's exit watche
 2. **Readiness, then non-blocking reads on the loop thread.** Reads are short, never block, and need no thread-pool hop, so reading progresses even while the host's pool is starved; only delivery to the consumer waits for the pool. Each ready master gets a bounded amount of reading per loop iteration, so one flooding session cannot starve the others.
 3. **Interest follows state.** Read interest is dropped while the ring is full and restored when the consumer frees space. Write interest is added only while input is queued, so the loop also writes queued input (today the reader thread does). At end of output (`EIO`/hang-up) the master is deregistered before anything else, so a hung-up descriptor cannot report readiness forever.
 4. **Deadlines in the loop's timeout.** The coalescing window (kept on Unix at first, see below) joins the hang-up kill deadline that the watcher already keeps there. The window is a fixed interval, so its deadlines form a FIFO queue rather than a heap. The post-exit drain keeps its process-wide timer, which Windows shares.
-5. **macOS.** Use `kqueue` if level-triggered read, write, and end-of-file events prove reliable on a pty master; tmux and creack/pty avoid kqueue for ptys on macOS. Otherwise the loop waits with `select`, which the reader already uses there (`_DARWIN_UNLIMITED_SELECT`). The probe comes first (Phase 4).
+5. **macOS and FreeBSD use `kqueue`.** Phase 4 found level-triggered read, write, and end-of-file events reliable on a macOS pty master, and the wait cost flat from 1 to 436 masters, where `select` grows with every master. FreeBSD follows from source. tmux, Go, and creack/pty avoid kqueue for ttys on macOS for reasons that do not apply to a master opened this way ([Phase 4 result](#phase-4-result)).
 6. **The per-reader wake descriptors go away**; only the loop's own wake remains. The master stays reference-counted, so a close never races a read, a resize, or a write that is in progress.
 
 ### Buffer
@@ -505,6 +505,75 @@ Implemented 2026-10-23 and tested on Windows and Linux; macOS is pending (`dotne
 
 **Done when:** the choice per operating system is recorded in "Phase 4 result". Without a FreeBSD machine, FreeBSD follows from source and stays flagged as unverified, as it is today.
 
+### Phase 4 result
+
+Done 2026-10-23. The probe is [pty-readiness-probe.c](../../../scripts/pty-readiness-probe.c): standalone C with no MiniPty code, written for macOS and FreeBSD, which takes about three minutes. On macOS 26.6.2 (Apple M2, 8 logical CPUs) all 71 of its checks passed. No FreeBSD machine was available, so neither its build nor its run there is tested.
+
+| OS | Wait | Basis |
+|---|---|---|
+| macOS | `kqueue`, level-triggered | Probed. `select` and `poll` also work on a master, but their wait cost grows with every master |
+| FreeBSD | `kqueue`, level-triggered | Source only (`ptsdev_kqfilter`, FreeBSD 8.0 and later). Unverified until the probe runs there |
+
+**kqueue on a macOS master** (each behavior below is in the XNU source, `ptmx_kqfilter`, too):
+- `EVFILT_READ` and `EVFILT_WRITE` register and are level-triggered: reported on every wait while output is unread or input has room, and no longer once it is not. Output that `^S` stopped (MiniPty sets `IXON`) is not reported readable until `^Q`, so a stopped terminal does not spin the loop.
+- `EVFILT_READ`'s `data` is exactly the unread byte count, so the loop can read that much and skip the read that would return `EAGAIN`. `EVFILT_WRITE`'s `data` is always 0: it says there is room, not how much.
+- **End of output:** after the slave's last close, `EVFILT_READ` reports `EV_EOF` with `data` 0, a read returns 0 (Linux fails it with `EIO`), and a write fails with `EIO`. The report repeats on every wait until the master is deregistered, as Architecture already plans.
+- **`EV_EOF` sticks.** A slave opened again after its last close left the old registration reporting `EV_EOF` while reads failed with `EAGAIN`: a spinning loop. Only deleting and adding the registration cleared it. So `EV_EOF` is a hint that a read returning 0 confirms. MiniPty never reopens a slave, since the host holds it until the spawn returns, but the loop must not spin if one does.
+- **Before the slave first opens,** kqueue reports a master writable while writes fail with `EAGAIN` (`select` reports nothing). MiniPty opens the slave before the spawn, so the loop registers a master only after it exists.
+- **Why others avoid it:**
+  - In the XNU source up to macOS 14, `O_NONBLOCK` on a master whose slave was never opened failed with `ENOTTY` but set the flag anyway; macOS 15 added an exception, and on macOS 26 it succeeded. That is behind Go issue 22099 and creack/pty's blocking master. Go itself still puts character devices in kqueue.
+  - tmux's "kqueue only works on sockets" comment concerns the client's `/dev/null` and `/dev/tty`, which share its one event loop with the masters.
+  - XNU builds `poll` on kqueue's filters, so the poll(2) page's "does not support devices" is outdated for masters.
+
+**The buffer and floods:**
+- A macOS master holds exactly 1,024 bytes of output (the tty's fixed output ring) and 1,022 of input at every line speed from 9,600 to 230,400 baud. A read returns at most 1,024, so each readiness report moves at most 1 KiB, whatever the mechanism.
+- Floods, alternating the three readers over 3 rounds: one flood of 32 MiB, then 8 at once of 8 MiB each. Every byte arrived in every run.
+
+| Reader | 1 flood (MB/s) | CPU per MiB, 1 flood (ms) | 8 floods (MB/s, total) | CPU per MiB, 8 floods (ms) | Reads per wait, 8 floods | Others' share when the first of 8 ended |
+|---|---:|---:|---:|---:|---:|---|
+| One thread per session (today's model) | 204–285 | 2.3–3.0 | 225–228 | 13.8–14.2 | 1.0 | 80–100% |
+| One `select` loop | 154–210 | 3.2–4.1 | 270–284 | 3.4–3.5 | 5.3 | 72–98% |
+| One `kqueue` loop | 155–233 | 3.0–3.9 | 297–298 | 3.3–3.4 | 6.5 | 98–100% |
+
+- A single flood moves faster through its own thread, because each KiB costs a wait plus a read. Once several sessions are active, one kqueue loop moves more than a thread per session for a quarter of the CPU, and shares best: `select` reports in descriptor order, which favors low descriptors.
+
+**Many masters:**
+- macOS allows 511 PTYs in the whole system (`kern.tty.ptmx_max`; 999 at most, and only root can raise it). The probe opened 436 before the next `posix_openpt` failed with `ENXIO`, because other programs held the rest. 1,000 sessions are impossible on macOS by default, which Acceptance already reflects by asking only 64 there.
+- Time from a write on one slave to the wait reporting its master (p50 / p99, µs, 300 rounds):
+
+| Masters | `kqueue` | `select` | `poll` |
+|---:|---:|---:|---:|
+| 1 | 4 / 14 | 9 / 21 | 10 / 22 |
+| 64 | 5 / 28 | 28 / 69 | 31 / 63 |
+| 256 | 9 / 21 | 48 / 243 | 68 / 386 |
+| 436 | 7 / 29 | 62 / 332 | 121 / 564 |
+
+- Idle for 500 ms, no mechanism reported anything. kqueue used 0.01–0.03 ms of CPU, and `select` and `poll` up to 0.4 and 0.7 ms at 436 masters.
+- With all 436 active, each master was reported exactly once.
+- Interest that follows state works. A registration disabled and enabled again, or deleted and added again, reports at once the output that arrived meanwhile. Write interest reports every master with room.
+- Unlimited `select` worked with masters at descriptors above 4,096.
+
+**End of output at the child's exit:**
+- A loop that reads at once loses nothing, also when the child writes more than the tty holds: a child writing 64 KiB blocks until it is read, and output ends at its exit. Output a grandchild writes after the session leader's exit is lost: its write fails with `EIO`, and the master reported end of file at the leader's exit.
+- **Output left unread is kept for 0.6 s.** When the exit is the slave's last close, XNU's slave close waits at most 60 clock ticks (0.6 s) for the master to read what the tty holds, then discards it, and the exit completes only then. 900 bytes left unread were all read at 551 ms and none at 601 ms. A child that sets its stdout non-blocking loses it at once.
+- **No bound when another process holds the slave.** The session leader's exit then waits for the master however long it takes, and nothing is lost.
+- **The same loss exists in MiniPty today:**
+  - Reproduced with the reader thread: a zsh child printed 13–16 KiB, which filled the ring, then 500 bytes, and exited. A consumer that began reading 2 s later received everything but those 500 bytes, and the exit was reported at 0.94 s. A consumer that read at once received everything.
+  - With `/bin/sh` (bash on macOS) the same script's exit waited until the consumer read, and nothing was lost: bash's exit was not the slave's last close. What else held the slave was not identified.
+  - Linux keeps the bytes readable after the slave closes. On FreeBSD (source), a last close drains for as long as the master keeps reading and discards after 1 s without progress. When another process still holds the slave, the leader's exit revokes the tty and discards at once, the opposite of macOS.
+  - See Risks.
+
+**FreeBSD from source:**
+- `EVFILT_READ` reports the bytes queued and `EVFILT_WRITE` the room left, level-triggered.
+- After the slave's last close, `EV_EOF` is set, queued bytes are read first, and then a read returns 0 and a write fails with `EIO`. Nothing is reported before the slave first opens.
+- The output queue is the line speed divided by 5 (at most 64 KiB), so about 7.5 KiB at MiniPty's 38,400 baud, against macOS's fixed 1 KiB.
+- tmux disables kqueue on FreeBSD for the tty layer before 8.0, which had no working master filter.
+
+**Lessons**
+- **Whether an exit is the slave's last close decides between 0.6 s and no bound.** The first exit probe found a forked child discarding its output after 0.6 s, while `sh -c "exec head …"` never exited until read. The variable was not `exec`, since an exec of the probe itself also discarded at 0.6 s. It was another holder of the slave, which bash's exit had and zsh's, `head`'s, and `dd`'s did not. A probe of exit behavior controls who else holds the slave.
+- **A forked session leader must ignore `SIGHUP` before it forks the grandchild it means to keep.** The leader's exit sends `SIGHUP` to the foreground group at once, and a grandchild that set its own handler after the fork died first.
+- **A size above the tty's buffer cannot test the discard.** The child blocks in its write until the master reads, so it exits only after the read; the first version of the test waited for that exit and hung.
+
 ### Phase 5: Windows engine
 
 **Goal:** no thread per Windows session, and no buffer while a session is idle.
@@ -543,7 +612,7 @@ Implemented 2026-10-23 and tested on Windows and Linux; macOS is pending (`dotne
 **Goal:** one thread per load for all Unix sessions.
 
 **Changes**
-- **Native watcher:** masters are registered, modified, and removed with read and write interest and a session token. The token is an index plus a generation, so a stale event cannot reach a reused slot. The wait returns master events alongside exits. On macOS and FreeBSD it uses what Phase 4 chose.
+- **Native watcher:** masters are registered, modified, and removed with read and write interest and a session token. The token is an index plus a generation, so a stale event cannot reach a reused slot. The wait returns master events alongside exits. On macOS and FreeBSD it is the existing kqueue, as Phase 4 chose, used as its result requires: registered after the slave is open, `EV_EOF` confirmed by a read that returns 0, and the master deregistered at end of output.
 - **The watcher loop becomes the I/O loop:**
   - non-blocking reads into rings taken on demand, bounded per iteration;
   - interest that follows ring and input state;
@@ -595,7 +664,8 @@ Implemented 2026-10-23 and tested on Windows and Linux; macOS is pending (`dotne
 
 ## Risks and Open Questions
 
-- **macOS readiness on a pty master** (Phase 4). If neither `kqueue` nor `select` holds up in one loop, macOS keeps reader threads; it is not a primary web hosting platform.
+- **macOS readiness on a pty master:** settled by Phase 4, `kqueue` holds up. FreeBSD's choice rests on source alone until the probe runs there.
+- **macOS discards output left in the tty when the child's exit is the slave's last close**, 0.6 s after the exit. A session whose ring is full then, because its consumer has stopped, loses up to 1 KiB of final output; reproduced with today's reader thread ([Phase 4 result](#phase-4-result)). The loop cannot rescue it from the exit report, which arrives after the window. Whether MiniPty holds a slave descriptor of its own on macOS to avoid it, at the price of an exit that waits for the consumer, is open; on FreeBSD the same descriptor would make the exit discard at once.
 - **Windows chunk count** with a consumer faster than ConPTY's slices; see Coalescing.
 - **Windows thread-pool dependence** of read completions; see Isolation Rules.
 - **Capture timestamps** stop being one per transport read if read boundaries change; Capture's contract may need rewording.
@@ -611,4 +681,4 @@ Implemented 2026-10-23 and tested on Windows and Linux; macOS is pending (`dotne
 
 ## Estimate
 
-Large overall; per-phase sizes are in [Implementation Phases](#implementation-phases). Phase 6 is the largest, and the Phase 4 outcome for macOS decides how large.
+Large overall; per-phase sizes are in [Implementation Phases](#implementation-phases). Phase 6 is the largest. Phase 4 chose kqueue for macOS, so macOS and FreeBSD share one loop and differ from Linux only in the wait call.
