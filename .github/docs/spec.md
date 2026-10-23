@@ -66,6 +66,7 @@ flowchart TB
 | What an unanswered `InheritCursor` query looks like on the in-box and out-of-band ConPTY | [Core session](specs/core_session.md#inherited-cursor), [samples/SingleFiles/InheritCursorWait.cs](../../samples/SingleFiles/InheritCursorWait.cs) |
 | Backend PTY for frontend terminals: push facade, flow control, WebSocket and stdio bridges (use case 4) | [Terminal](specs/terminal.md) |
 | Browser terminal sample (xterm.js over WebSocket) | [samples/SingleFiles/WebTerminal.cs](../../samples/SingleFiles/WebTerminal.cs) |
+| Web host serving many sessions: per-session cost dashboard and bench (threads, memory, echo latency, frames per 32 KiB) | [samples/SingleFiles/WebTerminalScale.cs](../../samples/SingleFiles/WebTerminalScale.cs), [Thread-free I/O plan](plans/plan_thread_free_io.md) |
 | VS Code helper sample (length-framed stdio) | [samples/SingleFiles/VsCodeTerminalHelper.cs](../../samples/SingleFiles/VsCodeTerminalHelper.cs) |
 | Authenticated, expiring WebSocket session reconnect with bounded output replay | [Terminal](specs/terminal.md) |
 | Real VS Code `Pseudoterminal` and persistent reconnect E2E samples | [samples/VsCodeExtension](../../samples/VsCodeExtension), [samples/SingleFiles/VsCodePersistentBridge.cs](../../samples/SingleFiles/VsCodePersistentBridge.cs) |

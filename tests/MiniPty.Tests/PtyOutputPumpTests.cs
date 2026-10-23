@@ -21,8 +21,8 @@ public sealed class PtyOutputPumpTests
         await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
         await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
 
-        // A full slot at this rate takes over a second to fill; a bounded window publishes a few bytes.
-        await Assert.That(enumerator.Current.Data.Length).IsLessThan(PtyOutputPump.SlotSize / 4);
+        // A full publish at this rate takes over a second to fill; a bounded window publishes a few bytes.
+        await Assert.That(enumerator.Current.Data.Length).IsLessThan(PtyOutputPump.PublishSize / 4);
     }
 
     /// <summary>
@@ -175,7 +175,7 @@ public sealed class PtyOutputPumpTests
 
         // Each read after the stall takes a tenth of the quiet period, so the transport must stay open.
         await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
-        for (var i = 0; i < PtyOutputPump.SlotCount + 4; i++)
+        for (var i = 0; i < ReadsThatFillTheRing + 4; i++)
             await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
 
         await Assert.That(backend.IsOutputClosed).IsFalse();
@@ -313,13 +313,14 @@ public sealed class PtyOutputPumpTests
 
     /// <summary>
     /// The transport may still hold output when the post-exit close finds the ring full. The pump must park until
-    /// the consumer frees a slot and then read on, not end output with that output unread.
+    /// the consumer frees space and then read on, not end output with that output unread. The flush is made of full-size
+    /// reads, so that it fills the ring.
     /// </summary>
     [Test]
     public async Task FullRingAfterTheCloseDoesNotEndOutput()
     {
         const int FlushReads = 8;
-        var backend = new SlowFlushAfterCloseBackend(FlushReads, intervalMs: 0);
+        var backend = new SlowFlushAfterCloseBackend(FlushReads, intervalMs: 0, readSize: PtyOutputPump.PublishSize);
         await using var session = new PtySession(backend);
         await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
         var next = enumerator.MoveNextAsync().AsTask();
@@ -336,27 +337,26 @@ public sealed class PtyOutputPumpTests
         while (await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout))
             bytes += enumerator.Current.Data.Length;
 
-        await Assert.That(bytes).IsEqualTo(FlushReads);
+        await Assert.That(bytes).IsEqualTo(FlushReads * PtyOutputPump.PublishSize);
     }
 
     /// <summary>
-    /// The ring holds four reads whatever their size. Under CPU contention ConPTY's frames for a single <c>echo</c> took
-    /// three reads before the post-exit close, and the frame flushed after the close took the fourth slot while nobody
-    /// read, so the reader parked with output still in the transport. Output has not ended then, and a reader that
-    /// starts only now still gets every frame, and then end of output.
+    /// A ring that fills after the close is not end of output. When the frame ConPTY flushes after the close fills the
+    /// ring while nobody reads, the reader parks with output still in the transport; a reader that starts only then
+    /// still gets every frame, and then end of output. The frames here are full-size reads, so that the ring fills.
     /// </summary>
     [Test]
     public async Task FramesThatFillTheRingAfterTheCloseReachALateReader()
     {
-        const int BeforeClose = PtyOutputPump.SlotCount - 1;
+        const int BeforeClose = ReadsThatFillTheRing - 1;
         const int AfterClose = 2;
-        var backend = new FramesAroundTheCloseBackend(BeforeClose, AfterClose);
+        var backend = new FramesAroundTheCloseBackend(BeforeClose, AfterClose, PtyOutputPump.PublishSize);
         await using var session = new PtySession(backend);
         await backend.WaitingForTheClose.WaitAsync(Timeout);
 
         backend.Exit(0);
         await backend.OutputClosed.WaitAsync(Timeout);
-        await Assert.That(await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSlot)).IsTrue();
+        await Assert.That(await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace)).IsTrue();
         // Past the quiet period after the close: a parked reader is not silence, so the drain does not end output.
         await Task.Delay(PtyOutputPump.DefaultPostExitQuietMs * 3);
         await Assert.That(session.OutputPump.IsProducerFinished).IsFalse();
@@ -366,7 +366,150 @@ public sealed class PtyOutputPumpTests
         await foreach (var chunk in session.ReadOutputAsync(cts.Token))
             bytes += chunk.Data.Length;
 
+        await Assert.That(bytes).IsEqualTo((BeforeClose + AfterClose) * PtyOutputPump.PublishSize);
+    }
+
+    /// <summary>
+    /// Small frames do not fill the ring. With a ring of four slots, four separate frames of a few bytes each filled it,
+    /// as ConPTY's frames for a single <c>echo</c> did under CPU contention, and the frame flushed after the close then
+    /// waited for a consumer: output nobody read did not end after exit. The ring now holds bytes, so the same frames
+    /// leave room, and output ends without a consumer.
+    /// </summary>
+    [Test]
+    public async Task SmallFramesDoNotFillTheRing()
+    {
+        const int BeforeClose = ReadsThatFillTheRing * 2;
+        const int AfterClose = 2;
+        var backend = new FramesAroundTheCloseBackend(BeforeClose, AfterClose);
+        await using var session = new PtySession(backend);
+        await backend.WaitingForTheClose.WaitAsync(Timeout);
+
+        backend.Exit(0);
+        await Assert.That(await WaitUntilAsync(() => session.OutputPump.IsProducerFinished)).IsTrue();
+
+        var bytes = 0;
+        using var cts = new CancellationTokenSource(Timeout);
+        await foreach (var chunk in session.ReadOutputAsync(cts.Token))
+            bytes += chunk.Data.Length;
+
         await Assert.That(bytes).IsEqualTo(BeforeClose + AfterClose);
+    }
+
+    /// <summary>
+    /// A consumer that fell behind takes all contiguous output at once: four full-size reads arrive as one chunk when the
+    /// backend allows chunks as large as the ring, as the platform backends do. A WebSocket consumer then sends one frame
+    /// where it sent four.
+    /// </summary>
+    [Test]
+    public async Task AConsumerThatFellBehindTakesContiguousReadsAsOneChunk()
+    {
+        int[] reads = [PtyOutputPump.PublishSize, PtyOutputPump.PublishSize, PtyOutputPump.PublishSize, PtyOutputPump.PublishSize];
+        var backend = new ScriptedReadsBackend(reads, PtyOutputPump.Capacity, endAfter: false);
+        await using var session = new PtySession(backend);
+        await Assert.That(await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace)).IsTrue();
+
+        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+        await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+        await Assert.That(enumerator.Current.Data.Length).IsEqualTo(PtyOutputPump.Capacity);
+        await Assert.That(ScriptedReadsBackend.IsSequence(enumerator.Current.Data.Span, start: 0)).IsTrue();
+    }
+
+    /// <summary>
+    /// A claim on one wait never completes a later one. The reader thread publishes, sees the consumer waiting, and
+    /// claims the wait. If the consumer meanwhile saw the output on its own, withdrew, consumed it, and waited again, a
+    /// claim that only checked that some wait was armed completed the new wait with nothing to read, and the enumeration
+    /// failed with "signaled without a state change": a 32 MiB flood through the WebSocket bridge lost the rest of its
+    /// output in about one of ten runs on Linux. Here several sessions stream small reads to consumers that do nothing,
+    /// so the consumers keep catching up and waiting again while the reader threads keep signaling.
+    /// </summary>
+    [Test]
+    public async Task ASignalClaimedForOneWaitNeverCompletesALaterOne()
+    {
+        var sessions = Math.Max(4, Environment.ProcessorCount / 2);
+        var until = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 3;
+        var runs = new Task<long>[sessions];
+        for (var i = 0; i < sessions; i++)
+        {
+            runs[i] = Task.Run(async () =>
+            {
+                await using var session = new PtySession(new EndlessBackend());
+                await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+                long chunks = 0;
+                while (Stopwatch.GetTimestamp() < until && await enumerator.MoveNextAsync())
+                    chunks++;
+
+                return chunks;
+            });
+        }
+
+        var counts = await Task.WhenAll(runs).WaitAsync(Timeout);
+        foreach (var count in counts)
+            await Assert.That(count).IsGreaterThan(0L);
+    }
+
+    /// <summary>
+    /// A consumer that still holds a chunk when the session is disposed releases it on its next <c>MoveNextAsync</c>,
+    /// after the ring went back to the pool. The release only moves the ring's positions and never touches the buffer,
+    /// so the call fails with <see cref="ObjectDisposedException"/>, as every read after disposal does.
+    /// </summary>
+    [Test]
+    public async Task ReleasingAChunkAfterDisposalFailsAsDisposed()
+    {
+        int[] reads = [PtyOutputPump.PublishSize, PtyOutputPump.PublishSize];
+        var backend = new ScriptedReadsBackend(reads, PtyOutputPump.Capacity, endAfter: false);
+        var session = new PtySession(backend);
+        var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+        await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+
+        await session.DisposeAsync().AsTask().WaitAsync(Timeout);
+
+        Exception? failure = null;
+        try
+        {
+            await enumerator.MoveNextAsync();
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+
+        await Assert.That(failure).IsTypeOf<ObjectDisposedException>();
+        await enumerator.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Output that wraps around the end of the ring reaches the consumer complete and in order, whether it is handed
+    /// out as chunks or copied out by the <c>Output</c> stream in pieces that do not line up with the reads.
+    /// </summary>
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task OutputThatWrapsAroundTheRingArrivesInOrder(bool throughStream)
+    {
+        // Three full reads and a short one leave less than a publish free, so the reader waits for the consumer. The
+        // next read then stops at the end of the buffer, and the rest of it continues at the start.
+        int[] reads = [PtyOutputPump.PublishSize, PtyOutputPump.PublishSize, PtyOutputPump.PublishSize, 100,
+            PtyOutputPump.PublishSize, PtyOutputPump.PublishSize, 777, PtyOutputPump.PublishSize * 3, 1, 2, 3];
+        var backend = new ScriptedReadsBackend(reads, PtyOutputPump.Capacity, endAfter: true);
+        await using var session = new PtySession(backend);
+
+        var received = new List<byte>();
+        using var cts = new CancellationTokenSource(Timeout);
+        if (throughStream)
+        {
+            var buffer = new byte[1000];
+            int read;
+            while ((read = await session.Output.ReadAsync(buffer, cts.Token)) > 0)
+                received.AddRange(buffer.AsSpan(0, read));
+        }
+        else
+        {
+            await foreach (var chunk in session.ReadOutputAsync(cts.Token))
+                received.AddRange(chunk.Data.Span);
+        }
+
+        await Assert.That(received.Count).IsEqualTo(reads.Sum());
+        await Assert.That(ScriptedReadsBackend.IsSequence(received.ToArray(), start: 0)).IsTrue();
     }
 
     /// <summary>
@@ -406,6 +549,9 @@ public sealed class PtyOutputPumpTests
 
     private const string ReaderThreadName = "MiniPty output reader";
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>Full-size reads (<see cref="PtyOutputPump.PublishSize"/> each) that fill the ring.</summary>
+    internal const int ReadsThatFillTheRing = PtyOutputPump.Capacity / PtyOutputPump.PublishSize;
 
     /// <summary>
     /// Quiet period of the scripted backends whose reads are paced by sleeps. The default 100 ms left a 50 ms sleep a
@@ -527,7 +673,7 @@ public sealed class PtyOutputPumpTests
     /// </summary>
     private sealed class StallThenSlowBackend : FakeBackend
     {
-        private int _fastReads = PtyOutputPump.SlotCount;
+        private int _fastReads = ReadsThatFillTheRing;
 
         public override int PostExitQuietMs => PacedQuietMs;
 
@@ -536,9 +682,13 @@ public sealed class PtyOutputPumpTests
             if (IsOutputClosed)
                 return 0;
 
-            if (Interlocked.Decrement(ref _fastReads) < 0)
-                Thread.Sleep(PacedQuietMs / 10);
+            if (Interlocked.Decrement(ref _fastReads) >= 0)
+            {
+                buffer.Fill((byte)'x');
+                return buffer.Length;
+            }
 
+            Thread.Sleep(PacedQuietMs / 10);
             buffer[0] = (byte)'x';
             return 1;
         }
@@ -583,7 +733,7 @@ public sealed class PtyOutputPumpTests
     /// Held open like <see cref="HeldOpenBackend"/>, but after the close it still yields one byte per read, each
     /// after <c>intervalMs</c>, for <c>flushReads</c> reads: a transport flushing its tail slowly.
     /// </summary>
-    private sealed class SlowFlushAfterCloseBackend(int flushReads, int intervalMs) : FakeBackend
+    private sealed class SlowFlushAfterCloseBackend(int flushReads, int intervalMs, int readSize = 1) : FakeBackend
     {
         private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -606,8 +756,8 @@ public sealed class PtyOutputPumpTests
                 _remaining--;
                 if (intervalMs > 0)
                     Thread.Sleep(intervalMs);
-                buffer[0] = (byte)'x';
-                return 1;
+                buffer[..readSize].Fill((byte)'x');
+                return readSize;
             }
 
             _reading.TrySetResult();
@@ -629,11 +779,96 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
-    /// One byte per read, each read its own frame: <c>beforeClose</c> of them at once, then nothing until the transport
-    /// is closed, then <c>afterClose</c> more and end of output, as ConPTY flushes its final frame after the close and
-    /// then breaks the pipe.
+    /// One byte per read, without end until disposal, yielding the thread between reads so that a consumer doing nothing
+    /// keeps catching up and waiting again.
     /// </summary>
-    private sealed class FramesAroundTheCloseBackend(int beforeClose, int afterClose) : FakeBackend
+    private sealed class EndlessBackend : FakeBackend
+    {
+        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        {
+            if (IsDisposed)
+                return 0;
+
+            Thread.Yield();
+            buffer[0] = (byte)'x';
+            return 1;
+        }
+
+        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
+        {
+            endOfOutput = false;
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Reads of the scripted lengths, each byte the next value of a sequence so that order can be checked. A read longer
+    /// than the space the pump offers is split, and its rest is returned by the next read. Afterwards end of output, or
+    /// nothing until disposal.
+    /// </summary>
+    private sealed class ScriptedReadsBackend(int[] reads, int chunkLimit, bool endAfter) : FakeBackend
+    {
+        // Read and written only by the reader thread.
+        private int _read;
+        private int _offset;
+        private int _sequence;
+
+        public override int OutputChunkLimit => chunkLimit;
+
+        public static bool IsSequence(ReadOnlySpan<byte> data, int start)
+        {
+            for (var i = 0; i < data.Length; i++)
+            {
+                if (data[i] != ValueAt(start + i))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static byte ValueAt(int index) => (byte)(index % 251);
+
+        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        {
+            if (IsDisposed)
+                return 0;
+
+            if (_read < reads.Length)
+            {
+                var length = Math.Min(reads[_read] - _offset, buffer.Length);
+                for (var i = 0; i < length; i++)
+                    buffer[i] = ValueAt(_sequence++);
+
+                _offset += length;
+                if (_offset == reads[_read])
+                {
+                    _read++;
+                    _offset = 0;
+                }
+
+                return length;
+            }
+
+            if (endAfter)
+                return 0;
+
+            reader.WaitForWake(System.Threading.Timeout.Infinite);
+            return -1;
+        }
+
+        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
+        {
+            endOfOutput = false;
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Each read its own frame of <c>frameSize</c> bytes: <c>beforeClose</c> of them at once, then nothing until the
+    /// transport is closed, then <c>afterClose</c> more and end of output, as ConPTY flushes its final frame after the
+    /// close and then breaks the pipe.
+    /// </summary>
+    private sealed class FramesAroundTheCloseBackend(int beforeClose, int afterClose, int frameSize = 1) : FakeBackend
     {
         private readonly TaskCompletionSource _waiting = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -655,8 +890,8 @@ public sealed class PtyOutputPumpTests
             if (_beforeClose > 0)
             {
                 _beforeClose--;
-                buffer[0] = (byte)'x';
-                return 1;
+                buffer[..frameSize].Fill((byte)'x');
+                return frameSize;
             }
 
             if (!IsOutputClosed)
@@ -670,8 +905,8 @@ public sealed class PtyOutputPumpTests
                 return 0;
 
             _afterClose--;
-            buffer[0] = (byte)'y';
-            return 1;
+            buffer[..frameSize].Fill((byte)'y');
+            return frameSize;
         }
 
         public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
@@ -714,6 +949,7 @@ public sealed class PtyOutputPumpTests
         public bool IsOutputClosed => _closed;
         public bool IsDisposed => _disposed;
         public long CoalesceBudgetTicks => Stopwatch.Frequency * 2 / 1000;
+        public virtual int OutputChunkLimit => PtyOutputPump.PublishSize;
         public virtual int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
         /// <summary>Reports child exit the way the exit watcher does: records it, then notifies the session's listener.</summary>

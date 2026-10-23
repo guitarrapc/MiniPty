@@ -115,10 +115,13 @@ public sealed class PtyWebSocketBridgeTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var options = new PtyBridgeOptions { HighWatermark = 4096, LowWatermark = 1024 };
 
-        // This needs only enough output to cross the watermark and prove an ACK resumes delivery.
+        // This needs enough output that some is still unsent when delivery pauses: more than the
+        // watermark plus one chunk, which can hold the whole output ring (a consumer that fell behind
+        // takes every contiguous read at once). With 64 lines (8 KiB) a Linux child's output arrived
+        // in one chunk, the child exited, and the bridge closed before the test acknowledged anything.
         // A 256 KiB burst creates roughly 64 serialized pause/ACK/resume round trips at this
         // watermark, which exceeds the test budget on loaded macOS arm64 CI runners.
-        var bridgeTask = PtyWebSocketBridge.RunAsync(BulkOutputChild(lineCount: 64), serverSocket, options, cts.Token);
+        var bridgeTask = PtyWebSocketBridge.RunAsync(BulkOutputChild(lineCount: 256), serverSocket, options, cts.Token);
         var client = new BridgeTestClient(clientSocket);
         var clientTask = client.RunToCloseAsync(ackEverything: false, cts.Token);
 

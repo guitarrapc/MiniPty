@@ -105,6 +105,12 @@ internal interface IPtyBackend : IDisposable
     /// </summary>
     public long CoalesceBudgetTicks { get; }
     /// <summary>
+    /// Most bytes one output chunk hands a consumer. Platform backends return <see cref="PtyOutputPump.Capacity"/>, so
+    /// a consumer that fell behind takes all contiguous output at once; a scripted backend returns
+    /// <see cref="PtyOutputPump.PublishSize"/>, so that tests can hand its full-size reads out one at a time.
+    /// </summary>
+    public int OutputChunkLimit { get; }
+    /// <summary>
     /// Reader silence, in milliseconds, that the post-exit drain takes to mean the transport has nothing more:
     /// counted after child exit before the transport is closed, and again after the close before output is ended
     /// without it. Platform backends return <see cref="PtyOutputPump.DefaultPostExitQuietMs"/>; a scripted backend

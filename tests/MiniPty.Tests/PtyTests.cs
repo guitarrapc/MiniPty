@@ -207,7 +207,7 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// Bulk stdout on Windows ConPTY arrives whole, in chunks no larger than a ring slot.
+    /// Bulk stdout on Windows ConPTY arrives whole, in chunks no larger than the output ring.
     /// </summary>
     /// <remarks>
     /// This used to assert that coalescing batched the 32 KiB into fewer than 40 chunks (about 13 on an idle
@@ -241,7 +241,7 @@ public sealed class PtyTests
 
         await Assert.That(totalBytes).IsGreaterThanOrEqualTo(32_768);
         await Assert.That(chunks).IsGreaterThan(0);
-        await Assert.That(maxChunk).IsLessThanOrEqualTo(4096);
+        await Assert.That(maxChunk).IsLessThanOrEqualTo(MiniPty.Internal.PtyOutputPump.Capacity);
     }
 
     /// <summary>Binary bulk stdout on Unix should remain few large chunks (coalesce must not regress large reads).</summary>
@@ -2003,12 +2003,13 @@ public sealed class PtyTests
     /// or parked on a full ring. Nothing more reaches the session after that until a consumer reads.
     /// </summary>
     /// <remarks>
-    /// Output need not have ended. The ring holds four reads whatever their size, and under CPU contention ConPTY's
-    /// frames for a single <c>echo</c> arrive as separate small reads, too far apart for the micro-window to join. When
-    /// they fill the ring, the frame ConPTY flushes after the close waits in the pipe, and the reader waits for a consumer
-    /// to free a slot (<c>PtyOutputPumpTests.FramesThatFillTheRingAfterTheCloseReachALateReader</c>). Waiting for end of
-    /// output timed out at 10 s in 3 of 10 full-suite runs pinned to two cores; the reader had taken three reads before
-    /// the close and was parked on the fourth.
+    /// Output need not have ended. When output nobody reads fills the ring, the frame ConPTY flushes after the close waits
+    /// in the pipe, and the reader waits for a consumer to free space
+    /// (<c>PtyOutputPumpTests.FramesThatFillTheRingAfterTheCloseReachALateReader</c>). With a ring of four slots, the few
+    /// small frames of a single <c>echo</c> filled it under CPU contention: waiting for end of output timed out at 10 s in
+    /// 3 of 10 full-suite runs pinned to two cores, with the reader parked on its fourth read. The ring now holds bytes,
+    /// so such frames no longer fill it (<c>PtyOutputPumpTests.SmallFramesDoNotFillTheRing</c>), but a larger output
+    /// still can.
     /// </remarks>
     private static async Task WaitUntilOutputSettled(PtySession session)
     {
@@ -2020,7 +2021,7 @@ public sealed class PtyTests
         await Assert.That(IsSettled(pump)).IsTrue();
 
         static bool IsSettled(MiniPty.Internal.PtyOutputPump pump) =>
-            pump.IsProducerFinished || (pump.IsCloseRequested && pump.IsWaitingForFreeSlot);
+            pump.IsProducerFinished || (pump.IsCloseRequested && pump.IsWaitingForFreeSpace);
     }
 
     private static async Task WaitUntilExited(PtySession session)

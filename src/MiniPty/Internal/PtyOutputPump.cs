@@ -1,6 +1,4 @@
-using System.Buffers;
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
 
 namespace MiniPty.Internal;
@@ -14,22 +12,25 @@ internal interface IPtyOutputWaiter
 
 /// <summary>
 /// The only reader of a session's output transport: reads on a dedicated <see cref="PtyReaderThread"/> from
-/// spawn until end of output, into a ring of fixed-size slots that the session's one active consumer drains.
+/// spawn until end of output, into a byte ring that the session's one active consumer drains.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Ring.</b> <see cref="SlotCount"/> slots of <see cref="SlotSize"/> bytes in one array from the shared
-/// pool. Each transport read fills one slot, and bytes that arrive within a short micro-window are appended to
-/// it, so bulk output is delivered in few chunks without delaying interactive output. When every slot is
-/// published and unread the pump stops reading, and backpressure reaches the child through the OS pipe. The
-/// ring is single-producer, single-consumer: the pump owns <see cref="_tail"/>, the active consumer owns
-/// <see cref="_head"/>, and <see cref="_count"/> publishes between them with full fences.
+/// <b>Ring.</b> <see cref="Capacity"/> bytes in one pinned buffer from <see cref="PtyBufferPool"/>. Each transport
+/// read, plus the bytes that arrive within a short micro-window after it, is published at once, up to
+/// <see cref="PublishSize"/>, so bulk output is published in few pieces without delaying interactive output. A
+/// consumer takes all contiguous published bytes as one chunk (up to the end of the buffer and the backend's
+/// <see cref="IPtyBackend.OutputChunkLimit"/>), so a consumer that fell behind, such as a WebSocket still sending
+/// the previous chunk, takes several reads at once. When less than <see cref="PublishSize"/> is free the pump stops
+/// reading, and backpressure reaches the child through the OS pipe. The ring is single-producer, single-consumer:
+/// the pump owns <see cref="_tail"/>, the active consumer owns <see cref="_head"/>, and <see cref="_count"/>
+/// publishes bytes between them with full fences.
 /// </para>
 /// <para>
 /// <b>Consumers.</b> <c>ReadOutputAsync</c> and the <c>Output</c> stream read the ring on their own thread and
 /// wait through <see cref="ArmWait"/> without blocking it. One-shot completion attaches a
-/// <see cref="PtyOutputSink"/> instead, and the pump writes into it directly on the reader thread; slots
-/// published before the sink attached are delivered first.
+/// <see cref="PtyOutputSink"/> instead, and the pump writes into it directly on the reader thread; output
+/// published before the sink attached is delivered first.
 /// </para>
 /// <para>
 /// <b>End of output.</b> Unix PTYs report end of output once every slave descriptor closes. ConPTY reports it
@@ -50,8 +51,15 @@ internal interface IPtyOutputWaiter
 /// </remarks>
 internal sealed class PtyOutputPump : IValueTaskSource
 {
-    internal const int SlotCount = 4;
-    internal const int SlotSize = PtyReadBuffer.Size;
+    /// <summary>
+    /// Most bytes the pump publishes at once (one transport read and the continuation reads appended to it), and the
+    /// free space it waits for before reading again, so a consumer that frees a few bytes at a time does not cause a
+    /// read per release.
+    /// </summary>
+    internal const int PublishSize = PtyReadBuffer.Size;
+
+    /// <summary>Bytes of output the ring holds: four publishes' worth.</summary>
+    internal const int Capacity = 4 * PublishSize;
 
     /// <summary>
     /// Post-exit silence after which the transport is closed so the reader sees end of output, and after which a
@@ -70,18 +78,20 @@ internal sealed class PtyOutputPump : IValueTaskSource
     // A second concurrent stop waiter falls back to a task; the first uses the allocation-free slot below.
     private TaskCompletionSource? _stoppedFallback;
     private readonly byte[] _ring;
-    private SlotLengths _lengths;
-    // Consumer side: the slot being read, and how much of it the Output stream has already copied out.
+    // Consumer side: where unread output starts, and how much of it the last TryPeek handed out.
     private int _head;
-    private int _headOffset;
-    // Producer side: the slot the next read fills.
+    private int _peeked;
+    // Producer side: where the next read writes. Always (_head + _count) % Capacity once a read is published.
     private int _tail;
-    // Published slots the consumer has not released.
+    // Published bytes the consumer has not released.
     private int _count;
     private int _flags;
     private int _ringReferences = 2;
     private int _producerWaiting;
+    // The armed consumer wait's generation, or 0 when no wait is armed. A signaler claims the generation it read.
     private int _consumerWaiting;
+    // Consumer side: the generation of the last wait armed.
+    private int _waitGeneration;
     private bool _waiterWantsData;
     private IPtyOutputWaiter? _waiter;
     private PtyOutputSink? _sink;
@@ -96,13 +106,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal PtyOutputPump(IPtyBackend backend)
     {
         _backend = backend;
-        _ring = ArrayPool<byte>.Shared.Rent(SlotCount * SlotSize);
-    }
-
-    [InlineArray(SlotCount)]
-    private struct SlotLengths
-    {
-        private int _element;
+        _ring = PtyBufferPool.Rent();
     }
 
     /// <summary>Guarded by the <see cref="PtyOutputDrainScheduler"/> lock.</summary>
@@ -118,8 +122,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// <summary>Whether the transport close has started: set before <see cref="IPtyBackend.CloseOutputTransport"/> runs.</summary>
     internal bool IsCloseRequested => (Volatile.Read(ref _flags) & FlagCloseRequested) != 0;
 
-    /// <summary>Whether the reader is parked on a full ring until the consumer frees a slot.</summary>
-    internal bool IsWaitingForFreeSlot => Volatile.Read(ref _producerWaiting) != 0;
+    /// <summary>Whether the reader is parked on a full ring until the consumer frees <see cref="PublishSize"/> bytes.</summary>
+    internal bool IsWaitingForFreeSpace => Volatile.Read(ref _producerWaiting) != 0;
 
     /// <summary>The transport failure that ended the pump, if any. Read only after <see cref="IsProducerFinished"/>.</summary>
     internal Exception? Error => _error;
@@ -171,22 +175,24 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
                 // Checked on its own, not as an alternative to the sink: a failed completion can detach its sink
                 // after the check above, leaving the backlog in place, and reading into a full ring would overwrite
-                // an unread slot.
-                if (Volatile.Read(ref _count) == SlotCount)
+                // unread output.
+                if (IsFull)
                 {
                     // Also after the close. The transport may still hold output then (ConPTY flushes its final
                     // frame after ClosePseudoConsole), and ending here would drop it. A consumer that is slow to
-                    // release a slot only delays the end: parked time is not silence (see IsQuietSince), so the
+                    // free space only delays the end: parked time is not silence (see IsQuietSince), so the
                     // forced end waits for it too, and the next read reports end of output once the transport has
                     // nothing left.
-                    WaitForFreeSlot(reader);
+                    WaitForFreeSpace(reader);
                     continue;
                 }
             }
 
-            // After disposal nothing reads the ring, so the reader reuses the same slot only to let the transport end.
-            var slot = _tail;
-            var buffer = _ring.AsSpan(slot * SlotSize, SlotSize);
+            // At least PublishSize is free, so this span holds no unread output: it ends at PublishSize or at the end of
+            // the buffer, and the next publish continues at the start. After disposal nothing reads the ring, so the
+            // reader reuses the same span only to let the transport end.
+            var start = _tail;
+            var buffer = _ring.AsSpan(start, Math.Min(PublishSize, Capacity - start));
             int read;
             if ((Volatile.Read(ref _flags) & FlagEndOfOutputForced) != 0)
             {
@@ -213,12 +219,12 @@ internal sealed class PtyOutputPump : IValueTaskSource
             var length = read;
             var end = false;
             // Each continuation read waits its own micro-window, so output that keeps trickling in faster than the
-            // window would otherwise hold the slot until it fills. The backend's budget bounds the hold from the
+            // window would otherwise be held until PublishSize is reached. The backend's budget bounds the hold from the
             // first read; the last window may still run past it.
-            // Read per slot rather than cached: the backend returns a constant, and the pump object stays smaller.
+            // Read per publish rather than cached: the backend returns a constant, and the pump object stays smaller.
             var coalesceBudget = _backend.CoalesceBudgetTicks;
             var coalesceDeadline = coalesceBudget > 0 ? timestamp + coalesceBudget : long.MaxValue;
-            while (length < SlotSize && Stopwatch.GetTimestamp() < coalesceDeadline)
+            while (length < buffer.Length && Stopwatch.GetTimestamp() < coalesceDeadline)
             {
                 var more = _backend.ReadMoreOutput(buffer[length..], reader, out end);
                 if (more <= 0)
@@ -229,30 +235,40 @@ internal sealed class PtyOutputPump : IValueTaskSource
             }
 
             if (!IsSessionDisposed)
-                Deliver(slot, length, timestamp);
+                Deliver(start, length, timestamp);
 
             if (end)
                 return;
         }
     }
 
-    private void Deliver(int slot, int length, long timestamp)
+    /// <summary>Whether less than <see cref="PublishSize"/> is free, so the producer waits for the consumer.</summary>
+    private bool IsFull => Capacity - Volatile.Read(ref _count) < PublishSize;
+
+    private void Deliver(int start, int length, long timestamp)
     {
         lock (this)
         {
             if (_sink is { } sink)
             {
-                // Slots published before the sink attached go first, so the sink sees output in order.
+                // Output published before the sink attached goes first, so the sink sees output in order. The span just
+                // read is not published, so the next read reuses it.
                 DrainRingInto(sink);
-                sink.Write(_ring.AsSpan(slot * SlotSize, length), timestamp);
+                sink.Write(_ring.AsSpan(start, length), timestamp);
                 return;
             }
         }
 
-        _lengths[slot] = length;
-        _tail = (slot + 1) % SlotCount;
-        Interlocked.Increment(ref _count);
+        _tail = Advance(start, length);
+        Interlocked.Add(ref _count, length);
         SignalConsumer(dataArrived: true);
+    }
+
+    /// <summary>The ring position <paramref name="length"/> bytes after <paramref name="position"/>, never past the end.</summary>
+    private static int Advance(int position, int length)
+    {
+        var next = position + length;
+        return next == Capacity ? 0 : next;
     }
 
     private void DeliverBacklog()
@@ -264,26 +280,29 @@ internal sealed class PtyOutputPump : IValueTaskSource
         }
     }
 
-    /// <summary>Hands every published slot to <paramref name="sink"/>. Caller holds the pump lock.</summary>
+    /// <summary>
+    /// Hands all published output to <paramref name="sink"/>, in at most two writes: up to the end of the buffer, then
+    /// from its start. Caller holds the pump lock.
+    /// </summary>
     private void DrainRingInto(PtyOutputSink sink)
     {
-        while (Volatile.Read(ref _count) > 0)
+        int count;
+        while ((count = Volatile.Read(ref _count)) > 0)
         {
             var head = _head;
-            var offset = _headOffset;
-            sink.Write(_ring.AsSpan(head * SlotSize + offset, _lengths[head] - offset), timestamp: 0);
-            _headOffset = 0;
-            _head = (head + 1) % SlotCount;
-            Interlocked.Decrement(ref _count);
+            var length = Math.Min(count, Capacity - head);
+            sink.Write(_ring.AsSpan(head, length), timestamp: 0);
+            _head = Advance(head, length);
+            Interlocked.Add(ref _count, -length);
         }
     }
 
-    private void WaitForFreeSlot(PtyReaderThread reader)
+    private void WaitForFreeSpace(PtyReaderThread reader)
     {
         Interlocked.Exchange(ref _producerWaiting, 1);
 
-        // Re-checked after publishing the flag: a consumer that released a slot before seeing it does not wake us.
-        if (Volatile.Read(ref _count) == SlotCount
+        // Re-checked after publishing the flag: a consumer that freed space before seeing it does not wake us.
+        if (IsFull
             && !IsSessionDisposed
             && Volatile.Read(ref _sink) is null)
         {
@@ -343,48 +362,66 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
     // ---------------------------------------------------------------- Ring consumer (ReadOutputAsync, Output)
 
-    /// <summary>Gets the unread part of the oldest published slot without releasing it.</summary>
+    /// <summary>
+    /// Gets all contiguous unread output, up to the end of the buffer and the backend's chunk limit, without releasing
+    /// it. <see cref="Release"/> releases exactly what the last call handed out, even if more was published since.
+    /// </summary>
     internal bool TryPeek(out ReadOnlyMemory<byte> data)
     {
-        if (Volatile.Read(ref _count) == 0)
+        var count = Volatile.Read(ref _count);
+        if (count == 0)
         {
             data = default;
             return false;
         }
 
         var head = _head;
-        data = _ring.AsMemory(head * SlotSize + _headOffset, _lengths[head] - _headOffset);
+        // Read per peek rather than cached: the backend returns a constant, and the pump object stays smaller.
+        var length = Math.Min(Math.Min(count, Capacity - head), _backend.OutputChunkLimit);
+        _peeked = length;
+        data = _ring.AsMemory(head, length);
         return true;
     }
 
-    /// <summary>Releases the oldest published slot so the pump can refill it.</summary>
+    /// <summary>Releases the output the last <see cref="TryPeek"/> handed out, so the pump can read into it again.</summary>
     internal void Release()
     {
-        _headOffset = 0;
-        _head = (_head + 1) % SlotCount;
-        Interlocked.Decrement(ref _count);
-        if (Volatile.Read(ref _producerWaiting) != 0)
-            Volatile.Read(ref _reader)?.Wake(this);
+        var length = _peeked;
+        _peeked = 0;
+        _head = Advance(_head, length);
+        Interlocked.Add(ref _count, -length);
+        WakeProducerIfSpace();
     }
 
-    /// <summary>Copies published output into <paramref name="destination"/>, releasing every slot it empties.</summary>
+    /// <summary>Copies published output into <paramref name="destination"/>, releasing what it copies.</summary>
     internal int CopyTo(Span<byte> destination)
     {
         var copied = 0;
-        while (copied < destination.Length && Volatile.Read(ref _count) > 0)
+        int count;
+        while (copied < destination.Length && (count = Volatile.Read(ref _count)) > 0)
         {
             var head = _head;
-            var available = _lengths[head] - _headOffset;
-            var take = Math.Min(available, destination.Length - copied);
-            _ring.AsSpan(head * SlotSize + _headOffset, take).CopyTo(destination[copied..]);
+            var take = Math.Min(Math.Min(count, Capacity - head), destination.Length - copied);
+            _ring.AsSpan(head, take).CopyTo(destination[copied..]);
             copied += take;
-            if (take == available)
-                Release();
-            else
-                _headOffset += take;
+            _head = Advance(head, take);
+            Interlocked.Add(ref _count, -take);
         }
 
+        if (copied > 0)
+            WakeProducerIfSpace();
+
         return copied;
+    }
+
+    /// <summary>
+    /// Wakes a producer parked on a full ring once it has room to read again. The consumer frees space before it
+    /// looks at the flag, and the producer sets the flag before it looks at the space, so one of them sees the other.
+    /// </summary>
+    private void WakeProducerIfSpace()
+    {
+        if (Volatile.Read(ref _producerWaiting) != 0 && !IsFull)
+            Volatile.Read(ref _reader)?.Wake(this);
     }
 
     /// <summary>
@@ -399,7 +436,14 @@ internal sealed class PtyOutputPump : IValueTaskSource
     {
         Volatile.Write(ref _waiter, waiter);
         _waiterWantsData = wakeOnData;
-        Interlocked.Exchange(ref _consumerWaiting, 1);
+
+        // Each wait gets a generation of its own, never 0, so that a signaler still holding an earlier wait's generation
+        // fails its claim instead of completing this one (see SignalConsumer).
+        var generation = ++_waitGeneration;
+        if (generation == 0)
+            generation = _waitGeneration = 1;
+
+        Interlocked.Exchange(ref _consumerWaiting, generation);
 
         // Re-checked after publishing the wait (Dekker with the producer's publish-then-check).
         var ready = (wakeOnData && Volatile.Read(ref _count) > 0)
@@ -408,21 +452,38 @@ internal sealed class PtyOutputPump : IValueTaskSource
             return true;
 
         // Withdraw, unless a signaler already claimed the wait; then the signal is on its way.
-        return Interlocked.CompareExchange(ref _consumerWaiting, 0, 1) != 1;
+        return Interlocked.CompareExchange(ref _consumerWaiting, 0, generation) != generation;
     }
 
     /// <summary>Claims the armed wait for cancellation. Exactly one of a signal and a cancellation wins.</summary>
-    internal bool TryCancelWait() => Interlocked.CompareExchange(ref _consumerWaiting, 0, 1) == 1;
+    internal bool TryCancelWait()
+    {
+        var generation = Volatile.Read(ref _consumerWaiting);
+        return generation != 0 && Interlocked.CompareExchange(ref _consumerWaiting, 0, generation) == generation;
+    }
 
     /// <summary>Signals the armed wait for a condition the waiter checks itself (a drain timeout).</summary>
     internal void SignalWaiter() => SignalConsumer(dataArrived: false);
 
     private void SignalConsumer(bool dataArrived)
     {
-        if (Volatile.Read(ref _consumerWaiting) == 0 || (dataArrived && !_waiterWantsData))
+        var generation = Volatile.Read(ref _consumerWaiting);
+        if (generation == 0 || (dataArrived && !_waiterWantsData))
             return;
 
-        if (Interlocked.CompareExchange(ref _consumerWaiting, 0, 1) == 1)
+        // A publish signals after it counts its output, and a consumer that is not waiting can take that output in
+        // between, finish with it, and arm a new wait. Claiming that wait then completed it with nothing to take, and the
+        // consumer failed with "signaled without a state change": a 32 MiB flood through the WebSocket bridge lost the
+        // rest of its output in about one of ten runs. So a data signal claims only a wait that output is still there
+        // for, checked after reading the wait: until that wait is withdrawn, the consumer cannot take output without
+        // being signaled. A withdrawn wait takes its generation with it, so a consumer that withdraws because it saw the
+        // output itself, takes it, and arms another wait leaves this claim failing. Either way the output this signal was
+        // about has been taken, and the new wait is signaled by the next change of state, which its own re-check in
+        // ArmWait cannot miss.
+        if (dataArrived && Volatile.Read(ref _count) == 0)
+            return;
+
+        if (Interlocked.CompareExchange(ref _consumerWaiting, 0, generation) == generation)
         {
             // Completing the wait posts the consumer's continuation to the context it captured, on this thread: the
             // reader thread, or a thread disposing the session. A context whose Post throws (a UI dispatcher that
@@ -644,7 +705,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private void ReleaseRing()
     {
         if (Interlocked.Decrement(ref _ringReferences) == 0)
-            ArrayPool<byte>.Shared.Return(_ring);
+            PtyBufferPool.Return(_ring);
     }
 
     private void SetFlag(int flag) => Interlocked.Or(ref _flags, flag);

@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Proposed (2026-10-23). No phase has started. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented on Windows and Linux (2026-10-23); their macOS measurements are pending. Phase 2 has not started. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -182,11 +182,19 @@ Phases 1–3 keep today's reader thread and change one thing each, so each chang
 **Goal:** the numbers every later phase is judged against, and failing tests that define "done".
 
 **Changes**
-- `MiniPty.Benchmarks` references `MiniPty.Terminal`, a first-party project and not a new dependency, and gains a WebSocket benchmark:
-  - Server and client run in one process over loopback TCP, through `WebSocket.CreateFromStream`.
-  - The server side is `PtyWebSocketBridge`. The client acknowledges output the way the xterm.js guide describes.
-  - It measures keystroke echo latency (p50/p99), throughput, and frames per 32 KiB, at 1, 64, and 1,000 sessions.
-- A census helper that reports the process thread count and working set for N idle sessions, and the same at 16 sessions, so that thread growth can be compared across session counts rather than against a fixed number.
+- `MiniPty.Benchmarks` references `MiniPty.Terminal`, a first-party project and not a new dependency, and gains `PtyWebSocketBenchmarks.Bridge_32KiB_Bytes`:
+  - A session bridged by `PtyWebSocketBridge` to a client over loopback TCP, through `WebSocket.CreateFromStream`.
+  - The client acknowledges output the way the xterm.js guide describes.
+  - It measures time and allocations per bridged session.
+- [WebTerminalScale.cs](../../../samples/SingleFiles/WebTerminalScale.cs), an ASP.NET Core host that serves many sessions, takes the census and the latency measurements. BenchmarkDotNet suits neither 1,000 sessions nor percentiles.
+  - Its dashboard shows the host's sessions, threads, memory, and handles live, so the effect of each phase can be seen in a browser.
+  - Its `bench` mode starts the host as a child process, so the client's sockets are not counted.
+  - It then opens idle shell sessions over WebSockets in steps, and records per step:
+    - the host's threads, with thread-pool workers counted apart, since a burst of connections injects them;
+    - working set and handles;
+    - keystroke echo latency p50/p99.
+  - Finally it floods one session, and records throughput and WebSocket frames per 32 KiB.
+  - CI publishes it with NativeAOT and runs it with `--smoke`.
 
 **Tests (added skipped)**
 - `IdleSessionsHoldNoThread`: going from 16 to 64 idle sessions adds no threads beyond the runtime's own. On Windows the exit watcher's thread per 63 sessions is excluded. Skipped until Phase 5 on Windows and Phase 6 on Unix.
@@ -194,6 +202,59 @@ Phases 1–3 keep today's reader thread and change one thing each, so each chang
 **Measure:** record the existing benchmarks (`PtyIntegrationBenchmarks`, `PtyOutputBenchmarks`, `PtyInputBenchmarks`, `PtyConPtyBenchmarks`) and the new ones on Windows, on Linux, and on macOS. Record the CPU a trickling child costs on Windows, which the specification puts at 10–40% of a core today.
 
 **Done when:** the baseline is recorded, and the census test, with its skip removed locally, fails for the expected reason.
+
+### Phase 0 result
+
+Implemented 2026-10-23, as planned. With its skip removed on Windows, `PtyScaleTests.IdleSessionsHoldNoThread` failed: 64 idle sessions had 48 more threads than 16.
+
+**Baseline on Windows.** Windows 11 26200 with 32 logical CPUs, the in-box ConPTY, and `WebTerminalScale bench` on a Release JIT build:
+
+| Sessions | Threads | Pool threads | Other threads per session | Working set (MB) | Handles | Echo p50 / p99 (ms) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 52 | 4 | — | 52.9 | 512 | — |
+| 16 | 82 | 19 | 0.94 | 59.8 | 772 | 0.67 / 0.92 |
+| 64 | 153 | 41 | 1.00 | 77.2 | 1,462 | 0.72 / 14.50 |
+| 128 | 218 | 41 | 1.01 | 83.6 | 2,237 | 0.77 / 2.22 |
+
+A flood through the bridge took 8.0 WebSocket frames per 32 KiB (4.0 KiB each) at 17–22 MB/s; ConPTY's rendering sets that rate.
+
+**Baseline on Linux.** WSL2, Ubuntu 24.04, 8 logical CPUs, same build:
+
+| Sessions | Threads | Pool threads | Other threads per session | Working set (MB) | Private (MB) | Descriptors | Echo p50 / p99 (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 28 | 5 | — | 73.5 | 175 | 189 | — |
+| 16 | 47 | 9 | 0.94 | 78.2 | 333 | 252 | 1.97 / 11.40 |
+| 64 | 95 | 9 | 0.98 | 84.2 | 723 | 444 | 1.58 / 2.51 |
+| 256 | 287 | 9 | 1.00 | 99.5 | 2,275 | 1,212 | 1.97 / 3.66 |
+| 1,000 | 1,050 | 28 | 1.00 | 159.4 | 8,447 | 4,188 | 1.50 / 1.62 |
+
+- Every open session holds exactly one more thread: its output reader. The thread-pool workers come from the burst of connections and retire later.
+- On Linux each reader thread reserves an 8 MB stack, so private (virtual) memory grows by 8 MB per session.
+- A flood took 8.0 frames per 32 KiB at about 100–135 MB/s.
+
+**BenchmarkDotNet baseline on Windows** (the rows Phase 1 can move):
+
+| Benchmark | Mean | Allocated |
+|---|---:|---:|
+| Integration `Session_Exit0_WaitForExit` | 32.3 ms | 1.25 KB |
+| Integration `Session_32KiB_Bytes` | 75.3 ms | 38.37 KB |
+| Integration `Session_32KiB_StreamBytes` | 73.9 ms | 1.55 KB |
+| Integration `Session_32KiB_OutputStreamBytes` | 72.6 ms | 1.66 KB |
+| Integration `Capture_32KiB_Bytes` | 76.3 ms | 39.78 KB |
+| ConPty `Session_32KiB_StreamBytes`, in-box / out-of-band | 74.7 / 76.8 ms | 1.55 / 1.56 KB |
+| WebSocket `Bridge_32KiB_Bytes` | 107.2 ms (±32.8) | 26.43 KB |
+
+**Not measured here:**
+- macOS, which is run on a maintainer's machine with the commands under the Phase 1 result.
+- BenchmarkDotNet on Linux; on Linux the sample's A/B runs stand in for it.
+- The CPU of a trickling child on Windows, which Phase 5 measures against its change.
+
+**Lessons**
+- **A path near `MAX_PATH` breaks benchmarks.** A checkout under a long temporary directory put BenchmarkDotNet's copy of the benchmark child at 258 characters. `CreateProcess` failed with error 206, and every 32 KiB benchmark reported NA. Run benchmarks from a short path.
+  - Long program paths need both the machine's `LongPathsEnabled` and a `longPathAware` manifest in the host.
+  - Even then, MiniPty leaves rooted names to `CreateProcess`'s own command-line search, which stays at `MAX_PATH`. Passing the path as the application name fixes that (measured), and is proposed separately.
+- **The WebSocket harness itself had to be right before its numbers meant anything.** The lessons on watching the bridge, closing the server's connection, and counting pool workers apart are in [terminal.md](../specs/terminal.md#lessons-learned).
+- **Repeated 32 MiB floods found a data-loss race that predates this plan:** one baseline run lost 60% of its output. See Phase 1 result.
 
 ### Phase 1: Byte ring and buffer free list
 
@@ -224,6 +285,66 @@ Phases 1–3 keep today's reader thread and change one thing each, so each chang
 **Measure:** allocations, and chunks per 32 KiB (`Session_32KiB_StreamBytes`, ConPTY streaming), against Phase 0.
 
 **Done when:** no allocation regression, and chunks per 32 KiB are the same or fewer.
+
+### Phase 1 result
+
+Implemented 2026-10-23 on Windows and Linux; macOS is pending (commands below).
+
+**Delivered as planned:**
+- **The byte ring.** `PtyOutputPump.PublishSize` (4 KiB) is the most one read and its continuation reads publish at once. `Capacity` (16 KiB) is the ring. The producer waits while less than `PublishSize` is free, so a consumer that frees a few bytes at a time does not cause a read per release.
+- **`PtyBufferPool`:** pinned buffers on one lock-guarded stack, with no thread affinity.
+- **`IPtyBackend.OutputChunkLimit`:** the platform backends return the ring, and the scripted backends one read, so that tests can still hand reads out one at a time.
+- **Tests:** the planned ones, and `IdleSessionsHoldNoOutputBuffer` (skipped).
+
+**Trimming:** the free list keeps every returned buffer, up to the peak number of rings held at once, and allocates nothing after that. Phases 5 and 6 revisit this, once rings are taken per burst rather than per session.
+
+**Behavior change:** the ring holds bytes, so a few small frames no longer fill it (`SmallFramesDoNotFillTheRing`). Tests that filled the ring with four small reads now use full-size reads.
+
+**Unplanned: data loss in the pump, which predates this plan.**
+- The Phase 0 harness lost the rest of a 32 MiB flood through the bridge in about one of ten runs. It happened on the baseline as well (13 of 33 MiB arrived), and the bridge then failed with "PTY output reader was signaled without a state change".
+- **Cause:** a data signal claimed a wait armed after its output had already been consumed. The consumer had taken the output without waiting, then armed a new wait.
+- **Fix:** each wait carries a generation, and a data signal claims a wait only while output is unread, checked after reading the wait. A generation alone did not fix it, because the claimed wait was new, not stale.
+- **Test:** `ASignalClaimedForOneWaitNeverCompletesALaterOne` failed within two seconds in 15 of 15 runs before the fix, and passed 15 of 15 after it. The lesson is in [core_session.md](../specs/core_session.md#lessons-learned).
+
+**Unplanned: one test changed.** In `BridgeFlowControlPausesWithoutAcksAndResumesOnAck`, a Linux child's 64 lines (8 KiB) arrived in one chunk, the child exited, and the bridge closed before the test acknowledged anything. It now prints 256 lines, more than the watermark plus one chunk.
+
+**Measured** (A/B runs alternate the two builds):
+
+| | Baseline | Phase 1 |
+|---|---:|---:|
+| Frames per 32 KiB of flood through the bridge, Windows (3 rounds) | 8.0 | 5.2–5.7 |
+| Flood throughput, Windows (MB/s; ConPTY-bound) | 22.0 / 22.1 / 20.9 | 22.2 / 22.3 / 20.8 |
+| Frames per 32 KiB, Linux (6 rounds) | 8.0 | 7.7–7.8 |
+| Flood throughput, Linux (mean of 6 rounds, MB/s) | 110.9 | 113.9 |
+| Echo p50 / p99 at 64 sessions, Linux (ms) | 1.52–1.54 / 1.70–1.90 | 1.52 / 1.72–1.78 |
+| Other threads per session | 1.00 | 1.00 (not this phase's goal) |
+
+BenchmarkDotNet on Windows, with the fix:
+
+| Benchmark | Baseline | Phase 1 |
+|---|---:|---:|
+| Integration `Session_Exit0_WaitForExit` | 32.3 ms, 1.25 KB | 35.6 ms, 1.24 KB |
+| Integration `Session_32KiB_Bytes` | 75.3 ms, 38.37 KB | 80.5 ms (±14.0), 38.36 KB |
+| Integration `Session_32KiB_StreamBytes` | 73.9 ms, 1.55 KB | 76.3 ms, 1.55 KB |
+| Integration `Session_32KiB_OutputStreamBytes` | 72.6 ms, 1.66 KB | 76.6 ms, 1.65 KB |
+| Integration `Capture_32KiB_Bytes` | 76.3 ms, 39.78 KB | 78.0 ms, 39.77 KB |
+| ConPty `Session_32KiB_StreamBytes`, in-box / out-of-band | 74.7 / 76.8 ms, 1.55 / 1.56 KB | 75.7 / 77.7 ms, 1.55 / 1.55 KB |
+| WebSocket `Bridge_32KiB_Bytes` | 107.2 ms (±32.8), 26.43 KB | 77.1 ms, 26.32 KB |
+
+- **Allocations** are equal or lower on every row: the pump lost its four slot lengths.
+- **Times** moved within the spread between runs of the same build, which is about ±4 ms for these spawn-bound benchmarks.
+  - An alternating A/B of the exit benchmarks measured Phase 1 at 35.0 / 34.2 ms, against 37.0 / 35.3 ms for the baseline.
+  - A second round in which both builds were the baseline measured 35.8 / 33.7 and 36.2 / 34.6 ms.
+- **Tests:** the full suite passed on Windows and on Linux: 592 tests, 590 passed, the 2 planned skips.
+- **NativeAOT:** the sample publishes and passes `--smoke` on Windows and on Linux.
+
+**On macOS** (pending), on this branch:
+- `dotnet test -c Release`.
+- `dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench --sessions 16,64,256`.
+- What to compare:
+  - Phase 1 leaves threads and memory per session unchanged, so these numbers also serve as the macOS baseline for Phase 6.
+  - Compare frames per 32 KiB with the 8.0 that four-slot chunking gives.
+  - Repeat the flood 5–10 times (`bench --sessions 1 --echo 5 --flood-bytes 33554432`) and check that every run reports the full output, with no "no exit message" and no "session failed".
 
 ### Phase 2: Event-driven pump
 

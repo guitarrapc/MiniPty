@@ -373,6 +373,7 @@ For custom transports (stdio framing to a VS Code extension, SignalR, …), use 
 | [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) | **MiniPty.Console** host attach: keyboard → PTY, `ReadOutputAsync` → host display (requires interactive TTY) |
 | [Observe.cs](samples/SingleFiles/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
 | [WebTerminal.cs](samples/SingleFiles/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner |
+| [WebTerminalScale.cs](samples/SingleFiles/WebTerminalScale.cs) | **MiniPty.Terminal** in an ASP.NET Core host serving many sessions: a dashboard of what each session costs the host (threads, memory, handles), and a `bench` mode that measures it with keystroke echo latency and WebSocket frames per 32 KiB |
 | [VsCodeTerminalHelper.cs](samples/SingleFiles/VsCodeTerminalHelper.cs) | **MiniPty.Terminal** stdio-framed helper for a VS Code `Pseudoterminal` |
 | [VsCodeExtension](samples/VsCodeExtension) | Dependency-free VS Code extension sample connecting `Pseudoterminal` to the NativeAOT helper |
 | [VsCodePersistentBridge.cs](samples/SingleFiles/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |
@@ -391,6 +392,8 @@ dotnet samples/SingleFiles/ConsoleAttach.cs
 dotnet samples/SingleFiles/Observe.cs
 dotnet samples/SingleFiles/Capture.cs
 dotnet samples/SingleFiles/WebTerminal.cs   # then open http://localhost:5170/
+dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs   # then open http://localhost:5171/
+dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench --sessions 16,64,256
 dotnet run --project samples/WinUiTerminal   # Windows only
 dotnet run --project samples/AvaloniaTerminal   # Windows, Linux, macOS
 ```

@@ -594,6 +594,8 @@ internal static partial class UnixPtyBackend
 
         public long CoalesceBudgetTicks => s_coalesceBudgetTicks;
 
+        public int OutputChunkLimit => PtyOutputPump.Capacity;
+
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
         public bool TryBeginOutputRead()
