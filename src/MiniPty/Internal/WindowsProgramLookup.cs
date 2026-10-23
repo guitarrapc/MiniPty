@@ -202,8 +202,10 @@ internal static partial class WindowsProgramLookup
     /// <c>ERROR_FILE_NOT_FOUND</c> and a directory with <c>ERROR_ACCESS_DENIED</c>, whatever <c>CreateProcess</c>
     /// reports for an application name (a missing directory there is <c>ERROR_PATH_NOT_FOUND</c>). In a host that did
     /// not opt into long paths the check cannot see the file and fails with <c>ERROR_FILE_NOT_FOUND</c>, as the spawn
-    /// did before. The current directory is read only for a name that is not fully qualified, so a short rooted name
-    /// costs nothing.
+    /// did before. A fully qualified name is measured as given, so a short one costs nothing. Any other name is resolved
+    /// first and measured as resolved, since the process's current directory is not always its base: a drive-relative
+    /// name (<c>C:tool.exe</c>) is relative to that drive's own current directory, and a root-relative one
+    /// (<c>\tool.exe</c>) to the current drive's root.
     /// </remarks>
     /// <param name="fileName">The program name as given.</param>
     /// <param name="program">The full path to pass as the application name, when the method returns true.</param>
@@ -220,13 +222,11 @@ internal static partial class WindowsProgramLookup
             return false;
 
         var extension = NeedsExecutableExtension(fileName) ? ExecutableExtension : "";
-        var length = Path.IsPathFullyQualified(fileName)
-            ? fileName.Length
-            : Environment.CurrentDirectory.Length + 1 + fileName.Length;
-        if (length + extension.Length < MaxPath)
+        var fullPath = Path.IsPathFullyQualified(fileName) ? null : Path.GetFullPath(fileName);
+        if ((fullPath ?? fileName).Length + extension.Length < MaxPath)
             return false;
 
-        program = Accept(Path.GetFullPath(fileName) + extension);
+        program = Accept((fullPath ?? Path.GetFullPath(fileName)) + extension);
         return true;
     }
 

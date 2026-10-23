@@ -39,6 +39,22 @@ public sealed record PtyStartInfo
     /// The <c>PATH</c> in <see cref="Environment"/> therefore chooses the program on every platform. Build it only from
     /// sources you trust, as you would the program itself, or pass a full path here to pin the program.
     /// </para>
+    /// <para>
+    /// A name that starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is relative to this process's current
+    /// directory, which every thread shares, not to <see cref="WorkingDirectory"/>. When any part of the name comes from
+    /// input you do not control, resolve it with <see cref="System.IO.Path.GetFullPath(string)"/> and check the result,
+    /// not the input, against the programs you allow. Windows starts the program that full path names: it resolves
+    /// <c>..</c> and drops trailing dots and spaces as <c>GetFullPath</c> does. A name that starts with <c>\\?\</c> is
+    /// taken without that normalization, by Windows and by <c>GetFullPath</c> alike. A UNC name makes this process
+    /// connect, and authenticate, to that server. This name, <see cref="Arguments"/>, <see cref="WorkingDirectory"/>,
+    /// and <see cref="CommandLine"/> cannot contain a NUL, which would end the string the operating system reads early;
+    /// <see cref="Pty.Start"/> throws <see cref="ArgumentException"/> for one.
+    /// </para>
+    /// <para>
+    /// On Windows a program under a path of 260 characters (<c>MAX_PATH</c>) or more starts only when this process
+    /// opted into long paths (<c>longPathAware</c> in its application manifest) and the machine allows them
+    /// (<c>LongPathsEnabled</c>).
+    /// </para>
     /// </remarks>
     public required string FileName { get; init; }
 
@@ -54,6 +70,8 @@ public sealed record PtyStartInfo
     /// with the UCRT. The pre-2008 rules, which <c>CommandLineToArgvW</c> and <c>msvcrt.dll</c> follow, read a quote
     /// inside an element as one that also ends the quoting. After such an element the boundaries move: later elements
     /// can merge into it, and its spaces can start new arguments.
+    /// No argument can contain a NUL, on any platform: the operating system would read it as the end of the argument, and
+    /// on Windows of the whole command line, dropping the arguments after it.
     /// An argument for a batch file cannot contain a carriage return, a line feed, or a NUL, which <c>cmd.exe</c>
     /// cannot receive. The batch file's whole <c>cmd.exe</c> command line cannot exceed the 8191 characters
     /// <c>cmd.exe</c> runs. The count includes the script's full path and the escaping: the quotes around an argument,
@@ -73,7 +91,8 @@ public sealed record PtyStartInfo
     /// <remarks>
     /// No quoting or escaping is applied to this value. The caller must follow the parsing rules of the target
     /// executable. For a batch file those are <c>cmd.exe</c>'s rules, and <c>CreateProcess</c> starts <c>cmd.exe</c>
-    /// with its defaults, AutoRun commands included. Use <see cref="Arguments"/> to have MiniPty escape for it.
+    /// with its defaults, AutoRun commands included. Use <see cref="Arguments"/> to have MiniPty escape for it. It
+    /// cannot contain a NUL, which would end the command line early.
     /// </remarks>
     public string? CommandLine { get; init; }
 
@@ -83,6 +102,12 @@ public sealed record PtyStartInfo
     /// <value>
     /// <see langword="null"/> to inherit the parent's working directory.
     /// </value>
+    /// <remarks>
+    /// It cannot contain a NUL. On Windows it must be shorter than 260 characters, also when this process opted into
+    /// long paths: <c>CreateProcess</c> refuses a longer one with <c>ERROR_DIRECTORY</c>, since a child's current
+    /// directory stays within <c>MAX_PATH</c>. It does not affect where a <see cref="FileName"/> that starts with
+    /// <c>.\</c> or <c>..\</c> is found; that is relative to this process's current directory.
+    /// </remarks>
     public string? WorkingDirectory { get; init; }
 
     /// <summary>

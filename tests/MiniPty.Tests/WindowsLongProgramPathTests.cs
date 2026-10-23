@@ -65,6 +65,30 @@ public sealed partial class WindowsLongProgramPathTests
         await Assert.That(applicationName).IsEqualTo(tree.Program);
     }
 
+    /// <summary>
+    /// A name relative to the current directory is measured, and passed, as the full path it resolves to; a short
+    /// relative name can name a long path.
+    /// </summary>
+    [Test]
+    public async Task RelativeNameOfALongPathStarts()
+    {
+        if (!LongPathsEnabled())
+            return;
+
+        using var tree = new LongTree(Environment.CurrentDirectory);
+        var relative = "." + Path.DirectorySeparatorChar + Path.GetRelativePath(Environment.CurrentDirectory, tree.Program);
+        var (applicationName, _) = WindowsPtyBackend.BuildLaunch(new PtyStartInfo { FileName = relative });
+
+        await Assert.That(applicationName).IsEqualTo(tree.Program);
+
+        PtyResult result;
+        await using (var session = Pty.Start(new PtyStartInfo { FileName = relative, Arguments = ["/c", "echo " + Marker] }))
+            result = await session.CompleteAsync().WaitAsync(Timeout);
+
+        await Assert.That(result.ExitCode).IsEqualTo(0);
+        await Assert.That(Encoding.UTF8.GetString(result.Output.Span)).Contains(Marker);
+    }
+
     [Test]
     public async Task ProgramUnderALongPathStarts()
     {
@@ -148,15 +172,22 @@ public sealed partial class WindowsLongProgramPathTests
     private static partial byte RtlAreLongPathsEnabled();
 
     /// <summary>
-    /// A directory under the temporary directory whose path is longer than <c>MAX_PATH</c>, holding a copy of
-    /// <c>cmd.exe</c> and a directory named like a program. A copied <c>cmd.exe</c> runs and echoes as the original does.
+    /// A directory, under the temporary directory unless given another, whose path is longer than <c>MAX_PATH</c>,
+    /// holding a copy of <c>cmd.exe</c> and a directory named like a program. A copied <c>cmd.exe</c> runs and echoes
+    /// as the original does.
     /// </summary>
     private sealed class LongTree : IDisposable
     {
-        private readonly string _root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "minipty-long-" + Guid.NewGuid().ToString("N")[..8]);
+        private readonly string _root;
 
         public LongTree()
+            : this(System.IO.Path.GetTempPath())
         {
+        }
+
+        public LongTree(string under)
+        {
+            _root = System.IO.Path.Combine(under, "minipty-long-" + Guid.NewGuid().ToString("N")[..8]);
             var directory = _root;
             while (directory.Length < 300)
                 directory = System.IO.Path.Combine(directory, new string('d', 100));
