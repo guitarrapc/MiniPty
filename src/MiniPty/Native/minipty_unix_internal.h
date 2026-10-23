@@ -25,7 +25,8 @@ int minipty_fork_pty_exec(
     char *const *argv,
     char *const *envp,
     int *pid_out,
-    int *pidfd_out);
+    int *pidfd_out,
+    int *slave_out);
 
 int minipty_set_winsize(
     int master,

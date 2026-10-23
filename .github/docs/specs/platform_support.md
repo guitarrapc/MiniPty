@@ -75,6 +75,8 @@ These are verification choices, not API requirements, but they document pitfalls
 | Windows | A program under a path of 260 characters or more starts only in a host that opted into long paths (`longPathAware` in its manifest), and only where the machine allows them (`LongPathsEnabled`); otherwise the opt-in is ignored. | The test host declares it in `tests/MiniPty.Tests/app.manifest`, which is the SDK's default manifest plus that one setting. `WindowsLongProgramPathTests` return early where the machine does not allow long paths, and one of them covers that case instead. |
 | Windows | Benchmarks from a deep checkout fail to spawn: BenchmarkDotNet builds each job under `bin/Release/net10.0/<Job>/bin/Release/net10.0/`, which put the benchmark child at about 260 characters from a worktree under a temporary directory, and every benchmark that spawns it reported NA. | Run benchmarks from a short path. |
 | Unix | `kill(pid, 0)` succeeds on a zombie. | "The pid is gone" also asserts that the exit watcher reaped the child. |
+| macOS | When the 1 KiB output queue fills right after the CR of a newline, the terminal writes CR CR LF: it puts the CR again when it retries the LF. It happens only when the reader falls behind, at multiples of 1,024 bytes. | Tests that compare bulk output exactly fold `\r\r\n` into `\r\n` on macOS (`OneShotResultsKeepMultiMegabyteOutput`). |
+| macOS | Output lost at the child's exit shows only when that exit is the terminal's last close. bash's exit was not, for a reason not identified, so it waited for the read even without MiniPty's own slave descriptor. | Tests of the child's last output use a zsh child, whose exit is the last close (`PtyMacExitDrainTests`). |
 
 ## Lessons Learned
 

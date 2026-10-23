@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23); their macOS test runs are pending. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -389,7 +389,7 @@ Phase 1 leaves threads and memory per session unchanged, so this table (`bench -
 
 ### Phase 2 result
 
-Implemented 2026-10-23 and measured on Windows and Linux; macOS is pending (`dotnet test -c Release`).
+Implemented 2026-10-23 and measured on Windows and Linux. The full suite passed on macOS later that day, with the follow-up under [Phase 4 result](#phase-4-result).
 
 **Delivered:**
 - **`IPtyOutputDriver`** (`Wake`, `CancelRead`, `OnPumpFinished`) is all the pump asks of a driver: re-check my state, release a blocked read, I am done. `PtyReaderThread` implements it, so a session still costs no driver object.
@@ -452,7 +452,7 @@ BenchmarkDotNet on Windows, mean of two rounds each (allocation in parentheses):
 
 ### Phase 3 result
 
-Implemented 2026-10-23 and tested on Windows and Linux; macOS is pending (`dotnet test -c Release`).
+Implemented 2026-10-23 and tested on Windows and Linux. On macOS, `OneShotResultsKeepMultiMegabyteOutput` then failed: its exact comparison did not allow for the macOS terminal writing CR CR LF when its output queue fills between the CR and the LF of a newline ([platform constraints](../specs/platform_support.md#platform-specific-test-constraints)). With that folded, the full suite passed on macOS (see [Phase 4 result](#phase-4-result)).
 
 **Delivered:**
 - **Segments instead of growing arrays.** `PtyCompletionSink` and `PtyCaptureSink` collect bytes and decoded text in `PtySegmentedBuffer<T>`, 16 KiB segments appended as output arrives. A write costs what it carries, and nothing written is copied until the result is built. `PtyGrowingBuffer` is gone.
@@ -557,11 +557,13 @@ Done 2026-10-23. The probe is [pty-readiness-probe.c](../../../scripts/pty-readi
 - A loop that reads at once loses nothing, also when the child writes more than the tty holds: a child writing 64 KiB blocks until it is read, and output ends at its exit. Output a grandchild writes after the session leader's exit is lost: its write fails with `EIO`, and the master reported end of file at the leader's exit.
 - **Output left unread is kept for 0.6 s.** When the exit is the slave's last close, XNU's slave close waits at most 60 clock ticks (0.6 s) for the master to read what the tty holds, then discards it, and the exit completes only then. 900 bytes left unread were all read at 551 ms and none at 601 ms. A child that sets its stdout non-blocking loses it at once.
 - **No bound when another process holds the slave.** The session leader's exit then waits for the master however long it takes, and nothing is lost.
-- **The same loss exists in MiniPty today:**
+- **The same loss existed in MiniPty, and is fixed:**
   - Reproduced with the reader thread: a zsh child printed 13–16 KiB, which filled the ring, then 500 bytes, and exited. A consumer that began reading 2 s later received everything but those 500 bytes, and the exit was reported at 0.94 s. A consumer that read at once received everything.
   - With `/bin/sh` (bash on macOS) the same script's exit waited until the consumer read, and nothing was lost: bash's exit was not the slave's last close. What else held the slave was not identified.
-  - Linux keeps the bytes readable after the slave closes. On FreeBSD (source), a last close drains for as long as the master keeps reading and discards after 1 s without progress. When another process still holds the slave, the leader's exit revokes the tty and discards at once, the opposite of macOS.
-  - See Risks.
+  - **Fix:** on macOS the session now holds a descriptor of the slave from spawn until the master closes, so the child's exit is never the last close. The exit waits for the consumer instead of discarding: a child whose output nobody reads already blocks once the ring and the tty fill, and this moves that point by at most 1 KiB. Disposal still discards the output, so a child held in its exit ends with the session ([Post-exit drain](../references/pty_crossplatform.md#post-exit-drain)).
+  - **Tests** (`PtyMacExitDrainTests`): the zsh scenario above receives every byte, and its exit is not reported before the read; disposal ends a child held in its exit, and the slave descriptor closes with the session; a child the host starts does not inherit the descriptor. The first two failed before the fix, with 0 of 500 bytes and no descriptor held, and the third failed with the descriptor opened without close-on-exec.
+  - The full suite then passed on macOS 26.6.2: 617 tests, 615 passed, the 2 planned skips.
+  - Only macOS holds the descriptor. Linux keeps the bytes readable after the slave closes, and a descriptor of the host would keep output from ending at the exit there. On FreeBSD (source), a last close drains for as long as the master keeps reading and discards after 1 s without progress. When another process still holds the slave, the leader's exit revokes the tty and discards at once, the opposite of macOS.
 
 **FreeBSD from source:**
 - `EVFILT_READ` reports the bytes queued and `EVFILT_WRITE` the room left, level-triggered.
@@ -665,7 +667,7 @@ Done 2026-10-23. The probe is [pty-readiness-probe.c](../../../scripts/pty-readi
 ## Risks and Open Questions
 
 - **macOS readiness on a pty master:** settled by Phase 4, `kqueue` holds up. FreeBSD's choice rests on source alone until the probe runs there.
-- **macOS discards output left in the tty when the child's exit is the slave's last close**, 0.6 s after the exit. A session whose ring is full then, because its consumer has stopped, loses up to 1 KiB of final output; reproduced with today's reader thread ([Phase 4 result](#phase-4-result)). The loop cannot rescue it from the exit report, which arrives after the window. Whether MiniPty holds a slave descriptor of its own on macOS to avoid it, at the price of an exit that waits for the consumer, is open; on FreeBSD the same descriptor would make the exit discard at once.
+- **macOS discards output left in the tty when the child's exit is the slave's last close**, 0.6 s after the exit: settled after Phase 4, since the session holds a slave descriptor on macOS ([Phase 4 result](#phase-4-result)). The Unix engine keeps closing that descriptor with the master. If FreeBSD runs need the same guarantee, they need another remedy, because there the descriptor would make the exit discard at once.
 - **Windows chunk count** with a consumer faster than ConPTY's slices; see Coalescing.
 - **Windows thread-pool dependence** of read completions; see Isolation Rules.
 - **Capture timestamps** stop being one per transport read if read boundaries change; Capture's contract may need rewording.

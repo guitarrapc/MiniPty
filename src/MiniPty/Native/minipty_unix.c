@@ -353,7 +353,8 @@ static int minipty_spawn_darwin_once(
     const char *cwd,
     char *const *argv,
     char *const *envp,
-    pid_t *pid_out)
+    pid_t *pid_out,
+    int *slave_out)
 {
     char helper_path[PATH_MAX];
     char slave_name[128];
@@ -540,6 +541,17 @@ done:
         posix_spawn_file_actions_destroy(&actions);
     if (attrs_initialized)
         posix_spawnattr_destroy(&attrs);
+    /*
+     * The caller keeps the slave open until it closes the master, so the child's exit is never the terminal's last
+     * close. On that last close XNU waits at most 0.6 s (ptsclose sets t_timeout to 60 ticks) for the master to read
+     * what the terminal still holds, then discards it, and a session whose consumer had stopped reading lost up to
+     * 1 KiB of the child's last output. With another descriptor open, a session leader's exit waits for the master
+     * without a bound and then revokes the terminal, which still ends output at the exit.
+     */
+    if (success) {
+        *slave_out = slave;
+        slave = -1;
+    }
     if (slave >= 0)
         close(slave);
     for (size_t i = 0; i < low_fd_opened; i++) {
@@ -568,7 +580,8 @@ static int spawn_pty_child_darwin(
     const char *file,
     char *const *argv,
     char *const *envp,
-    pid_t *pid_out)
+    pid_t *pid_out,
+    int *slave_out)
 {
     int err = 0;
 
@@ -577,7 +590,7 @@ static int spawn_pty_child_darwin(
     (void)file;
 
     for (int attempt = 0; attempt < MINIPTY_SPAWN_RETRY_MAX; attempt++) {
-        err = minipty_spawn_darwin_once(master, winp, cwd, argv, envp, pid_out);
+        err = minipty_spawn_darwin_once(master, winp, cwd, argv, envp, pid_out, slave_out);
         if (err == 0)
             return 0;
         if (!minipty_spawn_err_is_transient(err))
@@ -601,11 +614,13 @@ static int spawn_pty_child(
     char *const *argv,
     char *const *envp,
     pid_t *pid_out,
-    int *pidfd_out)
+    int *pidfd_out,
+    int *slave_out)
 {
+    *slave_out = -1;
 #if defined(__APPLE__)
     *pidfd_out = -1;
-    return spawn_pty_child_darwin(master, winp, cwd, file, argv, envp, pid_out);
+    return spawn_pty_child_darwin(master, winp, cwd, file, argv, envp, pid_out, slave_out);
 #else
     return spawn_pty_child_forkpty(master, winp, cwd, file, argv, envp, pid_out, pidfd_out);
 #endif
@@ -619,12 +634,13 @@ int minipty_fork_pty_exec(
     char *const *argv,
     char *const *envp,
     int *pid_out,
-    int *pidfd_out)
+    int *pidfd_out,
+    int *slave_out)
 {
     pid_t pid = -1;
     int err;
 
-    err = spawn_pty_child(master, winp, working_directory, file, argv, envp, &pid, pidfd_out);
+    err = spawn_pty_child(master, winp, working_directory, file, argv, envp, &pid, pidfd_out, slave_out);
     if (err != 0)
         return err;
 

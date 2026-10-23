@@ -668,7 +668,11 @@ public sealed class PtyTests
         }
         else
         {
-            // The terminal turns each newline into CR LF.
+            // The terminal turns each newline into CR LF. A macOS terminal writes CR CR LF instead when its 1 KiB output
+            // queue fills right after the CR, because it puts the CR again when it retries the LF, so those are folded.
+            if (OperatingSystem.IsMacOS())
+                text = text.Replace("\r\r\n", "\r\n", StringComparison.Ordinal);
+
             await Assert.That(text).IsEqualTo(new StringBuilder().Insert(0, "€\r\n", Size / 4).ToString());
         }
     }

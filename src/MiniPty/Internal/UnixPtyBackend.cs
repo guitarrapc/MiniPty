@@ -33,9 +33,10 @@ internal static partial class UnixPtyBackend
         var pid = 0;
         var master = 0;
         var pidfd = -1;
+        var slave = -1;
         unsafe
         {
-            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd);
+            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd, &slave);
             if (spawnError != 0)
             {
                 exec.Dispose();
@@ -46,7 +47,7 @@ internal static partial class UnixPtyBackend
         try
         {
             PtyStartTestHook.Run(PtyStartStage.Spawned, pid);
-            return new UnixPtyBackendInstance(master, pid, pidfd, size, exec);
+            return new UnixPtyBackendInstance(master, slave, pid, pidfd, size, exec);
         }
         catch
         {
@@ -60,6 +61,8 @@ internal static partial class UnixPtyBackend
             exec.Dispose();
             if (master >= 0)
                 UnixInterop.close(master);
+            if (slave >= 0)
+                UnixInterop.close(slave);
             throw;
         }
     }
@@ -72,7 +75,8 @@ internal static partial class UnixPtyBackend
         IntPtr argv,
         IntPtr envp,
         int* pid,
-        int* pidfd) =>
+        int* pidfd,
+        int* slave) =>
         minipty_fork_pty_exec(
             master,
             winsize,
@@ -81,7 +85,8 @@ internal static partial class UnixPtyBackend
             (byte**)argv,
             (byte**)envp,
             pid,
-            pidfd);
+            pidfd,
+            slave);
 
     private sealed class UnixExecPayload : IDisposable
     {
@@ -141,6 +146,11 @@ internal static partial class UnixPtyBackend
         private const int InputDisposed = 2;
 
         private readonly int _master;
+        // macOS only, -1 elsewhere: a descriptor of the slave that closes with the master, so the child's exit is never
+        // the terminal's last close. On that close macOS discards what the master has not read within 0.6 s; with this
+        // descriptor open, the session leader's exit waits until the master has read it. Linux keeps unread output after
+        // the last close, and there a descriptor of the host would keep output from ending at the exit.
+        private readonly int _slave;
         private readonly int _pid;
         private readonly UnixExecPayload? _execHold;
         // Serializes the child's reap with signal delivery, so Kill can never reach a pid the watcher has
@@ -178,9 +188,10 @@ internal static partial class UnixPtyBackend
         private bool _disposed;
         private PtySize _size;
 
-        public UnixPtyBackendInstance(int master, int pid, int pidfd, PtySize size, UnixExecPayload execHold)
+        public UnixPtyBackendInstance(int master, int slave, int pid, int pidfd, PtySize size, UnixExecPayload execHold)
         {
             _master = master;
+            _slave = slave;
             _pid = pid;
             _pidfd = pidfd;
             _execHold = execHold;
@@ -758,9 +769,14 @@ internal static partial class UnixPtyBackend
 
         private void ReleaseMaster()
         {
-            // The last reference after the close closes the descriptor.
+            // The last reference after the close closes the descriptor, and the slave's with it. The master goes first,
+            // so its close hangs the terminal up as before, also for a child held in its exit until the master is read.
             if (Interlocked.Add(ref _masterState, -MasterReference) == MasterClosedBit)
+            {
                 UnixInterop.close(_master);
+                if (_slave >= 0)
+                    UnixInterop.close(_slave);
+            }
         }
 
         /// <summary>
@@ -1245,7 +1261,8 @@ internal static partial class UnixPtyBackend
         byte** argv,
         byte** envp,
         int* pid_out,
-        int* pidfd_out);
+        int* pidfd_out,
+        int* slave_out);
 
     [LibraryImport("minipty_unix", SetLastError = true)]
     private static partial int minipty_set_winsize(
