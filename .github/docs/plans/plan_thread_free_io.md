@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented on Windows and Linux (2026-10-23); their macOS measurements are pending. Phase 2 has not started. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phase 2 has not started. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -245,8 +245,8 @@ A flood through the bridge took 8.0 WebSocket frames per 32 KiB (4.0 KiB each) a
 | WebSocket `Bridge_32KiB_Bytes` | 107.2 ms (±32.8) | 26.43 KB |
 
 **Not measured here:**
-- macOS, which is run on a maintainer's machine with the commands under the Phase 1 result.
-- BenchmarkDotNet on Linux; on Linux the sample's A/B runs stand in for it.
+- macOS, which was measured with Phase 1: its numbers, and an A/B against this baseline, are under the Phase 1 result.
+- BenchmarkDotNet on Linux and macOS; there the sample's A/B runs stand in for it.
 - The CPU of a trickling child on Windows, which Phase 5 measures against its change.
 
 **Lessons**
@@ -288,7 +288,7 @@ A flood through the bridge took 8.0 WebSocket frames per 32 KiB (4.0 KiB each) a
 
 ### Phase 1 result
 
-Implemented 2026-10-23 on Windows and Linux; macOS is pending (commands below).
+Implemented 2026-10-23 on Windows and Linux, and measured on macOS the same day (see [On macOS](#on-macos)).
 
 **Delivered as planned:**
 - **The byte ring.** `PtyOutputPump.PublishSize` (4 KiB) is the most one read and its continuation reads publish at once. `Capacity` (16 KiB) is the ring. The producer waits while less than `PublishSize` is free, so a consumer that frees a few bytes at a time does not cause a read per release.
@@ -335,16 +335,37 @@ BenchmarkDotNet on Windows, with the fix:
 - **Times** moved within the spread between runs of the same build, which is about ±4 ms for these spawn-bound benchmarks.
   - An alternating A/B of the exit benchmarks measured Phase 1 at 35.0 / 34.2 ms, against 37.0 / 35.3 ms for the baseline.
   - A second round in which both builds were the baseline measured 35.8 / 33.7 and 36.2 / 34.6 ms.
-- **Tests:** the full suite passed on Windows and on Linux: 592 tests, 590 passed, the 2 planned skips.
+- **Tests:** the full suite passed on Windows, on Linux, and on macOS: 592 tests, 590 passed, the 2 planned skips.
 - **NativeAOT:** the sample publishes and passes `--smoke` on Windows and on Linux.
 
-**On macOS** (pending), on this branch:
-- `dotnet test -c Release`.
-- `dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench --sessions 16,64,256`.
-- What to compare:
-  - Phase 1 leaves threads and memory per session unchanged, so these numbers also serve as the macOS baseline for Phase 6.
-  - Compare frames per 32 KiB with the 8.0 that four-slot chunking gives.
-  - Repeat the flood 5–10 times (`bench --sessions 1 --echo 5 --flood-bytes 33554432`) and check that every run reports the full output, with no "no exit message" and no "session failed".
+#### On macOS
+
+Apple M2 with 8 logical CPUs, macOS 26.6.2, .NET 10.0.13, `WebTerminalScale bench` on a Release JIT build. The A/B baseline is the commit before Phases 0 and 1 with this sample added; Phase 0 changed no engine code.
+
+Phase 1 leaves threads and memory per session unchanged, so this table (`bench --sessions 16,64,256`) is also the macOS baseline for Phase 6:
+
+| Sessions | Threads | Pool threads | Other threads per session | Working set (MB) | Echo p50 / p99 (ms) |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 31 | 5 | — | 78.5 | — |
+| 16 | 50 | 9 | 0.94 | 81.2 | 1.32 / 1.48 |
+| 64 | 116 | 28 | 0.97 | 92.2 | 1.31 / 1.47 |
+| 256 | 308 | 28 | 0.99 | 85.0 | 1.38 / 1.56 |
+
+- As on Linux, every open session holds exactly one more thread: its output reader.
+- The bench reports 0 for private memory and for handles on macOS, so the reader threads' stack reservations, 8 MB per session on Linux, cannot be read from it.
+- Working set at 256 sessions ranged from 85 to 110 MB over three runs (two of Phase 1, one of the baseline), so on macOS it is only a rough figure.
+
+| | Baseline | Phase 1 |
+|---|---:|---:|
+| Frames for a 32 MiB flood through the bridge (6 alternating rounds) | 8,295 in every round | 8,270–8,291 |
+| Frames per 32 KiB | 8.0 | 8.0 |
+| Flood throughput (mean of 6 rounds, MB/s) | 64.2 | 64.7 |
+| Echo p50 / p99 at 64 sessions (ms) | 1.46 / 2.43 | 1.31–1.49 / 1.47–1.82 |
+| Threads at 256 sessions | 308 | 308 |
+
+- **Every flood arrived in full.** The 32 MiB flood ran 16 times on Phase 1: 10 times on its own, and 6 times in the A/B. Each run received all 33,178 KiB (the 32 MiB plus the CR the terminal adds before each newline) and the exit message, and the host printed no "session failed". Throughput was 57–70 MB/s.
+- **The baseline lost no output in its 6 rounds.** That is too few to say macOS is free of the race that Phase 1 fixed, which lost output in about one of ten runs on Windows and Linux.
+- **Frames do not drop on macOS as they do on Windows.** In the baseline every frame but the last was exactly 4 KiB: the reader always filled a slot. With Phase 1 most chunks are still a single 4 KiB publish, so the bridge has usually sent one before the next is published. Frames are the same, which meets this phase's bar.
 
 ### Phase 2: Event-driven pump
 
