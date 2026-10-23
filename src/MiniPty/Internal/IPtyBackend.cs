@@ -76,8 +76,9 @@ internal interface IPtyBackend : IDisposable
 
     /// <summary>
     /// Starts reading output for <paramref name="pump"/> with this backend's <see cref="IPtyOutputDriver"/>. Called
-    /// once, by the session constructor. Today every backend runs the pump on a <see cref="PtyReaderThread"/> over its
-    /// <see cref="IPtyBlockingOutput"/>; a backend whose reads hold no thread starts its own driver here instead.
+    /// once, by the session constructor. Windows starts a <see cref="WindowsOutputDriver"/>, which holds no thread; Unix,
+    /// and Windows under the rollback switch (<see cref="PtyOutputDrivers"/>), run the pump on a
+    /// <see cref="PtyReaderThread"/> over the backend's <see cref="IPtyBlockingOutput"/>.
     /// </summary>
     public void StartOutput(PtyOutputPump pump);
     /// <summary>

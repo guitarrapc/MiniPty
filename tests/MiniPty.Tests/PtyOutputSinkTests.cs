@@ -35,6 +35,57 @@ public sealed class PtyOutputSinkTests
     }
 
     /// <summary>
+    /// Reads that follow one another closely join one chunk, as the reader thread's coalescing window joined them, so a
+    /// driver that publishes each read as it completes does not multiply Capture's chunks: within the gap of the previous
+    /// read, the budget from the chunk's first read, and one publish of size. The joined chunk keeps its first read's
+    /// time, and its text joins too. Output delivered without a read timestamp never joins.
+    /// </summary>
+    [Test]
+    public async Task CaptureJoinsReadsThatFollowClosely()
+    {
+        var origin = Stopwatch.GetTimestamp();
+        long At(int microseconds) => origin + Stopwatch.Frequency * (1000 + microseconds) / 1_000_000;
+        var sink = new PtyCaptureSink(origin, TimeProvider.System, Encoding.UTF8, decodeOutput: true);
+
+        // Within the gap: one chunk.
+        sink.Write("a"u8, At(0));
+        sink.Write("b"u8, At(100));
+        sink.Write("c"u8, At(200));
+        // A longer gap starts a chunk, which takes reads 400 µs apart until its budget runs out.
+        for (var i = 0; i < 7; i++)
+            sink.Write("d"u8, At(1500 + i * 400));
+        // A read that would make the chunk larger than one publish starts a chunk.
+        sink.Write(Fill('e', PtyOutputPump.PublishSize - 1), At(10_000));
+        sink.Write("ff"u8, At(10_100));
+        // Output read before the sink attached never joins.
+        sink.Write("g"u8, timestamp: 0);
+        sink.Write("h"u8, timestamp: 0);
+        sink.OnOutputEnded();
+        var result = sink.ToResult(exitCode: 0);
+
+        string[] expected = ["abc", "dddddd", "d", new string('e', PtyOutputPump.PublishSize - 1), "ff", "g", "h"];
+        await Assert.That(result.Chunks.Count).IsEqualTo(expected.Length);
+        var text = result.GetTextChunks();
+        await Assert.That(text.Count).IsEqualTo(expected.Length);
+        for (var i = 0; i < expected.Length; i++)
+        {
+            await Assert.That(Encoding.UTF8.GetString(result.Chunks[i].Data.Span)).IsEqualTo(expected[i]);
+            await Assert.That(new string(text[i].Text.Span)).IsEqualTo(expected[i]);
+            await Assert.That(text[i].Time).IsEqualTo(result.Chunks[i].Time);
+        }
+
+        // A joined chunk keeps the time of its first read.
+        await Assert.That(result.Chunks[0].Time).IsEqualTo(Stopwatch.GetElapsedTime(origin, At(0)));
+    }
+
+    private static byte[] Fill(char value, int length)
+    {
+        var bytes = new byte[length];
+        bytes.AsSpan().Fill((byte)value);
+        return bytes;
+    }
+
+    /// <summary>
     /// A write can hold more than one read: output published before a sink attached arrives as one contiguous span of
     /// up to the whole output ring. Decoding sized its buffer for one read and threw on such a span. Characters split
     /// across writes must still decode whole.
@@ -197,46 +248,55 @@ public sealed class PtyOutputSinkTests
         const int Reads = 8;
         const int Runs = 20;
 
+        // What the sink allocates on the threads that run it, beyond its result. Counted per thread, so work elsewhere in
+        // the process (the test framework, the runtime) cannot reach the number.
         long Run()
         {
             var sink = new PtyCompletionSink(Encoding.UTF8, decodeOutput);
             // Each step on a thread of its own, which ends afterwards, as pool workers come and go.
-            OnNewThread(() =>
+            var allocated = OnNewThread(() =>
             {
                 for (var i = 0; i < Reads; i++)
                     sink.Write(read, timestamp: 0);
             });
-            OnNewThread(sink.OnOutputEnded);
+            allocated += OnNewThread(sink.OnOutputEnded);
             long resultBytes = 0;
-            OnNewThread(() =>
+            allocated += OnNewThread(() =>
             {
                 var payload = sink.ToPayload();
                 resultBytes = payload.Bytes.Length + (payload.Chars?.Length ?? 0) * sizeof(char);
             });
-            return resultBytes;
+            return allocated - resultBytes;
         }
 
         // Warm up, so that buffers and the payload types exist before measuring.
         for (var i = 0; i < 3; i++)
             Run();
 
-        var before = GC.GetTotalAllocatedBytes(precise: true);
-        long results = 0;
+        long beyondResults = 0;
         for (var i = 0; i < Runs; i++)
-            results += Run();
+            beyondResults += Run();
 
-        var beyondResults = (GC.GetTotalAllocatedBytes(precise: true) - before - results) / Runs;
+        beyondResults /= Runs;
 
-        // Three threads, a sink, a decoder, a payload, and closures cost well under this per run; one regrown 4 KiB
-        // buffer alone exceeds it.
-        await Assert.That(beyondResults).IsLessThan(4 * 1024L);
+        // The payload, the result arrays' headers, and the decoder's flush cost a few hundred bytes per run; one regrown
+        // 4 KiB buffer alone exceeds this, and stranded pool arrays cost 6.4 KB per run (81 KB with decoding).
+        await Assert.That(beyondResults).IsLessThan(1024L);
     }
 
-    private static void OnNewThread(Action action)
+    /// <summary>Runs <paramref name="action"/> on a new thread, which then ends; returns what it allocated there.</summary>
+    private static long OnNewThread(Action action)
     {
-        var thread = new Thread(() => action());
+        long allocated = 0;
+        var thread = new Thread(() =>
+        {
+            var start = GC.GetAllocatedBytesForCurrentThread();
+            action();
+            allocated = GC.GetAllocatedBytesForCurrentThread() - start;
+        });
         thread.Start();
         thread.Join();
+        return allocated;
     }
 
     /// <summary>

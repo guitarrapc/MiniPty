@@ -4,7 +4,7 @@ Implemented contract for `PtySession.CompleteAsync`, `PtyCompleteOptions`, and `
 
 ## `CompleteAsync`
 
-`CompleteAsync` collects the PTY output, optionally writes stdin, waits for child exit, drains remaining output, and returns a `PtyResult`. Output is collected on the session's background reader thread as it arrives, so awaiting `CompleteAsync` does not block the calling thread on output or exit. `Input`, when set, is written first as by `WriteInputAsync`, without blocking the calling thread (see [Core Session](core_session.md#caller-context)).
+`CompleteAsync` collects the PTY output, optionally writes stdin, waits for child exit, drains remaining output, and returns a `PtyResult`. Output is collected as it arrives (through I/O completions on Windows, on the session's background reader thread on Unix), so awaiting `CompleteAsync` does not block the calling thread on output or exit. `Input`, when set, is written first as by `WriteInputAsync`, without blocking the calling thread (see [Core Session](core_session.md#caller-context)).
 
 This API is intended for one-shot command execution. It is not a high-level long-lived interactive session API.
 

@@ -964,7 +964,7 @@ public sealed class PtyOutputPumpTests
         public virtual PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes) => null;
         public PtyPendingInput? QueueInput(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer) => null;
         public void SetOutputPump(PtyOutputPump pump) { }
-        public void StartOutput(PtyOutputPump pump) => PtyReaderThread.Run(pump, this);
+        public virtual void StartOutput(PtyOutputPump pump) => PtyReaderThread.Run(pump, this);
         public void WaitWhileOutputBlocked(PtyReaderThread reader) => reader.WaitForWake(System.Threading.Timeout.Infinite);
         public int ProcessId => 0;
         public bool HasExited => _hasExited;

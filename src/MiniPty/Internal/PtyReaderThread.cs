@@ -7,7 +7,8 @@ namespace MiniPty.Internal;
 /// <summary>
 /// The output driver that blocks in the transport: dedicated background threads that each run one session's
 /// <see cref="PtyOutputPump"/> over the backend's <see cref="IPtyBlockingOutput"/>, so blocking transport reads never
-/// occupy a thread-pool worker and never run on a caller's thread.
+/// occupy a thread-pool worker and never run on a caller's thread. Unix reads this way until its engine lands; Windows
+/// only under the rollback switch (<see cref="PtyOutputDrivers"/>).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -32,7 +33,8 @@ namespace MiniPty.Internal;
 /// primitive is never touched after the thread retires.
 /// </para>
 /// <para>
-/// A Windows pump reads its pipe with a blocking <c>ReadFile</c> that no event can interrupt. The thread
+/// A Windows pump (under the rollback switch) reads its anonymous pipe with a blocking <c>ReadFile</c> that no event
+/// can interrupt. The thread
 /// therefore also holds a handle to itself, so <see cref="CancelRead"/> can release that read with
 /// <c>CancelSynchronousIo</c> when the pipe's writer never goes away (see <see cref="PtyOutputPump.OnDrainTick"/>).
 /// </para>
@@ -257,6 +259,8 @@ internal sealed class PtyReaderThread : IPtyOutputDriver
             {
                 try
                 {
+                    // A blocking read needs its buffer while it waits, so this driver holds the ring until end of output.
+                    pump.HoldRing();
                     Produce(pump, source);
                 }
                 finally

@@ -16,7 +16,8 @@ namespace MiniPty;
 /// <c>UnixPtyBackend</c> behind <see cref="IPtyBackend"/>.
 /// </para>
 /// <para>
-/// PTY output is read from spawn on a dedicated background thread into a small bounded buffer, and exactly one
+/// PTY output is read from spawn into a small bounded buffer, never on the caller's thread and never by blocking a
+/// thread-pool worker (through I/O completions on Windows, on a dedicated background thread on Unix), and exactly one
 /// consumer drains it: <see cref="ReadOutputAsync"/>, <see cref="Output"/>, <see cref="CompleteAsync"/>, or the
 /// <c>MiniPty.Capture</c> package. When nothing drains it the buffer fills, reading stops, and the child may block
 /// on its next write, as it would on a terminal nobody reads.
@@ -462,8 +463,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </param>
     /// <returns>A <see cref="PtyResult"/> with merged <see cref="PtyResult.Output"/> bytes and exit code.</returns>
     /// <remarks>
-    /// Output is collected on the session's reader thread while the child runs, so awaiting this method does not
-    /// block the calling thread. <see cref="PtyCompleteOptions.Input"/> is written as by
+    /// Output is collected as it is read while the child runs, never on the calling thread, so awaiting this method
+    /// does not block it. <see cref="PtyCompleteOptions.Input"/> is written as by
     /// <see cref="WriteInputAsync(string, Encoding?, CancellationToken)"/>, without blocking either.
     /// </remarks>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>

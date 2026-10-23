@@ -20,7 +20,8 @@ internal interface IPtyOutputWaiter
 /// waited for. The driver calls the producer members (<see cref="NextReadSpan"/>, <see cref="Publish"/>,
 /// <see cref="Finish"/>, and the free-space handshake) as output arrives, and the pump calls the driver back when its
 /// state changes in a way the driver cannot see from the transport: the consumer freed space, a sink attached, the
-/// close was requested, disposal began, or the drain gave up on the transport ending. Today the driver is a
+/// close was requested, disposal began, or the drain gave up on the transport ending. Windows reads through I/O
+/// completions (<see cref="WindowsOutputDriver"/>); Unix, and Windows under the rollback switch, on a
 /// <see cref="PtyReaderThread"/> blocking in the transport.
 /// </para>
 /// <para>
@@ -52,9 +53,12 @@ internal interface IPtyOutputWaiter
 /// (<see cref="OnDrainTick"/>).
 /// </para>
 /// <para>
-/// <b>Lifetime.</b> The pump and the session each hold a reference to the ring; it returns to the pool when both
-/// are done, so the reader never writes into an array another renter owns. Disposal makes the pump discard
-/// output until the transport ends, which ConPTY needs to finish closing.
+/// <b>Lifetime.</b> The ring is taken from the pool when the driver first reads into it (<see cref="HoldRing"/>), and
+/// given back once the driver has let go of it (<see cref="LetGoOfRing"/>) and no unread output remains, or the session
+/// was disposed, whichever comes last, so the driver never writes into an array another renter owns and a consumer's
+/// chunk stays valid until it releases it. A driver that blocks in the transport holds the ring until end of output; one
+/// that can wait without a buffer lets go of it whenever the consumer has caught up, so an idle session holds none.
+/// Disposal makes the pump discard output until the transport ends, which ConPTY needs to finish closing.
 /// </para>
 /// </remarks>
 internal sealed class PtyOutputPump : IValueTaskSource
@@ -82,10 +86,20 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// <summary>The drain has given up on the OS ending the transport; the reader drains without blocking and stops.</summary>
     private const int FlagEndOfOutputForced = 16;
 
+    // Who has the ring (_ringState), guarded by lock (this): nobody, the driver, or unread output it left behind.
+    private const int RingNone = 0;
+    private const int RingHeld = 1;
+    private const int RingKept = 2;
+
     private readonly IPtyBackend _backend;
     // A second concurrent stop waiter falls back to a task; the first uses the allocation-free slot below.
     private TaskCompletionSource? _stoppedFallback;
-    private readonly byte[] _ring;
+    // The last ring taken. Not cleared when it goes back to the pool: the consumer reads it only while output is unread,
+    // which keeps it here, and a consumer racing disposal must find an array, not null.
+    private byte[]? _ring;
+    private int _ringState;
+    // Set by a driver that wants a wake once the consumer has released all unread output (see WakeDriverWhenEmpty).
+    private int _wakeWhenEmpty;
     // Consumer side: where unread output starts, and how much of it the last TryPeek handed out.
     private int _head;
     private int _peeked;
@@ -94,7 +108,6 @@ internal sealed class PtyOutputPump : IValueTaskSource
     // Published bytes the consumer has not released.
     private int _count;
     private int _flags;
-    private int _ringReferences = 2;
     private int _producerWaiting;
     // The armed consumer wait's generation, or 0 when no wait is armed. A signaler claims the generation it read.
     private int _consumerWaiting;
@@ -114,7 +127,6 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal PtyOutputPump(IPtyBackend backend)
     {
         _backend = backend;
-        _ring = PtyBufferPool.Rent();
     }
 
     /// <summary>Guarded by the <see cref="PtyOutputDrainScheduler"/> lock.</summary>
@@ -147,9 +159,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
     // ---------------------------------------------------------------- Producer (the output driver)
     //
     // The driver calls these as it waits for the transport, one call at a time for this pump. Its loop is:
-    // DeliverBacklogToSink; when IsFull, the free-space handshake; then read into NextReadSpan, OnOutputRead for each
-    // read that returned bytes, and Publish; and Finish once at the end, also after a failure. After disposal it skips
-    // the first two steps and keeps reading only to let the transport end.
+    // DeliverBacklogToSink; when IsFull, the free-space handshake; then HoldRing, read into NextReadSpan, OnOutputRead for
+    // each read that returned bytes, and Publish; and Finish once at the end, also after a failure. After disposal it
+    // skips the first two steps and keeps reading only to let the transport end. A driver that can wait for output
+    // without a buffer calls LetGoOfRing before such a wait, and WakeDriverWhenEmpty to learn when a read it left posted
+    // into the ring is all that keeps the ring.
 
     /// <summary>
     /// Whether less than <see cref="PublishSize"/> is free, so the driver waits for the consumer instead of reading. It
@@ -171,16 +185,77 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// The span the next read fills: at least <see cref="PublishSize"/> is free unless the ring is full, so it holds no
     /// unread output. It ends at <see cref="PublishSize"/> or at the end of the buffer, and the next publish continues
     /// at the start. After disposal nothing reads the ring, so the driver reuses the same span only to let the
-    /// transport end.
+    /// transport end. Only while the driver holds the ring (<see cref="HoldRing"/>); the buffer is pinned, so a read
+    /// may stay posted into the span until it completes.
     /// </summary>
     internal Span<byte> NextReadSpan
     {
         get
         {
+            Debug.Assert(_ringState == RingHeld);
             var start = _tail;
-            return _ring.AsSpan(start, Math.Min(PublishSize, Capacity - start));
+            return _ring!.AsSpan(start, Math.Min(PublishSize, Capacity - start));
         }
     }
+
+    /// <summary>Whether published output is still unread (or handed out and not released).</summary>
+    internal bool HasUnreadOutput => Volatile.Read(ref _count) != 0;
+
+    /// <summary>
+    /// Makes sure the driver holds a ring before it reads: the one unread output kept, or one from the pool. Cheap once
+    /// held.
+    /// </summary>
+    internal void HoldRing()
+    {
+        // Only the driver moves the ring into or out of RingHeld, so it can read its own state without the lock.
+        if (Volatile.Read(ref _ringState) == RingHeld)
+            return;
+
+        lock (this)
+        {
+            if (_ringState == RingNone)
+                _ring = PtyBufferPool.Rent();
+
+            Volatile.Write(ref _ringState, RingHeld);
+        }
+    }
+
+    /// <summary>
+    /// The driver no longer reads into the ring: it waits for output without a buffer, or it has finished. The ring goes
+    /// back to the pool at once when nothing in it is unread or the session was disposed; otherwise it stays for the
+    /// consumer, and goes back once the consumer has released the last of it (or at disposal), unless the driver holds
+    /// it again first. Never call it while a read posted into the ring is outstanding.
+    /// </summary>
+    internal void LetGoOfRing()
+    {
+        if (Volatile.Read(ref _ringState) != RingHeld)
+            return;
+
+        lock (this)
+        {
+            Volatile.Write(ref _ringState, RingKept);
+            ReturnKeptRingLocked();
+        }
+    }
+
+    /// <summary>
+    /// Asks for one <see cref="IPtyOutputDriver.Wake"/> once the consumer has released all unread output, for a driver
+    /// whose read posted into the ring is then the only thing keeping it. Returns <see langword="false"/> when nothing is
+    /// unread already, so the driver acts at once; the request then stands no longer.
+    /// </summary>
+    internal bool WakeDriverWhenEmpty()
+    {
+        // A full fence before the check, paired with the consumer's release-then-check in OnRingEmptied: one sees the other.
+        Interlocked.Exchange(ref _wakeWhenEmpty, 1);
+        if (Volatile.Read(ref _count) != 0)
+            return true;
+
+        Volatile.Write(ref _wakeWhenEmpty, 0);
+        return false;
+    }
+
+    /// <summary>Withdraws <see cref="WakeDriverWhenEmpty"/>: the read it was about has completed.</summary>
+    internal void ClearWakeWhenEmpty() => Volatile.Write(ref _wakeWhenEmpty, 0);
 
     /// <summary>
     /// Stamps a read that returned bytes, for the post-exit quiet interval: per read, so the empty tail of a
@@ -239,7 +314,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
                 // Output published before the sink attached goes first, so the sink sees output in order. The span just
                 // read is not published, so the next read reuses it.
                 DrainRingInto(sink);
-                sink.Write(_ring.AsSpan(start, length), timestamp);
+                sink.Write(_ring!.AsSpan(start, length), timestamp);
                 return;
             }
         }
@@ -272,14 +347,19 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private void DrainRingInto(PtyOutputSink sink)
     {
         int count;
+        var drained = false;
         while ((count = Volatile.Read(ref _count)) > 0)
         {
             var head = _head;
             var length = Math.Min(count, Capacity - head);
-            sink.Write(_ring.AsSpan(head, length), timestamp: 0);
+            sink.Write(_ring!.AsSpan(head, length), timestamp: 0);
             _head = Advance(head, length);
             Interlocked.Add(ref _count, -length);
+            drained = true;
         }
+
+        if (drained)
+            ReturnKeptRingLocked();
     }
 
     /// <summary>
@@ -308,9 +388,15 @@ internal sealed class PtyOutputPump : IValueTaskSource
             }
 
             // The pump no longer touches the ring or the driver. Let go of both before completion becomes
-            // observable: a consumer that disposes the session as soon as it sees end of output then makes the
-            // final ring release, and a session started right after finds a reader thread already parked.
-            ReleaseRing();
+            // observable: a ring with nothing unread is back in the pool before the consumer sees end of output (and
+            // otherwise goes back when the consumer releases the rest, or at disposal), and a session started right
+            // after finds the driver already free.
+            if (_ringState == RingHeld)
+            {
+                Volatile.Write(ref _ringState, RingKept);
+                ReturnKeptRingLocked();
+            }
+
             _driver!.OnPumpFinished(this);
             SetFlag(FlagProducerFinished);
         }
@@ -351,7 +437,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
         // Read per peek rather than cached: the backend returns a constant, and the pump object stays smaller.
         var length = Math.Min(Math.Min(count, Capacity - head), _backend.OutputChunkLimit);
         _peeked = length;
-        data = _ring.AsMemory(head, length);
+        // Unread output keeps the ring, and the count read above was published after the ring was taken.
+        data = _ring!.AsMemory(head, length);
         return true;
     }
 
@@ -361,7 +448,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
         var length = _peeked;
         _peeked = 0;
         _head = Advance(_head, length);
-        Interlocked.Add(ref _count, -length);
+        if (Interlocked.Add(ref _count, -length) == 0 && length != 0)
+            OnRingEmptied();
+
         WakeProducerIfSpace();
     }
 
@@ -369,21 +458,56 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal int CopyTo(Span<byte> destination)
     {
         var copied = 0;
+        var emptied = false;
         int count;
         while (copied < destination.Length && (count = Volatile.Read(ref _count)) > 0)
         {
             var head = _head;
             var take = Math.Min(Math.Min(count, Capacity - head), destination.Length - copied);
-            _ring.AsSpan(head, take).CopyTo(destination[copied..]);
+            _ring!.AsSpan(head, take).CopyTo(destination[copied..]);
             copied += take;
             _head = Advance(head, take);
-            Interlocked.Add(ref _count, -take);
+            emptied = Interlocked.Add(ref _count, -take) == 0;
         }
 
         if (copied > 0)
+        {
+            if (emptied)
+                OnRingEmptied();
+
             WakeProducerIfSpace();
+        }
 
         return copied;
+    }
+
+    /// <summary>
+    /// The consumer released the last unread output: a ring the driver let go of goes back to the pool, and a driver that
+    /// asked for it (<see cref="WakeDriverWhenEmpty"/>) is woken to let go of the one it holds for a posted read.
+    /// </summary>
+    private void OnRingEmptied()
+    {
+        if (Volatile.Read(ref _ringState) == RingKept)
+        {
+            lock (this)
+                ReturnKeptRingLocked();
+        }
+
+        if (Volatile.Read(ref _wakeWhenEmpty) != 0 && Interlocked.Exchange(ref _wakeWhenEmpty, 0) != 0)
+            Volatile.Read(ref _driver)?.Wake(this);
+    }
+
+    /// <summary>
+    /// Returns a ring the driver let go of, once nothing in it is unread or the session was disposed (whose chunks are
+    /// invalid). Caller holds the pump lock.
+    /// </summary>
+    private void ReturnKeptRingLocked()
+    {
+        if (_ringState != RingKept || (Volatile.Read(ref _count) != 0 && !IsSessionDisposed))
+            return;
+
+        Volatile.Write(ref _ringState, RingNone);
+        PtyBufferPool.Return(_ring!);
     }
 
     /// <summary>
@@ -617,13 +741,18 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// <summary>
     /// Second half of session disposal, after the backend was disposed: wakes a Unix reader to observe the disposal,
     /// which ends reading even while the master stays open for a hung-up child, releases a Windows read that the
-    /// closed pseudo-console did not end (the output pipe held open by another process), and drops the session's
-    /// reference to the ring.
+    /// closed pseudo-console did not end (the output pipe held open by another process), and gives back a ring that
+    /// only unread output kept: chunks are invalid after disposal. A ring the driver still holds goes back when it lets
+    /// go of it.
     /// </summary>
     internal void OnSessionDisposed()
     {
         Volatile.Read(ref _driver)?.CancelRead(this);
-        ReleaseRing();
+        if (Volatile.Read(ref _ringState) == RingKept)
+        {
+            lock (this)
+                ReturnKeptRingLocked();
+        }
     }
 
     /// <summary>
@@ -677,11 +806,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// </summary>
     internal void WakeDriver() => Volatile.Read(ref _driver)?.Wake(this);
 
-    private void ReleaseRing()
-    {
-        if (Interlocked.Decrement(ref _ringReferences) == 0)
-            PtyBufferPool.Return(_ring);
-    }
+    /// <summary>The driver attached to this pump, for tests that check which one a backend chose.</summary>
+    internal IPtyOutputDriver? Driver => Volatile.Read(ref _driver);
 
     private void SetFlag(int flag) => Interlocked.Or(ref _flags, flag);
 

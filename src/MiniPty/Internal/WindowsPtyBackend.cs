@@ -123,12 +123,20 @@ internal static class WindowsPtyBackend
     /// </summary>
     private const int InputPipeBufferSize = 4096;
     private const string InputPipeNamePrefix = @"\\.\pipe\minipty-input-";
+    /// <summary>
+    /// The output pipe's buffer: what ConPTY can write ahead of MiniPty's reads, beyond the ring. It bounds the output
+    /// still in flight when a child is interrupted during a flood, and keeps the anonymous pipe's default size.
+    /// </summary>
+    private const int OutputPipeBufferSize = 4096;
+    private const string OutputPipeNamePrefix = @"\\.\pipe\minipty-output-";
+    private const uint PipeAccessInbound = 0x00000001;
     private const uint PipeAccessOutbound = 0x00000002;
     private const uint FileFlagOverlapped = 0x40000000;
     private const uint FileFlagFirstPipeInstance = 0x00080000;
     // PIPE_TYPE_BYTE, PIPE_READMODE_BYTE, and PIPE_WAIT are zero.
     private const uint PipeRejectRemoteClients = 0x00000008;
     private const uint GenericRead = 0x80000000;
+    private const uint GenericWrite = 0x40000000;
     private const uint OpenExisting = 3;
     private const uint SecuritySqosPresent = 0x00100000;
     private const uint SecurityIdentification = 0x00010000;
@@ -165,7 +173,10 @@ internal static class WindowsPtyBackend
         var environment = PtyEnvironment.BuildWindows(startInfo, out var pathOverridden, out var childPath);
         var (applicationName, commandLine) = BuildLaunch(startInfo, pathOverridden, childPath);
 
-        CreateConPtyPipes(out var inputRead, out var inputWrite, out var outputRead, out var outputWrite);
+        // Read once per session: the rollback switch picks the reader-thread driver, which reads an anonymous pipe with
+        // blocking calls, and a blocking read is not allowed on a handle opened for overlapped I/O.
+        var readsOnThread = PtyOutputDrivers.UseReaderThreads;
+        CreateConPtyPipes(readsOnThread, out var inputRead, out var inputWrite, out var outputRead, out var outputWrite);
         var inputWriteHandle = inputWrite;
         var outputReadHandle = outputRead;
 
@@ -320,7 +331,8 @@ internal static class WindowsPtyBackend
                 process,
                 job,
                 processInfo.dwProcessId,
-                size);
+                size,
+                readsOnThread);
         }
         catch
         {
@@ -429,8 +441,10 @@ internal static class WindowsPtyBackend
     {
         private static readonly IOCompletionCallback s_inputWriteCompleted = OnInputWriteCompleted;
 
-        // MiniPty's end of the input pipe, opened overlapped (see CreateInputPipe).
+        // MiniPty's end of the input pipe, opened overlapped (see CreateConPtyPipes).
         private readonly SafeFileHandle _inputWriteHandle;
+        // MiniPty's end of the output pipe: overlapped, read by WindowsOutputDriver; or, under the rollback switch, an
+        // anonymous pipe that a reader thread reads with blocking calls.
         private readonly SafeFileHandle _outputReadHandle;
         // Resizes, clears, and closes through the ConPTY implementation that created the pseudo-console.
         private readonly SafePseudoConsoleHandle _hpc;
@@ -458,6 +472,8 @@ internal static class WindowsPtyBackend
         private bool _exited;
         private int _exitCode;
         private bool _disposed;
+        // The rollback switch was set when the session started (see PtyOutputDrivers).
+        private readonly bool _readsOnThread;
 
         // Input queue and overlapped write state (see InputState), created on the first write. Guarded by lock (this),
         // which also orders EOF bytes and the pipe's close with writes; locking the instance itself, which is never
@@ -474,8 +490,10 @@ internal static class WindowsPtyBackend
             SafeKernelHandle process,
             SafeKernelHandle? job,
             int processId,
-            PtySize size)
+            PtySize size,
+            bool readsOnThread)
         {
+            _readsOnThread = readsOnThread;
             _inputWriteHandle = inputWriteHandle;
             _outputReadHandle = outputReadHandle;
             _hpc = hpc;
@@ -1180,9 +1198,20 @@ internal static class WindowsPtyBackend
 
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
-        // The reader thread blocks in ReadFile on the anonymous output pipe, which cannot be read overlapped.
-        public void StartOutput(PtyOutputPump pump) => PtyReaderThread.Run(pump, this);
+        /// <summary>
+        /// Reads output through I/O completions on the overlapped output pipe, holding no thread; under the rollback
+        /// switch, on a reader thread that blocks in <c>ReadFile</c> on the anonymous pipe, through the
+        /// <see cref="IPtyBlockingOutput"/> members below.
+        /// </summary>
+        public void StartOutput(PtyOutputPump pump)
+        {
+            if (_readsOnThread)
+                PtyReaderThread.Run(pump, this);
+            else
+                WindowsOutputDriver.Run(pump, _outputReadHandle);
+        }
 
+        // The members below serve only the reader-thread driver of the rollback switch, which reads the anonymous pipe.
         // The output pipe handle is pinned by each ReadFile call (SafeHandle reference counting), so a concurrent
         // Dispose defers the close until the read returns, and later reads see ObjectDisposedException.
         public bool TryBeginOutputRead() => true;
@@ -1489,20 +1518,39 @@ internal static class WindowsPtyBackend
     }
 
     /// <summary>
-    /// Creates the ConPTY pipes: an anonymous output pipe, which the session's reader thread reads with blocking
-    /// reads, and an input pipe whose MiniPty end is overlapped (see <see cref="CreateInputPipe"/>).
+    /// Creates the ConPTY pipes. MiniPty's end of each is the server end of a named pipe opened overlapped (see
+    /// <see cref="CreateOverlappedPipe"/>): input waits without blocking a thread while ConPTY is not taking it, and
+    /// output is read through I/O completions. Under the rollback switch (<paramref name="anonymousOutput"/>) the output
+    /// pipe is anonymous instead, for a reader thread's blocking reads.
     /// </summary>
     /// <remarks>
     /// Every handle is non-inheritable. ConPTY duplicates its ends into its host process itself, and the child is
     /// created without handle inheritance.
     /// </remarks>
     private static void CreateConPtyPipes(
+        bool anonymousOutput,
         out SafeFileHandle inputRead,
         out SafeFileHandle inputWrite,
         out SafeFileHandle outputRead,
         out SafeFileHandle outputWrite)
     {
-        CreateInputPipe(out inputRead, out inputWrite);
+        CreateOverlappedPipe(InputPipeNamePrefix, inbound: false, InputPipeBufferSize, out inputRead, out inputWrite);
+        if (!anonymousOutput)
+        {
+            try
+            {
+                CreateOverlappedPipe(OutputPipeNamePrefix, inbound: true, OutputPipeBufferSize, out outputWrite, out outputRead);
+            }
+            catch
+            {
+                inputRead.Dispose();
+                inputWrite.Dispose();
+                throw;
+            }
+
+            return;
+        }
+
         if (!WindowsInterop.CreatePipe(out outputRead, out outputWrite, IntPtr.Zero, 0))
         {
             var error = Marshal.GetLastPInvokeError();
@@ -1515,33 +1563,38 @@ internal static class WindowsPtyBackend
     }
 
     /// <summary>
-    /// Creates the input pipe. MiniPty's end is the server end of a named pipe opened overlapped, because an
-    /// anonymous pipe cannot be. A write that ConPTY is not taking yet then waits without blocking a thread.
-    /// ConPTY's end is opened synchronously by name, as ConPTY reads it with blocking reads.
+    /// Creates one ConPTY pipe. MiniPty's end is the server end of a named pipe opened overlapped, because an
+    /// anonymous pipe cannot be: it writes input (<paramref name="inbound"/> false) or reads output. ConPTY's end is
+    /// opened synchronously by name, as ConPTY uses it with blocking calls.
     /// </summary>
     /// <remarks>
     /// The name is random; the pipe allows one instance, must be the first instance of that name, and rejects remote
     /// clients. If anything else connects first, opening ConPTY's end fails and so does the spawn, instead of sharing
-    /// the pipe. The buffer keeps the anonymous pipe's default size; with none, every write would wait for ConPTY to
-    /// read it.
+    /// the pipe. The buffer keeps the anonymous pipe's default size: with none, every write would wait for the other end
+    /// to read it.
     /// </remarks>
-    private static unsafe void CreateInputPipe(out SafeFileHandle conPtySide, out SafeFileHandle ourSide)
+    internal static unsafe void CreateOverlappedPipe(
+        string namePrefix,
+        bool inbound,
+        int bufferSize,
+        out SafeFileHandle conPtySide,
+        out SafeFileHandle ourSide)
     {
         // Prefix, 32 hexadecimal digits, and the terminating NUL.
-        Span<char> name = stackalloc char[InputPipeNamePrefix.Length + 33];
-        InputPipeNamePrefix.CopyTo(name);
-        Guid.NewGuid().TryFormat(name[InputPipeNamePrefix.Length..], out var digits, "N");
-        name[InputPipeNamePrefix.Length + digits] = '\0';
+        Span<char> name = stackalloc char[namePrefix.Length + 33];
+        namePrefix.CopyTo(name);
+        Guid.NewGuid().TryFormat(name[namePrefix.Length..], out var digits, "N");
+        name[namePrefix.Length + digits] = '\0';
 
         fixed (char* path = name)
         {
             ourSide = WindowsInterop.CreateNamedPipe(
                 path,
-                PipeAccessOutbound | FileFlagOverlapped | FileFlagFirstPipeInstance,
+                (inbound ? PipeAccessInbound : PipeAccessOutbound) | FileFlagOverlapped | FileFlagFirstPipeInstance,
                 PipeRejectRemoteClients,
                 1,
-                InputPipeBufferSize,
-                0,
+                inbound ? 0u : (uint)bufferSize,
+                inbound ? (uint)bufferSize : 0u,
                 0,
                 IntPtr.Zero);
             if (ourSide.IsInvalid)
@@ -1553,7 +1606,7 @@ internal static class WindowsPtyBackend
 
             conPtySide = WindowsInterop.CreateFile(
                 path,
-                GenericRead,
+                inbound ? GenericWrite : GenericRead,
                 0,
                 IntPtr.Zero,
                 OpenExisting,
@@ -1564,7 +1617,9 @@ internal static class WindowsPtyBackend
                 var error = Marshal.GetLastPInvokeError();
                 conPtySide.Dispose();
                 ourSide.Dispose();
-                throw new Win32Exception(error, "Opening the ConPTY end of the input pipe failed");
+                throw new Win32Exception(error, inbound
+                    ? "Opening the ConPTY end of the output pipe failed"
+                    : "Opening the ConPTY end of the input pipe failed");
             }
         }
     }

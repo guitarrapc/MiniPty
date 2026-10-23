@@ -14,9 +14,9 @@ namespace MiniPty.Internal;
 /// session is being disposed, or the post-exit drain gave up on the transport ending.
 /// </para>
 /// <para>
-/// <see cref="PtyReaderThread"/> is the driver today: a dedicated thread that blocks in the transport
-/// (<see cref="IPtyBlockingOutput"/>). Drivers that hold no thread (I/O completions on Windows, one readiness loop on
-/// Unix) implement the same members against their own wait. Every member takes the pump it is about, so a driver
+/// Windows reads through I/O completions (<see cref="WindowsOutputDriver"/>), holding no thread. Unix, and Windows under
+/// the rollback switch (<see cref="PtyOutputDrivers"/>), use <see cref="PtyReaderThread"/>: a dedicated thread that
+/// blocks in the transport (<see cref="IPtyBlockingOutput"/>). Every member takes the pump it is about, so a driver
 /// serving several sessions over its lifetime ignores calls aimed at a pump it no longer serves.
 /// </para>
 /// </remarks>

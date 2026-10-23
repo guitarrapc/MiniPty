@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; its macOS test run is pending. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -609,6 +609,93 @@ Done 2026-10-23. The probe is [pty-readiness-probe.c](../../../scripts/pty-readi
 
 **Done when:** Acceptance holds on Windows.
 
+### Phase 5 result
+
+Implemented 2026-10-23 and tested on Windows and Linux; Phase 5 changes nothing that runs on macOS but the ring hand-off in the pump, which the full macOS suite covers (`dotnet test -c Release`).
+
+**Delivered:**
+- **`WindowsOutputDriver`**, the driver that holds no thread. It waits with a zero-byte read while nothing is unread and holds no ring then. When output arrives, it takes a ring, reads what the pipe holds with reads that complete at once, and publishes each. While output is unread it posts the next read into the ring; when the consumer has released everything, that read is canceled and the ring goes back. On a full ring it posts nothing and parks until the consumer's release wakes it.
+- **The output pipe** is the overlapped server end of a named pipe, created by `CreateOverlappedPipe`, which now serves both directions with a 4 KiB buffer each. It is bound with `ThreadPoolBoundHandle`, with completion-port notification skipped for reads that complete at once.
+- **Rings taken on demand.** The pump no longer rents its ring at construction. `HoldRing` takes one when the driver reads, and `LetGoOfRing` gives it back, at once when nothing is unread, otherwise when the consumer releases the last byte or the session is disposed. `WakeDriverWhenEmpty` is how the Windows driver learns that the read it left posted is all that keeps the ring. The reader thread holds its ring from its first read to end of output, as before.
+- **Stopping.** The forced end of output after the close cancels the posted read with `CancelIoEx` and takes what `PeekNamedPipe` reports without waiting. Disposal closes the pipe, which ends the posted read.
+- **Pooled driver objects.** Each driver owns a `PreAllocatedOverlapped`, 208 B to create, so drivers are pooled across sessions like reader threads; a session pays only its pipe's binding, 40 B.
+- **The rollback switch**, `MiniPty.UseOutputReaderThreads`, read when each session starts (`PtyOutputDrivers`). It selects the reader-thread driver over an anonymous pipe, exactly as before this phase. Unix reads with reader threads either way until Phase 6.
+- **Tests:** the census tests run on Windows and pass (they skip on Unix until Phase 6). `PtyWindowsOutputDriverTests` drives the driver over a plain named pipe whose writer the test controls:
+  - output in order, and its end when the writer closes;
+  - a full ring posts no read, and resumes on the consumer's release;
+  - an idle session gives its ring back and still reads the next output;
+  - the forced end cancels a posted zero-byte read, and a posted ring read whose output is still unread;
+  - the drain ends output after the driver parked;
+  - disposal during a flood, and disposal while the pipe never runs empty;
+  - a completion after disposal never touches a returned ring;
+  - the rollback switch selects reader threads.
+
+**Deviation: the reader thread's Windows code stays.** The plan removed `CancelSynchronousIo`, the reader's thread handle, and the `PIPE_NOWAIT` window here. But a rollback has to read the way the code did before, and a blocking read is not allowed on a handle opened for overlapped I/O. So the switch also brings back the anonymous pipe, and that code goes with the reader thread in Phase 7.
+
+**Found and fixed during the phase** (the lessons are in [core_session.md](../specs/core_session.md#lessons-learned)):
+- **A step must give its thread back.** A step that kept finding output held its pool thread, and its pin on the pipe, for as long as the child wrote. After disposal this was a livelock: about one of a thousand disposals during a flood never completed. Steps now continue as a new work item after 16 reads.
+- **A resumed driver ends the free-space handshake.** Otherwise the drain never saw the transport go quiet, and a session whose pipe stayed open never reached end of output.
+- **Early completions.** A completion can arrive before its step has recorded the posted read; it is handed to that step. The posting step does all its work before recording the posted state.
+
+**Unplanned: Capture joins close reads itself.** A sink is written once per read, so with no coalescing window Capture recorded one chunk per ConPTY slice again: a 32 KiB capture allocated 4.7 KB more (9.3 KB with text). The Capture sink now joins a read into the previous chunk within the reader thread's own windows (500 µs from the previous read, 2 ms from the chunk's first, 4 KiB at most), decided from the reads' timestamps as each write arrives. That is the consumer-side batching the plan calls for, applied where the consumer is a sink. `CaptureJoinsReadsThatFollowClosely` covers it.
+
+**Unplanned: one test measured the process.** `SinksFedAndFinishedOnOtherThreadsAllocateNothingBeyondTheResult` counted all allocation in the process, and failed now and then at 4.2 KB against its 4 KiB limit, from work elsewhere in the test host. It now counts per thread, on the threads that run the sink, with a 1 KiB limit. The Phase 2 sink still fails it, at 4.9 KB and 80 KB per run.
+
+**Measured** (A/B against Phase 4, alternating the builds; the trickle numbers compare the two drivers of one build through the rollback switch):
+
+`WebTerminalScale bench --sessions 16,64,128 --echo 200` on Windows, two rounds each:
+
+| | Phase 4 | Phase 5 |
+|---|---:|---:|
+| Other threads per session (16 / 64 / 128 sessions) | 0.94 / 1.00 / 1.01 | 0.00 / 0.02 / 0.02 |
+| Threads at 128 sessions | 209–213 | 100–101 |
+| Handles at 128 sessions | 2,187–2,205 | 1,739–1,759 |
+| Working set per session at 64 sessions (KB) | 312–326 | 276–293 |
+| Echo p50 / p99 at 64 sessions (ms) | 0.70–0.71 / 0.90–0.97 | 0.19–0.22 / 0.42–0.45 |
+| Flood: frames per 32 KiB (Phase 0: 8.0) | 6.2 | 5.5–5.6 |
+| Flood throughput (MB/s; ConPTY-bound) | 19.1 / 17.8 | 17.2 / 19.4 |
+
+- The pool threads at 64 and 128 sessions (35–52) come from the burst of connections and retire later, as in Phase 0; the census test, which waits for that, passes.
+- Echo is about 0.5 ms faster at p50, the 500 µs coalescing window the reader thread no longer waits out.
+
+Host CPU while children trickle 20 bytes per write, one run each (% of one core):
+
+| Sessions, interval | Reader threads | Completions |
+|---|---:|---:|
+| 1, 1 ms | 9.7 | 1.9 |
+| 1, 5 ms | 7.5 | 0.5 |
+| 1, 10 ms | 2.0 | 0.8 |
+| 8, 1 ms | 49.2 | 18.3 |
+| 8, 5 ms | 52.7 | 7.0 |
+| 8, 10 ms | 22.3 | 6.1 |
+
+With completions at 8 sessions and 1 ms, ConPTY delivered 107 KB/s against 66 KB/s, so that row also carries more output.
+
+BenchmarkDotNet on Windows, two rounds each (allocation; times moved within the spread between runs of the same build):
+
+| Benchmark | Phase 0 | Phase 4 | Phase 5 |
+|---|---:|---:|---:|
+| Integration `Session_Exit0_WaitForExit` | 1.25 KB | 1.24 KB | 1.28 KB |
+| Integration `Session_Exit0_Bytes` | — | 1.77 KB | 1.80 KB |
+| Integration `Session_32KiB_Bytes` | 38.37 KB | 38.30–38.31 KB | 38.34 KB |
+| Integration `Session_32KiB_StreamBytes` | 1.55 KB | 1.55–1.70 KB | 1.59 KB |
+| Integration `Capture_32KiB_Bytes` | 39.78 KB | 39.71–39.77 KB | 39.77 KB |
+| Integration `Capture_32KiB_Text` | — | 113.93 KB | 113.98 KB |
+| ConPty `Capture_32KiB_Bytes`, in-box / out-of-band | — | 39.71–39.77 / 35.35 KB | 39.77 / 35.41 KB |
+| WebSocket `Bridge_32KiB_Bytes` | 26.43 KB | 26.18–26.25 KB | 26.19–26.44 KB |
+
+- **Every session start costs 40 B more**: the pipe's binding to the completion port (`ThreadPoolBoundHandle`), the only allocation above Phase 0. `ThreadPool.BindHandle` with a reused `Overlapped` costs nothing, but it throws `PlatformNotSupportedException` when the host runs on the Windows thread pool (`System.Threading.ThreadPool.UseWindowsThreadPool`), where `ThreadPoolBoundHandle` works (72 B there). Reads, chunks, and exits allocate what they did. Accepted on 2026-10-24 as the price of having no thread per session (see Acceptance below).
+- The Capture rows are with the joining above; without it they were 44.4 KB and 123.3 KB.
+
+**Tests:** the full suite passed on Windows (628 tests) and on Linux (628 tests, 626 passed and the 2 census tests skipped, as they are until Phase 6). The driver, census, and ConPTY suites also pass with the host on the Windows thread pool.
+
+**NativeAOT:** `WebTerminalScale` (with `--smoke`), `Capture`, and `Session` publish without warnings and run on Windows.
+
+**Acceptance on Windows:**
+- **Held:** no thread grows with idle sessions; an idle session holds no output buffer; reads allocate nothing; echo latency is better and throughput the same; frames per 32 KiB are fewer than in Phase 0; NativeAOT works.
+- **Accepted exception (2026-10-24):** session start is 40 B above Phase 0, the completion-port binding (above). It is the price of having no thread per session, and the binding-free alternative fails on the Windows thread pool. The "not above the Phase 0 baseline" criterion therefore allows this 40 B for a Windows session start; reads, chunks, and exits stay at their baseline.
+- **Not measured on Windows:** 1,000 idle sessions (the bench went to 128), and the Linux NativeAOT publish, which this phase does not change.
+
 ### Phase 6: Unix engine
 
 **Goal:** one thread per load for all Unix sessions.
@@ -659,7 +746,7 @@ Done 2026-10-23. The probe is [pty-readiness-probe.c](../../../scripts/pty-readi
 
 - The process thread count does not grow with 64 or 1,000 idle sessions on Windows and Linux, nor with 64 on macOS. Windows exit watchers still add one thread per 63 sessions.
 - A session with no unread output holds no output buffer.
-- Reads allocate nothing. Allocation per session start, chunk, and exit is not above the Phase 0 baseline.
+- Reads allocate nothing. Allocation per session start, chunk, and exit is not above the Phase 0 baseline, except a Windows session start's 40 B completion-port binding, accepted in the [Phase 5 result](#phase-5-result).
 - Keystroke echo latency through the WebSocket bridge is not worse at p50 or p99, and throughput is not lower.
 - Frames per 32 KiB through the bridge are recorded on every platform. More than twice the Phase 0 baseline needs a decision before release.
 - The full test suite passes on Windows, Linux, and macOS, and a sample publishes and runs under NativeAOT on Windows and Linux.

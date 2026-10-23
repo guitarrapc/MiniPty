@@ -31,6 +31,35 @@ internal static partial class WindowsInterop
         out uint lpNumberOfBytesRead,
         IntPtr lpOverlapped);
 
+    /// <summary>
+    /// Overlapped read of a handle the caller has pinned: pass a null byte count and read the count from the overlapped
+    /// structure.
+    /// </summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool ReadFile(
+        IntPtr hFile,
+        byte* lpBuffer,
+        uint nNumberOfBytesToRead,
+        IntPtr lpNumberOfBytesRead,
+        NativeOverlapped* lpOverlapped);
+
+    /// <summary>For a handle the caller has already pinned. A null overlapped pointer cancels all of this process's I/O on it.</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool CancelIoEx(IntPtr hFile, IntPtr lpOverlapped);
+
+    /// <summary>For a pipe handle the caller has already pinned; reports the bytes waiting without reading them.</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool PeekNamedPipe(
+        IntPtr hNamedPipe,
+        IntPtr lpBuffer,
+        uint nBufferSize,
+        IntPtr lpBytesRead,
+        uint* lpTotalBytesAvail,
+        IntPtr lpBytesLeftThisMessage);
+
     /// <summary>Overlapped write: pass a null byte count and read the count from the overlapped structure.</summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

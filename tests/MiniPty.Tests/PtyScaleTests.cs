@@ -16,8 +16,8 @@ namespace MiniPty.Tests;
 public sealed class PtyScaleTests
 {
     private const string ThreadFreeIoSkip =
-        "Thread-free I/O Phase 5 (Windows) and Phase 6 (Unix): each reading session still holds a reader thread " +
-        "(.github/docs/plans/plan_thread_free_io.md).";
+        "Thread-free I/O Phase 6 (Unix): each reading Unix session still holds a reader thread, and its ring from spawn " +
+        "to end of output (.github/docs/plans/plan_thread_free_io.md).";
 
     private const int FewSessions = 16;
     private const int ManySessions = 64;
@@ -30,11 +30,14 @@ public sealed class PtyScaleTests
 
     private static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(60);
 
+    /// <summary>
+    /// Idle sessions hold no thread: their output waits on I/O completions, not on a reader thread each.
+    /// </summary>
     [Test]
     [NotInParallel]
-    [Skip(ThreadFreeIoSkip)]
     public async Task IdleSessionsHoldNoThread()
     {
+        Skip.When(!OperatingSystem.IsWindows(), ThreadFreeIoSkip);
         var sessions = new List<IdleSession>(ManySessions);
         try
         {
@@ -55,14 +58,15 @@ public sealed class PtyScaleTests
     }
 
     /// <summary>
-    /// An idle session whose output has been read holds no output buffer. Today every session holds its ring from
-    /// spawn to end of output, because a blocking read needs its buffer while it waits.
+    /// An idle session whose output has been read holds no output buffer: it waits with a zero-byte read and takes a ring
+    /// only while output is unread. A reader thread holds its ring from spawn to end of output instead, because a blocking
+    /// read needs its buffer while it waits.
     /// </summary>
     [Test]
     [NotInParallel]
-    [Skip(ThreadFreeIoSkip)]
     public async Task IdleSessionsHoldNoOutputBuffer()
     {
+        Skip.When(!OperatingSystem.IsWindows(), ThreadFreeIoSkip);
         var sessions = new List<IdleSession>(FewSessions);
         var before = MiniPty.Internal.PtyBufferPool.RentedCount;
         try
