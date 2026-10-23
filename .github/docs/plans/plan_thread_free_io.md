@@ -250,9 +250,10 @@ A flood through the bridge took 8.0 WebSocket frames per 32 KiB (4.0 KiB each) a
 - The CPU of a trickling child on Windows, which Phase 5 measures against its change.
 
 **Lessons**
-- **A path near `MAX_PATH` breaks benchmarks.** A checkout under a long temporary directory put BenchmarkDotNet's copy of the benchmark child at 258 characters. `CreateProcess` failed with error 206, and every 32 KiB benchmark reported NA. Run benchmarks from a short path.
+- **A path near `MAX_PATH` breaks benchmarks.** A checkout under a long temporary directory put BenchmarkDotNet's copy of the benchmark child at about 260 characters. `CreateProcess` failed with error 206, and every 32 KiB benchmark reported NA. Run benchmarks from a short path.
+  - The path BenchmarkDotNet reported was 258 characters, but recreated outside it, that path started. The limit measured exactly 260 there, in both kinds of host.
   - Long program paths need both the machine's `LongPathsEnabled` and a `longPathAware` manifest in the host.
-  - Even then, MiniPty leaves rooted names to `CreateProcess`'s own command-line search, which stays at `MAX_PATH`. Passing the path as the application name fixes that (measured), and is proposed separately.
+  - Even with both, `CreateProcess`'s own lookup of the command line stops at `MAX_PATH`. MiniPty now passes rooted and dot-relative program paths of 260 characters or more as the application name ([Program lookup](../specs/core_session.md#program-lookup-windows)).
 - **The WebSocket harness itself had to be right before its numbers meant anything.** The lessons on watching the bridge, closing the server's connection, and counting pool workers apart are in [terminal.md](../specs/terminal.md#lessons-learned).
 - **Repeated 32 MiB floods found a data-loss race that predates this plan:** one baseline run lost 60% of its output. See Phase 1 result.
 

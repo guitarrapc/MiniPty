@@ -72,6 +72,8 @@ These are verification choices, not API requirements, but they document pitfalls
 | Linux | A closed descriptor's number can be handed to the next one opened, so a before-and-after diff of open descriptors misses a leaked master under load. | Find a master by its terminal: `/proc/self/fdinfo/<fd>` reports `tty-index`, which matches the child's `/dev/pts/N`. |
 | Unix | Closing the last reference to the master already hangs up the session leader, so a test of the explicit `SIGHUP` passes without it. | The child sets `CLOCAL` (on macOS the close then hangs nothing up), or the test holds a duplicate of the master (Linux). |
 | Unix | A shell runs a trap only when its foreground command returns. | Children that trap `HUP` loop on `sleep 0.1` rather than block in `read` or a long `sleep`. |
+| Windows | A program under a path of 260 characters or more starts only in a host that opted into long paths (`longPathAware` in its manifest), and only where the machine allows them (`LongPathsEnabled`); otherwise the opt-in is ignored. | The test host declares it in `tests/MiniPty.Tests/app.manifest`, which is the SDK's default manifest plus that one setting. `WindowsLongProgramPathTests` return early where the machine does not allow long paths, and one of them covers that case instead. |
+| Windows | Benchmarks from a deep checkout fail to spawn: BenchmarkDotNet builds each job under `bin/Release/net10.0/<Job>/bin/Release/net10.0/`, which put the benchmark child at about 260 characters from a worktree under a temporary directory, and every benchmark that spawns it reported NA. | Run benchmarks from a short path. |
 | Unix | `kill(pid, 0)` succeeds on a zombie. | "The pid is gone" also asserts that the exit watcher reaped the child. |
 
 ## Lessons Learned

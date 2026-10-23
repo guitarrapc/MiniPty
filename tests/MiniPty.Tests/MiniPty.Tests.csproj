@@ -6,6 +6,8 @@
     <TestingPlatformShowTestsFailure>true</TestingPlatformShowTestsFailure>
     <!-- LibraryImport stubs need it. Tests that drive the native spawn helper directly declare their own libc imports. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Opts the test host into long paths (see app.manifest); Windows only, and only where the machine allows them. -->
+    <ApplicationManifest Condition="$([MSBuild]::IsOSPlatform('Windows'))">app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>

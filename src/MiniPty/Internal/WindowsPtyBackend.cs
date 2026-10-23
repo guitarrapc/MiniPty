@@ -1583,9 +1583,11 @@ internal static class WindowsPtyBackend
     /// the same lookup found, with the file name quoted by the MSVCRT rules and the quoted arguments after it. A
     /// program name that <c>CreateProcess</c> would search for is looked up here when the overlay sets or removes
     /// <c>PATH</c> (<paramref name="pathOverridden"/>), since <c>CreateProcess</c> searches only the host's
-    /// <c>PATH</c>; the file found becomes the application name, so it makes no lookup of its own. Anything else is
-    /// left to <c>CreateProcessW</c>'s own lookup, with the quoted arguments or the raw command line after the quoted
-    /// file name.
+    /// <c>PATH</c>; the file found becomes the application name, so it makes no lookup of its own. A rooted or
+    /// dot-relative program path of <c>MAX_PATH</c> or more becomes the application name too, since
+    /// <c>CreateProcess</c>'s own lookup fails there (<see cref="WindowsProgramLookup.TryResolveLongProgramPath"/>).
+    /// Anything else is left to <c>CreateProcessW</c>'s own lookup, with the quoted arguments or the raw command line
+    /// after the quoted file name.
     /// </summary>
     /// <param name="startInfo">The spawn options.</param>
     /// <param name="pathOverridden">Whether the overlay sets or removes <c>PATH</c>.</param>
@@ -1620,6 +1622,11 @@ internal static class WindowsPtyBackend
             var program = WindowsProgramLookup.ResolveProgram(fileName, WindowsProgramLookup.ChildLocations(fileName, childPath));
             return (program, BuildCommandLine(startInfo));
         }
+
+        // A rooted or dot-relative program path of MAX_PATH or more fails CreateProcess's own lookup even in a host that
+        // opted into long paths; as the application name it starts there. Shorter paths stay with the lookup.
+        if (!isBatchFile && WindowsProgramLookup.TryResolveLongProgramPath(fileName, out var longProgram))
+            return (longProgram, BuildCommandLine(startInfo));
 
         return (null, BuildCommandLine(startInfo));
     }
