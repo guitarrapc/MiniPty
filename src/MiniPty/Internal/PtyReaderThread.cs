@@ -14,8 +14,9 @@ namespace MiniPty.Internal;
 /// A pump owns its thread for as long as it reads. Once its transport reaches end of output, the thread parks
 /// and serves the next session's pump; a thread idle for <see cref="IdleTimeoutMs"/> exits. Reuse keeps
 /// steady-state spawning allocation-free: a new thread costs its managed objects, and the first pooled-array
-/// return on a new thread allocates that thread's array-pool cache (one-shot completion grows its result
-/// buffers on the reader thread). The thread is the driver, so a session costs no driver object of its own.
+/// return on a new thread allocates that thread's array-pool cache (Unix input that could not be written at once
+/// is returned to the pool on the reader thread). The thread is the driver, so a session costs no driver object
+/// of its own.
 /// </para>
 /// <para>
 /// <b>Reading.</b> Each transport read is published together with what <see cref="IPtyBlockingOutput.ReadMoreOutput"/>

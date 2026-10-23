@@ -609,6 +609,70 @@ public sealed class PtyTests
         await Assert.That(length).IsGreaterThanOrEqualTo(minimumLength);
     }
 
+    /// <summary>
+    /// One-shot results keep multi-megabyte output whole, and the text decoded while it arrives matches the bytes.
+    /// This much output spans hundreds of result segments, more than the segment pool keeps. On Unix every line holds
+    /// a three-byte character, so characters split between reads and between segments.
+    /// </summary>
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task OneShotResultsKeepMultiMegabyteOutput(bool capture)
+    {
+        const int Size = 4 * 1024 * 1024;
+
+        PtyStartInfo startInfo;
+        var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        if (windows)
+        {
+            if (!TryResolveWindowsPowerShell(out var powershell))
+                return;
+
+            startInfo = Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", $"[Console]::Out.Write(('x' * {Size}))"]);
+        }
+        else
+        {
+            // "€\n" is four bytes, so the cut falls between lines.
+            startInfo = UnixShell($"yes € | head -c {Size}");
+        }
+
+        var options = new PtyCompleteOptions { DecodeOutput = true };
+        ReadOnlyMemory<byte> output;
+        string text;
+        int exitCode;
+        if (capture)
+        {
+            var result = await PtyCapture.RunAsync(startInfo, new PtyCaptureOptions { Completion = options });
+            (output, text, exitCode) = (result.Output, result.GetTextString(), result.ExitCode);
+        }
+        else
+        {
+            await using var session = Pty.Start(startInfo);
+            var result = await session.CompleteAsync(options);
+            (output, text, exitCode) = (result.Output, result.GetTextString(), result.ExitCode);
+        }
+
+        await Assert.That(exitCode).IsEqualTo(0);
+        await Assert.That(text).IsEqualTo(Encoding.UTF8.GetString(output.Span));
+        if (windows)
+        {
+            // ConPTY renders the line into rows and adds sequences of its own, so only the characters are counted.
+            var count = 0;
+            foreach (var c in text)
+            {
+                if (c == 'x')
+                    count++;
+            }
+
+            await Assert.That(count).IsGreaterThanOrEqualTo(Size);
+        }
+        else
+        {
+            // The terminal turns each newline into CR LF.
+            await Assert.That(text).IsEqualTo(new StringBuilder().Insert(0, "€\r\n", Size / 4).ToString());
+        }
+    }
+
     [Test]
     public async Task PtyExitCodeIsCaptured()
     {

@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phase 2 is implemented and measured on Windows and Linux (2026-10-23); its macOS test run is pending. Phase 3 has not started. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23); their macOS test runs are pending. Phase 4 has not started. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -449,6 +449,48 @@ BenchmarkDotNet on Windows, mean of two rounds each (allocation in parentheses):
 **Measure:** the one-shot benchmarks (`Session_*_Bytes`, `Capture_*`), which gate this phase.
 
 **Done when:** no allocation regression with the reader-thread driver.
+
+### Phase 3 result
+
+Implemented 2026-10-23 and tested on Windows and Linux; macOS is pending (`dotnet test -c Release`).
+
+**Delivered:**
+- **Segments instead of growing arrays.** `PtyCompletionSink` and `PtyCaptureSink` collect bytes and decoded text in `PtySegmentedBuffer<T>`, 16 KiB segments appended as output arrives. A write costs what it carries, and nothing written is copied until the result is built. `PtyGrowingBuffer` is gone.
+- **A pool without thread affinity.** Segments come from `PtySegmentPool<T>`, one lock-guarded stack per element type that keeps at most 64 segments (1 MiB), so one large capture cannot hold its memory for the rest of the process. Output beyond what the pool holds allocates its extra segments, and the collector reclaims them.
+- **No bookkeeping objects.** The buffer is a struct of a segment table and a length, held inline in the sink. The tables (16 entries, 256 KiB of output) are pooled with the segments, and a buffer with more segments moves to a larger table that the pool does not keep.
+- **No decode scratch.** Text is decoded straight into the segments with `Decoder.Convert`. Only when a segment has less room left than one byte can decode to (two characters for UTF-8, a surrogate pair) do the next characters cross the boundary through a 64-character stack buffer.
+- **Results built on the caller's thread, once.** `OnOutputEnded` only flushes the decoder. `ToPayload` and `ToResult` merge the segments into one array each and return the segments, and a second call throws. `Abort` returns the segments of a failed completion, whose result nobody takes, also after output ended; before, an ended sink kept its buffers for a result that never came.
+- The on-demand text chunks of a Capture without `DecodeOutput` decode the same way.
+
+**Found and fixed: a Phase 1 regression.** Since Phase 1 a sink receives the backlog of several reads as one write of up to 16 KiB, but the decode scratch was still sized for one 4 KiB read. `CompleteAsync` and Capture with `DecodeOutput` threw when the sink attached after several reads had piled up, and on-demand text chunks threw for a chunk larger than one read. Every sink test had fed one read at a time.
+
+**Tests** (new):
+- `SinksDecodeAWriteLargerThanOneRead` and `CaptureTextChunksOnDemandDecodeAChunkLargerThanOneRead` for the regression, and `CompleteAsyncDecodesABacklogOfSeveralReads` for it end to end through the pump.
+- `SinksKeepMultiMegabyteOutputWithCharactersAcrossSegments`: 3 MiB in writes of 1 byte to 16 KiB, with three-byte sequences across byte segments and a surrogate pair at the last element of a character segment.
+- `OneShotResultsKeepMultiMegabyteOutput`: 4 MiB from a child through `CompleteAsync` and Capture. On Unix every line holds a three-byte character.
+- `SinksFedAndFinishedOnOtherThreadsAllocateNothingBeyondTheResult`: the writes, the finish, and the result each on a thread that then ends, over 20 runs. Before: 6.4 KB per run beyond the result for bytes, and 81 KB with decoding. After: 1.57 KB and 1.67 KB, the three threads and the sink's own objects. The test allows 4 KiB.
+- `AbortIsIdempotentAndNeverTouchesATakenResult` replaces the test that kept a finished result through `Abort`.
+- The full suite passed on Windows and on Linux: 614 tests, 612 passed, the 2 planned skips.
+- **NativeAOT:** the `Capture` and `Session` samples, which run Capture and `CompleteAsync`, publish without warnings and run on Windows. Linux was not published this phase; nothing in it is platform-specific.
+
+**Measured** (A/B, alternating the builds): BenchmarkDotNet on Windows, `PtyIntegrationBenchmarks`, two rounds each (allocation in parentheses). The first segmented version allocated 30–210 B more than Phase 2 on every one-shot benchmark: its buffer object was twice the old growing array, Capture had kept its bytes in an inline struct, and text past 32 K characters needed an overflow array. The numbers below are for the struct buffer with pooled tables.
+
+| Benchmark | Phase 2 | Phase 3 |
+|---|---:|---:|
+| `Session_Exit0_Bytes` | 37.6 / 35.6 ms (1.83 KB) | 35.0 / 34.6 ms (1.77 KB) |
+| `Session_Echo_Bytes` | 37.8 / 38.6 ms (1.88 KB) | 36.5 / 37.5 ms (1.81 KB) |
+| `Capture_Echo_Bytes` | 41.9 / 38.0 ms (3.08–3.09 KB) | 38.0 / 39.3 ms (3.02 KB) |
+| `Session_32KiB_Bytes` | 77.2 / 80.8 ms (38.36 KB) | 77.3 / 77.0 ms (38.30 KB) |
+| `Capture_32KiB_Bytes` | 77.1 / 76.9 ms (39.77 KB) | 79.8 / 81.4 ms (39.71–39.77 KB) |
+| `Session_Echo_Text` | 38.3 / 42.5 ms (2.20 KB) | 37.1 / 37.7 ms (2.10 KB) |
+| `Capture_Echo_Text` | 38.0 / 39.9 ms (4.55 KB) | 38.5 / 37.8 ms (4.45 KB) |
+| `Capture_32KiB_Text` | 78.2 / 80.6 ms (113.95 KB) | 77.4 / 75.9 ms (113.93 KB) |
+| `Capture_32KiB_DisplayPlain` | 77.5 / 78.9 ms (179.48 KB) | 79.1 / 77.7 ms (179.46–179.52 KB) |
+
+- Every one-shot benchmark allocates the same or 20–100 B less, except `Capture_32KiB_DisplayPlain`, which moved within ±40 B. The persistent benchmarks (`Session_Exit0_WaitForExit`, `Session_32KiB_StreamBytes`, `Session_32KiB_OutputStreamBytes`) did not change: 1.24, 1.55, and 1.65 KB.
+- Times moved within the spread between runs of the same build. Three benchmarks were rerun because a machine stall had slowed some iterations in one round of each build (StdDev 30–70 ms); the table uses the reruns for those three.
+
+**Left for Phase 6:** Unix input that the terminal cannot take at once is still rented from `ArrayPool<byte>.Shared` by the writing thread and returned by the reader thread once written. When the loop writes queued input, those buffers need the same treatment.
 
 ### Phase 4: Readiness probe for pty masters
 

@@ -448,6 +448,29 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
+    /// One-shot completion that attaches after output has piled up takes that backlog as one contiguous write of
+    /// several reads, and decodes it. Decoding sized its buffer for one read, so <c>CompleteAsync</c> with
+    /// <see cref="PtyCompleteOptions.DecodeOutput"/> failed once more than about 4 KiB was waiting.
+    /// </summary>
+    [Test]
+    public async Task CompleteAsyncDecodesABacklogOfSeveralReads()
+    {
+        int[] reads = [PtyOutputPump.PublishSize, PtyOutputPump.PublishSize, PtyOutputPump.PublishSize];
+        var backend = new ScriptedReadsBackend(reads, PtyOutputPump.Capacity, endAfter: false);
+        await using var session = new PtySession(backend);
+        await Assert.That(await WaitUntilAsync(() => backend.HasReadAll)).IsTrue();
+        // The last read is published right after it returns.
+        await Task.Delay(100);
+
+        backend.Exit(0);
+        var result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = true }).WaitAsync(Timeout);
+
+        await Assert.That(result.Output.Length).IsEqualTo(reads.Sum());
+        await Assert.That(ScriptedReadsBackend.IsSequence(result.Output.Span, start: 0)).IsTrue();
+        await Assert.That(result.GetText().Length).IsGreaterThan(0);
+    }
+
+    /// <summary>
     /// A consumer that still holds a chunk when the session is disposed releases it on its next <c>MoveNextAsync</c>,
     /// after the ring went back to the pool. The release only moves the ring's positions and never touches the buffer,
     /// so the call fails with <see cref="ObjectDisposedException"/>, as every read after disposal does.
@@ -814,6 +837,9 @@ public sealed class PtyOutputPumpTests
         private int _sequence;
 
         public override int OutputChunkLimit => chunkLimit;
+
+        /// <summary>Whether every scripted read has been returned.</summary>
+        public bool HasReadAll => Volatile.Read(ref _read) >= reads.Length;
 
         public static bool IsSequence(ReadOnlySpan<byte> data, int start)
         {

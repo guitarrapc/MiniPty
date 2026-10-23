@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Text;
 
 namespace MiniPty.Internal;
@@ -7,81 +6,62 @@ namespace MiniPty.Internal;
 /// <see cref="PtySession.CompleteAsync"/> output: merged bytes, plus text decoded while output arrives when
 /// <see cref="PtyCompleteOptions.DecodeOutput"/> is set.
 /// </summary>
+/// <remarks>
+/// Output collects in segments (<see cref="PtySegmentedBuffer{T}"/>), so a write costs what it carries, and is merged
+/// into the result arrays once, by <see cref="ToPayload"/> on the caller's thread. Nothing here depends on which thread
+/// delivers output: the segments come from a pool without per-thread caches.
+/// </remarks>
 internal sealed class PtyCompletionSink : PtyOutputSink
 {
-    private const int SustainedOutputInitialCapacity = 32 * 1024;
-
     private readonly Encoding _encoding;
-    private readonly PtyGrowingBuffer<byte> _bytes = new();
-    private readonly PtyGrowingBuffer<char>? _chars;
     private readonly Decoder? _decoder;
-    private char[]? _charScratch;
-    private PtyPumpPayload? _payload;
+    // Mutable structs, never readonly: a readonly field would hand every call a copy.
+    private PtySegmentedBuffer<byte> _bytes;
+    private PtySegmentedBuffer<char> _chars;
+    private PtySinkState _state;
 
     internal PtyCompletionSink(Encoding encoding, bool decodeOutput)
     {
         _encoding = encoding;
-        if (!decodeOutput)
-            return;
-
-        _chars = new PtyGrowingBuffer<char>();
-        _decoder = encoding.GetDecoder();
+        if (decodeOutput)
+            _decoder = encoding.GetDecoder();
     }
 
     internal override void Write(ReadOnlySpan<byte> data, long timestamp)
     {
-        // A second full read means sustained output: grow once to the bulk size instead of doubling up to it.
-        if (_bytes.Length == PtyReadBuffer.Size && data.Length == PtyReadBuffer.Size)
-            _bytes.EnsureCapacity(SustainedOutputInitialCapacity);
-
         _bytes.Append(data);
         if (_decoder is not null)
-            Decode(data, flush: false);
+            PtyTextDecoding.Decode(_decoder, _encoding, data, flush: false, ref _chars);
     }
 
-    /// <summary>Finishes the result on the reader thread, where the buffers were rented.</summary>
+    /// <summary>Flushes the decoder. The result arrays are built later, on the caller's thread, by <see cref="ToPayload"/>.</summary>
     internal override void OnOutputEnded()
     {
-        char[]? chars = null;
         if (_decoder is not null)
-        {
-            Decode(ReadOnlySpan<byte>.Empty, flush: true);
-            chars = _chars!.Detach();
-        }
+            PtyTextDecoding.Decode(_decoder, _encoding, ReadOnlySpan<byte>.Empty, flush: true, ref _chars);
 
-        var scratch = _charScratch;
-        if (scratch is not null)
-        {
-            _charScratch = null;
-            ArrayPool<char>.Shared.Return(scratch);
-        }
-
-        _payload = new PtyPumpPayload(_bytes.Detach(), chars, _encoding);
+        _state = PtySinkState.Ended;
     }
 
-    // Detached buffers are owned by the payload, so after OnOutputEnded only what it did not reach is returned.
+    /// <summary>
+    /// Returns the segments of a failed completion, whose result nobody takes, whether or not output had ended.
+    /// </summary>
     internal override void Abort()
     {
-        _bytes.Dispose();
-        _chars?.Dispose();
-        var scratch = _charScratch;
-        if (scratch is not null)
-        {
-            _charScratch = null;
-            ArrayPool<char>.Shared.Return(scratch);
-        }
+        _state = PtySinkState.Aborted;
+        _bytes.Release();
+        _chars.Release();
     }
 
-    /// <summary>Gets the result. Called once, after the drain wait reported end of output.</summary>
-    internal PtyPumpPayload ToPayload() =>
-        _payload ?? throw new InvalidOperationException("PTY output has not ended.");
-
-    private void Decode(ReadOnlySpan<byte> data, bool flush)
+    /// <summary>
+    /// Builds the result, merging the segments into its arrays. Called once, after the drain wait reported end of
+    /// output.
+    /// </summary>
+    internal PtyPumpPayload ToPayload()
     {
-        // Each write is at most one ring slot, so one maximum-size scratch buffer always fits it.
-        var scratch = _charScratch ??= ArrayPool<char>.Shared.Rent(PtyReadBuffer.GetCharBufferLength(_encoding));
-        var charCount = _decoder!.GetChars(data, scratch, flush);
-        if (charCount > 0)
-            _chars!.Append(scratch.AsSpan(0, charCount));
+        PtySinkStates.Take(ref _state);
+        var bytes = _bytes.ToArray();
+        var chars = _decoder is null ? null : _chars.ToArray();
+        return new PtyPumpPayload(bytes, chars, _encoding);
     }
 }

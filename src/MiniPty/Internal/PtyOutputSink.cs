@@ -5,14 +5,20 @@ namespace MiniPty.Internal;
 
 /// <summary>
 /// Output consumer for one-shot completion (<c>CompleteAsync</c>, <c>PtyCapture.RunAsync</c>): the pump writes
-/// into it directly on the reader thread, and the caller awaits end of output with the completion deadlines.
+/// into it directly on the thread that delivers output, and the caller awaits end of output with the completion
+/// deadlines.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Writing on the reader thread removes the hand-off through the ring and needs no consumer thread while
-/// output flows. A sink only accumulates and decodes, so the work stays short and never blocks the reader.
+/// Writing where output is delivered removes the hand-off through the ring and needs no consumer thread while
+/// output flows. A sink only accumulates and decodes, so the work stays short and never blocks delivery.
 /// Writes are serialized with attach and detach under the pump lock, and the caller reads the result only after
 /// the drain wait reports end of output.
+/// </para>
+/// <para>
+/// Delivery runs on a reader thread today, and on I/O completions or a loop shared by every session once reads hold
+/// no thread, so a sink must cost the same on any thread: no pool with per-thread caches, no growth that copies what
+/// was already written, and no result built until the caller asks for it on its own thread.
 /// </para>
 /// <para>
 /// The drain wait is a single reusable wait slot, so awaiting end of output allocates nothing. Its deadlines
@@ -34,10 +40,13 @@ internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
     private int _timedOut;
 
     /// <summary>
-    /// Receives output in order. Runs on the reader thread, or on the attaching thread for output read before the
-    /// sink attached to a pump that has already finished.
+    /// Receives output in order. Runs on the thread that delivers output, or on the attaching thread for output read
+    /// before the sink attached to a pump that has already finished.
     /// </summary>
-    /// <param name="data">Bytes of one transport read; valid only during the call.</param>
+    /// <param name="data">
+    /// Output of one or more transport reads, of any length (a backlog read before the sink attached arrives in as few
+    /// writes as the ring allows); valid only during the call.
+    /// </param>
     /// <param name="timestamp">
     /// <see cref="System.Diagnostics.Stopwatch"/> timestamp of the read's completion, or 0 for output read before the
     /// sink attached.
@@ -46,18 +55,17 @@ internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
 
     /// <summary>
     /// Called once after the last <see cref="Write"/>, on the same thread, before end of output is published.
-    /// Sinks finish their result here (flush decoders, detach pooled buffers) so every pooled rent and return of
-    /// a sink happens on one thread: an array returned on another thread lands in that thread's pool cache, and
-    /// the reader thread's next rent then misses and allocates.
+    /// Sinks finish their streaming state here (flush decoders). The result itself is built later, on the caller's
+    /// thread, once the drain wait reports end of output.
     /// </summary>
     internal virtual void OnOutputEnded()
     {
     }
 
     /// <summary>
-    /// Returns pooled buffers after a failed completion detached the sink, which then never reaches
-    /// <see cref="OnOutputEnded"/>. Called once no write can still be in progress (detaching is serialized with
-    /// writes). Idempotent, and safe after <see cref="OnOutputEnded"/> ran or failed part way.
+    /// Returns pooled buffers after a failed completion detached the sink; nobody takes its result afterwards. Called
+    /// once neither a write nor <see cref="OnOutputEnded"/> can still be in progress (detaching is serialized with
+    /// both). Idempotent, and safe whether or not <see cref="OnOutputEnded"/> ran, and after it failed part way.
     /// </summary>
     internal virtual void Abort()
     {
