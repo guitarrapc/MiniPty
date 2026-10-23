@@ -36,8 +36,8 @@ public sealed class PtyOutputPumpTests
 
         using var backend = UnixPtyBackend.Start(new PtyStartInfo { FileName = "sh", Arguments = ["-c", "exit 0"] });
 
-        await Assert.That(backend.CoalesceBudgetTicks).IsGreaterThan(0L);
-        await Assert.That(backend.CoalesceBudgetTicks).IsLessThanOrEqualTo(Stopwatch.Frequency * 5 / 1000);
+        await Assert.That(((IPtyBlockingOutput)backend).CoalesceBudgetTicks).IsGreaterThan(0L);
+        await Assert.That(((IPtyBlockingOutput)backend).CoalesceBudgetTicks).IsLessThanOrEqualTo(Stopwatch.Frequency * 5 / 1000);
     }
 
     /// <summary>
@@ -53,8 +53,8 @@ public sealed class PtyOutputPumpTests
         var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
         using var backend = WindowsPtyBackend.Start(new PtyStartInfo { FileName = cmd, Arguments = ["/c", "exit 0"] });
 
-        await Assert.That(backend.CoalesceBudgetTicks).IsGreaterThan(0L);
-        await Assert.That(backend.CoalesceBudgetTicks).IsLessThanOrEqualTo(Stopwatch.Frequency * 5 / 1000);
+        await Assert.That(((IPtyBlockingOutput)backend).CoalesceBudgetTicks).IsGreaterThan(0L);
+        await Assert.That(((IPtyBlockingOutput)backend).CoalesceBudgetTicks).IsLessThanOrEqualTo(Stopwatch.Frequency * 5 / 1000);
     }
 
     /// <summary>
@@ -926,7 +926,7 @@ public sealed class PtyOutputPumpTests
     /// A child that exits only through <see cref="Exit"/>. Subclasses script the output transport, and may script span
     /// writes to the input queue.
     /// </summary>
-    internal abstract class FakeBackend : IPtyBackend
+    internal abstract class FakeBackend : IPtyBackend, IPtyBlockingOutput
     {
         private readonly TaskCompletionSource<PtyExitStatus> _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private volatile bool _closed;
@@ -938,6 +938,7 @@ public sealed class PtyOutputPumpTests
         public virtual PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes) => null;
         public PtyPendingInput? QueueInput(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer) => null;
         public void SetOutputPump(PtyOutputPump pump) { }
+        public void StartOutput(PtyOutputPump pump) => PtyReaderThread.Run(pump, this);
         public void WaitWhileOutputBlocked(PtyReaderThread reader) => reader.WaitForWake(System.Threading.Timeout.Infinite);
         public int ProcessId => 0;
         public bool HasExited => _hasExited;

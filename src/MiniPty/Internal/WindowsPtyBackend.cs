@@ -425,7 +425,7 @@ internal static class WindowsPtyBackend
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private sealed unsafe class WindowsPtyBackendInstance : IPtyBackend, IPtyInputQueue, IWindowsExitObserver, IValueTaskSource<int>
+    private sealed unsafe class WindowsPtyBackendInstance : IPtyBackend, IPtyBlockingOutput, IPtyInputQueue, IWindowsExitObserver, IValueTaskSource<int>
     {
         private static readonly IOCompletionCallback s_inputWriteCompleted = OnInputWriteCompleted;
 
@@ -1179,6 +1179,9 @@ internal static class WindowsPtyBackend
         public int OutputChunkLimit => PtyOutputPump.Capacity;
 
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
+
+        // The reader thread blocks in ReadFile on the anonymous output pipe, which cannot be read overlapped.
+        public void StartOutput(PtyOutputPump pump) => PtyReaderThread.Run(pump, this);
 
         // The output pipe handle is pinned by each ReadFile call (SafeHandle reference counting), so a concurrent
         // Dispose defers the close until the read returns, and later reads see ObjectDisposedException.

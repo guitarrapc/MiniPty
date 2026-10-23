@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phase 2 has not started. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phase 2 is implemented and measured on Windows and Linux (2026-10-23); its macOS test run is pending. Phase 3 has not started. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -175,7 +175,7 @@ Each phase merges on its own with CI passing on Windows, Linux, and macOS. A tes
 
 Phases 5 and 6 can run in parallel on separate branches. They touch different backends and share only the contract from Phase 2. Phase 4 can run at any time before Phase 6 reaches macOS.
 
-Phases 1–3 keep today's reader thread and change one thing each, so each change is measured on its own, as G1 did. From Phase 2 on, an `AppContext` switch selects the reader-thread driver. That gives Phases 5 and 6 a rollback in the field, and Phase 7 decides whether it ships.
+Phases 1–3 keep today's reader thread and change one thing each, so each change is measured on its own, as G1 did. From Phase 5 on, when a second driver exists, an `AppContext` switch selects the reader-thread driver. That gives Phases 5 and 6 a rollback in the field, and Phase 7 decides whether it ships.
 
 ### Phase 0: Baseline and harness
 
@@ -381,11 +381,57 @@ Phase 1 leaves threads and memory per session unchanged, so this table (`bench -
 - The post-exit drain scheduler talks only to the pump.
 - The scripted backends in `PtyOutputPumpTests`, and the tests that construct backends or reader threads, move to the contract.
   - Those tests are `PtyConcurrentDisposeTests`, `PtyOutputYieldTests`, `PtyPendingInputTests`, and `PtyMacDescriptorTests`.
-- The `AppContext` switch for the reader-thread driver.
+- The `AppContext` switch for the reader-thread driver: moved to Phase 5, because with one driver there is nothing to select (see the Phase 2 result).
 
 **Tests:** the whole suite, unchanged in what it asserts.
 
 **Done when:** behavior and benchmark numbers match Phase 1 within noise.
+
+### Phase 2 result
+
+Implemented 2026-10-23 and measured on Windows and Linux; macOS is pending (`dotnet test -c Release`).
+
+**Delivered:**
+- **`IPtyOutputDriver`** (`Wake`, `CancelRead`, `OnPumpFinished`) is all the pump asks of a driver: re-check my state, release a blocked read, I am done. `PtyReaderThread` implements it, so a session still costs no driver object.
+- **`IPtyBlockingOutput`** takes the blocking members out of `IPtyBackend`: `TryBeginOutputRead`, `EndOutputRead`, `ReadOutput`, `ReadMoreOutput`, `WaitWhileOutputBlocked`, and `CoalesceBudgetTicks`. Both backends implement it, and only the reader thread calls it.
+- **`IPtyBackend.StartOutput(pump)`** lets each backend start its own driver. Today both call `PtyReaderThread.Run(pump, this)`, so Phases 5 and 6 change that one line per platform.
+- **The pump's producer members**, which any driver calls, one call at a time per pump:
+  - `IsFull` and `IsEndOfOutputForced`;
+  - `DeliverBacklogToSink`;
+  - the free-space handshake, `BeginWaitForFreeSpace` and `EndWaitForFreeSpace`;
+  - `NextReadSpan`, `OnOutputRead`, `Publish`, and `Finish(error)`.
+- **The read loop moved unchanged** from the pump into the reader thread, with its coalescing windows and its full-ring wait. The pump keeps the ring, its consumers, the sink, the drain decisions, and the ring's lifetime.
+- **Tests:** `FakeBackend` implements both interfaces and `StartOutput`, and its subclasses are unchanged. The two coalescing-budget tests read the budget through `IPtyBlockingOutput`. No assertion changed.
+
+**Deviation:** the `AppContext` switch moved to Phase 5. With one driver there is nothing for it to select, and a switch nothing exercises would only rot.
+
+**Measured** (A/B, alternating the builds):
+
+BenchmarkDotNet on Windows, mean of two rounds each (allocation in parentheses):
+
+| Benchmark | Phase 1 | Phase 2 |
+|---|---:|---:|
+| Integration `Session_Exit0_WaitForExit` | 32.7 / 37.5 ms (1.24 KB) | 31.9 / 33.5 ms (1.24 KB) |
+| Integration `Session_32KiB_Bytes` | 78.0 / 74.4 ms (38.36 KB) | 74.0 / 75.6 ms (38.36 KB) |
+| Integration `Session_32KiB_StreamBytes` | 73.7 / 77.7 ms (1.55 KB) | 74.9 / 75.8 ms (1.55 KB) |
+| Integration `Session_32KiB_OutputStreamBytes` | 74.8 / 80.2 ms (1.65 KB) | 75.8 / 75.3 ms (1.65 KB) |
+| Integration `Capture_32KiB_Text` | 77.8 / 74.3 ms (113.95 KB) | 76.4 / 76.2 ms (113.95 KB) |
+| ConPty `Session_32KiB_StreamBytes`, in-box | 75.1 / 78.1 ms (1.55 KB) | 80.2 / 73.8 ms (1.55 KB) |
+| WebSocket `Bridge_32KiB_Bytes` | 77.2 / 75.5 ms (26.25 / 26.11 KB) | 75.0 / 75.6 ms (26.25 / 26.11 KB) |
+
+- Every allocation matched, except once: in Phase 2's first round, `Session_Exit0_Bytes` and `Capture_Echo_Bytes` measured 70 B more, and the second round measured the Phase 1 values again.
+- Times moved within the spread between runs of the same build.
+
+`WebTerminalScale bench` on Linux, 3 rounds each:
+
+| | Phase 1 | Phase 2 |
+|---|---:|---:|
+| Threads at 64 sessions (other threads per session) | 95 (0.98) | 95 (0.98) |
+| Echo p50 / p99 at 64 sessions (ms) | 1.55–1.57 / 1.70–1.90 | 1.55–1.56 / 1.67–1.76 |
+| 32 MiB flood: received, frames per 32 KiB | 33,178 KiB every round, 7.8 | 33,178 KiB every round, 7.7–7.8 |
+| Flood throughput (mean, MB/s) | 108.6 | 106.1 |
+
+**Tests:** the full suite passed on Windows and on Linux: 604 tests, 602 passed, the 2 planned skips.
 
 ### Phase 3: Sinks independent of the delivering thread
 
@@ -431,6 +477,7 @@ Phase 1 leaves threads and memory per session unchanged, so this table (`bench -
   - takes the ring on demand and gives it back when it is empty and released.
 - The forced end of output and disposal use `CancelIoEx`. `CancelSynchronousIo`, the reader's thread handle, and the `PIPE_NOWAIT` window and its constants are removed.
 - This covers both the in-box and the out-of-band ConPTY.
+- The `AppContext` switch that selects the reader-thread driver instead, as a rollback in the field: added here, where a second driver first exists, and used by Phase 6 too.
 
 **Tests**
 - Remove the skips of both census tests on Windows.

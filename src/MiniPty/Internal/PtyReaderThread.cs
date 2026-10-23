@@ -1,11 +1,13 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace MiniPty.Internal;
 
 /// <summary>
-/// Dedicated background threads that run session output pumps, so blocking transport reads never occupy a
-/// thread-pool worker and never run on a caller's thread.
+/// The output driver that blocks in the transport: dedicated background threads that each run one session's
+/// <see cref="PtyOutputPump"/> over the backend's <see cref="IPtyBlockingOutput"/>, so blocking transport reads never
+/// occupy a thread-pool worker and never run on a caller's thread.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -13,7 +15,13 @@ namespace MiniPty.Internal;
 /// and serves the next session's pump; a thread idle for <see cref="IdleTimeoutMs"/> exits. Reuse keeps
 /// steady-state spawning allocation-free: a new thread costs its managed objects, and the first pooled-array
 /// return on a new thread allocates that thread's array-pool cache (one-shot completion grows its result
-/// buffers on the reader thread).
+/// buffers on the reader thread). The thread is the driver, so a session costs no driver object of its own.
+/// </para>
+/// <para>
+/// <b>Reading.</b> Each transport read is published together with what <see cref="IPtyBlockingOutput.ReadMoreOutput"/>
+/// appends within the backend's micro-windows, bounded by <see cref="IPtyBlockingOutput.CoalesceBudgetTicks"/> from
+/// the first read, so bulk output is published in few pieces without delaying interactive output. While the ring is
+/// full the thread parks in <see cref="IPtyBlockingOutput.WaitWhileOutputBlocked"/> until the pump wakes it.
 /// </para>
 /// <para>
 /// Each thread owns one wake primitive: an auto-reset event on Windows, an eventfd on Linux, a kqueue on macOS, a
@@ -28,7 +36,7 @@ namespace MiniPty.Internal;
 /// <c>CancelSynchronousIo</c> when the pipe's writer never goes away (see <see cref="PtyOutputPump.OnDrainTick"/>).
 /// </para>
 /// </remarks>
-internal sealed class PtyReaderThread
+internal sealed class PtyReaderThread : IPtyOutputDriver
 {
     private const int IdleTimeoutMs = 30_000;
     private const uint Infinite = 0xFFFFFFFF;
@@ -38,7 +46,7 @@ internal sealed class PtyReaderThread
     // Idle threads, most recently parked first, linked through _nextIdle and guarded by s_lock.
     private static PtyReaderThread? s_idle;
 
-    // Guards _pump, so a wake is signaled only while its pump still runs here.
+    // Guards _pump and _source, so a wake is signaled only while its pump still runs here.
     private readonly Lock _lock = new();
     private readonly IntPtr _event;
     private readonly int _wakeRead = -1;
@@ -46,6 +54,7 @@ internal sealed class PtyReaderThread
     // Windows: this thread's own handle, opened by the thread itself when it starts. Guarded by _lock.
     private IntPtr _threadHandle;
     private PtyOutputPump? _pump;
+    private IPtyBlockingOutput? _source;
     private PtyReaderThread? _nextIdle;
     private bool _idle;
 
@@ -75,8 +84,11 @@ internal sealed class PtyReaderThread
     /// <summary>Gets the descriptor a Unix pump waits on together with the PTY master.</summary>
     internal int WakeFd => _wakeRead;
 
-    /// <summary>Runs <paramref name="pump"/> on an idle reader thread, or on a new one.</summary>
-    internal static void Run(PtyOutputPump pump)
+    /// <summary>
+    /// Runs <paramref name="pump"/> over <paramref name="source"/> on an idle reader thread, or on a new one: what a
+    /// backend's <see cref="IPtyBackend.StartOutput"/> does when it reads with blocking calls.
+    /// </summary>
+    internal static void Run(PtyOutputPump pump, IPtyBlockingOutput source)
     {
         PtyReaderThread? reader;
         lock (s_lock)
@@ -92,12 +104,12 @@ internal sealed class PtyReaderThread
 
         if (reader is not null)
         {
-            reader.Assign(pump);
+            reader.Assign(pump, source);
             return;
         }
 
         reader = new PtyReaderThread();
-        reader.Assign(pump);
+        reader.Assign(pump, source);
         var thread = new Thread(reader.Loop)
         {
             IsBackground = true,
@@ -109,7 +121,7 @@ internal sealed class PtyReaderThread
     }
 
     /// <summary>Wakes this thread if it is still running <paramref name="pump"/>; otherwise does nothing.</summary>
-    internal void Wake(PtyOutputPump pump)
+    public void Wake(PtyOutputPump pump)
     {
         lock (_lock)
         {
@@ -125,7 +137,7 @@ internal sealed class PtyReaderThread
     /// against that handover, so it never reaches another session's read. A cancel that finds no read in progress
     /// is lost; a caller that depends on it repeats it.
     /// </summary>
-    internal void CancelRead(PtyOutputPump pump)
+    public void CancelRead(PtyOutputPump pump)
     {
         lock (_lock)
         {
@@ -178,12 +190,13 @@ internal sealed class PtyReaderThread
             UnixInterop.minipty_wake_drain(_wakeRead);
     }
 
-    private void Assign(PtyOutputPump pump)
+    private void Assign(PtyOutputPump pump, IPtyBlockingOutput source)
     {
-        pump.AttachReader(this);
+        pump.AttachDriver(this);
         lock (_lock)
         {
             _pump = pump;
+            _source = source;
             Signal();
         }
     }
@@ -211,10 +224,14 @@ internal sealed class PtyReaderThread
         while (true)
         {
             PtyOutputPump? pump;
+            IPtyBlockingOutput? source;
             lock (_lock)
+            {
                 pump = _pump;
+                source = _source;
+            }
 
-            if (pump is null)
+            if (pump is null || source is null)
             {
                 if (!WaitForWake(IdleTimeoutMs) && TryRetire())
                     return;
@@ -224,8 +241,96 @@ internal sealed class PtyReaderThread
 
             // Never throws: the pump records failures for its consumers. It parks this thread itself, before it
             // publishes completion; the call below only covers a pump that ended without doing so.
-            pump.Run();
+            RunPump(pump, source);
             OnPumpFinished(pump);
+        }
+    }
+
+    /// <summary>Reads until end of output, then finishes the pump. Runs on this thread and never throws.</summary>
+    private void RunPump(PtyOutputPump pump, IPtyBlockingOutput source)
+    {
+        Exception? error = null;
+        try
+        {
+            if (source.TryBeginOutputRead())
+            {
+                try
+                {
+                    Produce(pump, source);
+                }
+                finally
+                {
+                    source.EndOutputRead();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex;
+        }
+
+        pump.Finish(error);
+    }
+
+    private void Produce(PtyOutputPump pump, IPtyBlockingOutput source)
+    {
+        while (true)
+        {
+            if (!pump.IsSessionDisposed)
+            {
+                pump.DeliverBacklogToSink();
+                if (pump.IsFull)
+                {
+                    // Unix also writes queued input meanwhile; a return without a wake is re-checked by the loop.
+                    if (pump.BeginWaitForFreeSpace())
+                        source.WaitWhileOutputBlocked(this);
+
+                    pump.EndWaitForFreeSpace();
+                    continue;
+                }
+            }
+
+            var buffer = pump.NextReadSpan;
+            int read;
+            if (pump.IsEndOfOutputForced)
+            {
+                // Take what the transport holds without blocking, then report end of output.
+                read = source.ReadMoreOutput(buffer, this, out _);
+                if (read <= 0)
+                    return;
+            }
+            else
+            {
+                read = source.ReadOutput(buffer, this);
+                if (read < 0)
+                    continue; // Woken or canceled: re-check state.
+                if (read == 0)
+                    return;
+            }
+
+            var timestamp = Stopwatch.GetTimestamp();
+            pump.OnOutputRead();
+            var length = read;
+            var end = false;
+            // Each continuation read waits its own micro-window, so output that keeps trickling in faster than the
+            // window would otherwise be held until the publish is full. The backend's budget bounds the hold from the
+            // first read; the last window may still run past it. Read per publish rather than cached: the backend
+            // returns a constant.
+            var coalesceBudget = source.CoalesceBudgetTicks;
+            var coalesceDeadline = coalesceBudget > 0 ? timestamp + coalesceBudget : long.MaxValue;
+            while (length < buffer.Length && Stopwatch.GetTimestamp() < coalesceDeadline)
+            {
+                var more = source.ReadMoreOutput(buffer[length..], this, out end);
+                if (more <= 0)
+                    break;
+
+                length += more;
+                pump.OnOutputRead();
+            }
+
+            pump.Publish(length, timestamp);
+            if (end)
+                return;
         }
     }
 
@@ -233,7 +338,7 @@ internal sealed class PtyReaderThread
     /// Releases this thread from <paramref name="pump"/> and parks it in the idle list, so it can serve another
     /// session while it finishes the tail of the old pump's completion. Does nothing once the thread has moved on.
     /// </summary>
-    internal void OnPumpFinished(PtyOutputPump pump)
+    public void OnPumpFinished(PtyOutputPump pump)
     {
         lock (_lock)
         {
@@ -241,6 +346,7 @@ internal sealed class PtyReaderThread
                 return;
 
             _pump = null;
+            _source = null;
         }
 
         // Drop wakes aimed at the finished pump before serving another one. A pump handed over after this point

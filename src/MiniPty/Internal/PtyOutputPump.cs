@@ -11,10 +11,18 @@ internal interface IPtyOutputWaiter
 }
 
 /// <summary>
-/// The only reader of a session's output transport: reads on a dedicated <see cref="PtyReaderThread"/> from
-/// spawn until end of output, into a byte ring that the session's one active consumer drains.
+/// The only reader of a session's output transport, from spawn until end of output: what its output driver reads goes
+/// into a byte ring that the session's one active consumer drains.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Driver.</b> The pump decides what happens to output; an <see cref="IPtyOutputDriver"/> decides how reads are
+/// waited for. The driver calls the producer members (<see cref="NextReadSpan"/>, <see cref="Publish"/>,
+/// <see cref="Finish"/>, and the free-space handshake) as output arrives, and the pump calls the driver back when its
+/// state changes in a way the driver cannot see from the transport: the consumer freed space, a sink attached, the
+/// close was requested, disposal began, or the drain gave up on the transport ending. Today the driver is a
+/// <see cref="PtyReaderThread"/> blocking in the transport.
+/// </para>
 /// <para>
 /// <b>Ring.</b> <see cref="Capacity"/> bytes in one pinned buffer from <see cref="PtyBufferPool"/>. Each transport
 /// read, plus the bytes that arrive within a short micro-window after it, is published at once, up to
@@ -29,7 +37,7 @@ internal interface IPtyOutputWaiter
 /// <para>
 /// <b>Consumers.</b> <c>ReadOutputAsync</c> and the <c>Output</c> stream read the ring on their own thread and
 /// wait through <see cref="ArmWait"/> without blocking it. One-shot completion attaches a
-/// <see cref="PtyOutputSink"/> instead, and the pump writes into it directly on the reader thread; output
+/// <see cref="PtyOutputSink"/> instead, and the pump writes into it directly on the driver's thread; output
 /// published before the sink attached is delivered first.
 /// </para>
 /// <para>
@@ -95,7 +103,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private bool _waiterWantsData;
     private IPtyOutputWaiter? _waiter;
     private PtyOutputSink? _sink;
-    private PtyReaderThread? _reader;
+    private IPtyOutputDriver? _driver;
     private Exception? _error;
     private long _lastReadTick;
     private long _exitTick;
@@ -130,120 +138,97 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
     internal long ExitTick => Volatile.Read(ref _exitTick);
 
-    /// <summary>Starts reading on a reader thread. Called once, by the session constructor.</summary>
-    internal void Start() => PtyReaderThread.Run(this);
+    /// <summary>Starts reading with the backend's output driver. Called once, by the session constructor.</summary>
+    internal void Start() => _backend.StartOutput(this);
 
-    internal void AttachReader(PtyReaderThread reader) => Volatile.Write(ref _reader, reader);
+    /// <summary>Records the driver the pump calls back. The driver calls it before its first producer call.</summary>
+    internal void AttachDriver(IPtyOutputDriver driver) => Volatile.Write(ref _driver, driver);
 
-    // ---------------------------------------------------------------- Producer (reader thread)
+    // ---------------------------------------------------------------- Producer (the output driver)
+    //
+    // The driver calls these as it waits for the transport, one call at a time for this pump. Its loop is:
+    // DeliverBacklogToSink; when IsFull, the free-space handshake; then read into NextReadSpan, OnOutputRead for each
+    // read that returned bytes, and Publish; and Finish once at the end, also after a failure. After disposal it skips
+    // the first two steps and keeps reading only to let the transport end.
 
-    /// <summary>Reads until end of output, then publishes completion. Runs on the reader thread and never throws.</summary>
-    internal void Run()
+    /// <summary>
+    /// Whether less than <see cref="PublishSize"/> is free, so the driver waits for the consumer instead of reading. It
+    /// is checked on its own, not as the alternative to an attached sink: a failed completion can detach its sink after
+    /// <see cref="DeliverBacklogToSink"/>, leaving the backlog in place, and reading into a full ring would overwrite
+    /// unread output. It also holds after the close: the transport may still hold output then (ConPTY flushes its
+    /// final frame after <c>ClosePseudoConsole</c>), and ending output there would drop it.
+    /// </summary>
+    internal bool IsFull => Capacity - Volatile.Read(ref _count) < PublishSize;
+
+    /// <summary>
+    /// Whether the drain has given up on the OS ending the transport (see <see cref="OnDrainTick"/>): the driver takes
+    /// what the transport holds without waiting, including output that landed between the drain's quiet check and the
+    /// read's cancellation, then finishes.
+    /// </summary>
+    internal bool IsEndOfOutputForced => (Volatile.Read(ref _flags) & FlagEndOfOutputForced) != 0;
+
+    /// <summary>
+    /// The span the next read fills: at least <see cref="PublishSize"/> is free unless the ring is full, so it holds no
+    /// unread output. It ends at <see cref="PublishSize"/> or at the end of the buffer, and the next publish continues
+    /// at the start. After disposal nothing reads the ring, so the driver reuses the same span only to let the
+    /// transport end.
+    /// </summary>
+    internal Span<byte> NextReadSpan
     {
-        try
+        get
         {
-            if (_backend.TryBeginOutputRead())
-            {
-                try
-                {
-                    Produce(_reader!);
-                }
-                finally
-                {
-                    _backend.EndOutputRead();
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            // Disposal tears the transport down under the reader; that is end of output, not a failure.
-            if (!IsSessionDisposed)
-                _error = ex;
-        }
-
-        Finish();
-    }
-
-    private void Produce(PtyReaderThread reader)
-    {
-        while (true)
-        {
-            if (!IsSessionDisposed)
-            {
-                if (Volatile.Read(ref _sink) is not null && Volatile.Read(ref _count) > 0)
-                    DeliverBacklog();
-
-                // Checked on its own, not as an alternative to the sink: a failed completion can detach its sink
-                // after the check above, leaving the backlog in place, and reading into a full ring would overwrite
-                // unread output.
-                if (IsFull)
-                {
-                    // Also after the close. The transport may still hold output then (ConPTY flushes its final
-                    // frame after ClosePseudoConsole), and ending here would drop it. A consumer that is slow to
-                    // free space only delays the end: parked time is not silence (see IsQuietSince), so the
-                    // forced end waits for it too, and the next read reports end of output once the transport has
-                    // nothing left.
-                    WaitForFreeSpace(reader);
-                    continue;
-                }
-            }
-
-            // At least PublishSize is free, so this span holds no unread output: it ends at PublishSize or at the end of
-            // the buffer, and the next publish continues at the start. After disposal nothing reads the ring, so the
-            // reader reuses the same span only to let the transport end.
             var start = _tail;
-            var buffer = _ring.AsSpan(start, Math.Min(PublishSize, Capacity - start));
-            int read;
-            if ((Volatile.Read(ref _flags) & FlagEndOfOutputForced) != 0)
-            {
-                // The drain gave up on the OS ending the transport (see OnDrainTick). Take what is there without
-                // blocking, including output that landed between the drain's quiet check and the read's
-                // cancellation, then report end of output.
-                read = _backend.ReadMoreOutput(buffer, reader, out _);
-                if (read <= 0)
-                    return;
-            }
-            else
-            {
-                read = _backend.ReadOutput(buffer, reader);
-                if (read < 0)
-                    continue; // Woken or canceled: re-check state.
-                if (read == 0)
-                    return;
-            }
-
-            var timestamp = Stopwatch.GetTimestamp();
-            // Stamped per read that returned bytes, so the empty tail of the micro-window does not postpone the
-            // post-exit quiet close.
-            Volatile.Write(ref _lastReadTick, Environment.TickCount64);
-            var length = read;
-            var end = false;
-            // Each continuation read waits its own micro-window, so output that keeps trickling in faster than the
-            // window would otherwise be held until PublishSize is reached. The backend's budget bounds the hold from the
-            // first read; the last window may still run past it.
-            // Read per publish rather than cached: the backend returns a constant, and the pump object stays smaller.
-            var coalesceBudget = _backend.CoalesceBudgetTicks;
-            var coalesceDeadline = coalesceBudget > 0 ? timestamp + coalesceBudget : long.MaxValue;
-            while (length < buffer.Length && Stopwatch.GetTimestamp() < coalesceDeadline)
-            {
-                var more = _backend.ReadMoreOutput(buffer[length..], reader, out end);
-                if (more <= 0)
-                    break;
-
-                length += more;
-                Volatile.Write(ref _lastReadTick, Environment.TickCount64);
-            }
-
-            if (!IsSessionDisposed)
-                Deliver(start, length, timestamp);
-
-            if (end)
-                return;
+            return _ring.AsSpan(start, Math.Min(PublishSize, Capacity - start));
         }
     }
 
-    /// <summary>Whether less than <see cref="PublishSize"/> is free, so the producer waits for the consumer.</summary>
-    private bool IsFull => Capacity - Volatile.Read(ref _count) < PublishSize;
+    /// <summary>
+    /// Stamps a read that returned bytes, for the post-exit quiet interval: per read, so the empty tail of a
+    /// coalescing window does not postpone the quiet close.
+    /// </summary>
+    internal void OnOutputRead() => Volatile.Write(ref _lastReadTick, Environment.TickCount64);
+
+    /// <summary>
+    /// Publishes the first <paramref name="length"/> bytes of <see cref="NextReadSpan"/>, read at
+    /// <paramref name="timestamp"/>: to an attached sink, or to the ring for the consumer. Discarded after disposal.
+    /// </summary>
+    internal void Publish(int length, long timestamp)
+    {
+        if (!IsSessionDisposed)
+            Deliver(_tail, length, timestamp);
+    }
+
+    /// <summary>Hands an attached sink the output published before it attached. Does nothing without a sink.</summary>
+    internal void DeliverBacklogToSink()
+    {
+        if (Volatile.Read(ref _sink) is not null && Volatile.Read(ref _count) > 0)
+            DeliverBacklog();
+    }
+
+    /// <summary>
+    /// First half of the free-space handshake, when <see cref="IsFull"/>: marks the producer as waiting, then re-checks.
+    /// Returns <see langword="true"/> when the driver must wait for a <see cref="IPtyOutputDriver.Wake"/>: the ring is
+    /// still full, no sink drains it, and the session is not disposed. A consumer that freed space before it saw the
+    /// mark does not wake the driver, which the re-check after the mark covers. Always followed by
+    /// <see cref="EndWaitForFreeSpace"/>.
+    /// </summary>
+    internal bool BeginWaitForFreeSpace()
+    {
+        Interlocked.Exchange(ref _producerWaiting, 1);
+        return IsFull && !IsSessionDisposed && Volatile.Read(ref _sink) is null;
+    }
+
+    /// <summary>
+    /// Second half of the free-space handshake. Time parked on a full ring is not transport silence, so this restarts
+    /// the quiet interval before the drain can see that the producer no longer waits; otherwise a tick before the next
+    /// read would find the last read long past and close a Unix master that still holds unread output. A consumer
+    /// slow to free space therefore only delays the end of output.
+    /// </summary>
+    internal void EndWaitForFreeSpace()
+    {
+        Volatile.Write(ref _lastReadTick, Environment.TickCount64);
+        Volatile.Write(ref _producerWaiting, 0);
+    }
 
     private void Deliver(int start, int length, long timestamp)
     {
@@ -297,28 +282,16 @@ internal sealed class PtyOutputPump : IValueTaskSource
         }
     }
 
-    private void WaitForFreeSpace(PtyReaderThread reader)
+    /// <summary>
+    /// Ends the pump: the transport reported end of output, the driver stopped after the forced end, or
+    /// <paramref name="error"/> failed reading. Called once by the driver, never throws. Disposal tears the transport
+    /// down under the driver, so a failure after disposal is end of output, not an error.
+    /// </summary>
+    internal void Finish(Exception? error)
     {
-        Interlocked.Exchange(ref _producerWaiting, 1);
+        if (error is not null && !IsSessionDisposed)
+            _error = error;
 
-        // Re-checked after publishing the flag: a consumer that freed space before seeing it does not wake us.
-        if (IsFull
-            && !IsSessionDisposed
-            && Volatile.Read(ref _sink) is null)
-        {
-            // Unix also writes queued input meanwhile; a return without a wake is re-checked by the loop.
-            _backend.WaitWhileOutputBlocked(reader);
-        }
-
-        // Time parked on a full ring is not transport silence. Restart the quiet interval before the drain can see
-        // that the reader no longer waits; otherwise a tick before the next read would find the last read long past
-        // and close a Unix master that still holds unread output.
-        Volatile.Write(ref _lastReadTick, Environment.TickCount64);
-        Volatile.Write(ref _producerWaiting, 0);
-    }
-
-    private void Finish()
-    {
         lock (this)
         {
             if (!IsSessionDisposed && _sink is { } sink)
@@ -334,19 +307,18 @@ internal sealed class PtyOutputPump : IValueTaskSource
                 }
             }
 
-            // The pump no longer touches the ring or the thread. Let go of both before completion becomes
+            // The pump no longer touches the ring or the driver. Let go of both before completion becomes
             // observable: a consumer that disposes the session as soon as it sees end of output then makes the
-            // final ring release, returning the array on its own thread rather than stranding it in this thread's
-            // pool cache, and a session started right after finds this thread already parked.
+            // final ring release, and a session started right after finds a reader thread already parked.
             ReleaseRing();
-            _reader!.OnPumpFinished(this);
+            _driver!.OnPumpFinished(this);
             SetFlag(FlagProducerFinished);
         }
 
         SignalConsumer(dataArrived: false);
         if (Interlocked.CompareExchange(ref _stopWaitState, 2, 1) == 1)
         {
-            // Same hazard as in SignalConsumer: a throwing context must not take the reader thread down.
+            // Same hazard as in SignalConsumer: a throwing context must not take the driver's thread down.
             try
             {
                 _stopped.SetResult(true);
@@ -421,7 +393,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private void WakeProducerIfSpace()
     {
         if (Volatile.Read(ref _producerWaiting) != 0 && !IsFull)
-            Volatile.Read(ref _reader)?.Wake(this);
+            Volatile.Read(ref _driver)?.Wake(this);
     }
 
     /// <summary>
@@ -486,9 +458,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
         if (Interlocked.CompareExchange(ref _consumerWaiting, 0, generation) == generation)
         {
             // Completing the wait posts the consumer's continuation to the context it captured, on this thread: the
-            // reader thread, or a thread disposing the session. A context whose Post throws (a UI dispatcher that
+            // driver's thread, or a thread disposing the session. A context whose Post throws (a UI dispatcher that
             // already shut down) can never run that continuation; the exception must not end output reading,
-            // escape Dispose, or terminate the process from the reader thread.
+            // escape Dispose, or terminate the process from the driver's thread.
             try
             {
                 Volatile.Read(ref _waiter)!.OnOutputSignaled();
@@ -517,7 +489,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
         }
 
         // A pump parked on a full ring drains it into the sink.
-        Volatile.Read(ref _reader)?.Wake(this);
+        Volatile.Read(ref _driver)?.Wake(this);
     }
 
     /// <summary>
@@ -585,7 +557,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
         if (IsQuietSince(now, closeRequestedTick))
         {
             SetFlag(FlagEndOfOutputForced);
-            Volatile.Read(ref _reader)?.CancelRead(this);
+            Volatile.Read(ref _driver)?.CancelRead(this);
         }
 
         // Only a completion sink has a deadline of its own to watch; every pump ticks until its reader finishes.
@@ -628,7 +600,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
             // The transport already failed or is being disposed; the reader ends either way.
         }
 
-        Volatile.Read(ref _reader)?.Wake(this);
+        Volatile.Read(ref _driver)?.Wake(this);
     }
 
     /// <summary>
@@ -638,7 +610,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal void OnSessionDisposing()
     {
         SetFlag(FlagSessionDisposed);
-        WakeReader();
+        WakeDriver();
         SignalConsumer(dataArrived: false);
     }
 
@@ -650,12 +622,12 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// </summary>
     internal void OnSessionDisposed()
     {
-        Volatile.Read(ref _reader)?.CancelRead(this);
+        Volatile.Read(ref _driver)?.CancelRead(this);
         ReleaseRing();
     }
 
     /// <summary>
-    /// Completes once the reader thread has let go of the transport and the ring. Every caller waits: the first
+    /// Completes once the driver has let go of the transport and the ring. Every caller waits: the first
     /// through the allocation-free slot, any concurrent one through a task created only then.
     /// </summary>
     internal ValueTask WaitForStopAsync()
@@ -699,8 +671,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
     void IValueTaskSource.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
         _stopped.OnCompleted(continuation, state, token, flags);
 
-    /// <summary>Wakes the reader thread to re-check state; the Unix backend uses it when input is queued.</summary>
-    internal void WakeReader() => Volatile.Read(ref _reader)?.Wake(this);
+    /// <summary>
+    /// Wakes the driver to re-check state. The Unix backend uses it when input is queued, so that the reader thread,
+    /// which writes queued input, also waits for the master to take more.
+    /// </summary>
+    internal void WakeDriver() => Volatile.Read(ref _driver)?.Wake(this);
 
     private void ReleaseRing()
     {

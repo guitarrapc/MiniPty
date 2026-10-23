@@ -128,7 +128,7 @@ internal static partial class UnixPtyBackend
         public void Dispose() => FreeUtf8Allocations(_owned);
     }
 
-    private sealed class UnixPtyBackendInstance : IPtyBackend, IPtyInputQueue, IValueTaskSource<int>
+    private sealed class UnixPtyBackendInstance : IPtyBackend, IPtyBlockingOutput, IPtyInputQueue, IValueTaskSource<int>
     {
         // _masterState: bit 0 is set once the master is closed to new users; the remaining bits count references
         // in units of MasterReference. The owner holds one reference from spawn until the transport closes.
@@ -338,7 +338,7 @@ internal static partial class UnixPtyBackend
         }
 
         // The reader thread may be waiting for output only. This makes it wait for the master to take input too.
-        private void WakeReaderForInput() => Volatile.Read(ref _pump)?.WakeReader();
+        private void WakeReaderForInput() => Volatile.Read(ref _pump)?.WakeDriver();
 
         /// <summary>Writes queued input until the master is full again. Runs on the reader thread.</summary>
         private void FlushInput()
@@ -597,6 +597,10 @@ internal static partial class UnixPtyBackend
         public int OutputChunkLimit => PtyOutputPump.Capacity;
 
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
+
+        // The reader thread waits on the master and its wake descriptor together, and writes queued input when the
+        // master can take more (see ReadOutput and WaitWhileOutputBlocked).
+        public void StartOutput(PtyOutputPump pump) => PtyReaderThread.Run(pump, this);
 
         public bool TryBeginOutputRead()
         {
