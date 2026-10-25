@@ -282,6 +282,40 @@ public sealed class PtyUnixDisposeTests
     }
 
     /// <summary>
+    /// The same when the loop that reads the session sees the disposal before the hang-up. Session disposal marks the
+    /// output pump disposed first and hangs the child up only after, and a loop that served the session in between
+    /// ended it there and removed its master, so nothing discarded what the hung-up child then wrote, and the child
+    /// blocked until the grace kill. Under a loaded full suite that happened by chance; here the pump is marked first and
+    /// the loop given time to see it.
+    /// </summary>
+    [Test]
+    public async Task DisposeDiscardsWhatAHungUpChildWritesWhenTheLoopSeesTheDisposalFirst()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var marker = NewMarkerPath();
+        var session = Pty.Start(HangupScript($"trap 'yes xxxxxxxxxxxxxxx | head -c 1000000; echo written > \"{marker}\"; exit 0' HUP"));
+        var pid = session.ProcessId;
+        try
+        {
+            await WaitForReadyAsync(session);
+
+            session.OutputPump.OnSessionDisposing();
+            await Assert.That(await WaitForAsync(() => session.OutputPump.IsProducerFinished, 10_000)).IsTrue();
+            session.Dispose();
+
+            await Assert.That(await WaitForFileContentAsync(marker)).Contains("written");
+            await Assert.That(await WaitForProcessGoneAsync(pid)).IsTrue();
+        }
+        finally
+        {
+            session.Dispose();
+            File.Delete(marker);
+        }
+    }
+
+    /// <summary>
     /// A master that disposal leaves open for the hang-up closes once the watcher reaps the child. The child exits on
     /// the hang-up, so no grace kill comes to close it. A descendant that ignores the hang-up keeps the terminal, so
     /// the master does not report the end of output on its own, and the terminal's index cannot go to another session

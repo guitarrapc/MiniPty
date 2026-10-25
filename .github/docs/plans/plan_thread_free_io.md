@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; its macOS test run is pending. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; its macOS test run is pending. Phase 6 is implemented and measured on Linux (2026-10-25): one loop reads every Linux session; macOS and FreeBSD are next. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -122,7 +122,7 @@ Unix PTY master ───── one readiness loop per load (today's exit watche
 Today the reader thread holds a slot for up to 2 ms of continuation reads. In the new engine a consumer still busy with its previous chunk naturally takes everything that arrived meanwhile, so batching comes from the consumer's pace instead of a timer.
 
 - **Windows drops the time window.** Sub-millisecond timers are not available on the completion port, and the window costs 10–40% of a core for trickling output today. Reading what the pipe holds plus consumer-side batching replaces it.
-- **Unix keeps the 1 ms window and 2 ms budget at first**, as loop deadlines, so its chunking does not change in the same phase as its engine. Phase 6 compares it with consumer-side batching and keeps one policy for both platforms if the numbers allow.
+- **Unix keeps the 1 ms window and 2 ms budget at first**, as loop deadlines, so its chunking does not change in the same phase as its engine. Phase 6 compares it with consumer-side batching and keeps one policy for both platforms if the numbers allow. **Decided 2026-10-25:** the Linux loop dropped the window as well, so both engines publish each read as it completes ([Phase 6 result](#phase-6-result-linux)). The reader threads keep their windows until they retire.
 - **A consumer that is faster than the child sees more, smaller chunks than today** (ConPTY delivers bulk output in slices 20–45 µs apart). This is measured, with the WebSocket bridge as the reference consumer. If frame counts matter, the remedy is a consumer-side policy in the bridge, not a timer in the core.
 
 ### One-shot sinks
@@ -726,6 +726,82 @@ BenchmarkDotNet on Windows, two rounds each (allocation; times moved within the 
 
 **Done when:** Acceptance holds on Linux, then on macOS.
 
+### Phase 6 result (Linux)
+
+Implemented 2026-10-25 for Linux, as the delivery order above asks. macOS and FreeBSD keep reader threads until their kqueue loop lands; the native calls that register a master fail with `ENOTSUP` there, so nothing changes on those platforms yet.
+
+**Delivered:**
+- **Native watcher** (`minipty_unix_exit.c`): `minipty_watch_add`, `minipty_watch_modify`, and `minipty_watch_remove` register a master with read and write interest, level-triggered, under a token whose top bit sets it apart from children's reports. `minipty_watch_wait` replaces the child-only wait and reports masters' readiness (readable, writable, hang-up, error) alongside children's exits. Interest 0 arms the registration for one report (`EPOLLONESHOT`).
+- **The watcher loop is the I/O loop** (`ChildWatcher`). A master's token is its slot plus the slot's generation, so a report for a freed slot is dropped. Each pass:
+  - reaps reported children;
+  - serves each reporting master up to four reads (16 KiB) into its ring, taken on demand, and writes its queued input;
+  - looks at each session that asked: the consumer freed space, input was queued, a sink attached, the close or disposal began;
+  - publishes coalescing windows whose deadline passed.
+- **The session drives itself** (`UnixPtyBackendInstance` is the driver; `ServiceOnLoop`):
+  - interest follows state: output while the ring has room, input while some is queued;
+  - the free-space handshake parks it on a full ring;
+  - end of output removes the master before anything else, and the loop's own reference on the master keeps the descriptor open until then;
+  - a failure ends that session's output alone.
+- **No coalescing window:** each read is published as it completes, the policy the Windows driver has, decided below. The first version kept the 1 ms window and 2 ms budget as loop deadlines, which the comparison below measured.
+- **Disposal merges with reading:** disposal finishes the pump at once, as before, and the loop keeps the hung-up child's master registered and discards its output until the master closes. That replaced the watcher's separate discard path for these sessions.
+- The rollback switch selects reader threads on Linux too. Reader threads and their wake descriptors stay until Phase 7.
+
+**Tests:**
+- The census tests run on Linux and pass; they still skip on macOS and FreeBSD.
+- `PtyUnixLoopTests`:
+  - a flood does not delay another session's echo;
+  - an injected read failure ends only its own session;
+  - a hung-up master on a full ring does not spin the loop, and its output still arrives in full (with interest 0 left level-triggered, the loop made about 750,000 passes in 500 ms);
+  - 1,000 sessions opened and closed leave no thread, descriptor, or ring behind;
+  - the rollback switch.
+- Two disposal tests, each failing every time with the first Phase 6 code: `DisposeDiscardsWhatAHungUpChildWritesWhenTheLoopSeesTheDisposalFirst` and `DisposeFailsAQueuedWriteWhenTheLoopSeesTheDisposalFirst` (see Found and fixed).
+- The fairness test passed with the per-pass bound removed too, also with the flood going to a one-shot result. A terminal delivers output more slowly than the loop reads it, so the bound is insurance rather than something a test can show (see [core_session.md](../specs/core_session.md#lessons-learned)).
+- The full suite passed on Linux: 635 tests, all passed (the census tests run there now), in four consecutive runs after the disposal fixes.
+
+**Found and fixed: two races in disposal.** Session disposal marks the pump disposed first and only then disposes the backend, which fails queued writes and hangs the child up. A loop that served the session in between, which a loaded full suite made it do now and then, ended the session as if output had ended:
+- it removed the master, so nothing discarded what the hung-up child wrote next, and the child blocked until the grace kill (one of seven full Linux runs);
+- it closed the input as the end of output, so a queued write failed with `IOException` rather than `ObjectDisposedException` (one of two runs).
+
+The loop now treats a disposed pump as the disposal it is: it keeps discarding while the master stays open, and fails queued input as disposed. The hang-up also asks whether the loop still has the master registered. Both tests mark the pump first and let the loop see it, so each race happens every time; both failed every time with the first code.
+
+**Measured** on Linux (WSL2, 8 logical CPUs), A/B against Phase 5 with alternating builds.
+
+`WebTerminalScale bench --sessions 16,64,256,1000 --echo 200 --flood-bytes 33554432`, two rounds each of the final build (no window):
+
+| | Phase 5 (reader threads) | Phase 6 (loop) |
+|---|---:|---:|
+| Other threads per session (16 / 64 / 256 / 1,000 sessions) | 0.94 / 0.98 / 1.00 / 1.00 | 0.00 / 0.00 / 0.00 / 0.00 |
+| Threads at 1,000 sessions | 1,051 | 31–50 |
+| Private (reserved) memory at 1,000 sessions (MB) | 8,448–8,454 | 240–396 |
+| Working set at 1,000 sessions (MB) | 150–151 | 116–118 |
+| Descriptors at 1,000 sessions | 4,188 | 3,188 |
+| Echo p50 / p99 at 64 sessions (ms) | 1.47 / 1.59 | 0.38–0.39 / 0.50–0.55 |
+| Flood: frames per 32 KiB (Phase 0: 8.0) | 7.7–7.8 | 15.9–18.4 |
+| Flood throughput (MB/s) | 115.1–126.0 | 129.1–131.8 |
+
+- The threads and private memory at 1,000 sessions vary with the pool workers the burst of connections injected (9 to 28 of them in both builds).
+- Each session costs one descriptor less: its reader thread's wake descriptor.
+
+BenchmarkDotNet (allocation; times moved within the spread between runs, the loop's slightly faster): a session start allocates 10–20 B more than in Phase 5, for the loop's per-session state on the backend. For example, `Session_Exit0_WaitForExit` went from 1.22 to 1.23 KB, `Session_Exit0_Bytes` from 1.63 to 1.65 KB, and `Session_32KiB_StreamBytes` from 1.52 to 1.53 KB. Reads, chunks, and exits allocate what they did. Input writes stayed at 2 B, and `Bridge_32KiB_Bytes` at 26.4 KB.
+- A first layout cost 48 B. Storing the slot's generation instead of the whole token, and the interest in a byte, brought it to 40.
+- Dropping the coalescing window then removed 20 B more: the open publish, its first read's time, and its deadline.
+
+**The coalescing policy, compared** (the loop without its window publishes each read as it completes, as Windows does):
+
+| | Loop, 1 ms window | Loop, no window |
+|---|---:|---:|
+| Echo p50 / p99 at 64 sessions (ms) | 1.47–1.48 / 1.58–1.68 | 0.41–0.44 / 0.55–0.61 |
+| Flood: frames per 32 KiB (Phase 0: 8.0) | 7.7–7.8 | 15.2–17.1 |
+| Flood throughput (MB/s) | 111.3–129.7 | 111.9–121.0 |
+
+Without the window, echo is about 1 ms faster, and a flood takes about twice as many frames, smaller ones (1.9–2.1 KiB on average). That is around the "more than twice the Phase 0 baseline" that Acceptance says needs a decision. Windows already publishes without a window, at 5.5–5.6 frames per 32 KiB, because ConPTY's slices are smaller and its flood is ConPTY-bound.
+
+**NativeAOT:** `WebTerminalScale` publishes on Linux without warnings, links the native code statically, and passes `--smoke`.
+
+**Decision (2026-10-25): one policy, no window.** The Linux loop publishes each read as it completes, as the Windows driver does, and the doubled frame count of a flood is accepted. A bridge that wants fewer frames can batch on its side, the remedy this plan names. The reader threads of macOS and FreeBSD, and of the rollback switch, keep their windows until Phase 7, and the kqueue loop follows the new policy. Removing the window also removed 20 B of per-session state (see Measured), and the final build measured echo at p50 0.38–0.39 ms and 15.9–18.4 frames per 32 KiB.
+
+**Next:** macOS and FreeBSD on kqueue, as Phase 4 chose and with its rules: the master registered after the slave opens, `EV_EOF` confirmed by a read that returns 0, and the master deregistered at end of output. That needs the user's macOS machine to test.
+
 ### Phase 7: Retire the reader thread
 
 **Goal:** one engine per platform, and specifications that describe it.
@@ -746,7 +822,7 @@ BenchmarkDotNet on Windows, two rounds each (allocation; times moved within the 
 
 - The process thread count does not grow with 64 or 1,000 idle sessions on Windows and Linux, nor with 64 on macOS. Windows exit watchers still add one thread per 63 sessions.
 - A session with no unread output holds no output buffer.
-- Reads allocate nothing. Allocation per session start, chunk, and exit is not above the Phase 0 baseline, except a Windows session start's 40 B completion-port binding, accepted in the [Phase 5 result](#phase-5-result).
+- Reads allocate nothing. Allocation per session start, chunk, and exit is not above the Phase 0 baseline, except a few bytes at a session start for having no thread per session: Windows' 40 B completion-port binding, accepted in the [Phase 5 result](#phase-5-result), and Linux's 10–20 B of loop state, the same price, recorded under the same exception in the [Phase 6 result](#phase-6-result-linux).
 - Keystroke echo latency through the WebSocket bridge is not worse at p50 or p99, and throughput is not lower.
 - Frames per 32 KiB through the bridge are recorded on every platform. More than twice the Phase 0 baseline needs a decision before release.
 - The full test suite passes on Windows, Linux, and macOS, and a sample publishes and runs under NativeAOT on Windows and Linux.

@@ -16,7 +16,7 @@ namespace MiniPty.Tests;
 public sealed class PtyScaleTests
 {
     private const string ThreadFreeIoSkip =
-        "Thread-free I/O Phase 6 (Unix): each reading Unix session still holds a reader thread, and its ring from spawn " +
+        "Thread-free I/O Phase 6 (macOS and FreeBSD): each reading session there still holds a reader thread, and its ring from spawn " +
         "to end of output (.github/docs/plans/plan_thread_free_io.md).";
 
     private const int FewSessions = 16;
@@ -31,13 +31,14 @@ public sealed class PtyScaleTests
     private static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(60);
 
     /// <summary>
-    /// Idle sessions hold no thread: their output waits on I/O completions, not on a reader thread each.
+    /// Idle sessions hold no thread: their output waits on I/O completions (Windows) or on the one watcher loop (Linux), not on a
+    /// reader thread each.
     /// </summary>
     [Test]
     [NotInParallel]
     public async Task IdleSessionsHoldNoThread()
     {
-        Skip.When(!OperatingSystem.IsWindows(), ThreadFreeIoSkip);
+        Skip.When(!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux(), ThreadFreeIoSkip);
         var sessions = new List<IdleSession>(ManySessions);
         try
         {
@@ -66,7 +67,7 @@ public sealed class PtyScaleTests
     [NotInParallel]
     public async Task IdleSessionsHoldNoOutputBuffer()
     {
-        Skip.When(!OperatingSystem.IsWindows(), ThreadFreeIoSkip);
+        Skip.When(!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux(), ThreadFreeIoSkip);
         var sessions = new List<IdleSession>(FewSessions);
         var before = MiniPty.Internal.PtyBufferPool.RentedCount;
         try

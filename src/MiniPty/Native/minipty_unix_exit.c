@@ -43,7 +43,7 @@
 /*
  * Child exit watcher, child signaling and reaping.
  *
- * One managed thread blocks in minipty_child_watch_wait for every child that one load of the managed assembly
+ * One managed thread blocks in minipty_watch_wait for every child that one load of the managed assembly
  * starts, so observing exit adds no thread per session. The watcher keeps no state here: the caller holds its
  * descriptors and passes them back. Two loads in one process, such as two AssemblyLoadContexts, share this library,
  * and one shared epoll or kqueue handed one load's exits to the other load's thread. Linux watches pidfds with epoll.
@@ -65,6 +65,9 @@
  * A PTY master that a disposal keeps open for its hang-up can also wake the wait when it has output, so the caller
  * discards a hung-up child's output as fast as the child writes it (minipty_child_watch_add_output). Such a wake reports
  * no child.
+ *
+ * On Linux the same wait is the I/O loop of every session: each session's master is registered with the interest its
+ * state needs (minipty_watch_add), and minipty_watch_wait reports masters' readiness alongside children's exits.
  */
 
 #define MINIPTY_CHILD_WATCH_MAX_EVENTS 16
@@ -297,7 +300,93 @@ int minipty_child_watch_wake(int watch_fd, int wake_write)
 #endif
 }
 
-int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds, int capacity, int timeout_ms)
+/*
+ * Session I/O on the watcher: a session's PTY master registered with the interest its state needs, so the one watcher
+ * thread reads every session's output and writes every session's queued input. Level-triggered, keyed by a token the
+ * caller chooses, whose top bit is set so that it never meets a child's report, the wake, or a hung-up master's.
+ * Interest 0 arms the registration for one report (EPOLLONESHOT): a master whose every slave closed reports hang-up
+ * whatever the interest, and a level-triggered report would repeat on every wait while the caller cannot read (its
+ * ring is full). Setting the interest again re-arms it.
+ *
+ * Only epoll for now. kqueue masters follow the readiness probe's rules (registered after the slave opens, EV_EOF
+ * confirmed by a read) and land separately; there these calls fail with ENOTSUP and sessions keep reader threads.
+ */
+#define MINIPTY_WATCH_READ 1
+#define MINIPTY_WATCH_WRITE 2
+
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+static uint32_t minipty_watch_epoll_events(int interest)
+{
+    uint32_t events = 0;
+
+    if (interest & MINIPTY_WATCH_READ)
+        events |= EPOLLIN | EPOLLRDHUP;
+    if (interest & MINIPTY_WATCH_WRITE)
+        events |= EPOLLOUT;
+
+    return events == 0 ? EPOLLONESHOT : events;
+}
+#endif
+
+int minipty_watch_add(int watch_fd, int fd, uint64_t token, int interest)
+{
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+    struct epoll_event event;
+
+    event.events = minipty_watch_epoll_events(interest);
+    event.data.u64 = token;
+    return epoll_ctl(watch_fd, EPOLL_CTL_ADD, fd, &event) == 0 ? 0 : -1;
+#else
+    (void)watch_fd;
+    (void)fd;
+    (void)token;
+    (void)interest;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+int minipty_watch_modify(int watch_fd, int fd, uint64_t token, int interest)
+{
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+    struct epoll_event event;
+
+    event.events = minipty_watch_epoll_events(interest);
+    event.data.u64 = token;
+    return epoll_ctl(watch_fd, EPOLL_CTL_MOD, fd, &event) == 0 ? 0 : -1;
+#else
+    (void)watch_fd;
+    (void)fd;
+    (void)token;
+    (void)interest;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+void minipty_watch_remove(int watch_fd, int fd)
+{
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+    epoll_ctl(watch_fd, EPOLL_CTL_DEL, fd, NULL);
+#else
+    (void)watch_fd;
+    (void)fd;
+#endif
+}
+
+/*
+ * Waits for child exits, master events, and wakes. Each report is a token and its events: MINIPTY_WATCH_CHILD with a
+ * token of the pidfd (upper half, -1 under kqueue) and the pid (lower half), or a master's token with its readiness. The
+ * wake is drained here and never reported, and a hung-up master registered with minipty_child_watch_add_output only
+ * makes the wait return. Returns the report count, 0 on timeout or interruption, -1 on failure.
+ */
+#define MINIPTY_WATCH_READABLE 1
+#define MINIPTY_WATCH_WRITABLE 2
+#define MINIPTY_WATCH_HANGUP 4
+#define MINIPTY_WATCH_ERROR 8
+#define MINIPTY_WATCH_CHILD 16
+
+int minipty_watch_wait(int watch_fd, int wake_read, uint64_t *tokens, int *reports, int capacity, int timeout_ms)
 {
 #if defined(MINIPTY_CHILD_WATCH_EPOLL) || defined(MINIPTY_CHILD_WATCH_KQUEUE)
     int max_events = capacity < MINIPTY_CHILD_WATCH_MAX_EVENTS ? capacity : MINIPTY_CHILD_WATCH_MAX_EVENTS;
@@ -305,7 +394,7 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
     int ready;
     int i;
 
-    if (pids == NULL || pidfds == NULL || max_events <= 0) {
+    if (tokens == NULL || reports == NULL || max_events <= 0) {
         errno = EINVAL;
         return -1;
     }
@@ -319,22 +408,39 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
             return errno == EINTR ? 0 : -1;
 
         for (i = 0; i < ready; i++) {
-            if (events[i].data.u64 == MINIPTY_CHILD_WATCH_WAKE_TOKEN) {
+            uint64_t token = events[i].data.u64;
+            uint32_t got = events[i].events;
+            int report = 0;
+
+            if (token == MINIPTY_CHILD_WATCH_WAKE_TOKEN) {
                 minipty_drain_wake_pipe(wake_read);
                 continue;
             }
 
             /* A hung-up child's master has output; returning is the whole report. */
-            if (events[i].data.u64 == MINIPTY_CHILD_WATCH_OUTPUT_TOKEN)
+            if (token == MINIPTY_CHILD_WATCH_OUTPUT_TOKEN)
                 continue;
 
-            /*
-             * The one-shot registration is now disarmed. It stays until the caller removes it, and the pidfd stays
-             * open, because the caller signals the child through it until the reap. The pidfd is reported too, so
-             * the caller can tell this report from one for a pidfd it has since closed.
-             */
-            pids[count] = (int)(uint32_t)events[i].data.u64;
-            pidfds[count] = (int)(events[i].data.u64 >> 32);
+            if ((token >> 63) != 0) {
+                if (got & EPOLLIN)
+                    report |= MINIPTY_WATCH_READABLE;
+                if (got & EPOLLOUT)
+                    report |= MINIPTY_WATCH_WRITABLE;
+                if (got & (EPOLLHUP | EPOLLRDHUP))
+                    report |= MINIPTY_WATCH_HANGUP;
+                if (got & EPOLLERR)
+                    report |= MINIPTY_WATCH_ERROR;
+            } else {
+                /*
+                 * A child's pidfd. The one-shot registration is now disarmed. It stays until the caller removes it, and
+                 * the pidfd stays open, because the caller signals the child through it until the reap. The pidfd is
+                 * reported too, so the caller can tell this report from one for a pidfd it has since closed.
+                 */
+                report = MINIPTY_WATCH_CHILD;
+            }
+
+            tokens[count] = token;
+            reports[count] = report;
             count++;
         }
     }
@@ -371,8 +477,9 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
              * EVFILT_READ is a hung-up child's master with output, and returning is the whole report.
              */
             if (events[i].filter == EVFILT_PROC) {
-                pids[count] = (int)events[i].ident;
-                pidfds[count] = -1;
+                /* No pidfd under kqueue: the upper half is -1. */
+                tokens[count] = ((uint64_t)UINT32_MAX << 32) | (uint32_t)events[i].ident;
+                reports[count] = MINIPTY_WATCH_CHILD;
                 count++;
             }
         }
@@ -383,8 +490,8 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
 #else
     (void)watch_fd;
     (void)wake_read;
-    (void)pids;
-    (void)pidfds;
+    (void)tokens;
+    (void)reports;
     (void)capacity;
     (void)timeout_ms;
     errno = ENOTSUP;

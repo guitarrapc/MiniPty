@@ -7,8 +7,8 @@ namespace MiniPty.Internal;
 /// <summary>
 /// The output driver that blocks in the transport: dedicated background threads that each run one session's
 /// <see cref="PtyOutputPump"/> over the backend's <see cref="IPtyBlockingOutput"/>, so blocking transport reads never
-/// occupy a thread-pool worker and never run on a caller's thread. Unix reads this way until its engine lands; Windows
-/// only under the rollback switch (<see cref="PtyOutputDrivers"/>).
+/// occupy a thread-pool worker and never run on a caller's thread. macOS and FreeBSD read this way until their kqueue
+/// loop lands; Windows and Linux only under the rollback switch (<see cref="PtyOutputDrivers"/>).
 /// </summary>
 /// <remarks>
 /// <para>

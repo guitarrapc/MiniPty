@@ -16,12 +16,19 @@ internal static partial class UnixPtyBackend
     // macOS posix_spawn children can still be running short -c scripts when the first EOF tick fires.
     // Sending EOT before they finish leaves /bin/sh waiting on stdin and never exiting.
     private const int MacOsEofAttachDeferPolls = 4;
-    // How long a read keeps appending output that arrives right after it to the same ring slot.
+    // On a reader thread (macOS, FreeBSD, and the rollback switch): how long a read keeps appending output that arrives
+    // right after it to the same publish. The Linux loop publishes each read at once instead.
     private const int CoalesceMicroWindowMs = 1;
     // Bounds the windows chained into one slot, so output trickling in faster than the window is not held until
     // the slot fills. The last window may run past it: a slot is held for at most about 3 ms.
     private const int CoalesceBudgetMs = 2;
     private static readonly long s_coalesceBudgetTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceBudgetMs / 1000;
+
+    /// <summary>A pid whose session's next loop service fails, for the test that one failure ends one session. 0: none.</summary>
+    internal static int FailLoopReadsOfPidForTests;
+
+    /// <summary>Passes the watcher's loop has made, for tests that check it does not spin.</summary>
+    internal static long LoopPassesForTests => ChildWatcher.Passes;
 
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
@@ -133,8 +140,21 @@ internal static partial class UnixPtyBackend
         public void Dispose() => FreeUtf8Allocations(_owned);
     }
 
-    private sealed class UnixPtyBackendInstance : IPtyBackend, IPtyBlockingOutput, IPtyInputQueue, IValueTaskSource<int>
+    private sealed class UnixPtyBackendInstance : IPtyBackend, IPtyBlockingOutput, IPtyOutputDriver, IPtyInputQueue, IValueTaskSource<int>
     {
+        // _loopPhase: how the watcher's loop reads this session, when it does (Linux).
+        private const byte LoopNone = 0;
+        private const byte LoopReading = 1;
+        // The pump finished at disposal, and the master stays open for the hang-up: the loop reads and discards.
+        private const byte LoopDiscarding = 2;
+        private const byte LoopDone = 3;
+
+        /// <summary>
+        /// Reads one service makes for a session before the loop moves on: up to 16 KiB, so a flood shares the loop with
+        /// every other session. A master with more is reported again on the next pass.
+        /// </summary>
+        private const int LoopReadsPerService = 4;
+
         // _masterState: bit 0 is set once the master is closed to new users; the remaining bits count references
         // in units of MasterReference. The owner holds one reference from spawn until the transport closes.
         private const int MasterClosedBit = 1;
@@ -187,6 +207,21 @@ internal static partial class UnixPtyBackend
         private int _termSignal;
         private bool _disposed;
         private PtySize _size;
+
+        // The watcher loop's state for this session, used only on its thread unless noted: the slot and token of its
+        // registered master (the slot and its generation make the token), the interest registered, and the park on a full
+        // ring.
+        private int _loopSlot = -1;
+        private int _loopGeneration;
+        private byte _loopInterest = ChildWatcher.InterestRead;
+        private byte _loopPhase;
+        private bool _loopParked;
+
+        /// <summary>Whether this session waits on the watcher's queue of sessions to look at. Guarded by its lock.</summary>
+        internal bool ServiceQueued;
+
+        /// <summary>The next session on the watcher's queue. Guarded by its lock.</summary>
+        internal UnixPtyBackendInstance? NextService;
 
         public UnixPtyBackendInstance(int master, int slave, int pid, int pidfd, PtySize size, UnixExecPayload execHold)
         {
@@ -609,9 +644,393 @@ internal static partial class UnixPtyBackend
 
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
-        // The reader thread waits on the master and its wake descriptor together, and writes queued input when the
-        // master can take more (see ReadOutput and WaitWhileOutputBlocked).
-        public void StartOutput(PtyOutputPump pump) => PtyReaderThread.Run(pump, this);
+        /// <summary>
+        /// Reads output on the watcher's loop on Linux, which holds no thread of the session's own, and otherwise on a
+        /// reader thread that waits on the master and its wake descriptor together and writes queued input when the
+        /// master can take more (see <see cref="ReadOutput"/> and <see cref="WaitWhileOutputBlocked"/>). macOS and FreeBSD
+        /// read on reader threads until their kqueue loop lands, and every platform does under the rollback switch.
+        /// </summary>
+        public void StartOutput(PtyOutputPump pump)
+        {
+            if (OperatingSystem.IsLinux() && !PtyOutputDrivers.UseReaderThreads && TryStartOnLoop(pump))
+                return;
+
+            PtyReaderThread.Run(pump, this);
+        }
+
+        /// <summary>Whether the watcher's loop reads this session.</summary>
+        internal bool ReadsOnLoop => Volatile.Read(ref _loopPhase) != LoopNone;
+
+        /// <summary>
+        /// Whether the loop still reads this session's master, so it discards a hung-up child's output itself; otherwise
+        /// the watcher's separate discard path does.
+        /// </summary>
+        internal bool DiscardsOnLoop => Volatile.Read(ref _loopPhase) is LoopReading or LoopDiscarding;
+
+        private bool TryStartOnLoop(PtyOutputPump pump)
+        {
+            // The registration's own reference: the descriptor stays open, and its number unused, until it is removed.
+            if (!TryAcquireMaster(out var master))
+                return false;
+
+            _loopPhase = LoopReading;
+            pump.AttachDriver(this);
+            if (ChildWatcher.TryRegisterMaster(this, master))
+                return true;
+
+            _loopPhase = LoopNone;
+            ReleaseMaster();
+            return false;
+        }
+
+        /// <summary>Records the master's registration. Called by <see cref="ChildWatcher"/> under its lock.</summary>
+        internal void OnRegisteredOnLoop(int slot, int generation)
+        {
+            _loopSlot = slot;
+            _loopGeneration = generation;
+        }
+
+        // IPtyOutputDriver, for a session the loop reads: every call has the loop look at the session.
+        void IPtyOutputDriver.Wake(PtyOutputPump pump)
+        {
+            if (_loopPhase == LoopReading)
+                ChildWatcher.RequestService(this);
+        }
+
+        void IPtyOutputDriver.CancelRead(PtyOutputPump pump)
+        {
+            if (_loopPhase == LoopReading)
+                ChildWatcher.RequestService(this);
+        }
+
+        // The loop finishes the pump itself and already knows.
+        void IPtyOutputDriver.OnPumpFinished(PtyOutputPump pump)
+        {
+        }
+
+        /// <summary>
+        /// Serves this session on the loop: after a readiness <paramref name="report"/> from the master, or 0 when the
+        /// session asked for a look. Writes queued input, reads output into the ring and publishes each read, within the
+        /// per-service bound, parks on a full ring, and ends output. Never throws: a failure ends this session's output
+        /// with it, and the loop goes on.
+        /// </summary>
+        internal void ServiceOnLoop(int report)
+        {
+            try
+            {
+                ServeOnLoop(report);
+            }
+            catch (Exception ex)
+            {
+                FailOnLoop(ex);
+            }
+        }
+
+        private void ServeOnLoop(int report)
+        {
+            if (_loopPhase == LoopDone)
+                return;
+
+            var pump = _pump!;
+            if (_loopPhase == LoopReading && (Volatile.Read(ref _disposed) || pump.IsSessionDisposed))
+            {
+                // Disposal ends reading at once, as a reader thread's does. A master that stays open for the hang-up is
+                // read and discarded below until the child is gone.
+                FinishOnLoop(pump, null);
+            }
+
+            if (_loopPhase == LoopDiscarding)
+            {
+                DiscardOnLoop();
+                return;
+            }
+
+            if (_loopPhase != LoopReading)
+                return;
+
+            if (FailLoopReadsOfPidForTests != 0 && FailLoopReadsOfPidForTests == _pid)
+                throw new IOException("Injected read failure");
+
+            if ((report & (ChildWatcher.ReportWritable | ChildWatcher.ReportHangup | ChildWatcher.ReportError)) != 0
+                || (report == 0 && HasPendingInput))
+            {
+                FlushInput();
+            }
+
+            pump.DeliverBacklogToSink();
+            // A full ring after the close is not end of output either: the session stays parked until the consumer frees
+            // space, as a reader thread does.
+            if (ParkWhileFull(pump))
+            {
+                SetLoopInterest();
+                return;
+            }
+
+            if (IsMasterClosed)
+            {
+                // The close (the post-exit drain, or disposal after the exit) ends output; what the master still holds is
+                // not read, as with a reader thread.
+                EndOnLoop(pump);
+                return;
+            }
+
+            if ((report & (ChildWatcher.ReportReadable | ChildWatcher.ReportHangup | ChildWatcher.ReportError)) != 0
+                || pump.IsEndOfOutputForced)
+            {
+                if (!ReadOnLoop(pump))
+                    return;
+
+                ParkWhileFull(pump);
+            }
+
+            pump.LetGoOfRing();
+            SetLoopInterest();
+        }
+
+        /// <summary>
+        /// The free-space handshake on the loop: parks the session while the ring is full and no sink drains it, and ends
+        /// a park once there is room. Returns whether the session is parked. Read interest follows the park.
+        /// </summary>
+        private bool ParkWhileFull(PtyOutputPump pump)
+        {
+            if (pump.IsFull)
+            {
+                if (_loopParked)
+                    return true;
+
+                if (pump.BeginWaitForFreeSpace())
+                {
+                    _loopParked = true;
+                    return true;
+                }
+
+                pump.EndWaitForFreeSpace();
+                return false;
+            }
+
+            if (_loopParked)
+            {
+                // Room again. Read interest comes back, and the master reports what it holds on the next pass.
+                _loopParked = false;
+                pump.EndWaitForFreeSpace();
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Reads what the master holds into the ring, up to <see cref="LoopReadsPerService"/> reads, and publishes each read
+        /// as it completes. There is no coalescing window: a consumer still busy with its previous chunk takes everything
+        /// that arrived meanwhile as one chunk, the policy the Windows driver has too. Returns <see langword="false"/> once
+        /// output ended.
+        /// </summary>
+        private unsafe bool ReadOnLoop(PtyOutputPump pump)
+        {
+            if (!TryAcquireMaster(out var master))
+            {
+                EndOnLoop(pump);
+                return false;
+            }
+
+            try
+            {
+                for (var reads = 0; reads < LoopReadsPerService; reads++)
+                {
+                    if (pump.IsFull)
+                        break;
+
+                    pump.HoldRing();
+                    var span = pump.NextReadSpan;
+                    int read;
+                    fixed (byte* ptr = span)
+                        read = ReadMasterNow(master, ptr, span.Length);
+
+                    if (read < 0)
+                        break;
+
+                    if (read == 0)
+                    {
+                        EndOnLoop(pump);
+                        return false;
+                    }
+
+                    var timestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                    pump.OnOutputRead();
+                    pump.Publish(read, timestamp);
+                }
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
+
+            if (pump.IsEndOfOutputForced)
+            {
+                // The drain gave up on the transport ending; what the master held is in.
+                EndOnLoop(pump);
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>The interest the session's state needs: output while the ring has room, input while some is queued.</summary>
+        private void SetLoopInterest()
+        {
+            var interest = 0;
+            if (_loopPhase == LoopDiscarding || (_loopPhase == LoopReading && !_loopParked))
+                interest |= ChildWatcher.InterestRead;
+            if (_loopPhase == LoopReading && HasPendingInput)
+                interest |= ChildWatcher.InterestWrite;
+
+            if (interest == _loopInterest)
+                return;
+
+            _loopInterest = (byte)interest;
+            ChildWatcher.SetInterest(_master, _loopSlot, _loopGeneration, interest);
+        }
+
+        /// <summary>End of output on the loop: the master is removed first, so a hung-up master cannot report forever.</summary>
+        private void EndOnLoop(PtyOutputPump pump)
+        {
+            DeregisterFromLoop();
+            if (_loopPhase == LoopReading)
+                FinishOnLoop(pump, null);
+
+            _loopPhase = LoopDone;
+        }
+
+        /// <summary>
+        /// Finishes the pump from the loop. After disposal with the master still open for the hang-up, the session goes on
+        /// to discard what the child writes until the master closes; otherwise it is done.
+        /// </summary>
+        private void FinishOnLoop(PtyOutputPump pump, Exception? error)
+        {
+            if (_loopParked)
+            {
+                _loopParked = false;
+                pump.EndWaitForFreeSpace();
+            }
+
+            // Queued input is written by this loop; once it stops reading the session, nothing can deliver it. A disposal fails
+            // it as disposed, also when the loop sees the disposal on the pump before the backend's own close of the input,
+            // which would otherwise find the queue already failed with the end of output.
+            CloseInput(pump.IsSessionDisposed || Volatile.Read(ref _disposed) ? InputDisposed : InputOutputEnded);
+            // The pump's flag, not the backend's: session disposal marks the pump first and hangs the child up only after,
+            // and a session ended between the two would leave the hung-up child's output to nobody.
+            _loopPhase = _loopSlot >= 0 && (pump.IsSessionDisposed || Volatile.Read(ref _disposed)) && !IsMasterClosed
+                ? LoopDiscarding
+                : LoopDone;
+            pump.Finish(error);
+            if (_loopPhase == LoopDone)
+                DeregisterFromLoop();
+            else
+                SetLoopInterest();
+        }
+
+        /// <summary>
+        /// Reads and discards what a hung-up child writes while its master stays open after disposal, bounded per service,
+        /// until the master closes or reports end of output.
+        /// </summary>
+        private unsafe void DiscardOnLoop()
+        {
+            if (IsMasterClosed || !TryAcquireMaster(out var master))
+            {
+                DeregisterFromLoop();
+                _loopPhase = LoopDone;
+                return;
+            }
+
+            try
+            {
+                Span<byte> buffer = stackalloc byte[4096];
+                fixed (byte* ptr = buffer)
+                {
+                    for (var reads = 0; reads < LoopReadsPerService; reads++)
+                    {
+                        var read = ReadMasterNow(master, ptr, buffer.Length);
+                        if (read > 0)
+                            continue;
+
+                        if (read == 0)
+                        {
+                            DeregisterFromLoop();
+                            _loopPhase = LoopDone;
+                        }
+
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
+        }
+
+        /// <summary>A failure in this session's work ends its output with the failure; the loop and other sessions go on.</summary>
+        private void FailOnLoop(Exception error)
+        {
+            try
+            {
+                if (_loopPhase == LoopReading)
+                {
+                    _loopPhase = LoopDone;
+                    if (_loopParked)
+                    {
+                        _loopParked = false;
+                        _pump!.EndWaitForFreeSpace();
+                    }
+
+                    CloseInput(InputOutputEnded);
+                    _pump!.Finish(error);
+                }
+            }
+            catch (Exception)
+            {
+                // Finish never throws; nothing else is left to report.
+            }
+
+            _loopPhase = LoopDone;
+            DeregisterFromLoop();
+        }
+
+        /// <summary>Removes the master from the loop, while it is still open, and drops the registration's reference.</summary>
+        private void DeregisterFromLoop()
+        {
+            var slot = _loopSlot;
+            if (slot < 0)
+                return;
+
+            _loopSlot = -1;
+            ChildWatcher.DeregisterMaster(_master, slot);
+            ReleaseMaster();
+        }
+
+        /// <summary>
+        /// One non-blocking read of the master, which the caller has pinned. Returns the byte count, 0 at end of output
+        /// (EIO once every slave descriptor closed), or -1 when nothing is there.
+        /// </summary>
+        private static unsafe int ReadMasterNow(int master, byte* buffer, int length)
+        {
+            while (true)
+            {
+                var read = UnixInterop.Read(master, buffer, (nuint)length);
+                if (read >= 0)
+                    return read;
+
+                var errno = Marshal.GetLastPInvokeError();
+                if (errno == UnixInterop.EINTR)
+                    continue;
+                if (errno == UnixInterop.EAGAIN)
+                    return -1;
+                if (errno is 0 or UnixInterop.EIO or UnixInterop.EBADF)
+                    return 0;
+
+                throw new IOException($"read failed (errno {errno})");
+            }
+        }
+
 
         public bool TryBeginOutputRead()
         {
@@ -792,6 +1211,10 @@ internal static partial class UnixPtyBackend
                 if (seen == state)
                 {
                     ReleaseMaster();
+                    // The loop's registration still holds the descriptor open; the loop removes it, and the close completes.
+                    if (ReadsOnLoop)
+                        ChildWatcher.RequestService(this);
+
                     return;
                 }
 

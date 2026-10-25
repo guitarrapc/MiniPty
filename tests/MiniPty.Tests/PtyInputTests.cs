@@ -374,6 +374,39 @@ public sealed class PtyInputTests
     }
 
     /// <summary>
+    /// The same when the Linux loop sees the disposal first. Session disposal marks the output pump disposed before the
+    /// backend fails its queued writes, and a loop that ended the session in between closed the input as the end of
+    /// output, so the write failed with <see cref="IOException"/> instead. One full Linux run in two met it by chance;
+    /// here the pump is marked first and the loop given time to see it.
+    /// </summary>
+    [Test]
+    public async Task DisposeFailsAQueuedWriteWhenTheLoopSeesTheDisposalFirst()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var session = StartWithInputBlocked();
+        try
+        {
+            var (write, _) = await IssueUntilPendingAsync(_ => session.WriteInputAsync(BlockingPayload()));
+
+            session.OutputPump.OnSessionDisposing();
+            var deadline = Environment.TickCount64 + 10_000;
+            while (!session.OutputPump.IsProducerFinished && Environment.TickCount64 < deadline)
+                await Task.Delay(10);
+
+            await Assert.That(session.OutputPump.IsProducerFinished).IsTrue();
+            session.Dispose();
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(async () => await write.AsTask().WaitAsync(Timeout));
+        }
+        finally
+        {
+            await session.DisposeAsync().AsTask().WaitAsync(Timeout);
+        }
+    }
+
+    /// <summary>
     /// A write still queued when output ends fails with <see cref="IOException"/>. Closing the transport ends output
     /// while the child keeps running, so nothing can take the queued bytes first.
     /// </summary>

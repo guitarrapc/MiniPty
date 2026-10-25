@@ -17,7 +17,8 @@ internal interface IPtyBackend : IDisposable
     public Stream Input { get; }
 
     // Input. A write takes what the transport accepts now on the calling thread, and the rest is queued in order.
-    // On Unix the session's output driver (its reader thread) writes the queue when the master can take more. On
+    // On Unix the session's output driver (the watcher loop on Linux, its reader thread on macOS and FreeBSD) writes the
+    // queue when the master can take more. On
     // Windows I/O completions on the overlapped input pipe write it as ConPTY reads input again. PtyInputWrites turns
     // a queued write into the caller's task or a blocking wait.
 
@@ -76,9 +77,10 @@ internal interface IPtyBackend : IDisposable
 
     /// <summary>
     /// Starts reading output for <paramref name="pump"/> with this backend's <see cref="IPtyOutputDriver"/>. Called
-    /// once, by the session constructor. Windows starts a <see cref="WindowsOutputDriver"/>, which holds no thread; Unix,
-    /// and Windows under the rollback switch (<see cref="PtyOutputDrivers"/>), run the pump on a
-    /// <see cref="PtyReaderThread"/> over the backend's <see cref="IPtyBlockingOutput"/>.
+    /// once, by the session constructor. Windows starts a <see cref="WindowsOutputDriver"/>, and Linux registers the master
+    /// on the exit watcher's loop; neither holds a thread per session. macOS and FreeBSD, and every platform under the
+    /// rollback switch (<see cref="PtyOutputDrivers"/>), run the pump on a <see cref="PtyReaderThread"/> over the backend's
+    /// <see cref="IPtyBlockingOutput"/>.
     /// </summary>
     public void StartOutput(PtyOutputPump pump);
     /// <summary>
