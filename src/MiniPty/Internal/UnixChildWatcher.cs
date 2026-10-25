@@ -5,22 +5,25 @@ namespace MiniPty.Internal;
 internal static partial class UnixPtyBackend
 {
     /// <summary>
-    /// Observer of the exits of every child this load of MiniPty starts, and on Linux the I/O loop of every session: one
-    /// dedicated background thread for every Unix session, so neither observing exit nor reading output adds a
-    /// per-session thread, and neither occupies a thread-pool worker.
+    /// Observer of the exits of every child this load of MiniPty starts, and the I/O loop of every session: one dedicated
+    /// background thread for every Unix session, so neither observing exit nor reading output adds a per-session thread,
+    /// and neither occupies a thread-pool worker.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>I/O loop (Linux).</b> Each session's non-blocking master is registered on the same epoll as the children's
-    /// pidfds, level-triggered, with the interest its state needs: output while its ring has room, input while some is
-    /// queued (<see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). A master's token names its slot and the slot's
+    /// <b>I/O loop.</b> Each session's non-blocking master is registered on the same epoll (Linux) or kqueue (macOS,
+    /// FreeBSD) that reports the children's exits, level-triggered, with the interest its state needs: output while its
+    /// ring has room, input while some is queued (<see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). kqueue keeps the
+    /// two interests as two filters of the master, and the native wait joins their events into one report per master, as
+    /// epoll gives. A master's token names its slot and the slot's
     /// generation, so a report that arrives after the session's registration was removed never reaches the session that
     /// took the slot next. Each pass reads every reporting session a bounded amount and publishes each read at once (no
     /// coalescing window, as on Windows: a consumer that is busy takes what arrived meanwhile as one chunk), writes its
     /// queued input, and looks at every session that asked (a consumer freed space, input was queued, a sink attached, the
-    /// close or disposal began). A session's failure ends that session's output alone. Reading needs no thread-pool worker, so output keeps flowing into rings
-    /// while the host's pool is starved; only the consumers' continuations wait for it. macOS and FreeBSD read on reader
-    /// threads until their kqueue loop lands, and every platform does under the rollback switch (<see cref="PtyOutputDrivers"/>).
+    /// close or disposal began). A session's failure ends that session's output alone. Reading needs no thread-pool worker,
+    /// so output keeps flowing into rings while the host's pool is starved; only the consumers' continuations wait for it.
+    /// Sessions read on reader threads under the rollback switch (<see cref="PtyOutputDrivers"/>), and when the watcher
+    /// has no epoll or kqueue.
     /// </para>
     /// <para>
     /// The native shim reports exits through pidfd + epoll (Linux 5.3+) or <c>kqueue</c>
@@ -55,7 +58,7 @@ internal static partial class UnixPtyBackend
         private const int PollIntervalMs = 10;
         private const int WaitCapacity = 16;
 
-        // Session I/O (Linux): the masters of sessions whose output this thread reads. A master's token is its slot plus
+        // Session I/O: the masters of sessions whose output this thread reads. A master's token is its slot plus
         // the slot's generation, with the top bit set so that it never meets a child's report; a report whose generation
         // is stale (the slot was freed and taken again) is dropped.
         private const ulong MasterTokenBit = 1UL << 63;
@@ -186,8 +189,8 @@ internal static partial class UnixPtyBackend
 
         /// <summary>
         /// Registers <paramref name="session"/>'s <paramref name="master"/> for reading on this thread. Returns
-        /// <see langword="false"/> when this thread cannot read masters (no epoll, or kqueue until its loop lands), and the
-        /// session then reads on a reader thread. The caller holds a reference on the master until
+        /// <see langword="false"/> when this thread cannot read masters (no epoll or kqueue, or a 32-bit kqueue build, whose
+        /// event cannot carry the token), and the session then reads on a reader thread. The caller holds a reference on the master until
         /// <see cref="DeregisterMaster"/>, so its descriptor cannot close, and its number be reused, while registered.
         /// </summary>
         internal static bool TryRegisterMaster(UnixPtyBackendInstance session, int master)
@@ -216,6 +219,13 @@ internal static partial class UnixPtyBackend
         /// <summary>Sets what a registered master reports. On this thread only.</summary>
         internal static void SetInterest(int master, int slot, int generation, int interest) =>
             _ = minipty_watch_modify(s_watchFd, master, MasterToken(slot, generation), interest);
+
+        /// <summary>
+        /// Registers a master again with the same interest, which clears an end of file kqueue keeps reporting after the
+        /// slave opened again (see <see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). On this thread only.
+        /// </summary>
+        internal static void RenewInterest(int master, int slot, int generation, int interest) =>
+            _ = minipty_watch_renew(s_watchFd, master, MasterToken(slot, generation), interest);
 
         /// <summary>
         /// Removes a registered master, while it is still open, and frees its slot; a report already taken for it is
@@ -583,6 +593,9 @@ internal static partial class UnixPtyBackend
 
         [LibraryImport("minipty_unix", SetLastError = true)]
         private static partial int minipty_watch_modify(int watchFd, int fd, ulong token, int interest);
+
+        [LibraryImport("minipty_unix", SetLastError = true)]
+        private static partial int minipty_watch_renew(int watchFd, int fd, ulong token, int interest);
 
         [LibraryImport("minipty_unix")]
         private static partial void minipty_watch_remove(int watchFd, int fd);

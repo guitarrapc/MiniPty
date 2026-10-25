@@ -374,7 +374,7 @@ public sealed class PtyInputTests
     }
 
     /// <summary>
-    /// The same when the Linux loop sees the disposal first. Session disposal marks the output pump disposed before the
+    /// The same when the Unix loop sees the disposal first. Session disposal marks the output pump disposed before the
     /// backend fails its queued writes, and a loop that ended the session in between closed the input as the end of
     /// output, so the write failed with <see cref="IOException"/> instead. One full Linux run in two met it by chance;
     /// here the pump is marked first and the loop given time to see it.
@@ -382,7 +382,7 @@ public sealed class PtyInputTests
     [Test]
     public async Task DisposeFailsAQueuedWriteWhenTheLoopSeesTheDisposalFirst()
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
             return;
 
         var session = StartWithInputBlocked();

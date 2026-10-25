@@ -244,7 +244,11 @@ public sealed class PtyTests
         await Assert.That(maxChunk).IsLessThanOrEqualTo(MiniPty.Internal.PtyOutputPump.Capacity);
     }
 
-    /// <summary>Binary bulk stdout on Unix should remain few large chunks (coalesce must not regress large reads).</summary>
+    /// <summary>
+    /// Bulk output that piles up while the consumer is busy is handed out as few large chunks, whatever size each read
+    /// has. The loop publishes each read as it completes, and a macOS read returns at most 1 KiB, so a consumer that keeps
+    /// up gets about 32 chunks of 32 KiB there; this consumer is slower than the child on purpose.
+    /// </summary>
     [Test]
     public async Task PtyReadOutputAsyncPreservesLargeChunksOnUnix()
     {
@@ -256,12 +260,17 @@ public sealed class PtyTests
         var totalBytes = 0;
         var chunks = 0;
         var maxChunk = 0;
-        await foreach (var chunk in session.ReadOutputAsync())
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+        while (true)
         {
+            await Task.Delay(10);
+            if (!await output.MoveNextAsync())
+                break;
+
             chunks++;
-            totalBytes += chunk.Data.Length;
-            if (chunk.Data.Length > maxChunk)
-                maxChunk = chunk.Data.Length;
+            totalBytes += output.Current.Data.Length;
+            if (output.Current.Data.Length > maxChunk)
+                maxChunk = output.Current.Data.Length;
         }
 
         await Assert.That(totalBytes).IsEqualTo(32_768);

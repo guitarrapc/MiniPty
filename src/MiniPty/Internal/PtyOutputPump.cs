@@ -21,9 +21,8 @@ internal interface IPtyOutputWaiter
 /// <see cref="Finish"/>, and the free-space handshake) as output arrives, and the pump calls the driver back when its
 /// state changes in a way the driver cannot see from the transport: the consumer freed space, a sink attached, the
 /// close was requested, disposal began, or the drain gave up on the transport ending. Windows reads through I/O
-/// completions (<see cref="WindowsOutputDriver"/>), Linux on the exit watcher's loop, and macOS, FreeBSD, and every
-/// platform under the rollback switch on a
-/// <see cref="PtyReaderThread"/> blocking in the transport.
+/// completions (<see cref="WindowsOutputDriver"/>), Unix on the exit watcher's loop, and every platform under the
+/// rollback switch on a <see cref="PtyReaderThread"/> blocking in the transport.
 /// </para>
 /// <para>
 /// <b>Ring.</b> <see cref="Capacity"/> bytes in one pinned buffer from <see cref="PtyBufferPool"/>. Each transport

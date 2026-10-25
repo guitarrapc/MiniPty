@@ -45,6 +45,7 @@ void minipty_child_watch_remove_output(int watch_fd, int master_fd);
 int minipty_child_watch_wake(int watch_fd, int wake_write);
 int minipty_watch_add(int watch_fd, int fd, uint64_t token, int interest);
 int minipty_watch_modify(int watch_fd, int fd, uint64_t token, int interest);
+int minipty_watch_renew(int watch_fd, int fd, uint64_t token, int interest);
 void minipty_watch_remove(int watch_fd, int fd);
 int minipty_watch_wait(int watch_fd, int wake_read, uint64_t *tokens, int *reports, int capacity, int timeout_ms);
 int minipty_pidfd_open(int pid);

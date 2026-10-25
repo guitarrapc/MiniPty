@@ -17,9 +17,8 @@ namespace MiniPty;
 /// </para>
 /// <para>
 /// PTY output is read from spawn into a small bounded buffer, never on the caller's thread and never by blocking a
-/// thread-pool worker (through I/O completions on Windows, on one background loop for every session on Linux, on a
-/// dedicated background thread per session on macOS and FreeBSD), and exactly one
-/// consumer drains it: <see cref="ReadOutputAsync"/>, <see cref="Output"/>, <see cref="CompleteAsync"/>, or the
+/// thread-pool worker (through I/O completions on Windows, on one background loop for every session on Unix), and exactly
+/// one consumer drains it: <see cref="ReadOutputAsync"/>, <see cref="Output"/>, <see cref="CompleteAsync"/>, or the
 /// <c>MiniPty.Capture</c> package. When nothing drains it the buffer fills, reading stops, and the child may block
 /// on its next write, as it would on a terminal nobody reads.
 /// </para>

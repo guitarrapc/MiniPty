@@ -5,10 +5,10 @@ using MiniPty.Internal;
 namespace MiniPty.Tests;
 
 /// <summary>
-/// The Linux engine: one loop, the exit watcher's thread, reads every session's output and writes every session's queued
-/// input (<c>.github/docs/plans/plan_thread_free_io.md</c>, Phase 6). These tests cover what one shared thread must get
-/// right for every session at once: fairness, a failure that stays with its session, no spinning on a master that stays
-/// ready, and many sessions coming and going.
+/// The Unix engine: one loop, the exit watcher's thread, reads every session's output and writes every session's queued
+/// input, through epoll on Linux and kqueue on macOS and FreeBSD (<c>.github/docs/plans/plan_thread_free_io.md</c>,
+/// Phase 6). These tests cover what one shared thread must get right for every session at once: fairness, a failure that
+/// stays with its session, no spinning on a master that stays ready, and many sessions coming and going.
 /// </summary>
 public sealed class PtyUnixLoopTests
 {
@@ -27,7 +27,7 @@ public sealed class PtyUnixLoopTests
     [NotInParallel]
     public async Task AFloodDoesNotDelayAnotherSessionsEcho()
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
             return;
 
         await using var flood = Pty.Start(Shell("yes 0123456789abcdefghijklmnopqrstuvwxyz"));
@@ -68,6 +68,9 @@ public sealed class PtyUnixLoopTests
             }
 
             latencies.Add(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            // Erases the character again (VERASE is DEL), so the line never grows: a macOS terminal holds at most 1,024
+            // bytes on one line, then drops input and echoes BEL instead, and a fast loop echoes more than that in 500 ms.
+            await echo.WriteInputAsync("\x7f");
         }
 
         var floodDuring = Interlocked.Read(ref floodBytes) - floodAtStart;
@@ -89,7 +92,7 @@ public sealed class PtyUnixLoopTests
     [NotInParallel]
     public async Task AFailureInOneSessionEndsOnlyThatSession()
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
             return;
 
         await using var failing = Pty.Start(Shell("cat"));
@@ -127,17 +130,53 @@ public sealed class PtyUnixLoopTests
     /// its output still arrives in full when the consumer reads. A level-triggered hang-up while the loop cannot read
     /// would spin the loop for as long as the consumer stays away.
     /// </summary>
+    /// <remarks>
+    /// On Linux the child writes more than the ring holds; the rest waits in the terminal, which keeps it after the hang-up.
+    /// On macOS the child's exit waits until the master has read what the terminal holds, because the session holds a
+    /// descriptor of the slave, so the master hangs up while parked only when the terminal is empty: the child writes
+    /// exactly what fills the ring. FreeBSD discards what a last close leaves unread after 1 s, so it takes the same size.
+    /// </remarks>
     [Test]
     [NotInParallel]
     public async Task AHungUpMasterOnAFullRingDoesNotSpinTheLoop()
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
             return;
 
-        // More than the ring holds, so the session parks; the rest waits in the terminal, and the child exits.
-        const int Size = PtyOutputPump.Capacity + 4096;
-        await using var session = Pty.Start(Shell($"head -c {Size} /dev/zero | tr '\\0' x"));
+        var size = OperatingSystem.IsLinux()
+            ? PtyOutputPump.Capacity + 4096
+            : PtyOutputPump.Capacity - PtyOutputPump.PublishSize + 1;
+        await using var session = Pty.Start(Shell($"head -c {size} /dev/zero | tr '\\0' x"));
         await session.WaitForExitAsync().WaitAsync(Timeout);
+        await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace);
+
+        var before = UnixPtyBackend.LoopPassesForTests;
+        await Task.Delay(500);
+        var passes = UnixPtyBackend.LoopPassesForTests - before;
+
+        var received = 0;
+        await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
+            received += chunk.Data.Span.Count((byte)'x');
+
+        await Assert.That(passes).IsLessThan(50L);
+        await Assert.That(received).IsEqualTo(size);
+    }
+
+    /// <summary>
+    /// A master that stays readable while its session is parked on a full ring does not spin the loop: read interest is
+    /// dropped while the ring is full, and comes back, with everything the terminal held meanwhile, once the consumer
+    /// reads. Level-triggered readiness that stayed on would report the master on every pass.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task AParkedMasterWithUnreadOutputDoesNotSpinTheLoop()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        // Far more than the ring and the terminal hold, so the child blocks in its write while the session is parked.
+        const int Size = 1024 * 1024;
+        await using var session = Pty.Start(Shell($"head -c {Size} /dev/zero | tr '\\0' x"));
         await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace);
 
         var before = UnixPtyBackend.LoopPassesForTests;
@@ -160,12 +199,12 @@ public sealed class PtyUnixLoopTests
     [NotInParallel]
     public async Task AThousandSessionsOpenedAndClosedLeaveNothingBehind()
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
             return;
 
         await RunBatchAsync(50);
         var threads = ThreadCount();
-        var descriptors = Directory.GetFiles("/proc/self/fd").Length;
+        var descriptors = DescriptorCount();
         var rings = PtyBufferPool.RentedCount;
 
         for (var batch = 0; batch < 20; batch++)
@@ -174,7 +213,7 @@ public sealed class PtyUnixLoopTests
         // Helper threads the runtime started for the burst retire on their own.
         await Task.Delay(1000);
         await Assert.That(ThreadCount() - threads).IsLessThanOrEqualTo(4);
-        await Assert.That(Directory.GetFiles("/proc/self/fd").Length - descriptors).IsLessThanOrEqualTo(4);
+        await Assert.That(DescriptorCount() - descriptors).IsLessThanOrEqualTo(4);
         await Assert.That(PtyBufferPool.RentedCount).IsEqualTo(rings);
 
         static async Task RunBatchAsync(int count)
@@ -198,16 +237,19 @@ public sealed class PtyUnixLoopTests
             using var process = Process.GetCurrentProcess();
             return process.Threads.Count;
         }
+
+        // The process's open descriptors; macOS and FreeBSD list them under /dev/fd.
+        static int DescriptorCount() => Directory.GetFiles(OperatingSystem.IsLinux() ? "/proc/self/fd" : "/dev/fd").Length;
     }
 
     /// <summary>
-    /// Linux sessions read on the loop by default, and on reader threads under the rollback switch.
+    /// Unix sessions read on the loop by default, and on reader threads under the rollback switch.
     /// </summary>
     [Test]
     [NotInParallel]
     public async Task TheRollbackSwitchSelectsReaderThreads()
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
             return;
 
         await using (var session = Pty.Start(Shell("echo rollback-marker")))

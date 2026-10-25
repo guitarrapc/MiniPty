@@ -291,7 +291,7 @@ public sealed class PtyUnixDisposeTests
     [Test]
     public async Task DisposeDiscardsWhatAHungUpChildWritesWhenTheLoopSeesTheDisposalFirst()
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
             return;
 
         var marker = NewMarkerPath();

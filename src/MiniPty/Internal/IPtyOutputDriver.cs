@@ -14,10 +14,10 @@ namespace MiniPty.Internal;
 /// session is being disposed, or the post-exit drain gave up on the transport ending.
 /// </para>
 /// <para>
-/// Windows reads through I/O completions (<see cref="WindowsOutputDriver"/>) and Linux on the exit watcher's loop, which
-/// the session's backend drives itself; neither holds a thread per session. macOS and FreeBSD, and every platform under
-/// the rollback switch (<see cref="PtyOutputDrivers"/>), use <see cref="PtyReaderThread"/>: a dedicated thread that
-/// blocks in the transport (<see cref="IPtyBlockingOutput"/>). Every member takes the pump it is about, so a driver
+/// Windows reads through I/O completions (<see cref="WindowsOutputDriver"/>) and Unix on the exit watcher's loop, which
+/// the session's backend drives itself; neither holds a thread per session. Under the rollback switch
+/// (<see cref="PtyOutputDrivers"/>) every platform uses <see cref="PtyReaderThread"/>: a dedicated thread that blocks
+/// in the transport (<see cref="IPtyBlockingOutput"/>). Every member takes the pump it is about, so a driver
 /// serving several sessions over its lifetime ignores calls aimed at a pump it no longer serves.
 /// </para>
 /// </remarks>
