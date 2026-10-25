@@ -361,7 +361,7 @@ var status = await PtyWebSocketBridge.RunAsync(
 Console.WriteLine($"shell exited: {status.ExitCode} (signal {status.Signal?.ToString() ?? "none"})");
 ```
 
-For custom transports (stdio framing to a VS Code extension, SignalR, …), use the `PtyTerminal` facade directly: a node-pty-shaped push model with an output handler, awaitable `Completion` (exit after all output), and `Pause()` / `Resume()` flow control. See [terminal.md](.github/docs/specs/terminal.md) for the protocol and the VS Code `Pseudoterminal` bridging pattern.
+For custom transports (stdio framing to a VS Code extension, SignalR, …), use the `PtyTerminal` facade directly: a node-pty-shaped push model with an output handler, awaitable `Completion` (exit after all output), and `Pause()` / `Resume()` flow control. It pushes output as soon as it is read, so a handler that keeps up gets each read as a chunk of its own. Only the built-in bridges join a burst of output into larger messages ([Output frames](.github/docs/specs/terminal.md#output-frames)). See [terminal.md](.github/docs/specs/terminal.md) for the protocol and the VS Code `Pseudoterminal` bridging pattern.
 
 ## Samples
 
@@ -373,7 +373,7 @@ For custom transports (stdio framing to a VS Code extension, SignalR, …), use 
 | [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) | **MiniPty.Console** host attach: keyboard → PTY, `ReadOutputAsync` → host display (requires interactive TTY) |
 | [Observe.cs](samples/SingleFiles/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
 | [WebTerminal.cs](samples/SingleFiles/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner |
-| [WebTerminalScale.cs](samples/SingleFiles/WebTerminalScale.cs) | **MiniPty.Terminal** in an ASP.NET Core host serving many sessions: a dashboard of what each session costs the host (threads, memory, handles), and a `bench` mode that measures it with keystroke echo latency and WebSocket frames per 32 KiB |
+| [WebTerminalScale.cs](samples/SingleFiles/WebTerminalScale.cs) | **MiniPty.Terminal** in an ASP.NET Core host serving many sessions: a dashboard of what each session costs the host (threads, memory, handles), and a `bench` mode that measures it with keystroke echo latency, and a flood's WebSocket frames per 32 KiB and host CPU per MiB |
 | [VsCodeTerminalHelper.cs](samples/SingleFiles/VsCodeTerminalHelper.cs) | **MiniPty.Terminal** stdio-framed helper for a VS Code `Pseudoterminal` |
 | [VsCodeExtension](samples/VsCodeExtension) | Dependency-free VS Code extension sample connecting `Pseudoterminal` to the NativeAOT helper |
 | [VsCodePersistentBridge.cs](samples/SingleFiles/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |

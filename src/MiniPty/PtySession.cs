@@ -185,16 +185,17 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// <see cref="ReadOutputAsync"/> for a consumer that pays per chunk, such as a bridge that sends one message per chunk:
-    /// while output arrives in a burst, a chunk waits for more output, at most about a millisecond, so a flood goes out in
-    /// fewer, larger chunks. Output outside a burst, such as a keystroke echo, is handed out at once
-    /// (<see cref="PtyOutputCoalescing"/>).
+    /// <see cref="ReadOutputAsync"/> for a consumer that pays per chunk, such as a bridge that sends one message per chunk.
+    /// While output arrives in a burst, a chunk waits until 8 KiB is unread or a shared tick serves its deadline, so a flood
+    /// goes out in fewer, larger chunks. That is up to about 2 ms after the read asked where timers have millisecond
+    /// resolution, and up to about the timer's resolution where they are coarser
+    /// (<see cref="PtyOutputCoalescing.MaxDelayMs"/>). Output outside a burst, such as a keystroke echo, is handed out at
+    /// once (<see cref="PtyOutputCoalescing"/>).
     /// </summary>
     internal IAsyncEnumerable<PtyOutputChunk> ReadOutputCoalescedAsync(CancellationToken cancellationToken = default) =>
-        new PtyOutputReader.WithToken(
+        new PtyCoalescingOutputReader.CoalescingEnumerable(
             _outputReader as PtyCoalescingOutputReader ?? CreateCoalescingOutputReader(),
-            cancellationToken,
-            coalesce: true);
+            cancellationToken);
 
     /// <summary>
     /// Gets a value indicating whether the child process has exited.
@@ -634,7 +635,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// conflict, as any second reader does. If another thread replaced the reader meanwhile, which only racing reads do,
     /// the new one still serves this enumeration, and the session's single output consumer decides between them.
     /// </summary>
-    private PtyOutputReader CreateCoalescingOutputReader()
+    private PtyCoalescingOutputReader CreateCoalescingOutputReader()
     {
         var current = Volatile.Read(ref _outputReader);
         var created = new PtyCoalescingOutputReader(this, _pump);

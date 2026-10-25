@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using System.Threading.Tasks.Sources;
 
@@ -5,7 +6,8 @@ namespace MiniPty.Internal;
 
 /// <summary>
 /// <see cref="PtySession.ReadOutputAsync"/>: one enumerator per session, reused by every enumeration, that hands
-/// out ring slots in place.
+/// out ring slots in place. A session's first coalescing read replaces it with a <see cref="PtyCoalescingOutputReader"/>,
+/// which serves the enumerations after it.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,10 +23,11 @@ namespace MiniPty.Internal;
 /// (<see cref="PtyConsumerYield"/>).
 /// </para>
 /// <para>
-/// An enumeration started with coalescing (an internal mode the bridges use through <c>PtyTerminal</c>) waits, while
-/// output arrives in a burst, for a larger chunk instead of taking each read as it is published, at most
-/// <see cref="PtyOutputCoalescing.MaxDelayMs"/> per chunk (<see cref="PtyOutputCoalescing"/>). The deadline is served by
-/// <see cref="PtyOutputCoalesceScheduler"/>.
+/// An enumeration started through <see cref="PtySession.ReadOutputCoalescedAsync"/>, an internal mode the bridges use
+/// through <c>PtyTerminal</c>, waits for a larger chunk while output arrives in a burst, instead of taking each read as it
+/// is published, until a deadline that <see cref="PtyOutputCoalesceScheduler"/> serves (<see cref="PtyOutputCoalescing"/>).
+/// Only such an enumeration coalesces. One started through <see cref="PtySession.ReadOutputAsync"/> does not, even when
+/// a coalescing reader serves it.
 /// </para>
 /// <para>
 /// A chunk is the unread part of one ring slot, valid until the next <c>MoveNextAsync</c>, which releases the
@@ -42,7 +45,7 @@ internal class PtyOutputReader :
     private static readonly Action<object?> s_onCanceled = static state => ((PtyOutputReader)state!).OnCanceled();
 
     private readonly PtySession _session;
-    private readonly PtyOutputPump _pump;
+    private protected readonly PtyOutputPump _pump;
     private ManualResetValueTaskSourceCore<bool> _core;
     private CancellationTokenRegistration _registration;
     private CancellationToken _token;
@@ -52,14 +55,11 @@ internal class PtyOutputReader :
     private bool _active;
     // A yield was returned and completes when it is awaited (OnCompleted) or read (GetResult).
     private bool _yieldPending;
-    // Whether the current enumeration coalesces bursts; only a PtyCoalescingOutputReader does, which holds the state, so
-    // that a session read plainly pays nothing for it.
+    // Whether the current enumeration coalesces bursts. Only a PtyCoalescingOutputReader can, and it holds the state, so a
+    // session read plainly pays nothing for it.
     private bool _coalesce;
 
-    /// <summary>The burst coalescing state of a reader made for coalescing, otherwise null. For tests.</summary>
-    internal PtyOutputCoalescer? Coalescer => (this as PtyCoalescingOutputReader)?.State;
-
-    private PtyOutputCoalescer CoalescingState => ((PtyCoalescingOutputReader)this).State;
+    private PtyCoalescingOutputReader Coalescing => (PtyCoalescingOutputReader)this;
 
     internal PtyOutputReader(PtySession session, PtyOutputPump pump)
     {
@@ -103,9 +103,10 @@ internal class PtyOutputReader :
         _holdsChunk = false;
         _current = default;
         _yieldPending = false;
-        _coalesce = coalesce && this is PtyCoalescingOutputReader;
-        if (_coalesce)
-            CoalescingState.Reset();
+        Debug.Assert(!coalesce || this is PtyCoalescingOutputReader);
+        _coalesce = coalesce;
+        if (coalesce)
+            Coalescing.ResetCoalescing();
         PtyConsumerYield.StartRun();
         _active = true;
         return this;
@@ -124,7 +125,7 @@ internal class PtyOutputReader :
             while (true)
             {
                 // In a burst, a small amount of unread output is left for a larger chunk, unless output has ended.
-                var minimum = _coalesce ? CoalescingState.NextMinimum() : 1;
+                var minimum = _coalesce ? Coalescing.NextMinimum() : 1;
                 if (minimum == 1 && TryTakeOrEnd(out var hasChunk))
                 {
                     // End of output is never delayed; only a chunk can be handed over through a yield.
@@ -145,13 +146,16 @@ internal class PtyOutputReader :
                 _core.Reset();
                 // A yield abandoned without being awaited must not complete this wait before the pump signals it.
                 _yieldPending = false;
+                if (minimum > 1)
+                    Coalescing.BeforeWait();
+
                 if (!_pump.ArmWait(this, wakeOnData: true, minimum))
                     continue;
 
-                // After arming, so the deadline can only lower this wait's minimum, never an earlier one's. The continuation
-                // cannot run before this method returns, so nothing completes the wait under these writes.
+                // After arming, so its deadline can only lower this wait's minimum. A signal may complete the wait meanwhile,
+                // but GetResult, which ends it, cannot run before this method returns.
                 if (minimum > 1)
-                    CoalescingState.OnWaitArmed();
+                    Coalescing.OnWaitArmed();
 
                 if (_token.CanBeCanceled)
                     _registration = _token.UnsafeRegister(s_onCanceled, this);
@@ -177,7 +181,13 @@ internal class PtyOutputReader :
         return default;
     }
 
-    void IPtyOutputWaiter.OnOutputSignaled() => _core.SetResult(true);
+    void IPtyOutputWaiter.OnOutputSignaled()
+    {
+        if (_coalesce)
+            Coalescing.OnWaitCompleted();
+
+        _core.SetResult(true);
+    }
 
     bool IValueTaskSource<bool>.GetResult(short token)
     {
@@ -190,7 +200,7 @@ internal class PtyOutputReader :
         // completion would have.
         CompletePendingYield();
         if (_coalesce)
-            CoalescingState.OnWaitEnded();
+            Coalescing.OnWaitEnded();
         // The caller resumed from an asynchronous completion, so its context has run its queue: a new run starts.
         PtyConsumerYield.StartRun();
 
@@ -281,7 +291,7 @@ internal class PtyOutputReader :
 
         // Counted when released, so a chunk a yield handed over again is counted once.
         if (_coalesce)
-            CoalescingState.OnDelivered(_current.Data.Length);
+            Coalescing.OnDelivered(_current.Data.Length);
 
         _holdsChunk = false;
         _current = default;
@@ -298,7 +308,7 @@ internal class PtyOutputReader :
         if (_coalesce)
         {
             _coalesce = false;
-            CoalescingState.OnEnded();
+            Coalescing.OnEnded();
         }
         var linked = _linkedTokenSource;
         _linkedTokenSource = null;
@@ -324,10 +334,10 @@ internal class PtyOutputReader :
     }
 
     /// <summary><see cref="PtySession.ReadOutputAsync"/> with a cancelable token, which must travel with the enumerable.</summary>
-    internal sealed class WithToken(PtyOutputReader reader, CancellationToken readToken, bool coalesce = false) : IAsyncEnumerable<PtyOutputChunk>
+    internal sealed class WithToken(PtyOutputReader reader, CancellationToken readToken) : IAsyncEnumerable<PtyOutputChunk>
     {
         public IAsyncEnumerator<PtyOutputChunk> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-            reader.Begin(readToken, cancellationToken, coalesce);
+            reader.Begin(readToken, cancellationToken, coalesce: false);
     }
 
     /// <summary>An enumeration that could not start; it fails from its first <c>MoveNextAsync</c>.</summary>
@@ -347,11 +357,3 @@ internal class PtyOutputReader :
     }
 }
 
-/// <summary>
-/// The session's <see cref="PtyOutputReader"/> once an enumeration asked to coalesce bursts: the same reader with the
-/// coalescing state, so that a session that only reads plainly pays nothing for it.
-/// </summary>
-internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPump pump) : PtyOutputReader(session, pump)
-{
-    internal PtyOutputCoalescer State { get; } = new(pump);
-}

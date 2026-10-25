@@ -114,8 +114,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     // Consumer side: the generation of the last wait armed.
     private int _waitGeneration;
     // The least unread output a data signal completes the armed wait for: 1 for a plain read, more for a reader that
-    // coalesces a burst (PtyOutputReader), NoDataWait for a wait that output does not complete. A short, as the bool it
-    // replaced, so that every session's pump stays the size it was: the ring never holds more than Capacity.
+    // coalesces a burst (PtyCoalescingOutputReader), NoDataWait for a wait that output does not complete. A short, because
+    // a wider field grows every session's pump. It is enough because the ring never holds more than Capacity.
     private short _waiterMinimumData;
     private const short NoDataWait = short.MaxValue;
     private IPtyOutputWaiter? _waiter;
@@ -528,6 +528,12 @@ internal sealed class PtyOutputPump : IValueTaskSource
     }
 
     /// <summary>
+    /// Runs inside <see cref="ArmWait"/> between the wait's minimum and its generation, the one place where a deadline that
+    /// outlived an earlier wait can lower the minimum unseen. A test sets it to play that deadline.
+    /// </summary>
+    internal static Action<PtyOutputPump>? ArmWaitHookForTests;
+
+    /// <summary>
     /// Arms <paramref name="waiter"/> for the next signal: published output (when <paramref name="wakeOnData"/>, once at
     /// least <paramref name="minimumData"/> bytes are unread), end of output, disposal, or a drain timeout.
     /// </summary>
@@ -535,8 +541,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// <param name="wakeOnData">Whether published output completes the wait.</param>
     /// <param name="minimumData">
     /// The least unread output that completes the wait: 1 for a plain read. A reader coalescing a burst asks for more, and
-    /// <see cref="RelaxWaitMinimum"/> lowers it again at the reader's deadline, so output is never held back for longer
-    /// than its consumer asked. The pump itself never delays output.
+    /// <see cref="RelaxWaitMinimum"/> lowers it again at the reader's deadline. The pump never delays output on its own.
     /// </param>
     /// <returns>
     /// <see langword="true"/> when the wait is armed and the waiter will be signaled; <see langword="false"/> when
@@ -548,6 +553,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
         Volatile.Write(ref _waiter, waiter);
         // Before the generation: a signaler that reads this wait's generation reads its minimum too.
         Volatile.Write(ref _waiterMinimumData, wakeOnData ? (short)minimumData : NoDataWait);
+        Volatile.Read(ref ArmWaitHookForTests)?.Invoke(this);
 
         // Each wait gets a generation of its own, never 0, so that a signaler still holding an earlier wait's generation
         // fails its claim instead of completing this one (see SignalConsumer).
@@ -557,8 +563,10 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
         Interlocked.Exchange(ref _consumerWaiting, generation);
 
-        // Re-checked after publishing the wait (Dekker with the producer's publish-then-check).
-        var ready = (wakeOnData && Volatile.Read(ref _count) >= minimumData)
+        // Re-checked after publishing the wait (Dekker with the producer's publish-then-check). Against the field, not the
+        // parameter: a deadline that outlived an earlier wait can lower it after the write above, and its signal then found
+        // no wait to complete.
+        var ready = (wakeOnData && Volatile.Read(ref _count) >= Volatile.Read(ref _waiterMinimumData))
             || (Volatile.Read(ref _flags) & (FlagProducerFinished | FlagSessionDisposed)) != 0;
         if (!ready)
             return true;
@@ -578,18 +586,22 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal void SignalWaiter() => SignalConsumer(dataArrived: false);
 
     /// <summary>
-    /// Lowers the minimum of an armed wait that coalesces a burst to 1 byte, at its consumer's deadline, and completes it
-    /// when output is unread; otherwise the next publish does. Any thread. A wait that output does not complete, or a
-    /// plain one, is left as it is, so a deadline that outlived its wait changes nothing but an earlier flush.
+    /// Lowers the armed wait's minimum to 1 byte at its consumer's deadline, and completes the wait if output is unread. If
+    /// none is, the next publish completes it. It may be called from any thread. A wait that output does not complete keeps
+    /// its minimum, and a deadline that outlived its own wait at most hands a later wait's output out early.
     /// </summary>
     internal void RelaxWaitMinimum()
     {
         var minimum = Volatile.Read(ref _waiterMinimumData);
-        if (minimum <= 1 || minimum == NoDataWait)
+        if (minimum == NoDataWait)
             return;
 
-        if (Interlocked.CompareExchange(ref _waiterMinimumData, (short)1, minimum) == minimum)
-            SignalConsumer(dataArrived: true);
+        if (minimum > 1)
+            Interlocked.CompareExchange(ref _waiterMinimumData, (short)1, minimum);
+
+        // Also when the minimum is 1 already, so that a deadline completes a wait with output unread whatever lowered its
+        // minimum. The arming re-check and the next publish already cover a deadline that outlived its own wait.
+        SignalConsumer(dataArrived: true);
     }
 
     private void SignalConsumer(bool dataArrived)
@@ -614,9 +626,10 @@ internal sealed class PtyOutputPump : IValueTaskSource
         if (Interlocked.CompareExchange(ref _consumerWaiting, 0, generation) == generation)
         {
             // Completing the wait posts the consumer's continuation to the context it captured, on this thread: the
-            // driver's thread, or a thread disposing the session. A context whose Post throws (a UI dispatcher that
-            // already shut down) can never run that continuation; the exception must not end output reading,
-            // escape Dispose, or terminate the process from the driver's thread.
+            // driver's thread, a thread disposing the session, or a timer tick that serves a drain timeout or a
+            // coalescing deadline. A context whose Post throws (a UI dispatcher that already shut down) can never run
+            // that continuation. The exception must not end output reading, escape Dispose, or terminate the process
+            // from a driver or timer thread.
             try
             {
                 Volatile.Read(ref _waiter)!.OnOutputSignaled();

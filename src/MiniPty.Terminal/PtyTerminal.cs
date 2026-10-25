@@ -20,6 +20,11 @@ namespace MiniPty.Terminal;
 /// <see cref="Completion"/> transitions to completed, so tail output is never lost
 /// (drain-then-exit, matching node-pty's onData/onExit ordering).
 /// </para>
+/// <para>
+/// Output is pushed as soon as it is read, so a handler that keeps up gets each read as a chunk of its own. The built-in
+/// bridges join output that arrives in a burst into larger chunks before they send it. That mode is internal to them, so a
+/// custom transport that pays per message pays for each of those reads.
+/// </para>
 /// </remarks>
 public sealed class PtyTerminal : IAsyncDisposable
 {

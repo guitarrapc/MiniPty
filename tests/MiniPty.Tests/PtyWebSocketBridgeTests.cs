@@ -55,12 +55,12 @@ public sealed class PtyWebSocketBridgeTests
     }
 
     /// <summary>
-    /// A flood goes out in large frames. The core publishes each read as it completes, at most 1 KiB on macOS, and a bridge
-    /// that keeps up sent each as a frame of its own (about 32 per 32 KiB on macOS, 16 on Linux); the bridge joins reads
-    /// that arrive in a burst (plan_thread_free_io.md, Phase 7). Unix only: a Windows flood's pace is ConPTY's, and the
-    /// benchmark records it there. Alone, because a loaded machine slows the flood below a burst's rate now and then, and
-    /// each such pause hands out what has arrived: in one full parallel run of eight, 263 frames (3.99 KiB) instead of
-    /// about 130.
+    /// A flood goes out in large frames: the bridge joins reads that arrive in a burst. On macOS a terminal read returns at
+    /// most 1 KiB, and the core publishes each read as it completes, so without the joining hardly any byte would go out in
+    /// a frame of 4 KiB or more. A Linux read can return 4 KiB, so there the test may pass without the joining. The test
+    /// weighs frames by their bytes, so the few small frames a slowdown on a loaded machine causes do not decide it. It
+    /// skips Windows, whose output arrives in frames of a few KiB whether or not the bridge joins them. It runs alone, so
+    /// that other tests do not slow the flood.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -83,8 +83,8 @@ public sealed class PtyWebSocketBridgeTests
 
         var binaryFrames = client.MessageCount - (client.ExitMessage is null ? 0 : 1);
         await Assert.That(client.BinaryByteCount).IsEqualTo(Size);
-        await Assert.That(client.BinaryByteCount / binaryFrames).IsGreaterThanOrEqualTo(4096L)
-            .Because($"{binaryFrames} frames for {Size} bytes");
+        await Assert.That(client.LargeFrameByteCount * 4).IsGreaterThanOrEqualTo(client.BinaryByteCount * 3)
+            .Because($"{client.LargeFrameByteCount} of {Size} bytes in frames of 4 KiB or more, {binaryFrames} frames");
     }
 
     [Test]
@@ -622,6 +622,9 @@ public sealed class PtyWebSocketBridgeTests
         }
 
         public long BinaryByteCount => Interlocked.Read(ref _binaryByteCount);
+
+        /// <summary>Bytes received in binary frames of 4 KiB or more.</summary>
+        public long LargeFrameByteCount { get; private set; }
         public int MessageCount => _messageCount;
         public JsonElement? ExitMessage { get; private set; }
         public int ExitMessageIndex { get; private set; } = -1;
@@ -694,6 +697,8 @@ public sealed class PtyWebSocketBridgeTests
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
                     Interlocked.Add(ref _binaryByteCount, payload.Length);
+                    if (payload.Length >= 4096)
+                        LargeFrameByteCount += payload.Length;
                     lock (_binaryText)
                     {
                         _binaryText.Append(Encoding.UTF8.GetString(payload));

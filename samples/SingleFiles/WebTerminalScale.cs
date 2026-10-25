@@ -16,8 +16,9 @@
 // Bench:  dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench [--sessions 16,64] [--echo 200]
 //                                                                             [--flood-bytes 4194304]
 //   Starts the server as a child process and opens idle shell sessions over WebSockets in steps. For each step it
-//   prints the server's threads and memory and the keystroke echo latency; then it floods one session and prints
-//   throughput and WebSocket frames per 32 KiB. Run it before and after a change to MiniPty to compare.
+//   prints the server's threads and memory and the keystroke echo latency. Then it floods one session and prints
+//   throughput, WebSocket frames per 32 KiB, and the server's CPU time per MiB. Run it before and after a change to
+//   MiniPty to compare.
 //
 // Smoke (CI): the published executable with --smoke runs a small bench and exits 0 when every step succeeded.
 //
@@ -387,8 +388,9 @@ static class Bench
         Console.WriteLine();
         var framesPer32KiB = flood.Bytes == 0 ? 0 : flood.Frames * 32768.0 / flood.Bytes;
         var mbPerSecond = flood.Seconds <= 0 ? 0 : flood.Bytes / 1048576.0 / flood.Seconds;
+        var cpuMsPerMiB = flood.Bytes == 0 ? 0 : flood.HostCpuMs / (flood.Bytes / 1048576.0);
         Console.WriteLine($"Flood: {flood.Bytes / 1024.0:F0} KiB in {flood.Frames} frames (average {flood.Bytes / 1024.0 / Math.Max(1, flood.Frames):F1} KiB), " +
-            $"{framesPer32KiB:F1} frames per 32 KiB, {mbPerSecond:F1} MB/s, host CPU {flood.HostCpuMs / Math.Max(1, flood.Bytes / 1048576.0):F1} ms per MiB" +
+            $"{framesPer32KiB:F1} frames per 32 KiB, {mbPerSecond:F1} MB/s, host CPU {cpuMsPerMiB:F1} ms per MiB" +
             $"{(flood.Exited ? "" : " (no exit message)")}");
     }
 

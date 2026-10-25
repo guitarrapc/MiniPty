@@ -3,69 +3,106 @@ using System.Diagnostics;
 namespace MiniPty.Internal;
 
 /// <summary>
-/// Burst coalescing for a consumer that pays per chunk, such as a bridge that sends one WebSocket message per chunk: while
-/// output arrives in a burst, its reader waits for a larger chunk instead of taking each read as it is published, with a
-/// short bound on the wait. The pump keeps publishing each read as it completes; only the consumer that asks waits.
+/// Burst coalescing for a consumer that pays per chunk, such as a bridge that sends one message per chunk. While output
+/// arrives in a burst, its reader waits for a larger chunk instead of taking each read as it is published, with a short
+/// bound on the wait. The pump keeps publishing each read as it completes, and only the reader that asked waits.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A reader enters a burst once it has taken <see cref="BurstBytes"/> within <see cref="BurstWindowMs"/>, a rate no
-/// keystroke echo reaches, so interactive output is never held. In a burst it takes its next chunk only once
-/// <see cref="MinimumBytes"/> are unread, or once <see cref="MaxDelayMs"/> has passed since it asked; a wait that ends at
-/// that deadline means output slowed down, and ends the burst. The pump completes such a wait only at its minimum
-/// (<see cref="PtyOutputPump.ArmWait"/>), so the consumer is not woken once per read in between: that wake-up, and the
-/// thread-pool workers spinning after it, is what a flood of small reads costs the host.
+/// A reader enters a burst once it has been handed <see cref="BurstBytes"/> within <see cref="BurstWindowMs"/>. A keystroke
+/// echo never comes near that, but larger output can: one chunk of that size counts, so the tail of a large repaint or
+/// paste can wait too. In a burst the reader takes its next chunk only once <see cref="MinimumBytes"/> are unread, or once
+/// the wait's deadline, <see cref="MaxDelayMs"/> after it asked, has been served. A wait that output completes before its
+/// deadline keeps the burst. A later one keeps it while the output then unread amounts to <see cref="BurstKeepBytes"/> per
+/// <see cref="BurstWindowMs"/> since the read asked. A steady stream at that rate or more therefore stays in it, even when it
+/// fills the minimum only after the deadline. Otherwise output slowed down, and the burst ends. What the late wait leaves
+/// unread does not count toward the next burst, however many chunks it comes out as, because it piled up over the whole
+/// wait.
 /// </para>
 /// <para>
-/// Why the consumer: a macOS master holds 1 KiB, so a read returns at most that much, and before the child writes its next
-/// KiB no reader can tell a flood that goes on from one that has ended. Joining reads there means waiting, which trades
-/// latency for fewer chunks, and that trade belongs to the party that pays per chunk
-/// (<c>.github/docs/plans/plan_thread_free_io.md</c>, Phase 7).
+/// The pump completes a wait in a burst only at its minimum (<see cref="PtyOutputPump.ArmWait"/>), at its deadline, or at
+/// end of output or disposal, so the consumer is not woken once per read in between. Each wake-up queues the consumer's
+/// continuation to the thread pool, which a flood of small reads would otherwise pay once per read.
+/// </para>
+/// <para>
+/// Joining reads needs waiting where a read returns little: a macOS master holds 1 KiB, and before the child writes its
+/// next KiB no reader can tell a flood that goes on from one that has ended. The wait trades latency for fewer chunks, so
+/// it is left to the consumer that pays per chunk.
 /// </para>
 /// </remarks>
 internal static class PtyOutputCoalescing
 {
     /// <summary>
     /// The chunk a reader waits for in a burst: half the ring, so the producer keeps reading into the other half while the
-    /// consumer sends this one. It must stay below what the ring holds when the producer parks (more than
-    /// <see cref="PtyOutputPump.Capacity"/> minus <see cref="PtyOutputPump.PublishSize"/>), or a wait could outlast a
+    /// consumer sends this one. It must not exceed what the ring holds when the producer parks, which is more than
+    /// <see cref="PtyOutputPump.Capacity"/> minus <see cref="PtyOutputPump.PublishSize"/>, or a wait would outlast a
     /// parked producer until its deadline.
     /// </summary>
     internal const int MinimumBytes = PtyOutputPump.Capacity / 2;
 
-    /// <summary>The longest a reader in a burst waits for <see cref="MinimumBytes"/> before it takes what is unread.</summary>
+    /// <summary>
+    /// How long after it asks a reader in a burst waits for <see cref="MinimumBytes"/>. The scheduler serves the deadline at
+    /// its next tick, so the wait lasts up to about twice this where timers have millisecond resolution, and up to the
+    /// timer's resolution where they are coarser.
+    /// </summary>
     internal const int MaxDelayMs = 1;
 
-    /// <summary>Output taken within <see cref="BurstWindowMs"/> that starts a burst: 4 MB/s, far above any echo.</summary>
+    /// <summary>Output handed out within <see cref="BurstWindowMs"/> that starts a burst: 4 MB/s, which no echo reaches.</summary>
     internal const int BurstBytes = 4 * 1024;
 
     /// <summary>The window <see cref="BurstBytes"/> is counted over.</summary>
     internal const int BurstWindowMs = 1;
 
     /// <summary>
-    /// <see cref="MaxDelayMs"/> in <see cref="Stopwatch"/> ticks. Not read-only only so that a test that runs alone can
-    /// make a wait outlast scheduling noise.
+    /// Output per <see cref="BurstWindowMs"/> that keeps a burst after a wait outlasted its deadline: half the rate that
+    /// starts one, so a stream near that rate, or a flood slowed by a busy host, does not leave and enter a burst on every
+    /// wait.
+    /// </summary>
+    internal const int BurstKeepBytes = BurstBytes / 2;
+
+    /// <summary>
+    /// <see cref="MaxDelayMs"/> in <see cref="Stopwatch"/> ticks. Writable so that a test that runs alone can make a wait
+    /// outlast scheduling delays.
     /// </summary>
     internal static long MaxDelayTicks = Stopwatch.Frequency * MaxDelayMs / 1000;
 
-    internal static readonly long BurstWindowTicks = Stopwatch.Frequency * BurstWindowMs / 1000;
+    /// <summary>
+    /// <see cref="BurstWindowMs"/> in <see cref="Stopwatch"/> ticks. Writable so that a test that runs alone can widen the
+    /// window: to count small chunks into one window despite scheduling delays, or to scale the rate that keeps a burst to a
+    /// deadline that outlasts them.
+    /// </summary>
+    internal static long BurstWindowTicks = Stopwatch.Frequency * BurstWindowMs / 1000;
+
+    // Compile-time bounds: converting a negative constant to uint does not compile. The minimum must fit in what the ring
+    // holds when the producer parks, and the ring must stay below the short.MaxValue the pump uses for a wait that output
+    // does not complete.
+    private const uint MinimumFitsTheParkedRing = (uint)(PtyOutputPump.Capacity - PtyOutputPump.PublishSize - MinimumBytes);
+    private const uint RingFitsTheShortMinimum = (uint)(short.MaxValue - 1 - PtyOutputPump.Capacity);
 }
 
 /// <summary>
-/// One reader's burst coalescing state (<see cref="PtyOutputCoalescing"/>), held by a <see cref="PtyCoalescingOutputReader"/>
-/// and reused by each of its coalescing enumerations. Touched by the consumer, except <see cref="Deadline"/>,
-/// <see cref="Scheduled"/>, and the expiry, which <see cref="PtyOutputCoalesceScheduler"/>'s tick reads and claims.
+/// The session's <see cref="PtyOutputReader"/> once an enumeration asked to coalesce bursts: the same reader with the
+/// coalescing state (<see cref="PtyOutputCoalescing"/>), so that a session read plainly pays nothing for it.
 /// </summary>
-internal sealed class PtyOutputCoalescer(PtyOutputPump pump)
+/// <remarks>
+/// The consumer's thread owns the state, with three exceptions. The thread that completes a wait records when it did.
+/// <see cref="PtyOutputCoalesceScheduler"/>'s tick reads and claims <see cref="Deadline"/>. The scheduler keeps
+/// <see cref="Scheduled"/> and <see cref="ScheduleIndex"/> under its lock.
+/// </remarks>
+internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPump pump) : PtyOutputReader(session, pump)
 {
-    // Consumer side: whether the reader is in a burst, whether a coalescing wait is armed, and the bytes delivered in the
-    // current window, which starts at _windowStart (Stopwatch ticks).
     private bool _inBurst;
     private bool _waitArmed;
+    // The output a burst left unread when a late wait ended it. It is not counted toward the next burst, however many
+    // chunks it comes out as.
+    private int _skipBytes;
+    // The bytes handed out in the current burst window, which starts at _windowStart (Stopwatch ticks).
     private int _windowBytes;
     private long _windowStart;
-    // Set by the tick when it ended the armed wait at its deadline; read and cleared by the consumer when the wait ends.
-    private int _expired;
+    // The armed wait's deadline as the consumer judges it, which the scheduler's Deadline loses when it is served.
+    private long _waitDeadline;
+    // When the armed wait was completed (Stopwatch ticks), written by the thread that completed it, or 0.
+    private long _completedAt;
 
     /// <summary>
     /// The armed coalescing wait's deadline in <see cref="Stopwatch"/> ticks, or 0 when none is armed. Written by the
@@ -73,20 +110,26 @@ internal sealed class PtyOutputCoalescer(PtyOutputPump pump)
     /// </summary>
     internal long Deadline;
 
-    /// <summary>Whether <see cref="PtyOutputCoalesceScheduler"/> watches this state. Guarded by the scheduler's lock.</summary>
+    /// <summary>
+    /// Whether the scheduler holds this reader. Written under the scheduler's lock, and read without it by the consumer,
+    /// which skips that lock while the reader stays held.
+    /// </summary>
     internal bool Scheduled;
+
+    /// <summary>This reader's place in the scheduler's array, or -1. Guarded by the scheduler's lock.</summary>
+    internal int ScheduleIndex = -1;
 
     /// <summary>Whether the reader is in a burst. For tests, on the consumer's thread.</summary>
     internal bool IsInBurst => _inBurst;
 
     /// <summary>Starts an enumeration outside a burst.</summary>
-    internal void Reset()
+    internal void ResetCoalescing()
     {
         _inBurst = false;
         _waitArmed = false;
+        _skipBytes = 0;
         _windowBytes = 0;
         _windowStart = 0;
-        Volatile.Write(ref _expired, 0);
         Volatile.Write(ref Deadline, 0);
     }
 
@@ -97,9 +140,9 @@ internal sealed class PtyOutputCoalescer(PtyOutputPump pump)
     internal int NextMinimum()
     {
         if (!_inBurst
-            || pump.UnreadCount >= PtyOutputCoalescing.MinimumBytes
-            || pump.IsProducerFinished
-            || pump.IsSessionDisposed)
+            || _pump.UnreadCount >= PtyOutputCoalescing.MinimumBytes
+            || _pump.IsProducerFinished
+            || _pump.IsSessionDisposed)
         {
             return 1;
         }
@@ -107,17 +150,36 @@ internal sealed class PtyOutputCoalescer(PtyOutputPump pump)
         return PtyOutputCoalescing.MinimumBytes;
     }
 
-    /// <summary>The reader armed a coalescing wait: it gets its deadline, which the scheduler watches.</summary>
+    /// <summary>
+    /// Prepares a coalescing wait before the pump arms it, because a signal can complete the wait as soon as it is armed.
+    /// </summary>
+    internal void BeforeWait()
+    {
+        _waitDeadline = Stopwatch.GetTimestamp() + PtyOutputCoalescing.MaxDelayTicks;
+        Volatile.Write(ref _completedAt, 0);
+    }
+
+    /// <summary>The pump armed the coalescing wait: its deadline goes to the scheduler.</summary>
     internal void OnWaitArmed()
     {
         _waitArmed = true;
-        Volatile.Write(ref Deadline, Stopwatch.GetTimestamp() + PtyOutputCoalescing.MaxDelayTicks);
-        PtyOutputCoalesceScheduler.Schedule(this);
+        // A full fence before reading Scheduled, paired with the one in the scheduler's Remove: either this sees the
+        // reader dropped and schedules it again, or Remove sees the new deadline and keeps the reader.
+        Interlocked.Exchange(ref Deadline, _waitDeadline);
+        if (!Volatile.Read(ref Scheduled))
+            PtyOutputCoalesceScheduler.Schedule(this);
     }
 
+    /// <summary>Records when the wait was completed. Called by the completing thread, before the consumer resumes.</summary>
+    internal void OnWaitCompleted() => Volatile.Write(ref _completedAt, Stopwatch.GetTimestamp());
+
     /// <summary>
-    /// The reader's wait completed, however it completed. A coalescing wait that ended at its deadline means output slowed
-    /// down, which ends the burst.
+    /// The consumer resumed from its wait. A coalescing wait that output completed before its deadline keeps the burst. The
+    /// time of completion decides, not the time the consumer resumed, so a consumer that resumes late keeps a burst whose
+    /// output came in time. A later completion keeps the burst only while what is unread now, including any left unread when
+    /// the read asked, amounts to at least <see cref="PtyOutputCoalescing.BurstKeepBytes"/> per window since it asked. A
+    /// steady stream at that rate or more stays in it, even when it fills the minimum only after the deadline. Otherwise
+    /// output slowed down, and the burst ends.
     /// </summary>
     internal void OnWaitEnded()
     {
@@ -126,19 +188,41 @@ internal sealed class PtyOutputCoalescer(PtyOutputPump pump)
 
         _waitArmed = false;
         Volatile.Write(ref Deadline, 0);
-        if (Interlocked.Exchange(ref _expired, 0) != 0)
+        var completedAt = Volatile.Read(ref _completedAt);
+        if (completedAt != 0 && completedAt < _waitDeadline)
+            return;
+
+        var unread = _pump.UnreadCount;
+        // completedAt is zero when cancellation ended the wait, which ends the enumeration too.
+        if (completedAt != 0)
         {
-            _inBurst = false;
-            _windowBytes = 0;
-            _windowStart = 0;
+            var waited = Stopwatch.GetTimestamp() - (_waitDeadline - PtyOutputCoalescing.MaxDelayTicks);
+            // Dividing keeps the comparison in range. Multiplying the wait by the keep rate overflows for a wait of 2^52
+            // ticks or more, about 52 days at a 1 GHz timestamp, and the wrapped product can keep the burst.
+            if ((long)unread * PtyOutputCoalescing.BurstWindowTicks / PtyOutputCoalescing.BurstKeepBytes >= waited)
+                return;
         }
+
+        _inBurst = false;
+        _windowBytes = 0;
+        _windowStart = 0;
+        _skipBytes = unread;
     }
 
-    /// <summary>Counts a delivered chunk towards the burst window, and starts a burst once the window holds enough.</summary>
+    /// <summary>Counts a chunk handed out toward the burst window, and starts a burst once the window holds enough.</summary>
     internal void OnDelivered(int length)
     {
         if (_inBurst)
             return;
+
+        if (_skipBytes > 0)
+        {
+            var skipped = Math.Min(length, _skipBytes);
+            _skipBytes -= skipped;
+            length -= skipped;
+            if (length == 0)
+                return;
+        }
 
         var now = Stopwatch.GetTimestamp();
         if (now - _windowStart > PtyOutputCoalescing.BurstWindowTicks)
@@ -152,7 +236,7 @@ internal sealed class PtyOutputCoalescer(PtyOutputPump pump)
             _inBurst = true;
     }
 
-    /// <summary>The enumeration ended. The scheduler drops state without a deadline at its next tick.</summary>
+    /// <summary>The enumeration ended. The scheduler drops a reader without a deadline at its next tick.</summary>
     internal void OnEnded()
     {
         _waitArmed = false;
@@ -160,9 +244,11 @@ internal sealed class PtyOutputCoalescer(PtyOutputPump pump)
     }
 
     /// <summary>
-    /// Ends the armed coalescing wait if its deadline has passed at <paramref name="now"/>: the wait's minimum drops to 1
-    /// byte, so what is unread is taken now (or the next publish is). Called by the scheduler's tick. Returns
-    /// <see langword="true"/> once no deadline is left to watch.
+    /// Serves the armed wait's deadline if it has passed at <paramref name="now"/>: the wait's minimum drops to 1 byte, so
+    /// what is unread is taken now, or the next publish is. Called by the scheduler's tick. Returns <see langword="true"/>
+    /// when the reader has no deadline, so the scheduler can let it go. A served deadline returns <see langword="false"/>:
+    /// a burst's consumer arms its next wait on another thread soon after, and finding the reader still held spares it the
+    /// scheduler's lock.
     /// </summary>
     internal bool Expire(long now)
     {
@@ -173,57 +259,70 @@ internal sealed class PtyOutputCoalescer(PtyOutputPump pump)
         if (now < deadline)
             return false;
 
-        // A consumer that ended the wait and armed another meanwhile changed the deadline; that one is looked at again.
+        // A consumer that ended the wait and armed another meanwhile changed the deadline. The new one is looked at again.
         if (Interlocked.CompareExchange(ref Deadline, 0, deadline) != deadline)
             return false;
 
-        Volatile.Write(ref _expired, 1);
-        pump.RelaxWaitMinimum();
-        return true;
+        _pump.RelaxWaitMinimum();
+        return false;
+    }
+
+    /// <summary><see cref="PtySession.ReadOutputCoalescedAsync"/>, with the token that must travel with the enumerable.</summary>
+    internal sealed class CoalescingEnumerable(PtyCoalescingOutputReader reader, CancellationToken readToken) : IAsyncEnumerable<PtyOutputChunk>
+    {
+        public IAsyncEnumerator<PtyOutputChunk> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
+            reader.Begin(readToken, cancellationToken, coalesce: true);
     }
 }
 
 /// <summary>
-/// Process-wide deadlines of coalescing reads: one timer ticks every <see cref="TickMs"/> while any reader waits in a burst,
-/// and lowers the minimum of each wait whose deadline passed (<see cref="PtyOutputCoalescer.Expire"/>), as
-/// <see cref="PtyOutputDrainScheduler"/> does for the post-exit drain. No reader holds a timer of its own, and the timer
-/// stops while none waits.
+/// Process-wide deadlines of coalescing reads: one timer ticks every <see cref="TickMs"/> while the scheduler holds a
+/// reader, and serves each deadline that has passed (<see cref="PtyCoalescingOutputReader.Expire"/>), as
+/// <see cref="PtyOutputDrainScheduler"/> does for the post-exit drain. No reader holds a timer of its own. A reader leaves
+/// at the first tick that finds it without a deadline, and the timer stops once none is left.
 /// </summary>
 /// <remarks>
 /// A deadline is served at the first tick after it, so a burst's last chunk waits up to about twice
-/// <see cref="PtyOutputCoalescing.MaxDelayMs"/> where timers have millisecond resolution. Registration allocates nothing
-/// after the state array has grown to the peak number of readers waiting at once.
+/// <see cref="PtyOutputCoalescing.MaxDelayMs"/> where timers have millisecond resolution. A consumer takes the lock only
+/// when its reader is not held: on its first wait, or after a tick found the reader with no deadline and dropped it. A tick
+/// that serves a deadline keeps the reader, whose consumer usually arms its next wait before the next tick. Joining and
+/// leaving cost O(1), and nothing is allocated once the array has grown to the peak number of readers waiting at once.
 /// </remarks>
 internal static class PtyOutputCoalesceScheduler
 {
     private const int TickMs = PtyOutputCoalescing.MaxDelayMs;
 
     private static readonly Lock s_lock = new();
-    private static PtyOutputCoalescer?[] s_states = new PtyOutputCoalescer?[4];
+    private static PtyCoalescingOutputReader?[] s_readers = new PtyCoalescingOutputReader?[4];
     private static int s_count;
     private static Timer? s_timer;
     private static bool s_timerRunning;
 
     // Touched only by the tick, which runs one at a time.
-    private static PtyOutputCoalescer?[] s_snapshot = new PtyOutputCoalescer?[4];
+    private static PtyCoalescingOutputReader?[] s_snapshot = new PtyCoalescingOutputReader?[4];
     private static int s_ticking;
 
     /// <summary>
-    /// Watches <paramref name="state"/>'s deadline (<see cref="PtyOutputCoalescer.Deadline"/>), which its reader set before
-    /// calling. A state already watched stays watched.
+    /// Set by a test that runs alone to serve deadlines itself: ticks then serve none, as a tick that runs late on a coarse
+    /// timer serves none in time.
     /// </summary>
-    internal static void Schedule(PtyOutputCoalescer state)
+    internal static bool HoldTicksForTests;
+
+    /// <summary>Holds <paramref name="reader"/>, whose deadline is set, until it has none left to serve.</summary>
+    internal static void Schedule(PtyCoalescingOutputReader reader)
     {
         lock (s_lock)
         {
-            if (state.Scheduled)
-                return;
+            if (reader.ScheduleIndex < 0)
+            {
+                if (s_count == s_readers.Length)
+                    Array.Resize(ref s_readers, s_count * 2);
 
-            state.Scheduled = true;
-            if (s_count == s_states.Length)
-                Array.Resize(ref s_states, s_count * 2);
+                reader.ScheduleIndex = s_count;
+                s_readers[s_count++] = reader;
+            }
 
-            s_states[s_count++] = state;
+            Volatile.Write(ref reader.Scheduled, true);
             if (s_timerRunning)
                 return;
 
@@ -245,7 +344,7 @@ internal static class PtyOutputCoalesceScheduler
 
     private static void Tick()
     {
-        if (Interlocked.Exchange(ref s_ticking, 1) != 0)
+        if (Volatile.Read(ref HoldTicksForTests) || Interlocked.Exchange(ref s_ticking, 1) != 0)
             return;
 
         try
@@ -255,21 +354,21 @@ internal static class PtyOutputCoalesceScheduler
             {
                 count = s_count;
                 if (s_snapshot.Length < count)
-                    s_snapshot = new PtyOutputCoalescer?[s_states.Length];
+                    s_snapshot = new PtyCoalescingOutputReader?[s_readers.Length];
 
-                Array.Copy(s_states, s_snapshot, count);
+                Array.Copy(s_readers, s_snapshot, count);
             }
 
             var now = Stopwatch.GetTimestamp();
             for (var i = 0; i < count; i++)
             {
-                var state = s_snapshot[i]!;
+                var reader = s_snapshot[i]!;
                 s_snapshot[i] = null;
 
                 bool done;
                 try
                 {
-                    done = state.Expire(now);
+                    done = reader.Expire(now);
                 }
                 catch (Exception)
                 {
@@ -278,7 +377,7 @@ internal static class PtyOutputCoalesceScheduler
                 }
 
                 if (done)
-                    Remove(state);
+                    Remove(reader);
             }
         }
         finally
@@ -287,24 +386,29 @@ internal static class PtyOutputCoalesceScheduler
         }
     }
 
-    private static void Remove(PtyOutputCoalescer state)
+    private static void Remove(PtyCoalescingOutputReader reader)
     {
         lock (s_lock)
         {
-            // State whose reader set a new deadline since this tick looked stays for the next tick.
-            if (Volatile.Read(ref state.Deadline) != 0)
+            if (reader.ScheduleIndex < 0)
                 return;
 
-            for (var i = 0; i < s_count; i++)
+            // The other half of the fence in OnWaitArmed, which publishes the deadline and then reads Scheduled: a reader
+            // that armed a wait since the tick looked keeps its place.
+            Volatile.Write(ref reader.Scheduled, false);
+            Interlocked.MemoryBarrier();
+            if (Volatile.Read(ref reader.Deadline) != 0)
             {
-                if (s_states[i] != state)
-                    continue;
-
-                s_states[i] = s_states[--s_count];
-                s_states[s_count] = null;
-                state.Scheduled = false;
-                break;
+                Volatile.Write(ref reader.Scheduled, true);
+                return;
             }
+
+            var index = reader.ScheduleIndex;
+            var last = s_readers[--s_count]!;
+            s_readers[index] = last;
+            last.ScheduleIndex = index;
+            s_readers[s_count] = null;
+            reader.ScheduleIndex = -1;
 
             if (s_count == 0 && s_timerRunning)
             {

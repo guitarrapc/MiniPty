@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; the full suite with it passed on macOS on 2026-10-25. Phase 6 is done on Linux and on macOS (2026-10-25): one loop reads every Unix session, on epoll and on kqueue; FreeBSD runs the kqueue code from source, unverified. On macOS a flood through the WebSocket bridge took about four times the frames of Phase 0 and was about 12% slower; the core stays as it is, and Phase 7 has the bridges coalesce bursts instead ([decision](#phase-6-result-macos)). Phase 7 is implemented and measured on macOS (2026-10-25): a flood there takes half Phase 0's frames and runs faster than with reader threads; Windows and Linux are next ([Phase 7 result](#phase-7-result-macos)). Phase 8 retires the reader threads. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; the full suite with it passed on macOS on 2026-10-25. Phase 6 is done on Linux and on macOS (2026-10-25): one loop reads every Unix session, on epoll and on kqueue; FreeBSD runs the kqueue code from source, unverified. On macOS a flood through the WebSocket bridge took about four times the frames of Phase 0 and was about 12% slower; the core stays as it is, and Phase 7 has the bridges coalesce bursts instead ([decision](#phase-6-result-macos)). Phase 7 is implemented and measured on macOS (2026-10-25): a flood there takes half Phase 0's frames and runs faster than with reader threads; Windows and Linux are next ([Phase 7 result](#phase-7-result-macos)). Phase 8 decides whether the bridges join steady output below the burst rate, and Phase 9 retires the reader threads. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -76,7 +76,7 @@ The public API does not change shape. The web-facing layer (`PtyTerminal`, `PtyW
 | `ReadOutputAsync` | Shape unchanged. A chunk becomes **all contiguous output available when the consumer asks**, up to the buffer's capacity, instead of one transport read plus its micro-window | Coalescing moves to the consumer side (see Coalescing). A WebSocket consumer still busy with the previous send finds everything that arrived meanwhile, so a flood goes out in large frames and a keystroke echo goes out at once. The chunk lifetime contract is unchanged |
 | `Output` (Stream) | Unchanged; `ReadAsync` now waits on a completion or readiness notification instead of a reader thread | Becomes as asynchronous as `NetworkStream`, so `CopyToAsync` into a WebSocket stream holds no thread |
 | `PtyOutputChunk` | Unchanged | — |
-| `PtyTerminal`, bridges | Unchanged. The bridges keep sending one binary frame per chunk | Larger chunks under load reduce frame count without bridge changes |
+| `PtyTerminal`, bridges | Shape unchanged. From Phase 7 the bridges join output that arrives in a burst into larger chunks, through an internal `PtyTerminal` option | Larger chunks under load reduce frame count. Where a read returns little, as on macOS, joining needs a wait, which the bridges make because they pay per frame |
 | Engine selection | Internal only, no public option | A per-platform engine is not a user decision. An `AppContext` switch back to reader threads may ship for one release as a field escape hatch, documented as temporary |
 | Metrics | Not in this plan | `System.Diagnostics.Metrics` counters (active sessions, bytes, full-buffer stalls, loop delay) are AOT-safe and useful to web operators, but are a separate decision |
 
@@ -123,7 +123,7 @@ Today the reader thread holds a slot for up to 2 ms of continuation reads. In th
 
 - **Windows drops the time window.** Sub-millisecond timers are not available on the completion port, and the window costs 10–40% of a core for trickling output today. Reading what the pipe holds plus consumer-side batching replaces it.
 - **Unix keeps the 1 ms window and 2 ms budget at first**, as loop deadlines, so its chunking does not change in the same phase as its engine. Phase 6 compares it with consumer-side batching and keeps one policy for both platforms if the numbers allow. **Decided 2026-10-25:** the Linux loop dropped the window as well, so both engines publish each read as it completes ([Phase 6 result](#phase-6-result-linux)), and the kqueue loop does the same on macOS. The reader threads keep their windows until they retire.
-- **A consumer that is faster than the child sees more, smaller chunks than today** (ConPTY delivers bulk output in slices 20–45 µs apart). This is measured, with the WebSocket bridge as the reference consumer. If frame counts matter, the remedy is a consumer-side policy in the bridge, not a timer in the core. On macOS they do: a read there returns at most 1 KiB, so a flood took four times the frames and ran about 12% slower through the bridge, and Phase 7 has the bridges coalesce bursts.
+- **A consumer that is faster than the child sees more, smaller chunks than today** (ConPTY delivers bulk output in slices 20–45 µs apart). This is measured, with the WebSocket bridge as the reference consumer. If frame counts matter, the remedy is a policy the consumer asks for, not a window the core applies to every consumer. On macOS they do: a read there returns at most 1 KiB, so a flood took four times the frames and ran about 12% slower through the bridge. In Phase 7 the bridges ask for one. In a burst their reads wait until 8 KiB is unread or a deadline passes, and a process-wide tick in the core library serves the deadlines.
 
 ### One-shot sinks
 
@@ -172,11 +172,12 @@ Each phase merges on its own with CI passing on Windows, Linux, and macOS. A tes
 | 5 | Windows engine | 3 | Windows | Medium–large |
 | 6 | Unix engine | 3, and 4 for macOS and FreeBSD | Linux, then macOS and FreeBSD | Large |
 | 7 | Bridges coalesce bursts of output into larger frames | 6 | All | Small–medium |
-| 8 | Reader thread retired, specifications updated, plan retired | 5, 6, 7 | All | Small |
+| 8 | Decision on steady output below the burst rate | 7 | All | Small |
+| 9 | Reader thread retired, specifications updated, plan retired | 5, 6, 7, 8 | All | Small |
 
 Phases 5 and 6 can run in parallel on separate branches. They touch different backends and share only the contract from Phase 2. Phase 4 can run at any time before Phase 6 reaches macOS.
 
-Phases 1–3 keep today's reader thread and change one thing each, so each change is measured on its own, as G1 did. From Phase 5 on, when a second driver exists, an `AppContext` switch selects the reader-thread driver. That gives Phases 5 and 6 a rollback in the field, and Phase 8 decides whether it ships.
+Phases 1–3 keep today's reader thread and change one thing each, so each change is measured on its own, as G1 did. From Phase 5 on, when a second driver exists, an `AppContext` switch selects the reader-thread driver. That gives Phases 5 and 6 a rollback in the field, and Phase 9 decides whether it ships.
 
 ### Phase 0: Baseline and harness
 
@@ -631,7 +632,7 @@ Implemented 2026-10-23 and tested on Windows and Linux; Phase 5 changes nothing 
   - a completion after disposal never touches a returned ring;
   - the rollback switch selects reader threads.
 
-**Deviation: the reader thread's Windows code stays.** The plan removed `CancelSynchronousIo`, the reader's thread handle, and the `PIPE_NOWAIT` window here. But a rollback has to read the way the code did before, and a blocking read is not allowed on a handle opened for overlapped I/O. So the switch also brings back the anonymous pipe, and that code goes with the reader thread in Phase 8.
+**Deviation: the reader thread's Windows code stays.** The plan removed `CancelSynchronousIo`, the reader's thread handle, and the `PIPE_NOWAIT` window here. But a rollback has to read the way the code did before, and a blocking read is not allowed on a handle opened for overlapped I/O. So the switch also brings back the anonymous pipe, and that code goes with the reader thread in Phase 9.
 
 **Found and fixed during the phase** (the lessons are in [core_session.md](../specs/core_session.md#lessons-learned)):
 - **A step must give its thread back.** A step that kept finding output held its pool thread, and its pin on the pipe, for as long as the child wrote. After disposal this was a livelock: about one of a thousand disposals during a flood never completed. Steps now continue as a new work item after 16 reads.
@@ -710,7 +711,7 @@ BenchmarkDotNet on Windows, two rounds each (allocation; times moved within the 
   - coalescing deadlines;
   - queued input written when the master is writable.
 - Disposal's discard path merges with normal reading.
-- **Delivery order:** Linux first, then macOS and FreeBSD, in separate pull requests. The reader-thread driver and its wake descriptors stay until Phase 8.
+- **Delivery order:** Linux first, then macOS and FreeBSD, in separate pull requests. The reader-thread driver and its wake descriptors stay until Phase 9.
 
 **Tests**
 - Remove the skips of both census tests on Linux and macOS.
@@ -745,7 +746,7 @@ Implemented 2026-10-25 for Linux, as the delivery order above asks. macOS and Fr
   - a failure ends that session's output alone.
 - **No coalescing window:** each read is published as it completes, the policy the Windows driver has, decided below. The first version kept the 1 ms window and 2 ms budget as loop deadlines, which the comparison below measured.
 - **Disposal merges with reading:** disposal finishes the pump at once, as before, and the loop keeps the hung-up child's master registered and discards its output until the master closes. That replaced the watcher's separate discard path for these sessions.
-- The rollback switch selects reader threads on Linux too. Reader threads and their wake descriptors stay until Phase 8.
+- The rollback switch selects reader threads on Linux too. Reader threads and their wake descriptors stay until Phase 9.
 
 **Tests:**
 - The census tests run on Linux and pass; they still skip on macOS and FreeBSD.
@@ -799,7 +800,7 @@ Without the window, echo is about 1 ms faster, and a flood takes about twice as 
 
 **NativeAOT:** `WebTerminalScale` publishes on Linux without warnings, links the native code statically, and passes `--smoke`.
 
-**Decision (2026-10-25): one policy, no window.** The Linux loop publishes each read as it completes, as the Windows driver does, and the doubled frame count of a flood is accepted. A bridge that wants fewer frames can batch on its side, the remedy this plan names. The reader threads of macOS and FreeBSD, and of the rollback switch, keep their windows until Phase 8, and the kqueue loop follows the new policy. Removing the window also removed 20 B of per-session state (see Measured), and the final build measured echo at p50 0.38–0.39 ms and 15.9–18.4 frames per 32 KiB.
+**Decision (2026-10-25): one policy, no window.** The Linux loop publishes each read as it completes, as the Windows driver does, and the doubled frame count of a flood is accepted. A bridge that wants fewer frames can batch on its side, the remedy this plan names. The reader threads of macOS and FreeBSD, and of the rollback switch, keep their windows until Phase 9, and the kqueue loop follows the new policy. Removing the window also removed 20 B of per-session state (see Measured), and the final build measured echo at p50 0.38–0.39 ms and 15.9–18.4 frames per 32 KiB.
 
 **Next:** macOS and FreeBSD on kqueue, as Phase 4 chose and with its rules: the master registered after the slave opens, `EV_EOF` confirmed by a read that returns 0, and the master deregistered at end of output. Done for macOS the same day; see [Phase 6 result (macOS)](#phase-6-result-macos).
 
@@ -895,7 +896,7 @@ BenchmarkDotNet, one round each (time, allocation):
 - **Coalescing on macOS needs a wait, and the wait belongs to the consumer.** Before the child writes its next KiB, a reader cannot tell a flood that goes on from one that has ended, so joining reads there means waiting, which trades latency for frames. The party that pays per frame is the bridge (one WebSocket message per chunk, and one event per message in the browser), so the trade is the bridge's to make, as this plan's Coalescing section already says. It is not a macOS special case: Linux floods take twice Phase 0's frames, and the session manager sends frames the same way.
 - **Severity:** the cost shows where the network is faster than the terminal (loopback, a LAN), as CPU at both ends; no output is lost, and interactive output is not delayed. It does not hold back Phase 6, but Phase 7 gates the release, as Acceptance asks for a decision before it.
 
-**Next:** Phase 7; FreeBSD stays from source until a machine runs the probe and the suite there; then Phase 8.
+**Next:** Phase 7; FreeBSD stays from source until a machine runs the probe and the suite there; then Phases 8 and 9.
 
 ### Phase 7: Coalesce bursts in the bridges
 
@@ -924,57 +925,132 @@ BenchmarkDotNet, one round each (time, allocation):
 Implemented 2026-10-25 and measured on macOS, on the machine of the Phase 6 macOS result. Windows and Linux are not measured yet.
 
 **Delivered:**
-- **Coalescing reads** (`PtyOutputCoalescing.cs`). `PtySession.ReadOutputCoalescedAsync` is internal, and `PtyTerminal` uses it when the internal `PtyTerminalOptions.CoalesceBursts` is set. All three bridges set it: `PtyWebSocketBridge`, `PtyWebSocketSessionManager`, and `PtyStdioBridge`, which sends a frame per chunk as the others do.
-  - A reader enters a burst once it has delivered 4 KiB within 1 ms, a rate no echo reaches.
-  - In a burst it takes its next chunk only once 8 KiB is unread, or 1 ms after it asked. A wait that ends at that deadline means output slowed down, and ends the burst.
-- **A wait with a minimum in the pump.** `ArmWait` takes the least unread output that completes the wait. A publish below it does not wake the consumer, which is what saves the host's CPU, and `RelaxWaitMinimum` lowers it to 1 byte at the deadline. A plain read asks for 1 byte, which is the previous check exactly; the pump still never holds output back on its own.
-- **One deadline tick per process** (`PtyOutputCoalesceScheduler`), modeled on the post-exit drain's: 1 ms, running only while some reader waits in a burst.
-- **Nothing more per plain session.** The coalescing state lives in a `PtyCoalescingOutputReader`, which replaces the session's reader on its first coalescing enumeration, and the pump's minimum is a `short` where a `bool` was. Measured with a probe, a pump is 184 B and a reader 128 B, as in Phase 6.
+- **Coalescing reads** (`PtyOutputCoalescing.cs`). `PtySession.ReadOutputCoalescedAsync` is internal, and `PtyTerminal` uses it when the internal `PtyTerminalOptions.CoalesceBursts` is set. All three bridges set it: `PtyWebSocketBridge`, `PtyWebSocketSessionManager`, and `PtyStdioBridge`, which sends a frame per chunk as the WebSocket bridge does.
+  - A reader enters a burst once it has been handed 4 KiB within 1 ms. An echo never comes near that rate, but a single chunk of 4 KiB counts.
+  - In a burst it takes its next chunk once 8 KiB is unread, or once the wait's deadline, 1 ms after it asked, has been served.
+  - A wait that output completes before its deadline keeps the burst. One completed later keeps it while the output unread when the consumer resumes, including any left unread when it asked, amounts to 2 KiB or more per millisecond since it asked, half the rate that starts a burst. Otherwise the burst ends, and what the late wait left unread does not count toward the next burst, however many chunks it comes out as.
+- **A wait with a minimum in the pump.** `ArmWait` takes the least unread output that completes the wait, and a publish below it does not wake the consumer. A flood therefore wakes the bridge at most once per chunk it takes, 8 KiB on average in the flood below, instead of once per 1 KiB read. `RelaxWaitMinimum` lowers the minimum to 1 byte at the deadline. A plain read asks for 1 byte, which is the previous check exactly, so the pump still never holds output back on its own.
+- **One deadline tick per process** (`PtyOutputCoalesceScheduler`): 1 ms, running while it holds a reader, until a tick finds none of them with a deadline, as the post-exit drain's 10 ms tick runs only while some session drains after its child exited. A reader the scheduler still holds arms its deadline without the scheduler's lock, a served deadline keeps the reader for one more tick so that the next wait of its burst finds it held, and joining or leaving costs O(1).
+- **Nothing more per plain session.** The coalescing state lives in a `PtyCoalescingOutputReader`, which replaces the session's reader on its first coalescing enumeration, and the pump's minimum is a `short` where a `bool` was. Measured with a probe on the final code, a pump is 184 B and a plain reader 128 B, as in Phase 6. A bridge's coalescing reader and its enumerable take 208 B together, once per session.
 - `WebTerminalScale bench` reports the host's CPU per MiB of its flood.
 
 **Found and fixed during the phase:**
 - **A wider field grew every session.** The first version kept the minimum in an `int` in place of the `bool`, and every session's pump grew from 184 to 192 B, also for sessions that never read through a bridge (`Session_Exit0_WaitForExit` 1.24 to 1.25 KB). Its state inside the reader grew every reader from 128 to 136 B. Both are back, as the lesson in [core_session.md](../specs/core_session.md#lessons-learned) says: a session's fields are paid by every session.
-- **A frame-size test runs alone.** In one full parallel run of eight, the bridge's flood test took 263 frames for 1 MiB (3.99 KiB on average) against about 130 alone: a loaded machine slowed the flood below a burst's rate now and then, and each such slowdown hands out what has arrived, as it should. The two frame tests are now `[NotInParallel]`, like the loop's flood test.
-- **A test of joined chunks needs the platform's chunk limit.** The scripted backends hand out one read per chunk (`OutputChunkLimit`), so the first test of an 8 KiB chunk got 4 KiB. The new test backend allows the ring, as the platform backends do.
+- **A frame-size test runs alone.** In one of four full parallel runs, the bridge's flood test took 263 frames for 1 MiB (3.89 KiB on average) against about 130 alone. A loaded machine slowed the flood below a burst's rate now and then, and each such slowdown hands out what has arrived, as it should. The frame tests are `[NotInParallel]`, like the loop's flood test.
+- **A test of joined chunks needs the platform's chunk limit.** The pump tests' scripted backend caps a chunk at 4 KiB (`OutputChunkLimit`), so the first test of an 8 KiB chunk got 4 KiB. The new test backend allows the ring, as the platform backends do.
+
+**Found and fixed in review.** An adversarial review of the macOS implementation ran in rounds. It kept each claim only after a probe, a failing test, arithmetic, or the cited source showed it, and two of three independent verifiers failed to refute it. The first round:
+- **A stale deadline could strand output.** A deadline that outlived its wait could lower the next wait's minimum to 1 byte while that wait was being armed. The arming re-check compared against the minimum it was given, and the deadline's signal found no wait yet, so the output stayed unread until the next publish, with no time bound. The re-check now reads the minimum the pump holds. `RelaxWaitMinimum` also signals when the minimum is 1 already, a safeguard that completes any wait with output unread at its deadline.
+- **The chunk a deadline took started the next burst.** It piled up over the whole wait, so a chunk of 4 KiB or more counted as 4 KiB within 1 ms, and the next read waited again. That output no longer counts.
+- **The end of a burst depended on the tick.** A burst ended only when a tick served the deadline. With a late tick, as on a coarse timer, output that came after the deadline but before the tick completed the wait at its minimum and kept the burst. A tick that ran after output had completed a wait in time ended the burst. The consumer now compares when the wait was completed with its deadline.
+- **`ReadOutputAsync` with a token grew by 8 B.** The enumerable that carries the token gained a coalescing flag, 40 B instead of 32. Coalescing reads now have an enumerable of their own.
+- **Every coalescing wait took the scheduler's lock**, and leaving the scheduler scanned its array. A held reader now arms without the lock, and leaving moves the last reader into the freed place.
+- **The coalescing state was a separate object**, reached under three names. It is now the reader's subclass.
+- **Tests did not cover** a deadline with nothing unread, a minimum already at 1 byte, the time bound with the real tick, or the stdio bridge's frames, and several relied on the real tick's timing.
+- **README** did not say that only the built-in bridges join bursts, which a custom transport needs to know.
+
+The second round:
+- **Staying in a burst took twice the rate that starts one.** A wait had to fill the 8 KiB minimum within 1 ms to keep the burst, while 4 KiB within 1 ms starts one. A steady stream between those rates left and entered a burst on every wait. Under load the verifiers measured 1.4–3.4 times the reader threads' frames at 4.5–7 MB/s. A late wait now keeps the burst while what is unread then amounts to 2 KiB or more per millisecond of the wait, half the starting rate.
+- **Output a late wait left unread still counted when it wrapped the ring.** It came out as two chunks, and only the first was skipped, so the next output could wait for a deadline again. The skip now counts bytes.
+- **A served deadline let the reader go,** so the next wait of the same burst took the scheduler's lock and restarted the timer. The scheduler now keeps it for one more tick.
+- **Tests did not catch** a read in a burst that already finds the minimum unread, which a broken line would make spin, a burst started by several small chunks, the arming re-check of a stale deadline, or the scheduler keeping a reader that armed while a tick dropped it. Each now has a test that fails when its line is broken. The burst window is writable for the second, and `ArmWait` has a hook for the third, a static field read once per wait.
+- **Docs and comments** were corrected in about twenty places, among them the persistent-sessions bridge's frames, the measured builds behind each figure, and the test premise on Linux.
+
+The third round:
+- **The keep rule counts what the bridge left unread.** Output already unread when the read asked counts as if it came during the wait. Output that piles up while the bridge sends therefore keeps a stream below the keep rate in a burst when the sends take long enough, and each chunk then waits until its deadline is served. In the review's probes of a 1 MB/s stream sent at 2.5 ms per chunk, 83–100% of the chunks waited so. Their waits averaged 1.15–1.53 ms. A bridge 8 KiB behind does not wait at all. The rule keeps a burst whenever counting only what came after the ask would, since it counts at least as much. Measured against that rule, a 2.5 MB/s stream took 10.3 frames per 32 KiB where the other rule took 33 in one of two runs. One `ls -lR` run of the shipped rule took 40.9 against 20.3, and it also streamed slower, at 3.0 against 4.5 MB/s. The code stays, and the docs now say what it counts.
+- **The keep test could overflow.** After a wait of 2^52 ticks, about 52 days at a 1 GHz timestamp, the time multiplied by the keep rate no longer fits in 64 bits, and the wrapped product could keep the burst. It now divides instead.
+- **Two skip lines had no test**: clearing the skip for a new enumeration, and counting the new output in a chunk that also holds the last of the skipped bytes. Each now has one.
+- **Docs and comments** were corrected, among them what the keep rule counts, how long a wait may last, when the scheduler lets a reader go, and the figures behind the test list.
+
+The later rounds:
+- **A test could lose its premise unnoticed.** An early return on cancellation in `OnWaitEnded` changes no behavior, and `ANewEnumerationCountsWhatACanceledOneLeftUnread` kept passing without the skip it is about. It now asserts that skip.
+- **Docs and comments** were made exact where the earlier rounds had rewritten them.
+
+**Lesson: judge the burst rules on the traffic they serve, not on one flood.** The first round's two exit fixes were right by the spec's words, and a single flood, which fills the minimum before nearly every deadline, almost never reached them (1–8 late waits of about 4,096 in the review's count). Measured afterwards on other traffic, a build with them took about twice the committed build's frames for 32 floods at once and three times for `ls -lR`, whichever of the second round's other changes it had. A late wait then ended the burst whenever output had slowed at all, as it does on a busy host. Keeping the burst at half the starting rate brought both back to the committed build's figures or below. A change to these rules is measured on concurrent floods, a bursty real command, and steady streams between 1 and 8 MB/s, as below.
 
 **Tests:**
-- `PtyOutputCoalescingTests`, eight tests with a backend the test publishes into:
-  - output outside a burst is handed out as it is published;
-  - in a burst, reads below the minimum do not complete the wait, and the minimum comes as one chunk;
-  - the end of a burst comes at the deadline, and ends the burst;
-  - end of output, cancellation, and disposal end a coalescing wait;
-  - a plain read is never held and creates no coalescing state, and a coalescing read after a plain one coalesces.
-  - Without the minimum in the pump, two of them failed; without the deadline, the tail test timed out.
-- `AFloodThroughTheBridgeGoesOutInLargeFrames` and `PersistentSessionSendsAFloodInLargeFrames` (Unix): a 1 MiB flood averages at least 4 KiB per frame. With coalescing off they failed at 922 and 930 frames (1.1 KiB). They run alone (see below).
-- The full suite passed on macOS: 649 tests, in six consecutive runs.
+- `PtyOutputCoalescingTests`, 24 tests with a backend the test publishes into. Twelve hold the tick (`HoldTicksForTests`), ten of them serving deadlines by hand, eleven set a deadline no test reaches, and one uses the real tick. Only a delay of 50 ms or more could decide one:
+  - output outside a burst is handed out as it is published, and small chunks within the window start a burst
+  - in a burst, reads below the minimum do not complete the wait, the minimum comes as one chunk, and a read that finds it unread takes it at once
+  - the end of a burst comes at the deadline and ends the burst, and what the deadline took does not start the next one, also when it wraps the ring, while output after it does count, and a new enumeration counts what a canceled one left unread
+  - a wait that outlasts its deadline, far slower than a burst, ends the burst when the tick is late or the wait lasted days, one at three quarters of the starting rate keeps it, and one completed before its deadline keeps it when the consumer resumes late
+  - the deadline completes a wait whose minimum is already 1 byte, a stale deadline during the arming is seen by the re-check, and a deadline with nothing unread lets the next output through
+  - the scheduler keeps a reader whose deadline it served, and one that armed a wait while a tick dropped it
+  - with the real tick, the tails of six sessions over three rounds go out within the bound, a median under 50 ms that allows a coarse timer and fails a deadline 100 times too long
+  - end of output, cancellation, and disposal end a coalescing wait
+  - a plain read is never held and keeps the plain reader, and a coalescing read after a plain one coalesces
+  - In the first version, without the minimum in the pump two tests failed, and without the deadline the tail test timed out. From the second round on, each line that a round's new test guards was broken in turn, and each break failed that test and no other test of the class.
+- `AFloodThroughTheBridgeGoesOutInLargeFrames` and `PersistentSessionSendsAFloodInLargeFrames` (1 MiB), and `StdioBridgeSendsAFloodInLargeFrames` (256 KiB, below the high watermark): at least three quarters of the flood's bytes go out in frames of 4 KiB or more. They run on Unix only, and alone. On macOS with coalescing off, all three failed in each of three runs, with 1–13% of the flood's bytes in such frames.
+- The full suite passed on macOS: 666 tests, in three consecutive runs.
 
-**Measured** on macOS, A/B against Phase 6 with alternating builds.
+**Measured** on macOS, A/B with alternating builds.
 
-`WebTerminalScale bench --sessions 16,64,256 --echo 200 --flood-bytes 33554432`, two rounds each, plus two rounds of the final build:
+`WebTerminalScale bench --sessions 16,64,256 --echo 200 --flood-bytes 33554432`. Phase 6 and the first Phase 7 version ran two rounds each, alternating. That version still had the `int` minimum, superseded before the commit. The committed build ran two more rounds alone, then two rounds each against the round-one build and against the final build, alternating. The final build includes the review's first two rounds. The third changed only the keep test's arithmetic, which gives the same result for any wait under 2^52 ticks, so these figures stand for the final code:
 
-| | Phase 6 | Phase 7 |
-|---|---:|---:|
-| Flood: frames per 32 KiB (Phase 0: 8.0) | 29.9–33.2 | 4.0 |
-| Flood throughput (MB/s; reader threads: 63–66) | 54.5–55.0 | 73.0–79.1 |
-| Host CPU per MiB of the flood (ms) | 57.4–67.8 | 36.6–42.7 |
-| Threads at 256 sessions | 33–46 | 33 |
-| Echo p50 at 64 / 256 sessions (ms) | 0.11 / 0.11 | 0.10–0.12 / 0.10–0.13 |
+| | Phase 6 | Phase 7, first version | Phase 7, committed | Phase 7, final |
+|---|---:|---:|---:|---:|
+| Flood: frames per 32 KiB (Phase 0: 8.0) | 29.9–33.2 | 4.0 | 4.0 | 4.0 |
+| Flood throughput (MB/s; reader threads: 63–66) | 54.5–55.0 | 77.0–79.1 | 73.0–76.6 | 74.8–75.0 |
+| Host CPU per MiB of the flood (ms) | 57.4–67.8 | 36.6–39.8 | 37.4–42.7 | 41.1–41.2 |
+| Threads at 256 sessions | 33–46 | 33 | 33–52 | 33 |
+| Echo p50 at 64 / 256 sessions (ms) | 0.11 / 0.11 | 0.11–0.12 / 0.11 | 0.08–0.12 / 0.10–0.14 | 0.11–0.13 / 0.10 |
+| Echo p99 at 16, 64, and 256 sessions (ms) | 0.18–0.45 | 0.23–0.46 | 0.15–0.54 | 0.17–0.36 |
 
-- **Echo is unchanged.** p99 over 200 samples moved between 0.18 and 0.54 ms in both builds. Three rounds each of `--sessions 64 --echo 1000` measured p50 0.09–0.10 ms in both, and p99 0.23–0.31 ms for Phase 6 and 0.21–0.24 ms for Phase 7.
+- **The flood's CPU is within the spread between rounds.** Four more alternating rounds of the flood alone (`--sessions 16 --echo 50`) measured the committed build at 37.1–44.1 ms per MiB and the final build at 37.8–40.8 ms, at 71.0–75.6 against 73.8–75.6 MB/s. Over the six rounds each, the medians are 38.8 and 40.8 ms, about 5% apart, within a 10% regression threshold.
+- **Echo is unchanged.** p99 over 200 samples is the third slowest sample, and it moves across each build's whole range from round to round. Three rounds each of `--sessions 64 --echo 1000`, Phase 6 against the final build, measured p50 0.09–0.10 ms against 0.10 ms, and p99 0.18–0.24 ms against 0.24–0.27 ms. Three earlier rounds measured Phase 6's p99 at 0.23–0.31 ms.
+- **The threads at 256 sessions** grew to 52 in two rounds of the committed build, all of it thread-pool workers (28 against 9), as Phase 6 showed in one round (46 threads, 22 of them pool workers).
 - The flood is now faster than with reader threads, whose 1 ms window joined only four reads.
 
-BenchmarkDotNet, one round each: every allocation is the same as Phase 6 or lower, within the spread between runs of the same build (up to 160 B on the 32 KiB rows). For example `Session_Exit0_WaitForExit` 1.24 KB, `Session_32KiB_StreamBytes` 1.60–1.76 KB, and `Bridge_32KiB_Bytes` 26.81 against 26.63 KB. Input writes stay at 105–111 µs and 2 B; times moved within the spread.
+Other traffic, through the WebSocket bridge over an in-memory socket, two rounds each, the committed build against the final one, alternating. A paced child writes lines of the given size at a steady rate. The rate per session is measured in the client from the first frame to the last:
 
-**NativeAOT:** `WebTerminalScale` publishes for `osx-arm64` without trimming or AOT warnings, passes `--smoke`, and its 256 KiB flood took 4.4 frames per 32 KiB.
+| Frames per 32 KiB | Committed | Final |
+|---|---:|---:|
+| 32 floods of 4 MiB at once (3.0–3.3 MB/s each) | 9.7–10.1 | 8.5–8.9 |
+| 8 floods of 8 MiB at once (13 MB/s each) | 4.03 | 4.06 |
+| `ls -lR /usr/share` (4–5 MB/s) | 17.5–30.6 | 16.9 |
+| Steady 7 MB/s, 800 B lines | 4.25 | 4.25–4.26 |
+| Steady 4.5 MB/s, 500 B lines | 7.1 | 5.7 |
+| Steady 2.5 MB/s, 500 B lines | 17.7–18.1 | 10.3 |
+| Steady 1.4 MB/s, 100 B lines | 324 | 324 |
 
-**Done on macOS:** throughput 73–79 MB/s against 63–66 with reader threads, 4 frames per 32 KiB against Phase 0's 8, echo at Phase 6's p50 and p99.
+- **A burst's tail and an echo right after it** take the same time in both builds. A 1 KiB tail with the real tick, 60 times 50 ms apart, went out at p50 1.33 against 1.31 ms, and at most 1.50 against 1.49 ms. A 10-byte echo right after a 5 KiB tail went out at p50 1.31 against 1.33 ms.
+- **A steady stream below about 2 MB/s is not joined while each send is quick.** One that never reaches the starting rate, 4 KiB within 1 ms, goes out one frame per read, as with the Phase 6 loop. One that enters a burst leaves it at its first late wait, unless the output that piles up during the bridge's sends keeps it there. The 1.4 MB/s stream took 324 frames per 32 KiB. The 2.5 MB/s stream, above the keep rate, stays in a burst once it enters: in the review's probe 2 of about 2,600 late waits ended it. It took 10.3. With reader threads, whose 1 ms window joined every read, the review measured 8–12 for the 1.4 MB/s stream.
+
+BenchmarkDotNet, one round each, the committed Phase 7 build against Phase 6: every allocation is the same or lower, and no integration or bridge time is higher by more than 0.1%. The session and capture 32 KiB rows are 160 B lower, for example `Session_32KiB_StreamBytes` 1.60 against 1.76 KB, which is the spread between runs of Phase 6 itself (its own result above measured 1.60 KB). `Bridge_32KiB_Bytes` is 26.63 against 26.81 KB, inside that row's spread between runs (26.56–28.29 KB). `Session_Exit0_WaitForExit` stays at 1.24 KB. Input writes take 105–109 µs and 2 B, against 104–111 µs in Phase 6's own result. The final build against the committed one: every allocation is the same except `Bridge_32KiB_Bytes`, 26.80 against 26.63 KB, inside that spread. No integration time is more than 4.5% higher, most are lower, and input writes take 104–107 µs.
+
+**NativeAOT:** the final code's `WebTerminalScale` publishes for `osx-arm64` without trimming or AOT warnings and passes `--smoke`, whose 256 KiB flood took 4.6 frames per 32 KiB.
+
+**Done on macOS:** throughput 74–76 MB/s against 63–66 with reader threads, 4 frames per 32 KiB against Phase 0's 8, echo at Phase 6's p50 and p99.
 
 **Open:**
-- **Windows and Linux** are not measured: frames, throughput, echo, host CPU, and BenchmarkDotNet against Phase 6, on those machines.
-- **The deadline on Windows.** The tick runs on .NET timers, which on Windows fire at the system timer's resolution, about 15.6 ms, so the end of a burst there may wait up to that long; on macOS it waits up to about 2 ms. Echo outside a burst is not affected. Measure it on Windows; if it shows, the tick can move to a high-resolution waitable timer, one per process.
+- **Windows and Linux** are not measured: frames, throughput, echo, host CPU, and BenchmarkDotNet against Phase 6, on those machines, and the traffic table above.
+- **The frame tests on Linux.** A Linux read can return 4 KiB, so the three frame tests may pass there without the joining. Check them with coalescing off.
+- **The deadline on Windows.** The tick runs on .NET timers, which on Windows fire at the system timer's resolution, about 15.6 ms. A wait in a burst there may last that long, where on macOS it lasts up to about 2 ms. That covers the end of a burst, the tail of a repaint or paste of 4 KiB or more, and an echo typed while output streams. Echo outside a burst is not affected. Measure it on Windows. If it shows, the tick can move to a high-resolution waitable timer, one per process, or a burst can start at a larger size.
+- **Steady output below about 2 MB/s goes out one frame per read** while each send is quick, as with the Phase 6 loop. Reader threads joined it within 1 ms. This covers log-rate streams of many small writes. Joining it means waiting on output no rate distinguishes from interactive output. It stays as it is for now, and [Phase 8](#phase-8-steady-streams-below-the-burst-rate) decides from measurements on every platform.
+- **An echo during a flood** is not tested against the bound. The tests time the end of a burst only.
+- **Package versions.** `MiniPty.Terminal` now uses MiniPty's internals, as `MiniPty.Capture` already does, while each package declares MiniPty with a lower bound only, through its project reference. A newer MiniPty with changed internals would break an older `MiniPty.Terminal` at run time. Whether to pin the exact version is a release decision.
 - FreeBSD stays from source, as before.
 
-### Phase 8: Retire the reader thread
+### Phase 8: Steady streams below the burst rate
+
+**Goal:** decide, from measurements on Windows, Linux, and macOS, whether the bridges join steady output that never reaches the rate that starts a burst, and record the decision in [terminal.md](../specs/terminal.md). Until then such output goes out one frame per read while the bridge keeps up, as it did before Phase 7.
+
+**Why it is open:** on macOS, 100-byte lines at 1.4 MB/s took 324 frames per 32 KiB, where reader threads took 8–12 ([Phase 7 result](#phase-7-result-macos)). The reader threads' window joined every read, but it also held each echo back: echo became about 1.4 ms faster on macOS once that window and the reader thread's own wait were gone ([Phase 6 result](#phase-6-result-macos)). Before the next write comes, nothing tells such a stream from interactive output that has ended, so joining it means letting each of its chunks wait. A wait lasts up to about 2 ms where timers have millisecond resolution, and up to the timer's resolution where they are coarser, about 15.6 ms on Windows.
+
+**Changes**
+- Measure the cost on each platform, with the reader threads as the baseline through the rollback switch: frames per 32 KiB and the host's CPU per MiB for steady streams of small writes from about 0.4 to 4 MB/s, and for real commands that write many short lines.
+- Try at least one rule that starts a burst below 4 KiB per millisecond, such as a number of reads within the window. The review tried starting a burst on four chunks within 1 ms, and ending it only at a deadline with nothing unread, on the code before its second round. The 1.4 MB/s stream then took 12.6 frames per 32 KiB, a flood stayed at 4.0, and each chunk of such a stream waited about 1.3 ms on macOS.
+- Measure what each tried rule costs interactive output on each platform: echo p50 and p99, the tail of a repaint, and an echo right after other output.
+- Choose: keep the current rule and record its cost, lower the start rule for every bridge, or let the host choose. A host choice is public API, so it is added to the Public API Decisions above.
+- Decide after the Windows deadline in Phase 7's Open list is measured, since the cost of any wait there depends on the timer.
+
+**Tests** (if the rule changes)
+- The new start rule has a test on each side of its threshold, using the window and deadline overrides of `PtyOutputCoalescingTests`.
+- An echo after idle, and one right after a burst's tail, still goes out at once.
+
+**Done when:** terminal.md states what the bridges do with steady output below the starting rate, and why, with figures from Windows, Linux, and macOS. If the rule changed, echo stays at Phase 7's p50 and p99, and no traffic in Phase 7's table takes more frames.
+
+### Phase 9: Retire the reader thread
 
 **Goal:** one engine per platform, and specifications that describe it.
 
@@ -996,7 +1072,7 @@ BenchmarkDotNet, one round each: every allocation is the same as Phase 6 or lowe
 - A session with no unread output holds no output buffer.
 - Reads allocate nothing. Allocation per session start, chunk, and exit is not above the Phase 0 baseline, except a few bytes at a session start for having no thread per session: Windows' 40 B completion-port binding, accepted in the [Phase 5 result](#phase-5-result), and the Unix loop's 10–20 B of state, the same price, recorded under the same exception in the [Phase 6 result](#phase-6-result-linux) and paid on macOS too.
 - Keystroke echo latency through the WebSocket bridge is not worse at p50 or p99, and throughput is not lower.
-- Frames per 32 KiB through the bridge are recorded on every platform. More than twice the Phase 0 baseline needs a decision before release: Linux's twice was accepted, and the bridges' coalescing (Phase 7) brought macOS's four times down to half the baseline.
+- Frames per 32 KiB through the bridge are recorded on every platform. More than twice the Phase 0 baseline needs a decision before release: Linux's twice was accepted, and the bridges' coalescing (Phase 7) brought macOS's four times down to half the baseline. Steady output below the burst rate has its own decision (Phase 8).
 - The full test suite passes on Windows, Linux, and macOS, and a sample publishes and runs under NativeAOT on Windows and Linux.
 
 ## Risks and Open Questions

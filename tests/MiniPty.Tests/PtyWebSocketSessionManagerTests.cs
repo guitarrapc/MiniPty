@@ -276,9 +276,9 @@ public sealed class PtyWebSocketSessionManagerTests
 
     /// <summary>
     /// A flood to an attached client goes out in large frames, as through the plain bridge: reads that arrive in a burst
-    /// are joined before they reach the replay buffer, so the send loop finds more than one read each time. The child
-    /// floods only once the client is attached, so the replay buffer does not join it instead. Unix only and alone, as the
-    /// plain bridge's test.
+    /// are joined before they reach the replay buffer, so the send loop mostly finds several reads at once. The child floods
+    /// only once the client is attached, so that the replay buffer does not join the output instead while nobody sends.
+    /// The test weighs frames by their bytes and runs on Unix only and alone, for the reasons the plain bridge's test gives.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -301,14 +301,17 @@ public sealed class PtyWebSocketSessionManagerTests
             await client.ReceiveUntilAsync("READY", timeout.Token);
             var framesBefore = client.Frames;
             var bytesBefore = client.OutputBytes;
+            var largeBefore = client.LargeFrameBytes;
             await client.SendInputAsync("\n", timeout.Token);
             await client.ReceiveToCloseAsync(timeout.Token);
             await connection.WaitAsync(timeout.Token);
 
             var frames = client.Frames - framesBefore;
             var bytes = client.OutputBytes - bytesBefore;
+            var large = client.LargeFrameBytes - largeBefore;
             await Assert.That(bytes).IsGreaterThanOrEqualTo(Size);
-            await Assert.That(bytes / frames).IsGreaterThanOrEqualTo(4096L).Because($"{frames} frames for {bytes} bytes");
+            await Assert.That(large * 4).IsGreaterThanOrEqualTo(bytes * 3)
+                .Because($"{large} of {bytes} bytes in frames of 4 KiB or more, {frames} frames");
         }
     }
 
@@ -360,6 +363,7 @@ public sealed class PtyWebSocketSessionManagerTests
         public long AcknowledgedOffset { get; private set; } = acknowledgedOffset;
         public int Frames { get; private set; }
         public long OutputBytes { get; private set; }
+        public long LargeFrameBytes { get; private set; }
 
         public Task SendInputAsync(string input, CancellationToken cancellationToken) =>
             socket.SendAsync(
@@ -414,6 +418,8 @@ public sealed class PtyWebSocketSessionManagerTests
             _output.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
             Frames++;
             OutputBytes += result.Count;
+            if (result.Count >= 4096)
+                LargeFrameBytes += result.Count;
             AcknowledgedOffset = _pendingOffset + result.Count;
             _pendingOffset = -1;
             _pendingBytes = 0;
