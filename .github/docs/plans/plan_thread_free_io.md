@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; the full suite with it passed on macOS on 2026-10-25. Phase 6 is implemented and measured on Linux and on macOS (2026-10-25): one loop reads every Unix session, on epoll and on kqueue; FreeBSD runs the kqueue code from source, unverified. On macOS a flood through the WebSocket bridge takes about four times the frames of Phase 0 and is about 12% slower, which needs a decision ([Phase 6 result (macOS)](#phase-6-result-macos)). See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; the full suite with it passed on macOS on 2026-10-25. Phase 6 is done on Linux and on macOS (2026-10-25): one loop reads every Unix session, on epoll and on kqueue; FreeBSD runs the kqueue code from source, unverified. On macOS a flood through the WebSocket bridge takes about four times the frames of Phase 0 and is about 12% slower; the core stays as it is, and Phase 7 has the bridges coalesce bursts instead ([decision](#phase-6-result-macos)). Phase 8 retires the reader threads. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -122,8 +122,8 @@ Unix PTY master ───── one readiness loop per load (today's exit watche
 Today the reader thread holds a slot for up to 2 ms of continuation reads. In the new engine a consumer still busy with its previous chunk naturally takes everything that arrived meanwhile, so batching comes from the consumer's pace instead of a timer.
 
 - **Windows drops the time window.** Sub-millisecond timers are not available on the completion port, and the window costs 10–40% of a core for trickling output today. Reading what the pipe holds plus consumer-side batching replaces it.
-- **Unix keeps the 1 ms window and 2 ms budget at first**, as loop deadlines, so its chunking does not change in the same phase as its engine. Phase 6 compares it with consumer-side batching and keeps one policy for both platforms if the numbers allow. **Decided 2026-10-25:** the Linux loop dropped the window as well, so both engines publish each read as it completes ([Phase 6 result](#phase-6-result-linux)). The reader threads keep their windows until they retire.
-- **A consumer that is faster than the child sees more, smaller chunks than today** (ConPTY delivers bulk output in slices 20–45 µs apart). This is measured, with the WebSocket bridge as the reference consumer. If frame counts matter, the remedy is a consumer-side policy in the bridge, not a timer in the core.
+- **Unix keeps the 1 ms window and 2 ms budget at first**, as loop deadlines, so its chunking does not change in the same phase as its engine. Phase 6 compares it with consumer-side batching and keeps one policy for both platforms if the numbers allow. **Decided 2026-10-25:** the Linux loop dropped the window as well, so both engines publish each read as it completes ([Phase 6 result](#phase-6-result-linux)), and the kqueue loop does the same on macOS. The reader threads keep their windows until they retire.
+- **A consumer that is faster than the child sees more, smaller chunks than today** (ConPTY delivers bulk output in slices 20–45 µs apart). This is measured, with the WebSocket bridge as the reference consumer. If frame counts matter, the remedy is a consumer-side policy in the bridge, not a timer in the core. On macOS they do: a read there returns at most 1 KiB, so a flood took four times the frames and ran about 12% slower through the bridge, and Phase 7 has the bridges coalesce bursts.
 
 ### One-shot sinks
 
@@ -171,11 +171,12 @@ Each phase merges on its own with CI passing on Windows, Linux, and macOS. A tes
 | 4 | Readiness probe for pty masters | — | macOS, FreeBSD | Small |
 | 5 | Windows engine | 3 | Windows | Medium–large |
 | 6 | Unix engine | 3, and 4 for macOS and FreeBSD | Linux, then macOS and FreeBSD | Large |
-| 7 | Reader thread retired, specifications updated, plan retired | 5, 6 | All | Small |
+| 7 | Bridges coalesce bursts of output into larger frames | 6 | All | Small–medium |
+| 8 | Reader thread retired, specifications updated, plan retired | 5, 6, 7 | All | Small |
 
 Phases 5 and 6 can run in parallel on separate branches. They touch different backends and share only the contract from Phase 2. Phase 4 can run at any time before Phase 6 reaches macOS.
 
-Phases 1–3 keep today's reader thread and change one thing each, so each change is measured on its own, as G1 did. From Phase 5 on, when a second driver exists, an `AppContext` switch selects the reader-thread driver. That gives Phases 5 and 6 a rollback in the field, and Phase 7 decides whether it ships.
+Phases 1–3 keep today's reader thread and change one thing each, so each change is measured on its own, as G1 did. From Phase 5 on, when a second driver exists, an `AppContext` switch selects the reader-thread driver. That gives Phases 5 and 6 a rollback in the field, and Phase 8 decides whether it ships.
 
 ### Phase 0: Baseline and harness
 
@@ -630,7 +631,7 @@ Implemented 2026-10-23 and tested on Windows and Linux; Phase 5 changes nothing 
   - a completion after disposal never touches a returned ring;
   - the rollback switch selects reader threads.
 
-**Deviation: the reader thread's Windows code stays.** The plan removed `CancelSynchronousIo`, the reader's thread handle, and the `PIPE_NOWAIT` window here. But a rollback has to read the way the code did before, and a blocking read is not allowed on a handle opened for overlapped I/O. So the switch also brings back the anonymous pipe, and that code goes with the reader thread in Phase 7.
+**Deviation: the reader thread's Windows code stays.** The plan removed `CancelSynchronousIo`, the reader's thread handle, and the `PIPE_NOWAIT` window here. But a rollback has to read the way the code did before, and a blocking read is not allowed on a handle opened for overlapped I/O. So the switch also brings back the anonymous pipe, and that code goes with the reader thread in Phase 8.
 
 **Found and fixed during the phase** (the lessons are in [core_session.md](../specs/core_session.md#lessons-learned)):
 - **A step must give its thread back.** A step that kept finding output held its pool thread, and its pin on the pipe, for as long as the child wrote. After disposal this was a livelock: about one of a thousand disposals during a flood never completed. Steps now continue as a new work item after 16 reads.
@@ -709,7 +710,7 @@ BenchmarkDotNet on Windows, two rounds each (allocation; times moved within the 
   - coalescing deadlines;
   - queued input written when the master is writable.
 - Disposal's discard path merges with normal reading.
-- **Delivery order:** Linux first, then macOS and FreeBSD, in separate pull requests. The reader-thread driver and its wake descriptors stay until Phase 7.
+- **Delivery order:** Linux first, then macOS and FreeBSD, in separate pull requests. The reader-thread driver and its wake descriptors stay until Phase 8.
 
 **Tests**
 - Remove the skips of both census tests on Linux and macOS.
@@ -744,7 +745,7 @@ Implemented 2026-10-25 for Linux, as the delivery order above asks. macOS and Fr
   - a failure ends that session's output alone.
 - **No coalescing window:** each read is published as it completes, the policy the Windows driver has, decided below. The first version kept the 1 ms window and 2 ms budget as loop deadlines, which the comparison below measured.
 - **Disposal merges with reading:** disposal finishes the pump at once, as before, and the loop keeps the hung-up child's master registered and discards its output until the master closes. That replaced the watcher's separate discard path for these sessions.
-- The rollback switch selects reader threads on Linux too. Reader threads and their wake descriptors stay until Phase 7.
+- The rollback switch selects reader threads on Linux too. Reader threads and their wake descriptors stay until Phase 8.
 
 **Tests:**
 - The census tests run on Linux and pass; they still skip on macOS and FreeBSD.
@@ -798,7 +799,7 @@ Without the window, echo is about 1 ms faster, and a flood takes about twice as 
 
 **NativeAOT:** `WebTerminalScale` publishes on Linux without warnings, links the native code statically, and passes `--smoke`.
 
-**Decision (2026-10-25): one policy, no window.** The Linux loop publishes each read as it completes, as the Windows driver does, and the doubled frame count of a flood is accepted. A bridge that wants fewer frames can batch on its side, the remedy this plan names. The reader threads of macOS and FreeBSD, and of the rollback switch, keep their windows until Phase 7, and the kqueue loop follows the new policy. Removing the window also removed 20 B of per-session state (see Measured), and the final build measured echo at p50 0.38–0.39 ms and 15.9–18.4 frames per 32 KiB.
+**Decision (2026-10-25): one policy, no window.** The Linux loop publishes each read as it completes, as the Windows driver does, and the doubled frame count of a flood is accepted. A bridge that wants fewer frames can batch on its side, the remedy this plan names. The reader threads of macOS and FreeBSD, and of the rollback switch, keep their windows until Phase 8, and the kqueue loop follows the new policy. Removing the window also removed 20 B of per-session state (see Measured), and the final build measured echo at p50 0.38–0.39 ms and 15.9–18.4 frames per 32 KiB.
 
 **Next:** macOS and FreeBSD on kqueue, as Phase 4 chose and with its rules: the master registered after the slave opens, `EV_EOF` confirmed by a read that returns 0, and the master deregistered at end of output. Done for macOS the same day; see [Phase 6 result (macOS)](#phase-6-result-macos).
 
@@ -886,11 +887,39 @@ BenchmarkDotNet, one round each (time, allocation):
 
 **Acceptance on macOS:**
 - **Held:** no thread grows with 64 or 256 idle sessions; an idle session holds no output buffer (the census tests); reads allocate nothing, and session start, chunks, and exit allocate no more than with reader threads; echo latency is better at p50 and p99; the full suite passes; NativeAOT works.
-- **Not held, needs a decision:** a flood through the bridge takes 33 frames per 32 KiB, four times Phase 0, and its throughput is about 12% lower. The plan's remedy is batching in the bridge, not a window in the core, and it needs a design of its own: the bridge already sends one chunk at a time, and joining small chunks must not hold back an echo. The alternative is to accept the numbers, as Linux accepted twice the frames.
+- **Not held:** a flood through the bridge takes 33 frames per 32 KiB, four times Phase 0, and its throughput is about 12% lower.
 
-**Next:** the decision above; FreeBSD stays from source until a machine runs the probe and the suite there; then Phase 7.
+**Decision (2026-10-25): the core stays as it is, and the bridges coalesce bursts (Phase 7).**
+- **No window in the core.** Every engine publishes each read as it completes, on every platform, and a macOS window would split that policy by platform. On Linux the whole echo gain came from dropping the window (p50 1.47 ms on the loop with it, 0.41–0.44 ms without), and macOS's 1.5 ms to 0.1 ms is of the same kind. A window would also bring deadlines back into the loop, which the Linux loop has just shed.
+- **Nothing to change in kqueue or the loop.** The 1 KiB is the macOS tty's fixed output ring, which reader threads read 1 KiB at a time too ([Phase 4 result](#phase-4-result)). Read without the bridge, the loop delivers one flood as fast as reader threads and eight floods faster, and skipping the read that returns `EAGAIN` changed nothing.
+- **Coalescing on macOS needs a wait, and the wait belongs to the consumer.** Before the child writes its next KiB, a reader cannot tell a flood that goes on from one that has ended, so joining reads there means waiting, which trades latency for frames. The party that pays per frame is the bridge (one WebSocket message per chunk, and one event per message in the browser), so the trade is the bridge's to make, as this plan's Coalescing section already says. It is not a macOS special case: Linux floods take twice Phase 0's frames, and the session manager sends frames the same way.
+- **Severity:** the cost shows where the network is faster than the terminal (loopback, a LAN), as CPU at both ends; no output is lost, and interactive output is not delayed. It does not hold back Phase 6, but Phase 7 gates the release, as Acceptance asks for a decision before it.
 
-### Phase 7: Retire the reader thread
+**Next:** Phase 7; FreeBSD stays from source until a machine runs the probe and the suite there; then Phase 8.
+
+### Phase 7: Coalesce bursts in the bridges
+
+**Goal:** a flood through a bridge goes out in large frames on every platform, while an echo still goes out at once. The core keeps publishing each read as it completes.
+
+**Changes**
+- `PtyWebSocketBridge` and `PtyWebSocketSessionManager` coalesce while output arrives in a burst. A chunk after idle goes out at once. During a burst the bridge takes its next chunk only once enough output is waiting or a short bound has passed, so the ring holds what arrived meanwhile and the next chunk carries it without a copy. Whether `PtyStdioBridge` does the same is decided here too.
+- The decision comes from the traffic, never from an operating-system check.
+- **Waiting must not wake the bridge once per read.** That wake-up, and the thread-pool workers spinning after it, is what made a single macOS flood cost the host half again as much CPU. If this needs the pump to signal a consumer at a byte threshold, that signal is internal and requested by the consumer: the pump still never holds output back on its own.
+- **Bounds:**
+  - Size: the pump stops reading with less than 4 KiB free, so about 12 KiB is the most one chunk can count on.
+  - Time: about 1 ms on Unix. Windows timers tick at about 15.6 ms, so the time bound there is part of the design; Windows floods already take 5.5 frames per 32 KiB, bound by ConPTY.
+- [terminal.md](../specs/terminal.md) records the policy and its bounds.
+
+**Tests**
+- An echo after idle is sent at once, and one during a flood waits no longer than the bound.
+- A flood's frames grow, and the end of a burst goes out within the bound.
+- Flow control, the session manager's replay offsets, and disposal behave as before.
+
+**Measure:** on Windows, Linux, and macOS, against Phase 6: frames per 32 KiB and throughput of a flood through the bridge, echo p50 and p99, the host's CPU per MiB of a flood, and `Bridge_32KiB_Bytes`.
+
+**Done when:** a macOS flood through the bridge is no slower than with reader threads (63–66 MB/s on the machine above) and takes at most twice Phase 0's frames; echo stays at Phase 6's p50 and p99; and no platform regresses.
+
+### Phase 8: Retire the reader thread
 
 **Goal:** one engine per platform, and specifications that describe it.
 
@@ -912,13 +941,13 @@ BenchmarkDotNet, one round each (time, allocation):
 - A session with no unread output holds no output buffer.
 - Reads allocate nothing. Allocation per session start, chunk, and exit is not above the Phase 0 baseline, except a few bytes at a session start for having no thread per session: Windows' 40 B completion-port binding, accepted in the [Phase 5 result](#phase-5-result), and the Unix loop's 10–20 B of state, the same price, recorded under the same exception in the [Phase 6 result](#phase-6-result-linux) and paid on macOS too.
 - Keystroke echo latency through the WebSocket bridge is not worse at p50 or p99, and throughput is not lower.
-- Frames per 32 KiB through the bridge are recorded on every platform. More than twice the Phase 0 baseline needs a decision before release.
+- Frames per 32 KiB through the bridge are recorded on every platform. More than twice the Phase 0 baseline needs a decision before release: Linux's twice was accepted, and macOS's four times goes to the bridges (Phase 7).
 - The full test suite passes on Windows, Linux, and macOS, and a sample publishes and runs under NativeAOT on Windows and Linux.
 
 ## Risks and Open Questions
 
 - **macOS readiness on a pty master:** settled by Phase 4, `kqueue` holds up, and the Phase 6 loop on it passes the full suite on macOS 27. FreeBSD's choice, and the loop there, rest on source alone until the probe and the suite run there.
-- **macOS flood frames and throughput** through the WebSocket bridge: four times the frames of Phase 0 and about 12% slower with no window, because a macOS read returns at most 1 KiB ([Phase 6 result (macOS)](#phase-6-result-macos)). Needs a decision before release.
+- **macOS flood frames and throughput** through the WebSocket bridge: four times the frames of Phase 0 and about 12% slower with no window, because a macOS read returns at most 1 KiB ([Phase 6 result (macOS)](#phase-6-result-macos)). Decided: the bridges coalesce bursts (Phase 7), before release.
 - **macOS discards output left in the tty when the child's exit is the slave's last close**, 0.6 s after the exit: settled after Phase 4, since the session holds a slave descriptor on macOS ([Phase 4 result](#phase-4-result)). The Unix engine keeps closing that descriptor with the master. If FreeBSD runs need the same guarantee, they need another remedy, because there the descriptor would make the exit discard at once.
 - **Windows chunk count** with a consumer faster than ConPTY's slices; see Coalescing.
 - **Windows thread-pool dependence** of read completions; see Isolation Rules.
