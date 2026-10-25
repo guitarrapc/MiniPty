@@ -151,6 +151,7 @@ static class Server
         writer.WriteNumber("workingSet", process.WorkingSet64);
         writer.WriteNumber("privateBytes", process.PrivateMemorySize64);
         writer.WriteNumber("gcHeap", GC.GetTotalMemory(forceFullCollection: false));
+        writer.WriteNumber("cpuMs", process.TotalProcessorTime.TotalMilliseconds);
         writer.WriteNumber("handles", HandleCount(process));
         writer.WriteString("os", RuntimeInformation.OSDescription);
         writer.WriteString("runtime", RuntimeInformation.FrameworkDescription);
@@ -215,7 +216,7 @@ static class Bench
             await CloseAllAsync(clients);
             await WaitForSessionsAsync(http, 0);
 
-            var flood = await MeasureFloodAsync(baseUri, floodBytes);
+            var flood = await MeasureFloodAsync(http, baseUri, floodBytes);
             Report(baseline, rows, flood);
 
             if (smoke)
@@ -277,12 +278,15 @@ static class Bench
         return [.. latencies];
     }
 
-    private static async Task<FloodResult> MeasureFloodAsync(Uri baseUri, int bytes)
+    private static async Task<FloodResult> MeasureFloodAsync(HttpClient http, Uri baseUri, int bytes)
     {
+        // The host's CPU over the flood: its bridge, its output loop, and its thread-pool workers, not the client's.
+        var before = await GetStatsAsync(http);
         await using var client = await Client.ConnectAsync(baseUri, $"flood&bytes={bytes}");
         await client.Closed.WaitAsync(TimeSpan.FromMinutes(5));
+        var after = await GetStatsAsync(http);
         // Only the bridge's exit message means the child finished; a connection that just closed may have lost output.
-        return new FloodResult(client.Bytes, client.Frames, client.OutputSeconds, client.ExitMessage is not null);
+        return new FloodResult(client.Bytes, client.Frames, client.OutputSeconds, client.ExitMessage is not null, after.CpuMs - before.CpuMs);
     }
 
     private static async Task CloseAllAsync(List<Client> clients)
@@ -356,7 +360,8 @@ static class Bench
             root.GetProperty("gcHeap").GetInt64(),
             root.GetProperty("handles").GetInt32(),
             root.GetProperty("os").GetString() ?? "",
-            root.GetProperty("runtime").GetString() ?? "");
+            root.GetProperty("runtime").GetString() ?? "",
+            root.TryGetProperty("cpuMs", out var cpu) ? cpu.GetDouble() : 0);
     }
 
     private static void Report(Stats baseline, List<(int Sessions, Stats Stats, double[] Echo)> rows, FloodResult flood)
@@ -383,7 +388,8 @@ static class Bench
         var framesPer32KiB = flood.Bytes == 0 ? 0 : flood.Frames * 32768.0 / flood.Bytes;
         var mbPerSecond = flood.Seconds <= 0 ? 0 : flood.Bytes / 1048576.0 / flood.Seconds;
         Console.WriteLine($"Flood: {flood.Bytes / 1024.0:F0} KiB in {flood.Frames} frames (average {flood.Bytes / 1024.0 / Math.Max(1, flood.Frames):F1} KiB), " +
-            $"{framesPer32KiB:F1} frames per 32 KiB, {mbPerSecond:F1} MB/s{(flood.Exited ? "" : " (no exit message)")}");
+            $"{framesPer32KiB:F1} frames per 32 KiB, {mbPerSecond:F1} MB/s, host CPU {flood.HostCpuMs / Math.Max(1, flood.Bytes / 1048576.0):F1} ms per MiB" +
+            $"{(flood.Exited ? "" : " (no exit message)")}");
     }
 
     private static double Percentile(double[] sorted, double p) =>
@@ -398,9 +404,9 @@ static class Bench
         return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
-    private sealed record Stats(int Sessions, int Threads, int PoolThreads, long WorkingSet, long PrivateBytes, long GcHeap, int Handles, string Os, string Runtime);
+    private sealed record Stats(int Sessions, int Threads, int PoolThreads, long WorkingSet, long PrivateBytes, long GcHeap, int Handles, string Os, string Runtime, double CpuMs);
 
-    private sealed record FloodResult(long Bytes, int Frames, double Seconds, bool Exited);
+    private sealed record FloodResult(long Bytes, int Frames, double Seconds, bool Exited, double HostCpuMs);
 }
 
 /// <summary>

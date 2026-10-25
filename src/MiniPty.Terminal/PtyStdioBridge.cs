@@ -68,7 +68,7 @@ public static class PtyStdioBridge
         {
             using var teardownCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _teardownToken = teardownCts.Token;
-            await using var terminal = PtyTerminal.Start(startInfo, new PtyTerminalOptions { Output = SendOutputAsync });
+            await using var terminal = PtyTerminal.Start(startInfo, new PtyTerminalOptions { Output = SendOutputAsync, CoalesceBursts = true });
             _flowControl.Attach(terminal);
             var receiveTask = ReceiveLoopAsync(terminal, teardownCts.Token);
 

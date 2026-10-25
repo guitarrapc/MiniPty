@@ -25,15 +25,17 @@ public sealed class PtyTerminal : IAsyncDisposable
 {
     private readonly PtySession _session;
     private readonly PtyTerminalOutputHandler _output;
+    private readonly bool _coalesceBursts;
     private readonly CancellationTokenSource _pumpCts = new();
     private readonly Task<PtyExitStatus> _pumpTask;
     private TaskCompletionSource? _pauseGate;
     private int _disposed;
 
-    private PtyTerminal(PtySession session, PtyTerminalOutputHandler output)
+    private PtyTerminal(PtySession session, PtyTerminalOptions options)
     {
         _session = session;
-        _output = output;
+        _output = options.Output;
+        _coalesceBursts = options.CoalesceBursts;
         _pumpTask = Task.Run(PumpAsync);
     }
 
@@ -50,7 +52,7 @@ public sealed class PtyTerminal : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(options.Output);
 
-        return new PtyTerminal(Pty.Start(startInfo), options.Output);
+        return new PtyTerminal(Pty.Start(startInfo), options);
     }
 
     /// <summary>
@@ -70,7 +72,7 @@ public sealed class PtyTerminal : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(options.Output);
 
-        return new PtyTerminal(session, options.Output);
+        return new PtyTerminal(session, options);
     }
 
     /// <summary>Gets the OS process id of the child.</summary>
@@ -176,7 +178,7 @@ public sealed class PtyTerminal : IAsyncDisposable
     /// <remarks>
     /// Pausing parks the pump: the session's bounded output buffer fills, its reader stops reading the PTY
     /// transport, the OS PTY buffer fills, and the child eventually blocks on write. No data is
-    /// dropped, and managed buffering stays within that buffer (4 × 4 KiB, including the in-flight chunk). Equivalent to
+    /// dropped, and managed buffering stays within that buffer (16 KiB, including the in-flight chunk). Equivalent to
     /// node-pty's <c>pause()</c>.
     /// </remarks>
     public void Pause()
@@ -254,7 +256,10 @@ public sealed class PtyTerminal : IAsyncDisposable
         var cancellationToken = _pumpCts.Token;
         try
         {
-            await foreach (var chunk in _session.ReadOutputAsync(cancellationToken).ConfigureAwait(false))
+            var output = _coalesceBursts
+                ? _session.ReadOutputCoalescedAsync(cancellationToken)
+                : _session.ReadOutputAsync(cancellationToken);
+            await foreach (var chunk in output.ConfigureAwait(false))
             {
                 // Gate before delivery: while paused the in-flight chunk stays valid (the pump
                 // does not advance the enumerator) and the producer stops reading the transport.

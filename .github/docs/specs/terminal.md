@@ -100,6 +100,19 @@ Server-side watermark over unacknowledged bytes; ACK credit was chosen over paus
 
 The client counts binary payload bytes it has fed through `term.write` callbacks and ACKs them; both sides measure the same metric, which the xterm.js guide calls out as mandatory for the stream not to stall.
 
+### Output frames
+
+Each bridge (`PtyWebSocketBridge`, persistent sessions, `PtyStdioBridge`) sends one message per chunk it takes from the session, and joins output that arrives in a burst into larger chunks:
+
+- **Outside a burst**, such as a keystroke echo or the first output after a pause, a chunk goes out as soon as it is read.
+- **A burst** starts once 4 KiB has gone out within 1 ms, a rate no echo reaches. In a burst the bridge takes its next chunk only once 8 KiB is waiting, or 1 ms after it asked, whichever comes first. A chunk taken at that bound means output slowed down, and ends the burst. A process-wide 1 ms tick serves the bound, so a burst's last chunk waits up to about 2 ms where timers have millisecond resolution.
+- **The core is unchanged.** The session still publishes each read as it completes; only the bridge waits, and the session does not wake it until the 8 KiB is there.
+- `PtyTerminal` itself pushes each chunk as it is read. Joining is internal to the bridges, not a public option.
+
+**Why:** a macOS terminal holds 1 KiB of output, so each read returns at most that much. A bridge that keeps up sent each read as a frame of its own: a 32 MiB flood took 33 frames per 32 KiB (8 with the reader thread's former 1 ms window), ran about 12% slower, and woke the bridge once per KiB. Before the child writes its next KiB, nothing can tell a flood that goes on from one that has ended, so joining reads means waiting, which trades latency for frames. That trade belongs to the party that pays per frame, the bridge, rather than to the core, which serves every consumer. Joined, the same flood takes 4 frames per 32 KiB, runs faster than with the reader thread's window (73–79 against 63–66 MB/s), and costs the host about a third less CPU (37–43 against 57–68 ms per MiB), while echo is unchanged ([plan](../plans/plan_thread_free_io.md#phase-7-result-macos)). On Windows, whose timers fire at about 15.6 ms, the end of a burst may wait that long; that is still to be measured.
+
+**Cost:** nothing for a session that is not read through a bridge. A bridge's session allocates its coalescing state once, and the pump completes a bridge's wait only once 8 KiB is unread, so a flood does not wake the bridge once per read.
+
 ### Close and failure behavior
 
 | Condition | Behavior |

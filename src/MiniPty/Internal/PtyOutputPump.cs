@@ -113,7 +113,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private int _consumerWaiting;
     // Consumer side: the generation of the last wait armed.
     private int _waitGeneration;
-    private bool _waiterWantsData;
+    // The least unread output a data signal completes the armed wait for: 1 for a plain read, more for a reader that
+    // coalesces a burst (PtyOutputReader), NoDataWait for a wait that output does not complete. A short, as the bool it
+    // replaced, so that every session's pump stays the size it was: the ring never holds more than Capacity.
+    private short _waiterMinimumData;
+    private const short NoDataWait = short.MaxValue;
     private IPtyOutputWaiter? _waiter;
     private PtyOutputSink? _sink;
     private IPtyOutputDriver? _driver;
@@ -200,6 +204,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
     /// <summary>Whether published output is still unread (or handed out and not released).</summary>
     internal bool HasUnreadOutput => Volatile.Read(ref _count) != 0;
+
+    /// <summary>Published bytes the consumer has not released.</summary>
+    internal int UnreadCount => Volatile.Read(ref _count);
 
     /// <summary>
     /// Makes sure the driver holds a ring before it reads: the one unread output kept, or one from the pool. Cheap once
@@ -521,17 +528,26 @@ internal sealed class PtyOutputPump : IValueTaskSource
     }
 
     /// <summary>
-    /// Arms <paramref name="waiter"/> for the next signal: published output (when <paramref name="wakeOnData"/>),
-    /// end of output, disposal, or a drain timeout.
+    /// Arms <paramref name="waiter"/> for the next signal: published output (when <paramref name="wakeOnData"/>, once at
+    /// least <paramref name="minimumData"/> bytes are unread), end of output, disposal, or a drain timeout.
     /// </summary>
+    /// <param name="waiter">The waiter to complete.</param>
+    /// <param name="wakeOnData">Whether published output completes the wait.</param>
+    /// <param name="minimumData">
+    /// The least unread output that completes the wait: 1 for a plain read. A reader coalescing a burst asks for more, and
+    /// <see cref="RelaxWaitMinimum"/> lowers it again at the reader's deadline, so output is never held back for longer
+    /// than its consumer asked. The pump itself never delays output.
+    /// </param>
     /// <returns>
     /// <see langword="true"/> when the wait is armed and the waiter will be signaled; <see langword="false"/> when
     /// the condition already holds and the caller should re-check synchronously instead of waiting.
     /// </returns>
-    internal bool ArmWait(IPtyOutputWaiter waiter, bool wakeOnData)
+    internal bool ArmWait(IPtyOutputWaiter waiter, bool wakeOnData, int minimumData = 1)
     {
+        Debug.Assert(minimumData is >= 1 and <= Capacity);
         Volatile.Write(ref _waiter, waiter);
-        _waiterWantsData = wakeOnData;
+        // Before the generation: a signaler that reads this wait's generation reads its minimum too.
+        Volatile.Write(ref _waiterMinimumData, wakeOnData ? (short)minimumData : NoDataWait);
 
         // Each wait gets a generation of its own, never 0, so that a signaler still holding an earlier wait's generation
         // fails its claim instead of completing this one (see SignalConsumer).
@@ -542,7 +558,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
         Interlocked.Exchange(ref _consumerWaiting, generation);
 
         // Re-checked after publishing the wait (Dekker with the producer's publish-then-check).
-        var ready = (wakeOnData && Volatile.Read(ref _count) > 0)
+        var ready = (wakeOnData && Volatile.Read(ref _count) >= minimumData)
             || (Volatile.Read(ref _flags) & (FlagProducerFinished | FlagSessionDisposed)) != 0;
         if (!ready)
             return true;
@@ -561,10 +577,25 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// <summary>Signals the armed wait for a condition the waiter checks itself (a drain timeout).</summary>
     internal void SignalWaiter() => SignalConsumer(dataArrived: false);
 
+    /// <summary>
+    /// Lowers the minimum of an armed wait that coalesces a burst to 1 byte, at its consumer's deadline, and completes it
+    /// when output is unread; otherwise the next publish does. Any thread. A wait that output does not complete, or a
+    /// plain one, is left as it is, so a deadline that outlived its wait changes nothing but an earlier flush.
+    /// </summary>
+    internal void RelaxWaitMinimum()
+    {
+        var minimum = Volatile.Read(ref _waiterMinimumData);
+        if (minimum <= 1 || minimum == NoDataWait)
+            return;
+
+        if (Interlocked.CompareExchange(ref _waiterMinimumData, (short)1, minimum) == minimum)
+            SignalConsumer(dataArrived: true);
+    }
+
     private void SignalConsumer(bool dataArrived)
     {
         var generation = Volatile.Read(ref _consumerWaiting);
-        if (generation == 0 || (dataArrived && !_waiterWantsData))
+        if (generation == 0)
             return;
 
         // A publish signals after it counts its output, and a consumer that is not waiting can take that output in
@@ -575,8 +606,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
         // being signaled. A withdrawn wait takes its generation with it, so a consumer that withdraws because it saw the
         // output itself, takes it, and arms another wait leaves this claim failing. Either way the output this signal was
         // about has been taken, and the new wait is signaled by the next change of state, which its own re-check in
-        // ArmWait cannot miss.
-        if (dataArrived && Volatile.Read(ref _count) == 0)
+        // ArmWait cannot miss. The same check holds a wait that coalesces a burst until its minimum is unread, and keeps
+        // output from completing a wait that does not want it (NoDataWait, more than the ring holds).
+        if (dataArrived && Volatile.Read(ref _count) < Volatile.Read(ref _waiterMinimumData))
             return;
 
         if (Interlocked.CompareExchange(ref _consumerWaiting, 0, generation) == generation)

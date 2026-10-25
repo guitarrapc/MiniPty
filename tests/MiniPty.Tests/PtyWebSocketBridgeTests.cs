@@ -54,6 +54,39 @@ public sealed class PtyWebSocketBridgeTests
         await Assert.That(client.BinaryText).Contains("BRIDGE_MARKER");
     }
 
+    /// <summary>
+    /// A flood goes out in large frames. The core publishes each read as it completes, at most 1 KiB on macOS, and a bridge
+    /// that keeps up sent each as a frame of its own (about 32 per 32 KiB on macOS, 16 on Linux); the bridge joins reads
+    /// that arrive in a burst (plan_thread_free_io.md, Phase 7). Unix only: a Windows flood's pace is ConPTY's, and the
+    /// benchmark records it there. Alone, because a loaded machine slows the flood below a burst's rate now and then, and
+    /// each such pause hands out what has arrived: in one full parallel run of eight, 263 frames (3.99 KiB) instead of
+    /// about 130.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task AFloodThroughTheBridgeGoesOutInLargeFrames()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        const int Size = 1024 * 1024;
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var bridgeTask = PtyWebSocketBridge.RunAsync(
+            Spawn("sh", ["-c", $"head -c {Size} /dev/zero | tr '\\0' x"]),
+            serverSocket,
+            cancellationToken: cts.Token);
+        var client = new BridgeTestClient(clientSocket);
+
+        await client.RunToCloseAsync(ackEverything: true, cts.Token);
+        await bridgeTask.WaitAsync(cts.Token);
+
+        var binaryFrames = client.MessageCount - (client.ExitMessage is null ? 0 : 1);
+        await Assert.That(client.BinaryByteCount).IsEqualTo(Size);
+        await Assert.That(client.BinaryByteCount / binaryFrames).IsGreaterThanOrEqualTo(4096L)
+            .Because($"{binaryFrames} frames for {Size} bytes");
+    }
+
     [Test]
     public async Task BridgeWritesClientBinaryFramesToChildInput()
     {

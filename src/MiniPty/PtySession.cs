@@ -139,6 +139,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
 
     internal PtyOutputPump OutputPump => _pump;
 
+    /// <summary>The session's <see cref="ReadOutputAsync"/> enumerator, once one was created. For tests.</summary>
+    internal PtyOutputReader? OutputReader => _outputReader;
+
     internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
     /// <summary>
@@ -180,6 +183,18 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
             ? new PtyOutputReader.WithToken(reader, cancellationToken)
             : reader;
     }
+
+    /// <summary>
+    /// <see cref="ReadOutputAsync"/> for a consumer that pays per chunk, such as a bridge that sends one message per chunk:
+    /// while output arrives in a burst, a chunk waits for more output, at most about a millisecond, so a flood goes out in
+    /// fewer, larger chunks. Output outside a burst, such as a keystroke echo, is handed out at once
+    /// (<see cref="PtyOutputCoalescing"/>).
+    /// </summary>
+    internal IAsyncEnumerable<PtyOutputChunk> ReadOutputCoalescedAsync(CancellationToken cancellationToken = default) =>
+        new PtyOutputReader.WithToken(
+            _outputReader as PtyCoalescingOutputReader ?? CreateCoalescingOutputReader(),
+            cancellationToken,
+            coalesce: true);
 
     /// <summary>
     /// Gets a value indicating whether the child process has exited.
@@ -611,6 +626,20 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     {
         var created = new PtyOutputReader(this, _pump);
         return Interlocked.CompareExchange(ref _outputReader, created, null) ?? created;
+    }
+
+    /// <summary>
+    /// Makes the session's reader one that can coalesce. It replaces a plain reader an earlier enumeration created; one that
+    /// is still enumerating keeps the session's single output consumer, so the new reader's enumeration fails with the
+    /// conflict, as any second reader does. If another thread replaced the reader meanwhile, which only racing reads do,
+    /// the new one still serves this enumeration, and the session's single output consumer decides between them.
+    /// </summary>
+    private PtyOutputReader CreateCoalescingOutputReader()
+    {
+        var current = Volatile.Read(ref _outputReader);
+        var created = new PtyCoalescingOutputReader(this, _pump);
+        Interlocked.CompareExchange(ref _outputReader, created, current);
+        return created;
     }
 
     private PtyOutputStream CreateOutputStream()

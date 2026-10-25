@@ -30,4 +30,11 @@ public sealed class PtyTerminalOptions
     /// window where early child output could be produced with no consumer attached.
     /// </summary>
     public required PtyTerminalOutputHandler Output { get; init; }
+
+    /// <summary>
+    /// Gets whether output that arrives in a burst is joined into larger chunks, waiting at most about a millisecond per
+    /// chunk, while output outside a burst, such as a keystroke echo, is pushed at once. Set by the bridges, which send one
+    /// message per chunk; see <c>PtySession.ReadOutputCoalescedAsync</c>.
+    /// </summary>
+    internal bool CoalesceBursts { get; init; }
 }

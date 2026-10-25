@@ -89,7 +89,7 @@ public static class PtyWebSocketBridge
         {
             using var teardownCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _sendCancellation = teardownCts.Token;
-            var terminal = PtyTerminal.Start(startInfo, new PtyTerminalOptions { Output = SendOutputAsync });
+            var terminal = PtyTerminal.Start(startInfo, new PtyTerminalOptions { Output = SendOutputAsync, CoalesceBursts = true });
             _flowControl.Attach(terminal);
 
             Task? receiveTask = null;
