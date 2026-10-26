@@ -254,11 +254,22 @@ Holding the payload is harmless: a few hundred bytes per session. But the docume
 | The full test suite with that overwrite in every start | 676 tests | 0 failed |
 | Negative control: the same overwrite before the fork | 200 | 200 failed (`chdir` to the overwritten directory) |
 
-**Likely real cause: `ETXTBSY`.**
+**Measured on macOS (arm64, 2026-10-27).** The same checks ran against the macOS spawn. There the spawn is `posix_spawn` of the helper, which copies `argv` and `envp` in the kernel before it returns, and since R2 the start also waits for the helper's exec.
+
+| Experiment build | Starts | Mismatches or failures |
+|---|---|---|
+| Unchanged | 3,008 (64 at a time) | 0 |
+| The parent overwrites every payload string, and every `argv` and `envp` slot, right after the spawn returns, then frees them | 3,008 (64) and 3,072 (128) | 0 |
+| The full test suite with that overwrite in every start, made in managed code before the payload is freed | 676 tests, twice | 0 failed |
+| Negative control: the strings overwritten before the spawn | 200 | 200 failed (`chdir` to the overwritten directory) |
+| Negative control in managed code: the strings overwritten before the spawn, in the `PtyUnix*` tests | 13 tests | 12 failed with `Win32Exception`, for example `Cannot start 'sh': No such file or directory`. The one that passed expects the start to fail with `ENOENT` |
+
+**Likely real cause: `ETXTBSY`, on Linux.**
 
 - The flaking tests write a script and exec it at once.
-- A child another test forks during the write inherits the script's write descriptor until its own exec. Exec of a file open for writing fails with `ETXTBSY`, and the shim then ended every exec failure with 127.
-- Measured: a start of a file held open for writing now fails with `Win32Exception` 26 ("Text file busy").
+- A child another test forks during the write inherits the script's write descriptor until its own exec. On Linux, exec of a file open for writing fails with `ETXTBSY`, and the shim then ended every exec failure with 127.
+- Measured on Linux: a start of a file held open for writing now fails with `Win32Exception` 26 ("Text file busy").
+- Measured on macOS (2026-10-27): the same start runs. A script and a compiled binary that another process held open for writing both started and exited 0, so a concurrent fork does not fail the start there.
 - It is a race in the tests' fixtures, as in Go's issue 22315, so their retries stay. With R2 such a flake now names its `errno` in CI logs, which would confirm or refute this.
 
 **Changes:**
