@@ -111,6 +111,12 @@ static char **minipty_build_inherited_envp(void)
     return envp;
 }
 
+/*
+ * Runs a file the kernel does not recognize as an executable (ENOEXEC: a plain script without a shebang) through sh, as
+ * execvp does. No other error falls back. EACCES means the file may not be executed (no execute permission, or a noexec
+ * mount), and running it through sh would bypass that and stop a PATH search before an executable in a later entry.
+ * ENOENT for a file that exists means its shebang names a missing interpreter, and sh would run the script in its place.
+ */
 static void minipty_execve_compat(const char *path, char *const *argv, char *const *envp)
 {
     size_t argc = 0;
@@ -118,8 +124,7 @@ static void minipty_execve_compat(const char *path, char *const *argv, char *con
 
     execve(path, argv, envp);
 
-    if (errno != ENOEXEC && errno != EACCES
-        && !(errno == ENOENT && access(path, F_OK) == 0))
+    if (errno != ENOEXEC)
         return;
 
     while (argv[argc] != NULL)
@@ -135,8 +140,11 @@ static void minipty_execve_compat(const char *path, char *const *argv, char *con
     for (size_t i = 0; i < sizeof(shells) / sizeof(shells[0]); i++) {
         execve(shells[i], shell_argv, envp);
         if (errno != ENOENT && errno != ENOTDIR)
-            break;
+            return;
     }
+
+    /* No sh exists: report the script's own error, so a PATH search does not read it as a missing file. */
+    errno = ENOEXEC;
 }
 
 static void minipty_execve_path(const char *dir, size_t dir_len, const char *file, char *const *argv, char *const *envp)

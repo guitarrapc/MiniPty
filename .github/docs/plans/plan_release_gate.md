@@ -2,7 +2,7 @@
 
 Goal: resolve the items below before the next release, the first since `v1.3.0` (see [next_todo.md](../next_todo.md#release)). They came from reviewing MiniPty as a general-purpose PTY library against the reference libraries under `.references/`: node-pty 1.1.0, Porta.Pty 2.2.3, WezTerm's `portable-pty` 0.9.0, and creack/pty. Each gate is closed by a fix, or by a decision recorded in the specifications, as its own section says.
 
-**Status:** open (2026-10-27). No gate is resolved.
+**Status:** open (2026-10-27). R1 is implemented (2026-10-27); R2–R5 are open.
 
 ## Gate Inventory
 
@@ -57,18 +57,28 @@ The macOS helper resolves the program with the same function, so macOS behaves t
 - A script on a `noexec` mount, started directly, now fails instead of running through `sh`.
 - A script whose interpreter is missing now fails instead of running under `sh`.
 
+### Result (implemented 2026-10-27)
+
+- `minipty_execve_compat` falls back to `sh` for `ENOEXEC` only. When no `sh` exists, it reports `ENOEXEC` instead of the shell's `ENOENT`, so a `PATH` search does not mistake the script for a missing file.
+- The compiled shim was checked on WSL with the four cases below. All matched `execvp`:
+  - A non-executable file earlier on `PATH`, then an executable: the executable ran.
+  - A missing interpreter: `ENOENT`.
+  - A plain script: ran through `sh`.
+  - A non-executable file as the only match: `EACCES`.
+- The documented reason is updated in [pty_crossplatform.md](../references/pty_crossplatform.md#plain-scripts-and-shell-fallback).
+
 ### Tests
 
-These run on Unix, through `Pty.Start`:
+These run on Unix, through `Pty.Start`, in `PtyTests`:
 
-- A non-executable file earlier on `PATH` is skipped, and the executable in a later entry runs.
-- A script with a missing interpreter fails. With R2 the start throws; without R2 the child exits 127.
-- A plain script without a shebang still runs through `sh`. This is the `ENOEXEC` path, which stays.
-- A non-executable file that is the only match fails with `EACCES` (126 without R2).
+- `PtyUnixPathLookupSkipsFilesWithoutExecutePermission`: a non-executable file earlier on `PATH` is skipped, and the executable in a later entry runs.
+- `PtyUnixPathLookupFailsWhenShebangInterpreterMissing` replaces the test that asserted the old fallback. A script with a missing interpreter exits 127 and its body does not run.
+- `PtyUnixFileWithoutExecutePermissionDoesNotStart`: a non-executable file, found on `PATH` or named by its full path, exits 127 and does not run.
+- `PtyUnixPathLookupUsesOverlayAndFallsBackToShellForPlainScripts` is unchanged. A plain script without a shebang still runs through `sh`; this is the `ENOEXEC` path, which stays.
 
-### Documents
+### Lesson
 
-- [pty_crossplatform.md](../references/pty_crossplatform.md#plain-scripts-and-shell-fallback): the errno table, and the paragraph on `noexec` mounts.
+The shim ends the child with 127 for every exec failure, so the caller cannot tell `EACCES` from `ENOENT`. Only R2 would surface the `errno`.
 
 ## R2: Unix start failures are not reported by `Pty.Start`
 

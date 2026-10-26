@@ -964,9 +964,13 @@ public sealed class PtyTests
         }
     }
 
+    /// <summary>
+    /// A script whose shebang names a missing interpreter fails to exec (<c>ENOENT</c>), as with <c>execvp</c>. It must
+    /// not run under <c>sh</c> instead: the script was written for another interpreter.
+    /// </summary>
     [Test]
     [Retry(3)]
-    public async Task PtyUnixPathLookupFallsBackToShellWhenShebangInterpreterMissing()
+    public async Task PtyUnixPathLookupFailsWhenShebangInterpreterMissing()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
@@ -975,7 +979,7 @@ public sealed class PtyTests
         try
         {
             var script = Path.Combine(tempRoot, "minipty-bad-shebang-script");
-            await File.WriteAllTextAsync(script, "#!/no-such-minipty-interpreter\nprintf bad-shebang-shell-fallback\n");
+            await File.WriteAllTextAsync(script, "#!/no-such-minipty-interpreter\nprintf bad-shebang-ran-under-sh\n");
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
             var result = await PtyCapture.RunAsync(Spawn("minipty-bad-shebang-script", []) with
@@ -983,8 +987,83 @@ public sealed class PtyTests
                 Environment = new Dictionary<string, string?> { ["PATH"] = tempRoot }
             });
 
+            await Assert.That(result.ExitCode).IsEqualTo(127);
+            await Assert.That(result.Contains("bad-shebang-ran-under-sh")).IsFalse();
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A file without execute permission earlier on <c>PATH</c> is skipped (<c>EACCES</c>), and the executable of the
+    /// same name in a later entry runs, as with <c>execvp</c>. Running the first file through <c>sh</c> would ignore its
+    /// permission and stop the search there.
+    /// </summary>
+    [Test]
+    [Retry(3)]
+    public async Task PtyUnixPathLookupSkipsFilesWithoutExecutePermission()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        var tempRoot = CreateUnixExecTestDirectory();
+        try
+        {
+            var notExecutableDirectory = Directory.CreateDirectory(Path.Combine(tempRoot, "not-executable")).FullName;
+            var executableDirectory = Directory.CreateDirectory(Path.Combine(tempRoot, "executable")).FullName;
+
+            var notExecutable = Path.Combine(notExecutableDirectory, "minipty-lookup-target");
+            await File.WriteAllTextAsync(notExecutable, "printf not-executable-entry-ran\n");
+            File.SetUnixFileMode(notExecutable, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+            var executable = Path.Combine(executableDirectory, "minipty-lookup-target");
+            await File.WriteAllTextAsync(executable, "printf executable-entry-ran\n");
+            File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var result = await PtyCapture.RunAsync(Spawn("minipty-lookup-target", []) with
+            {
+                Environment = new Dictionary<string, string?> { ["PATH"] = notExecutableDirectory + ":" + executableDirectory }
+            });
+
             await Assert.That(result.ExitCode).IsEqualTo(0);
-            await Assert.That(result.Contains("bad-shebang-shell-fallback")).IsTrue();
+            await Assert.That(result.Contains("executable-entry-ran")).IsTrue();
+            await Assert.That(result.Contains("not-executable-entry-ran")).IsFalse();
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A file without execute permission does not start, whether it is the only match on <c>PATH</c> or named by its full
+    /// path. The child exits 127, as for any failed exec.
+    /// </summary>
+    [Test]
+    [Retry(3)]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task PtyUnixFileWithoutExecutePermissionDoesNotStart(bool fullPath)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        var tempRoot = CreateUnixExecTestDirectory();
+        try
+        {
+            var script = Path.Combine(tempRoot, "minipty-not-executable");
+            await File.WriteAllTextAsync(script, "printf not-executable-file-ran\n");
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+            var result = await PtyCapture.RunAsync(Spawn(fullPath ? script : "minipty-not-executable", []) with
+            {
+                Environment = new Dictionary<string, string?> { ["PATH"] = tempRoot }
+            });
+
+            await Assert.That(result.ExitCode).IsEqualTo(127);
+            await Assert.That(result.Contains("not-executable-file-ran")).IsFalse();
         }
         finally
         {

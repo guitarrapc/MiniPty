@@ -205,17 +205,22 @@ If `file` contains `/`, the shim calls `execve` directly. Otherwise it searches 
 
 ### Plain scripts and shell fallback
 
-After `execve(path, …)` fails, the shim may retry with `/bin/sh` (then `/usr/bin/sh`) and the resolved file path as `argv[1]`—the same pattern as a manual `sh /path/to/script` invocation. This path is used when:
+The shim follows `execvp`. When `execve(path, …)` fails, the result depends on `errno`:
 
-| `errno` | Typical cause |
-|---|---|
-| `ENOEXEC` | Plain script with no shebang |
-| `EACCES` | File exists and is marked executable but the mount is `noexec` (common on hardened `/tmp`) |
-| `ENOENT` | Shebang names a missing interpreter while the script file itself exists |
+| `errno` | Typical cause | What the shim does |
+|---|---|---|
+| `ENOEXEC` | Plain script with no shebang | Runs it through `/bin/sh` (then `/usr/bin/sh`), with the file path as `argv[1]`, as `sh /path/to/script` would |
+| `EACCES` | No execute permission, or a `noexec` mount | Tries the next `PATH` entry. If no entry succeeds, the start fails with `EACCES` |
+| `ENOENT` | No such file, or a shebang that names a missing interpreter | Tries the next `PATH` entry. If no entry succeeds, the start fails |
 
-**Why this matters:** Plain scripts only need **read** permission for the `sh` fallback. Shebang execution tries to **exec** the script file first; on `noexec` mounts that path fails even when `sh script` would succeed. Callers spawning scripts on restrictive filesystems should either rely on this fallback (no shebang) or execute via an explicit interpreter (`sh`, `-c`, …).
+When the shim fails, the child exits with status **127**, the common shell convention for a failed `exec` (not only for a missing `PATH` lookup).
 
-On total failure the child exits with status **127**, matching the common shell convention for a failed `exec` (not only a missing `PATH` lookup).
+**Why only `ENOEXEC`:** `EACCES` and `ENOENT` used to fall back to `sh` as well, so that executable scripts on `noexec` mounts would run and scripts with a missing interpreter would still run. That made the program depend on files `execvp`, shells, and `Process.Start` all reject. Measured on WSL before the change:
+
+- A non-executable file on an earlier `PATH` entry ran through `sh`, and the search stopped before the executable of the same name in a later entry.
+- A script whose interpreter was missing ran under `sh` instead of failing.
+
+`noexec` is an administrator's control, and the library does not work around it for every caller. A caller that wants a script run despite it names the interpreter explicitly (`FileName = "/bin/sh"` with the script as an argument). For the same reason, test fixtures that are executed live under the test output directory, not under `/tmp`, which hosted runners may mount `noexec` ([platform_support.md](../specs/platform_support.md)).
 
 ### macOS: posix_spawn + spawn-helper
 
