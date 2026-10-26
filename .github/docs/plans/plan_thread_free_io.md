@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; the full suite with it passed on macOS on 2026-10-25. Phase 6 is done on Linux and on macOS (2026-10-25): one loop reads every Unix session, on epoll and on kqueue; FreeBSD runs the kqueue code from source, unverified. On macOS a flood through the WebSocket bridge took about four times the frames of Phase 0 and was about 12% slower; the core stays as it is, and Phase 7 has the bridges coalesce bursts instead ([decision](#phase-6-result-macos)). Phase 7 is implemented and measured on macOS (2026-10-25): a flood there takes half Phase 0's frames and runs faster than with reader threads ([Phase 7 result](#phase-7-result-macos)). It is measured on Windows and Linux too (2026-10-26), where .NET timers did not keep the 1 ms the deadlines need: Windows now ticks on a high-resolution waitable timer and Unix on the I/O loop's wait, and a flood takes 3.9–4.0 frames per 32 KiB on both, at Phase 6's throughput and echo ([Windows and Linux](#phase-7-result-windows-and-linux)); the loop's tick on macOS still needs a run there. Phase 8 decides whether the bridges join steady output below the burst rate, and Phase 9 retires the reader threads. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; the full suite with it passed on macOS on 2026-10-25. Phase 6 is done on Linux and on macOS (2026-10-25): one loop reads every Unix session, on epoll and on kqueue; FreeBSD runs the kqueue code from source, unverified. On macOS a flood through the WebSocket bridge took about four times the frames of Phase 0 and was about 12% slower; the core stays as it is, and Phase 7 has the bridges coalesce bursts instead ([decision](#phase-6-result-macos)). Phase 7 is implemented and measured on macOS (2026-10-25): a flood there takes half Phase 0's frames and runs faster than with reader threads ([Phase 7 result](#phase-7-result-macos)). It is measured on Windows and Linux too (2026-10-26), where .NET timers did not keep the 1 ms the deadlines need: Windows now ticks on a high-resolution waitable timer and Unix on the I/O loop's wait, and a flood takes 3.9–4.0 frames per 32 KiB on both, at Phase 6's throughput and echo ([Windows and Linux](#phase-7-result-windows-and-linux)), and a recheck on macOS with the loop's tick measured flood, echo, and tails as before. Phase 8 decides whether the bridges join steady output below the burst rate, and Phase 9 retires the reader threads. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -1041,7 +1041,7 @@ Measured 2026-10-26 on Windows 11 26200 (32 logical CPUs) and Linux (WSL2, kerne
 
 **Delivered:**
 - **Windows ticks on a high-resolution waitable timer** (`WindowsPreciseTick`, `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`, Windows 10 1803 and later, below every ConPTY). A thread of its own waits for it and runs the tick. Waiting on the thread pool instead cost 35–44 µs of CPU per tick with the runtime's own pool, whose wait thread hands each signal to a worker, against 4–9 µs on the thread: about 3% of a core while a flood keeps the tick running. `timeBeginPeriod` would have raised the timer resolution of the whole process. The thread stays 30 s after the last burst, so bursts start no thread each, and then exits.
-- **Unix ticks on the I/O loop.** While the scheduler holds a reader, the loop's wait times out at the next tick, as it does for a hang-up's deadline, and the loop serves the tick after the pass's other work. It runs on the loop thread, which no longer waits for a pool worker to serve a deadline. This covers macOS and FreeBSD too, which have not run it.
+- **Unix ticks on the I/O loop.** While the scheduler holds a reader, the loop's wait times out at the next tick, as it does for a hang-up's deadline, and the loop serves the tick after the pass's other work. It runs on the loop thread, which no longer waits for a pool worker to serve a deadline. This covers macOS, checked below, and FreeBSD, which has not run it.
 - A `Timer` ticks only where neither can start. The scheduler records which tick runs (`PtyCoalesceTickSource`), so it stops the same one.
 
 **Tests:**
@@ -1099,8 +1099,31 @@ BenchmarkDotNet, one round each, Phase 6 against the final build: every allocati
 
 **Done on Windows and Linux:** a flood takes 3.9–4.0 frames per 32 KiB, half Phase 0's, at Phase 6's throughput or more and no more host CPU; echo p50 is Phase 6's, and p99 stays within the spread between rounds (0.37–0.67 ms across all builds). A burst's tail now waits about 1–2 ms on every platform, where Phase 6 sent it at once.
 
+**Checked on macOS** (2026-10-26, on the machine of the macOS result): the final code against the build before it (`244141f`, whose tick ran on `Timer`), alternating, two rounds each.
+- The full suite passed, 668 tests, in three runs, `TheTickFiresAboutEveryMillisecond` and `TheTickStopsOnceNoReaderWaits` among them.
+- The tick runs on the loop (`PtyCoalesceTickSource.UnixLoop`). Over five rounds it fired 157–161 times in 200–202 ms, every 1.26–1.29 ms on average, where the review had measured the `Timer` at 1.27–1.30 ms apart.
+
+| | Before | After |
+|---|---:|---:|
+| `WebTerminalScale bench` flood: frames per 32 KiB, MB/s, host CPU per MiB (ms) | 4.0, 77.6–86.1, 31.5–40.0 | 4.0, 76.5–79.5, 33.8–38.0 |
+| 32 floods of 4 MiB at once, frames per 32 KiB | 9.37–9.50 | 9.19–9.37 |
+| 8 floods of 8 MiB at once | 4.05–4.06 | 4.06–4.08 |
+| `ls -lR /usr/share` | 17.2–54.8 | 17.9–19.1 |
+| Steady 7 MB/s, 800 B lines | 4.25–4.28 | 4.53–4.56 |
+| Steady 4.5 MB/s, 500 B lines | 5.71–5.72 | 5.72 |
+| Steady 2.5 MB/s, 500 B lines | 10.3–17.0 | 8.14 |
+| Steady 1.4 MB/s, 100 B lines | 319–323 | 319–322 |
+| A burst's 1 KiB tail with the real tick, p50 / max (ms) | 1.28 / 1.86 | 1.28 / 2.78 |
+| An echo right after a 5 KiB tail, p50 (ms) | 1.31 | 1.27 |
+
+- The `ls -lR` round of 54.8 frames streamed at 2.4 MB/s, against 4.8 MB/s in the other three.
+- The 7 MB/s stream took about 7% more frames in both rounds.
+- **Echo is unchanged.** Three rounds each of `--sessions 64 --echo 1000` measured p50 0.09–0.10 ms in both builds, and p99 0.17–0.27 ms before and 0.19–0.25 ms after. In the scale bench, p50 at 64 and 256 sessions was 0.11–0.12 and 0.13–0.14 ms before, and 0.11–0.13 and 0.12–0.13 ms after.
+- BenchmarkDotNet, one round, against the macOS result's final build: every allocation is the same except `Bridge_32KiB_Bytes`, 26.87 against 26.80 KB, inside that row's spread between runs. No time is more than 3.5% higher, the short rows are 1–3% lower, and input writes take 100–102 µs.
+- **NativeAOT:** `WebTerminalScale` publishes for `osx-arm64` without trimming or AOT warnings and passes `--smoke`, whose 256 KiB flood took 4.3 frames per 32 KiB.
+
 **Open:**
-- **macOS runs the loop's tick now**, where it ran a `Timer` that measured about 1.3 ms. The full suite and `TheTickFiresAboutEveryMillisecond` need a run there. FreeBSD stays from source.
+- FreeBSD runs the loop's tick from source, unverified, as the rest of its loop.
 - **An echo during a flood** is still not tested against the bound.
 - Steady output below the burst rate, and the package versions, as in the macOS result.
 
