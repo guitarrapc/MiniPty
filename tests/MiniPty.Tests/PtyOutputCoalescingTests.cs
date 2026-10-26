@@ -82,11 +82,12 @@ public sealed class PtyOutputCoalescingTests
     }
 
     /// <summary>
-    /// The end of a burst is handed out at the deadline, below the minimum, and that ends the burst: the next read is
-    /// handed out as it is published again. 1 KiB over at least the 1 ms deadline is below the rate that keeps a burst.
+    /// The end of a burst is handed out at the deadline, below the minimum. That deadline found output, so the burst goes
+    /// on: a slow stream would come next as well. The next deadline finds nothing, and the output after it, such as an
+    /// echo, is handed out as it is published and ends the burst.
     /// </summary>
     [Test]
-    public async Task TheEndOfABurstIsHandedOutAtTheDeadlineAndEndsTheBurst()
+    public async Task TheEndOfABurstIsHandedOutAtTheDeadlineAndTheBurstEndsAtTheNextEmptyOne()
     {
         using var tick = new ManualTick();
         var backend = new ManualOutputBackend();
@@ -99,16 +100,76 @@ public sealed class PtyOutputCoalescingTests
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
         await Assert.That(output.Current.Data.Length).IsEqualTo(1024);
 
+        next = output.MoveNextAsync().AsTask();
+        await Assert.That(Reader(session).IsInBurst).IsTrue();
+        await ManualTick.ServeAfterDeadlineAsync(Reader(session));
+        backend.Write(10);
+        await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
+        await Assert.That(output.Current.Data.Length).IsEqualTo(10);
+
         await AssertNextReadIsHandedOutAtOnceAsync(backend, session, output);
         backend.End();
     }
 
     /// <summary>
-    /// Small chunks that add up to the burst size within the window start a burst, as 1 KiB reads do on macOS. The window
-    /// is raised so that scheduling delays between the chunks cannot restart it.
+    /// A stream of small writes, each read on its own, stays in its burst while each deadline finds output: four chunks
+    /// within the window start the burst, and each later chunk is taken at a deadline, whatever its size. 200 bytes per
+    /// deadline of 1 ms or more is far below the rate that keeps a burst, so only the deadline's finding keeps it. The
+    /// window is raised while the four chunks start the burst, so that scheduling delays between them cannot restart it,
+    /// and back to 1 ms afterwards, since it also scales that rate.
     /// </summary>
     [Test]
-    public async Task SmallChunksWithinTheWindowStartABurst()
+    public async Task ASlowStreamStaysInItsBurstWhileEachDeadlineFindsOutput()
+    {
+        using var tick = new ManualTick();
+        var backend = new ManualOutputBackend();
+        await using var session = new PtySession(backend);
+        await using var output = session.ReadOutputCoalescedAsync().GetAsyncEnumerator();
+
+        using (new WindowOverride(Stopwatch.Frequency * 60))
+        {
+            for (var i = 0; i < PtyOutputCoalescing.BurstChunks; i++)
+            {
+                var read = output.MoveNextAsync().AsTask();
+                backend.Write(100);
+                await Assert.That(await read.WaitAsync(Timeout)).IsTrue();
+                await Assert.That(output.Current.Data.Length).IsEqualTo(100);
+            }
+
+            // Releasing the fourth chunk starts the burst; the read it arms is the stream's first wait.
+            var first = output.MoveNextAsync().AsTask();
+            await Assert.That(Reader(session).IsInBurst).IsTrue();
+            backend.Write(100);
+            backend.Write(100);
+            await ManualTick.ServeAfterDeadlineAsync(Reader(session));
+            await Assert.That(await first.WaitAsync(Timeout)).IsTrue();
+            await Assert.That(output.Current.Data.Length).IsEqualTo(200);
+        }
+
+        for (var i = 0; i < 3; i++)
+        {
+            var next = output.MoveNextAsync().AsTask();
+            await Assert.That(Reader(session).IsInBurst).IsTrue();
+            backend.Write(100);
+            backend.Write(100);
+            await Assert.That(next.IsCompleted).IsFalse();
+            await ManualTick.ServeAfterDeadlineAsync(Reader(session));
+            await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
+            await Assert.That(output.Current.Data.Length).IsEqualTo(200);
+        }
+
+        var last = output.MoveNextAsync().AsTask();
+        await Assert.That(Reader(session).IsInBurst).IsTrue();
+        backend.End();
+        await Assert.That(await last.WaitAsync(Timeout)).IsFalse();
+    }
+
+    /// <summary>
+    /// Chunks that add up to the burst size within the window start a burst, also fewer than the chunks that start one by
+    /// their count. The window is raised so that scheduling delays between the chunks cannot restart it.
+    /// </summary>
+    [Test]
+    public async Task ChunksThatAddUpToTheBurstSizeWithinTheWindowStartABurst()
     {
         using var deadline = DeadlineOverride.Long();
         using var window = new WindowOverride(Stopwatch.Frequency * 60);
@@ -116,16 +177,49 @@ public sealed class PtyOutputCoalescingTests
         await using var session = new PtySession(backend);
         await using var output = session.ReadOutputCoalescedAsync().GetAsyncEnumerator();
 
-        for (var i = 0; i < PtyOutputCoalescing.BurstBytes / 1024; i++)
+        // Fewer than BurstChunks, so the bytes alone start the burst.
+        const int Chunks = 2;
+        for (var i = 0; i < Chunks; i++)
         {
             var read = output.MoveNextAsync().AsTask();
             await Assert.That(Reader(session).IsInBurst).IsFalse();
-            backend.Write(1024);
+            backend.Write(PtyOutputCoalescing.BurstBytes / Chunks);
             await Assert.That(await read.WaitAsync(Timeout)).IsTrue();
-            await Assert.That(output.Current.Data.Length).IsEqualTo(1024);
+            await Assert.That(output.Current.Data.Length).IsEqualTo(PtyOutputCoalescing.BurstBytes / Chunks);
         }
 
         // Releasing the last of them completes the burst size.
+        var next = output.MoveNextAsync().AsTask();
+        await Assert.That(Reader(session).IsInBurst).IsTrue();
+        await Assert.That(next.IsCompleted).IsFalse();
+        backend.End();
+        await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
+    }
+
+    /// <summary>
+    /// Four chunks within the window start a burst however small they are, as a stream of short lines read one by one
+    /// does, and three do not. The window is raised so that scheduling delays between the chunks cannot restart it.
+    /// </summary>
+    [Test]
+    public async Task FourChunksWithinTheWindowStartABurstAndThreeDoNot()
+    {
+        using var deadline = DeadlineOverride.Long();
+        using var window = new WindowOverride(Stopwatch.Frequency * 60);
+        var backend = new ManualOutputBackend();
+        await using var session = new PtySession(backend);
+        await using var output = session.ReadOutputCoalescedAsync().GetAsyncEnumerator();
+
+        for (var i = 0; i < PtyOutputCoalescing.BurstChunks; i++)
+        {
+            var read = output.MoveNextAsync().AsTask();
+            // Each read releases the chunk before it: after three, still no burst.
+            await Assert.That(Reader(session).IsInBurst).IsFalse();
+            backend.Write(10);
+            await Assert.That(await read.WaitAsync(Timeout)).IsTrue();
+            await Assert.That(output.Current.Data.Length).IsEqualTo(10);
+        }
+
+        // Releasing the fourth starts it.
         var next = output.MoveNextAsync().AsTask();
         await Assert.That(Reader(session).IsInBurst).IsTrue();
         await Assert.That(next.IsCompleted).IsFalse();
@@ -169,25 +263,23 @@ public sealed class PtyOutputCoalescingTests
     }
 
     /// <summary>
-    /// The chunk a deadline handed out, after output came slower than the rate that keeps a burst, does not start the next
-    /// burst. It piled up over the whole wait, so its size says nothing about the rate. Counted, a chunk of 4 KiB or more
-    /// that piled up over a wait of more than 2 ms, as on a coarse timer, would start a burst again.
+    /// The output that completes a wait after a deadline that found nothing does not start the next burst. It piled up over
+    /// the whole wait, so its size says nothing about the rate. Counted, a chunk of 4 KiB that piled up over a wait of more
+    /// than 2 ms, as after a pause, would start a burst again.
     /// </summary>
     [Test]
-    public async Task AChunkTakenAtTheDeadlineDoesNotStartTheNextBurst()
+    public async Task OutputAfterAnEmptyDeadlineDoesNotStartTheNextBurst()
     {
-        // The deadline is three windows long, so a burst's worth taken at it came at no more than 4 KiB per 3 ms, below the
-        // 2 KiB per millisecond that keeps a burst, however soon the deadline is served.
+        // The deadline is three windows long, so a burst's worth that comes after it came at no more than 4 KiB per 3 ms,
+        // below the 2 KiB per millisecond that keeps a burst.
         using var tick = new ManualTick(deadlineMs: 3);
         var backend = new ManualOutputBackend();
         await using var session = new PtySession(backend);
         await using var output = session.ReadOutputCoalescedAsync().GetAsyncEnumerator();
 
         var next = await EnterBurstAsync(backend, session, output);
-        // A burst's worth, and less than the minimum, so only the deadline completes the wait.
-        backend.Write(PtyOutputCoalescing.BurstBytes);
-        await Assert.That(next.IsCompleted).IsFalse();
         await ManualTick.ServeAfterDeadlineAsync(Reader(session));
+        backend.Write(PtyOutputCoalescing.BurstBytes);
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
         await Assert.That(output.Current.Data.Length).IsEqualTo(PtyOutputCoalescing.BurstBytes);
 
@@ -196,12 +288,12 @@ public sealed class PtyOutputCoalescingTests
     }
 
     /// <summary>
-    /// The output a deadline handed out does not start the next burst when it wraps the ring's end either, where it comes
-    /// out as two chunks. The burst starts at the ring's start, and an in-time chunk of 10 KiB leaves the head 2 KiB before
-    /// the end, so the 6 KiB that pile up over the next wait wrap.
+    /// The output a late wait leaves unread does not start the next burst when it wraps the ring's end either, where it
+    /// comes out as two chunks. The burst starts at the ring's start, and an in-time chunk of 10 KiB leaves the head 2 KiB
+    /// before the end. No tick serves the next deadline, and the minimum comes long after it, in 8 KiB that wrap.
     /// </summary>
     [Test]
-    public async Task OutputTakenAtTheDeadlineDoesNotStartTheNextBurstWhenItWrapsTheRing()
+    public async Task OutputALateWaitLeavesDoesNotStartTheNextBurstWhenItWrapsTheRing()
     {
         // Long enough that the in-time chunk beats its deadline on a loaded machine.
         using var tick = new ManualTick(deadlineMs: 200);
@@ -219,14 +311,11 @@ public sealed class PtyOutputCoalescingTests
 
         next = output.MoveNextAsync().AsTask();
         await Assert.That(Reader(session).IsInBurst).IsTrue();
-        backend.Write(2048);
-        backend.Write(4096);
-        await Assert.That(next.IsCompleted).IsFalse();
-        await ManualTick.ServeAfterDeadlineAsync(Reader(session));
+        await WriteMinimumLateAsync(backend, next);
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
         await Assert.That(output.Current.Data.Length).IsEqualTo(2048);
         await Assert.That(await output.MoveNextAsync()).IsTrue();
-        await Assert.That(output.Current.Data.Length).IsEqualTo(4096);
+        await Assert.That(output.Current.Data.Length).IsEqualTo(6144);
 
         await AssertNextReadIsHandedOutAtOnceAsync(backend, session, output);
         backend.End();
@@ -235,7 +324,7 @@ public sealed class PtyOutputCoalescingTests
     /// <summary>
     /// Output that comes after a late wait's leftovers counts toward the next burst, also in the chunk that holds the last of
     /// them. The leftovers wrap the ring as in the test above, and 4 KiB more arrives before the remainder is taken, so one
-    /// chunk holds 4 KiB to skip and 4 KiB to count.
+    /// chunk holds 6 KiB to skip and 4 KiB to count.
     /// </summary>
     [Test]
     public async Task OutputAfterTheLeftoversOfALateWaitCountsTowardTheNextBurst()
@@ -254,15 +343,13 @@ public sealed class PtyOutputCoalescingTests
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
 
         next = output.MoveNextAsync().AsTask();
-        backend.Write(2048);
-        backend.Write(4096);
-        await ManualTick.ServeAfterDeadlineAsync(Reader(session));
+        await WriteMinimumLateAsync(backend, next);
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
         await Assert.That(output.Current.Data.Length).IsEqualTo(2048);
 
         backend.Write(4096);
         await Assert.That(await output.MoveNextAsync()).IsTrue();
-        await Assert.That(output.Current.Data.Length).IsEqualTo(8192);
+        await Assert.That(output.Current.Data.Length).IsEqualTo(10240);
         await Assert.That(Reader(session).IsInBurst).IsFalse();
 
         // Releasing it counts the 4 KiB that came after the leftovers, a burst's worth.
@@ -362,12 +449,12 @@ public sealed class PtyOutputCoalescingTests
     }
 
     /// <summary>
-    /// A wait completed only after its deadline keeps the burst while what is unread when the consumer resumes amounts to
-    /// at least 2 KiB per burst window since the read asked, half the rate that starts a burst. The window and the deadline
-    /// are both 200 ms here. The test writes 3 KiB into a wait of the burst. That is below the 8 KiB minimum, so only the
-    /// deadline, which the test serves, completes the wait. That 3 KiB keeps the burst unless the consumer resumes more than
-    /// 100 ms after the deadline. It is less than the 4 KiB per window that starts a burst, so a rule that kept the burst
-    /// only at that rate would end it.
+    /// A wait that output completed only after its deadline, which no tick served, keeps the burst while what is unread when
+    /// the consumer resumes amounts to at least 2 KiB per burst window since the read asked, half the rate that starts a
+    /// burst: a flood whose deadline a late tick missed stays in it. The window and the deadline are both 200 ms here. The
+    /// test writes the 8 KiB minimum 450 ms into the wait, 3.6 KiB per window: at least the rate that keeps a burst unless
+    /// the consumer resumes 350 ms later still, and less than the 4 KiB per window that starts one, so a rule that kept the
+    /// burst only at that rate would end it.
     /// </summary>
     [Test]
     public async Task ALateWaitKeepsTheBurstWhileOutputCameAtTheRateThatKeepsIt()
@@ -379,10 +466,11 @@ public sealed class PtyOutputCoalescingTests
         await using var output = session.ReadOutputCoalescedAsync().GetAsyncEnumerator();
 
         var next = await EnterBurstAsync(backend, session, output);
-        backend.Write(3072);
-        await ManualTick.ServeAfterDeadlineAsync(Reader(session));
+        await Task.Delay(450);
+        backend.Write(PtyOutputCoalescing.MinimumBytes / 2);
+        backend.Write(PtyOutputCoalescing.MinimumBytes / 2);
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
-        await Assert.That(output.Current.Data.Length).IsEqualTo(3072);
+        await Assert.That(output.Current.Data.Length).IsEqualTo(PtyOutputCoalescing.MinimumBytes);
 
         next = output.MoveNextAsync().AsTask();
         await Assert.That(Reader(session).IsInBurst).IsTrue();
@@ -834,6 +922,20 @@ public sealed class PtyOutputCoalescingTests
 
         await Assert.That(next.IsCompleted).IsFalse();
         return next;
+    }
+
+    /// <summary>
+    /// Completes <paramref name="next"/>, a wait of a burst whose 200 ms deadline no tick serves, late: past the deadline it
+    /// writes the minimum as 2 KiB to the ring's end, 4 KiB, and 2 KiB. 8 KiB in 250 ms is far below the rate that keeps a
+    /// burst, and the deadline found nothing, so the burst ends with all of it left to skip.
+    /// </summary>
+    private static async Task WriteMinimumLateAsync(ManualOutputBackend backend, Task<bool> next)
+    {
+        await Task.Delay(250);
+        backend.Write(2048);
+        backend.Write(4096);
+        await Assert.That(next.IsCompleted).IsFalse();
+        backend.Write(2048);
     }
 
     /// <summary>The burst has ended: the next read waits plainly and gets the next output as it is published.</summary>

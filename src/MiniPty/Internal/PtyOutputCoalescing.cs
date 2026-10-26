@@ -9,15 +9,20 @@ namespace MiniPty.Internal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A reader enters a burst once it has been handed <see cref="BurstBytes"/> within <see cref="BurstWindowMs"/>. A keystroke
-/// echo never comes near that, but larger output can: one chunk of that size counts, so the tail of a large repaint or
-/// paste can wait too. In a burst the reader takes its next chunk only once <see cref="MinimumBytes"/> are unread, or once
-/// the wait's deadline, <see cref="MaxDelayMs"/> after it asked, has been served. A wait that output completes before its
-/// deadline keeps the burst. A later one keeps it while the output then unread amounts to <see cref="BurstKeepBytes"/> per
-/// <see cref="BurstWindowMs"/> since the read asked. A steady stream at that rate or more therefore stays in it, even when it
-/// fills the minimum only after the deadline. Otherwise output slowed down, and the burst ends. What the late wait leaves
-/// unread does not count toward the next burst, however many chunks it comes out as, because it piled up over the whole
-/// wait.
+/// A reader enters a burst once it has been handed <see cref="BurstBytes"/>, or <see cref="BurstChunks"/> chunks, within
+/// <see cref="BurstWindowMs"/>. A keystroke echo never comes near either, but larger output can: one chunk of that size
+/// counts, so the tail of a large repaint or paste can wait too, and so can output right after a run of small writes that
+/// were read one by one. In a burst the reader takes its next chunk only once <see cref="MinimumBytes"/> are unread, or once
+/// the wait's deadline, <see cref="MaxDelayMs"/> after it asked, has been served.
+/// </para>
+/// <para>
+/// A wait that output completes before its deadline keeps the burst, and so does one whose deadline still found output
+/// unread: output kept coming, however slowly, so a stream of small writes stays in its burst, each chunk taken at a
+/// deadline. A wait completed later than its deadline by output that came after it keeps the burst only while what is
+/// unread then amounts to <see cref="BurstKeepBytes"/> per <see cref="BurstWindowMs"/> since the read asked, which covers a
+/// flood whose deadline a late tick did not serve. Otherwise output stopped, and the burst ends at that wait, whose output
+/// the consumer takes at once. What that wait leaves unread does not count toward the next burst, however many chunks it
+/// comes out as, because it piled up over the whole wait.
 /// </para>
 /// <para>
 /// The pump completes a wait in a burst only at its minimum (<see cref="PtyOutputPump.ArmWait"/>), at its deadline, or at
@@ -50,13 +55,20 @@ internal static class PtyOutputCoalescing
     /// <summary>Output handed out within <see cref="BurstWindowMs"/> that starts a burst: 4 MB/s, which no echo reaches.</summary>
     internal const int BurstBytes = 4 * 1024;
 
-    /// <summary>The window <see cref="BurstBytes"/> is counted over.</summary>
+    /// <summary>The window <see cref="BurstBytes"/> and <see cref="BurstChunks"/> are counted over.</summary>
     internal const int BurstWindowMs = 1;
 
     /// <summary>
-    /// Output per <see cref="BurstWindowMs"/> that keeps a burst after a wait outlasted its deadline: half the rate that
-    /// starts one, so a stream near that rate, or a flood slowed by a busy host, does not leave and enter a burst on every
-    /// wait.
+    /// Chunks handed out within <see cref="BurstWindowMs"/> that start a burst as well: a stream of small writes read one by
+    /// one, which never reaches <see cref="BurstBytes"/>. Lines of 100 bytes at 0.4 MB/s come four to a millisecond; joined,
+    /// they took 46–48 frames per 32 KiB instead of 333. A run of writes that the terminal hands over at once is one chunk.
+    /// </summary>
+    internal const int BurstChunks = 4;
+
+    /// <summary>
+    /// Output per <see cref="BurstWindowMs"/> that keeps a burst after output completed a wait only after its deadline, with
+    /// no deadline served in between that found output, as when a late tick did not serve it: half the rate that starts a
+    /// burst, so a flood slowed by a busy host does not leave and enter a burst on every wait.
     /// </summary>
     internal const int BurstKeepBytes = BurstBytes / 2;
 
@@ -86,8 +98,8 @@ internal static class PtyOutputCoalescing
 /// </summary>
 /// <remarks>
 /// The consumer's thread owns the state, with three exceptions. The thread that completes a wait records when it did.
-/// <see cref="PtyOutputCoalesceScheduler"/>'s tick reads and claims <see cref="Deadline"/>. The scheduler keeps
-/// <see cref="Scheduled"/> and <see cref="ScheduleIndex"/> under its lock.
+/// <see cref="PtyOutputCoalesceScheduler"/>'s tick reads and claims <see cref="Deadline"/>, and records whether the deadline
+/// found output. The scheduler keeps <see cref="Scheduled"/> and <see cref="ScheduleIndex"/> under its lock.
 /// </remarks>
 internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPump pump) : PtyOutputReader(session, pump)
 {
@@ -96,9 +108,14 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
     // The output a burst left unread when a late wait ended it. It is not counted toward the next burst, however many
     // chunks it comes out as.
     private int _skipBytes;
-    // The bytes handed out in the current burst window, which starts at _windowStart (Stopwatch ticks).
+    // The bytes and chunks handed out in the current burst window, which starts at _windowStart (Stopwatch ticks). A byte
+    // for the chunks, which only count to BurstChunks, so that the state packs with the flags.
     private int _windowBytes;
+    private byte _windowChunks;
     private long _windowStart;
+    // Whether the armed wait's deadline found output unread, written by the tick that served it before it completes the
+    // wait. Output that kept coming keeps the burst.
+    private bool _deadlineFoundOutput;
     // The armed wait's deadline as the consumer judges it, which the scheduler's Deadline loses when it is served.
     private long _waitDeadline;
     // When the armed wait was completed (Stopwatch ticks), written by the thread that completed it, or 0.
@@ -129,6 +146,7 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
         _waitArmed = false;
         _skipBytes = 0;
         _windowBytes = 0;
+        _windowChunks = 0;
         _windowStart = 0;
         Volatile.Write(ref Deadline, 0);
     }
@@ -157,6 +175,7 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
     {
         _waitDeadline = Stopwatch.GetTimestamp() + PtyOutputCoalescing.MaxDelayTicks;
         Volatile.Write(ref _completedAt, 0);
+        Volatile.Write(ref _deadlineFoundOutput, false);
     }
 
     /// <summary>The pump armed the coalescing wait: its deadline goes to the scheduler.</summary>
@@ -176,10 +195,10 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
     /// <summary>
     /// The consumer resumed from its wait. A coalescing wait that output completed before its deadline keeps the burst. The
     /// time of completion decides, not the time the consumer resumed, so a consumer that resumes late keeps a burst whose
-    /// output came in time. A later completion keeps the burst only while what is unread now, including any left unread when
-    /// the read asked, amounts to at least <see cref="PtyOutputCoalescing.BurstKeepBytes"/> per window since it asked. A
-    /// steady stream at that rate or more stays in it, even when it fills the minimum only after the deadline. Otherwise
-    /// output slowed down, and the burst ends.
+    /// output came in time. A wait whose deadline found output unread keeps it too: output kept coming, however slowly. A
+    /// wait completed later by output that came after its deadline keeps the burst only while what is unread now, including
+    /// any left unread when the read asked, amounts to at least <see cref="PtyOutputCoalescing.BurstKeepBytes"/> per window
+    /// since it asked, as for a flood whose deadline a late tick did not serve. Otherwise output stopped, and the burst ends.
     /// </summary>
     internal void OnWaitEnded()
     {
@@ -196,6 +215,9 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
         // completedAt is zero when cancellation ended the wait, which ends the enumeration too.
         if (completedAt != 0)
         {
+            if (Volatile.Read(ref _deadlineFoundOutput))
+                return;
+
             var waited = Stopwatch.GetTimestamp() - (_waitDeadline - PtyOutputCoalescing.MaxDelayTicks);
             // Dividing keeps the comparison in range. Multiplying the wait by the keep rate overflows for a wait of 2^52
             // ticks or more, about 52 days at a 1 GHz timestamp, and the wrapped product can keep the burst.
@@ -205,11 +227,14 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
 
         _inBurst = false;
         _windowBytes = 0;
+        _windowChunks = 0;
         _windowStart = 0;
         _skipBytes = unread;
     }
 
-    /// <summary>Counts a chunk handed out toward the burst window, and starts a burst once the window holds enough.</summary>
+    /// <summary>
+    /// Counts a chunk handed out toward the burst window, and starts a burst once the window holds enough bytes or chunks.
+    /// </summary>
     internal void OnDelivered(int length)
     {
         if (_inBurst)
@@ -229,10 +254,12 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
         {
             _windowStart = now;
             _windowBytes = 0;
+            _windowChunks = 0;
         }
 
         _windowBytes += length;
-        if (_windowBytes >= PtyOutputCoalescing.BurstBytes)
+        _windowChunks++;
+        if (_windowBytes >= PtyOutputCoalescing.BurstBytes || _windowChunks >= PtyOutputCoalescing.BurstChunks)
             _inBurst = true;
     }
 
@@ -245,7 +272,8 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
 
     /// <summary>
     /// Serves the armed wait's deadline if it has passed at <paramref name="now"/>: the wait's minimum drops to 1 byte, so
-    /// what is unread is taken now, or the next publish is. Called by the scheduler's tick. Returns <see langword="true"/>
+    /// what is unread is taken now, or the next publish is. Whether output was unread is recorded first, before the wait
+    /// can complete, and keeps the burst (<see cref="OnWaitEnded"/>). Called by the scheduler's tick. Returns <see langword="true"/>
     /// when the reader has no deadline, so the scheduler can let it go. A served deadline returns <see langword="false"/>:
     /// a burst's consumer arms its next wait on another thread soon after, and finding the reader still held spares it the
     /// scheduler's lock.
@@ -262,6 +290,9 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
         // A consumer that ended the wait and armed another meanwhile changed the deadline. The new one is looked at again.
         if (Interlocked.CompareExchange(ref Deadline, 0, deadline) != deadline)
             return false;
+
+        if (_pump.UnreadCount > 0)
+            Volatile.Write(ref _deadlineFoundOutput, true);
 
         _pump.RelaxWaitMinimum();
         return false;
