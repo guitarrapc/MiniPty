@@ -576,7 +576,8 @@ public sealed class PtyOutputCoalescingTests
     /// With the real tick, a burst's tail goes out within the bound for every reader waiting at once, round after round:
     /// the scheduler holds several readers, drops each at the first tick that finds it without a deadline, and takes it
     /// back for the next burst.
-    /// The bound allows for timers coarser than a millisecond and still fails a deadline 100 times too long.
+    /// The bound allows for a loaded machine and a coarse timer, and still fails a deadline 100 times too long. The tick's
+    /// own resolution is <see cref="TheTickFiresAboutEveryMillisecond"/>'s.
     /// </summary>
     [Test]
     public async Task TheEndOfABurstGoesOutWithinTheBound()
@@ -629,6 +630,75 @@ public sealed class PtyOutputCoalescingTests
         latencies.Sort();
         var median = latencies[latencies.Count / 2];
         await Assert.That(median).IsLessThan(50.0).Because($"median {median:F2} ms, slowest {latencies[^1]:F2} ms");
+    }
+
+    /// <summary>
+    /// The tick that serves deadlines fires about every millisecond while a reader waits, where .NET timers do not: on
+    /// Windows they fire at the system timer's resolution of about 15.6 ms, and on Linux at the kernel's tick rate, every
+    /// 4 ms under a 250 Hz kernel. With them, this test counted 14 ticks in 200 ms on Windows and 48–49 on WSL2. It allows a
+    /// mean interval of 4 ms, for a loaded machine.
+    /// </summary>
+    [Test]
+    public async Task TheTickFiresAboutEveryMillisecond()
+    {
+        using var deadline = DeadlineOverride.Long();
+        var backend = new ManualOutputBackend();
+        await using var session = new PtySession(backend);
+        await using var output = session.ReadOutputCoalescedAsync().GetAsyncEnumerator();
+
+        // A wait whose deadline no test reaches keeps the scheduler ticking.
+        var next = await EnterBurstAsync(backend, session, output);
+        await Assert.That(PtyOutputCoalesceScheduler.TickSourceForTests)
+            .IsEqualTo(OperatingSystem.IsWindows() ? PtyCoalesceTickSource.WaitableTimer : PtyCoalesceTickSource.UnixLoop);
+
+        var ticksBefore = PtyOutputCoalesceScheduler.TicksForTests;
+        var started = Stopwatch.GetTimestamp();
+        await Task.Delay(200);
+        var ticks = PtyOutputCoalesceScheduler.TicksForTests - ticksBefore;
+        var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        await Assert.That(ticks * 4.0).IsGreaterThanOrEqualTo(elapsed).Because($"{ticks} ticks in {elapsed:F0} ms");
+        backend.End();
+        await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
+    }
+
+    /// <summary>
+    /// The tick runs only while a reader waits. Once the last wait ends, the tick stops at the next tick and fires no more:
+    /// on Windows its thread waits without a period, and on Unix the I/O loop's wait gets its own timeout back, so nothing
+    /// wakes once per millisecond while sessions are idle. 200 ms of a tick that went on would fire about 130 times on
+    /// Windows and make about 190 loop passes on Linux.
+    /// </summary>
+    [Test]
+    public async Task TheTickStopsOnceNoReaderWaits()
+    {
+        using var deadline = DeadlineOverride.Long();
+        var backend = new ManualOutputBackend();
+        await using var session = new PtySession(backend);
+        await using var output = session.ReadOutputCoalescedAsync().GetAsyncEnumerator();
+
+        var next = await EnterBurstAsync(backend, session, output);
+        await Assert.That(PtyOutputCoalesceScheduler.TickSourceForTests).IsNotEqualTo(PtyCoalesceTickSource.None);
+        backend.End();
+        await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
+
+        var stopBy = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 5;
+        while (PtyOutputCoalesceScheduler.TickSourceForTests != PtyCoalesceTickSource.None)
+        {
+            if (Stopwatch.GetTimestamp() > stopBy)
+                throw new TimeoutException("The tick did not stop.");
+
+            await Task.Delay(5);
+        }
+
+        var ticks = PtyOutputCoalesceScheduler.TicksForTests;
+        var passes = OperatingSystem.IsWindows() ? 0 : UnixPtyBackend.LoopPassesForTests;
+        await Task.Delay(200);
+
+        // A tick already on its way when the stop landed may still run.
+        await Assert.That(PtyOutputCoalesceScheduler.TicksForTests - ticks).IsLessThanOrEqualTo(1);
+        // Other tests' children, polled or hung up, wake the loop every 10 ms at most.
+        if (!OperatingSystem.IsWindows())
+            await Assert.That(UnixPtyBackend.LoopPassesForTests - passes).IsLessThan(100);
     }
 
     /// <summary>End of output completes a coalescing wait at once: the rest is handed out, then the end.</summary>

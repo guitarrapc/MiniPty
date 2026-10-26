@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using MiniPty.Capture;
@@ -1344,11 +1344,18 @@ public sealed class PtyTests
                 .Replace("\n", "\\n", StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A resize after the child exits, while the transport is still open, applies the size. On Windows a grandchild keeps
+    /// the console host, and with it the pseudo-console, after the child exits. Without one, a host released at spawn
+    /// (Windows 11 24H2 and later, and the out-of-band ConPTY) ends with its last client 2–5 ms after the child, and a
+    /// resize after that is skipped, as exit tolerance allows, before the output pipe has reported the end: of 20 resizes
+    /// 5 ms after the exit, none applied. A loaded full run delayed this thread that long now and then.
+    /// </summary>
     [Test]
     public async Task PtyResizeAfterExitWithOpenTransportDoesNotThrow()
     {
         using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? WindowsCommand("exit /b 0")
+            ? WindowsCommand("start /b ping -n 6 127.0.0.1 >nul & exit /b 0")
             : UnixShell("exit 0"));
         var initial = session.Size;
 
@@ -1371,9 +1378,9 @@ public sealed class PtyTests
 
         if (OperatingSystem.IsWindows())
         {
-            // conhost stays alive until the pseudo-console is closed, so the size is still applied. A runner that kept
-            // this thread off a core past the drain's quiet period closed it first, and the resize is then the documented
-            // no-op that PtyResizeAfterTransportClosedIsNoOp covers.
+            // The grandchild keeps the host alive, so the size is applied. A runner that kept this thread off a core past
+            // the drain's quiet period closed the pseudo-console first, and the resize is then the documented no-op that
+            // PtyResizeAfterTransportClosedIsNoOp covers.
             if (!closeStarted)
                 await Assert.That(session.Size).IsEqualTo(new PtySize(100, 30));
             else

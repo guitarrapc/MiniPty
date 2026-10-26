@@ -1,9 +1,19 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace MiniPty.Internal;
 
 internal static partial class UnixPtyBackend
 {
+    /// <summary>
+    /// Has the I/O loop serve <see cref="PtyOutputCoalesceScheduler"/>'s tick about every millisecond, until
+    /// <see cref="StopCoalesceTicks"/>. Returns <see langword="false"/> when the loop cannot run.
+    /// </summary>
+    internal static bool TryStartCoalesceTicks() => ChildWatcher.TryStartCoalesceTicks();
+
+    /// <summary>Stops the loop's coalescing tick.</summary>
+    internal static void StopCoalesceTicks() => ChildWatcher.StopCoalesceTicks();
+
     /// <summary>
     /// Observer of the exits of every child this load of MiniPty starts, and the I/O loop of every session: one dedicated
     /// background thread for every Unix session, so neither observing exit nor reading output adds a per-session thread,
@@ -24,6 +34,12 @@ internal static partial class UnixPtyBackend
     /// so output keeps flowing into rings while the host's pool is starved; only the consumers' continuations wait for it.
     /// Sessions read on reader threads under the rollback switch (<see cref="PtyOutputDrivers"/>), and when the watcher
     /// has no epoll or kqueue.
+    /// </para>
+    /// <para>
+    /// While a bridge's reader waits to coalesce a burst, this thread also serves the deadlines' tick
+    /// (<see cref="PtyOutputCoalesceScheduler"/>). The tick joins this thread's wait timeout, as the hang-up deadlines do,
+    /// so the wait ends about every millisecond on the precise clock, which a .NET timer on Linux does not keep. A tick
+    /// only checks deadlines and signals consumers, so it never blocks this thread.
     /// </para>
     /// <para>
     /// The native shim reports exits through pidfd + epoll (Linux 5.3+) or <c>kqueue</c>
@@ -83,6 +99,12 @@ internal static partial class UnixPtyBackend
         private static UnixPtyBackendInstance? s_serviceTail;
         // Loop passes, for tests that check the loop does not spin.
         private static long s_passes;
+        // While set, this thread serves the coalescing scheduler's tick (PtyOutputCoalesceScheduler) about every
+        // CoalesceTickMs. Written under s_lock. The next tick's time (Stopwatch ticks) is this thread's alone.
+        private static bool s_coalesceTicking;
+        private static long s_nextCoalesceTick;
+        private const int CoalesceTickMs = 1;
+        private static readonly long s_coalesceTickTicks = Stopwatch.Frequency * CoalesceTickMs / 1000;
 
         /// <summary>Passes this thread has made through its loop, for tests that check it does not spin.</summary>
         internal static long Passes => Volatile.Read(ref s_passes);
@@ -243,6 +265,44 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>
+        /// Has this thread serve the coalescing scheduler's tick about every millisecond, from its next pass until
+        /// <see cref="StopCoalesceTicks"/>. Its wait times out on the precise clock, where .NET timers on Linux compute due
+        /// times from <c>CLOCK_MONOTONIC_COARSE</c>, which advances at the kernel's tick rate: a 1 ms timer fired every
+        /// 4 ms under a 250 Hz kernel. Returns <see langword="false"/> when this thread cannot run, which leaves the tick to
+        /// a timer. Called under the scheduler's lock.
+        /// </summary>
+        internal static bool TryStartCoalesceTicks()
+        {
+            lock (s_lock)
+            {
+                try
+                {
+                    EnsureStarted();
+                }
+                catch (Exception)
+                {
+                    // No native shim, or no thread: the scheduler keeps its timer.
+                    return false;
+                }
+
+                if (s_coalesceTicking)
+                    return true;
+
+                s_coalesceTicking = true;
+                // The wait in progress may have no timeout; the next one serves the tick.
+                WakeLocked();
+                return true;
+            }
+        }
+
+        /// <summary>Stops serving the coalescing tick; the next wait has its usual timeout. Called under the scheduler's lock.</summary>
+        internal static void StopCoalesceTicks()
+        {
+            lock (s_lock)
+                s_coalesceTicking = false;
+        }
+
+        /// <summary>
         /// Has this thread look at <paramref name="session"/> on its next pass. Cheap, never blocks, from any thread; a
         /// session already waiting for a look is not queued twice.
         /// </summary>
@@ -395,7 +455,25 @@ internal static partial class UnixPtyBackend
                 ServeRequests();
                 PollFallbackChildren(polledSnapshot);
                 ServeHangups();
+                ServeCoalesceTick();
             }
+        }
+
+        /// <summary>
+        /// Ticks the coalescing scheduler while it asked for ticks and the next one is due. A tick only checks deadlines and
+        /// signals consumers, whose continuations run on the thread pool, so it never blocks this thread.
+        /// </summary>
+        private static void ServeCoalesceTick()
+        {
+            if (!Volatile.Read(ref s_coalesceTicking))
+                return;
+
+            var now = Stopwatch.GetTimestamp();
+            if (now < s_nextCoalesceTick)
+                return;
+
+            s_nextCoalesceTick = now + s_coalesceTickTicks;
+            PtyOutputCoalesceScheduler.ServeTick();
         }
 
         /// <summary>Looks at every session that asked since the last pass, including ones that ask meanwhile.</summary>
@@ -424,24 +502,38 @@ internal static partial class UnixPtyBackend
 
         /// <summary>
         /// The longest the thread may wait: forever, or the polling interval while any child is polled or hung up, or
-        /// until the earliest hang-up deadline if that comes first. Caller holds <see cref="s_lock"/>.
+        /// until the earliest hang-up deadline if that comes first, and until the next coalescing tick while the scheduler
+        /// asked for ticks. On this thread, which holds <see cref="s_lock"/>.
         /// </summary>
         private static int WaitTimeoutLocked()
         {
-            if (s_hangups.Count == 0)
-                return s_polled.Count > 0 ? PollIntervalMs : Timeout.Infinite;
-
-            // A hung-up child's output is discarded on every pass, so this thread wakes at the polling interval.
-            var timeout = PollIntervalMs;
-            var now = Environment.TickCount64;
-            foreach (var child in s_hangups)
+            var timeout = Timeout.Infinite;
+            if (s_hangups.Count > 0)
             {
-                var remaining = (int)Math.Clamp(child.HangupKillDeadline - now, 0, int.MaxValue);
-                if (remaining < timeout)
-                    timeout = remaining;
+                // A hung-up child's output is discarded on every pass, so this thread wakes at the polling interval.
+                timeout = PollIntervalMs;
+                var now = Environment.TickCount64;
+                foreach (var child in s_hangups)
+                {
+                    var remaining = (int)Math.Clamp(child.HangupKillDeadline - now, 0, int.MaxValue);
+                    if (remaining < timeout)
+                        timeout = remaining;
+                }
+            }
+            else if (s_polled.Count > 0)
+            {
+                timeout = PollIntervalMs;
             }
 
-            return timeout;
+            if (!s_coalesceTicking)
+                return timeout;
+
+            // Rounded up, so the wait does not end just before the tick is due and spin until it is.
+            var untilTick = s_nextCoalesceTick - Stopwatch.GetTimestamp();
+            var tickTimeout = untilTick <= 0
+                ? 0
+                : (int)Math.Min(CoalesceTickMs, (untilTick * 1000 + Stopwatch.Frequency - 1) / Stopwatch.Frequency);
+            return timeout == Timeout.Infinite ? tickTimeout : Math.Min(timeout, tickTimeout);
         }
 
         /// <summary>

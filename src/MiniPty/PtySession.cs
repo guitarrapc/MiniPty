@@ -187,10 +187,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <summary>
     /// <see cref="ReadOutputAsync"/> for a consumer that pays per chunk, such as a bridge that sends one message per chunk.
     /// While output arrives in a burst, a chunk waits until 8 KiB is unread or a shared tick serves its deadline, so a flood
-    /// goes out in fewer, larger chunks. That is up to about 2 ms after the read asked where timers have millisecond
-    /// resolution, and up to about the timer's resolution where they are coarser
-    /// (<see cref="PtyOutputCoalescing.MaxDelayMs"/>). Output outside a burst, such as a keystroke echo, is handed out at
-    /// once (<see cref="PtyOutputCoalescing"/>).
+    /// goes out in fewer, larger chunks. That is up to about 2 ms after the read asked, on Windows too, whose tick runs on
+    /// a high-resolution timer (<see cref="PtyOutputCoalescing.MaxDelayMs"/>). Output outside a burst, such as a keystroke
+    /// echo, is handed out at once (<see cref="PtyOutputCoalescing"/>).
     /// </summary>
     internal IAsyncEnumerable<PtyOutputChunk> ReadOutputCoalescedAsync(CancellationToken cancellationToken = default) =>
         new PtyCoalescingOutputReader.CoalescingEnumerable(
@@ -344,7 +343,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// Frontend size changes race child exit, so exit never makes this call fail. While the PTY
     /// transport is open the size is applied, even if the child has already exited. Once the transport
     /// has been closed after exit, the call does nothing and <see cref="Size"/> keeps its last applied
-    /// value. Hosts can therefore forward every layout change without checking <see cref="HasExited"/>.
+    /// value. On Windows the console host can end before the transport closes: from Windows 11 24H2, and with
+    /// the out-of-band ConPTY, it ends with the last process attached to it, a few milliseconds after the child
+    /// unless a grandchild stays, and a resize after that is skipped in the same way. Hosts can therefore forward
+    /// every layout change without checking <see cref="HasExited"/>.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed while the child was running.</exception>

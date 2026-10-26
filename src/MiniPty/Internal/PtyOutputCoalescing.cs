@@ -42,8 +42,8 @@ internal static class PtyOutputCoalescing
 
     /// <summary>
     /// How long after it asks a reader in a burst waits for <see cref="MinimumBytes"/>. The scheduler serves the deadline at
-    /// its next tick, so the wait lasts up to about twice this where timers have millisecond resolution, and up to the
-    /// timer's resolution where they are coarser.
+    /// its next tick, which fires about every millisecond on every platform (a high-resolution timer on Windows, the I/O
+    /// loop on Unix), so the wait lasts up to about twice this.
     /// </summary>
     internal const int MaxDelayMs = 1;
 
@@ -282,11 +282,21 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
 /// at the first tick that finds it without a deadline, and the timer stops once none is left.
 /// </summary>
 /// <remarks>
+/// <para>
 /// A deadline is served at the first tick after it, so a burst's last chunk waits up to about twice
-/// <see cref="PtyOutputCoalescing.MaxDelayMs"/> where timers have millisecond resolution. A consumer takes the lock only
-/// when its reader is not held: on its first wait, or after a tick found the reader with no deadline and dropped it. A tick
-/// that serves a deadline keeps the reader, whose consumer usually arms its next wait before the next tick. Joining and
-/// leaving cost O(1), and nothing is allocated once the array has grown to the peak number of readers waiting at once.
+/// <see cref="PtyOutputCoalescing.MaxDelayMs"/>. A consumer takes the lock only when its reader is not held: on its first
+/// wait, or after a tick found the reader with no deadline and dropped it. A tick that serves a deadline keeps the reader,
+/// whose consumer usually arms its next wait before the next tick. Joining and leaving cost O(1), and nothing is allocated
+/// once the array has grown to the peak number of readers waiting at once.
+/// </para>
+/// <para>
+/// .NET timers do not keep a millisecond. On Windows they fire at the system timer's resolution, about 15.6 ms, and a
+/// burst's last chunk waited about 15 ms there. On Linux they compute due times from <c>CLOCK_MONOTONIC_COARSE</c>, which
+/// advances at the kernel's tick rate, and a 1 ms timer fired every 4 ms under a 250 Hz kernel. So Windows ticks on a
+/// high-resolution waitable timer (<see cref="WindowsPreciseTick"/>), and Unix on the I/O loop, whose wait times out on the
+/// precise clock (<see cref="UnixPtyBackend.TryStartCoalesceTicks"/>). A <see cref="Timer"/> ticks only where neither can
+/// start.
+/// </para>
 /// </remarks>
 internal static class PtyOutputCoalesceScheduler
 {
@@ -296,17 +306,39 @@ internal static class PtyOutputCoalesceScheduler
     private static PtyCoalescingOutputReader?[] s_readers = new PtyCoalescingOutputReader?[4];
     private static int s_count;
     private static Timer? s_timer;
+    // Windows: the high-resolution tick, or null before the first start and once it could not be created or started.
+    private static WindowsPreciseTick? s_preciseTick;
+    private static bool s_preciseTickTried;
     private static bool s_timerRunning;
+    // What ticks while s_timerRunning, so that the stop stops the same.
+    private static PtyCoalesceTickSource s_tickSource;
 
     // Touched only by the tick, which runs one at a time.
     private static PtyCoalescingOutputReader?[] s_snapshot = new PtyCoalescingOutputReader?[4];
     private static int s_ticking;
+    private static long s_ticks;
 
     /// <summary>
     /// Set by a test that runs alone to serve deadlines itself: ticks then serve none, as a tick that runs late on a coarse
     /// timer serves none in time.
     /// </summary>
     internal static bool HoldTicksForTests;
+
+    /// <summary>How many ticks have fired since the process started. For tests.</summary>
+    internal static long TicksForTests => Interlocked.Read(ref s_ticks);
+
+    /// <summary>What ticks now, or <see cref="PtyCoalesceTickSource.None"/> while nothing does. For tests.</summary>
+    internal static PtyCoalesceTickSource TickSourceForTests
+    {
+        get
+        {
+            lock (s_lock)
+                return s_tickSource;
+        }
+    }
+
+    /// <summary>Serves a tick from the Unix I/O loop, which calls it about every millisecond while asked to.</summary>
+    internal static void ServeTick() => Tick();
 
     /// <summary>Holds <paramref name="reader"/>, whose deadline is set, until it has none left to serve.</summary>
     internal static void Schedule(PtyCoalescingOutputReader reader)
@@ -327,8 +359,58 @@ internal static class PtyOutputCoalesceScheduler
                 return;
 
             s_timerRunning = true;
-            s_timer ??= CreateTimer();
-            s_timer.Change(TickMs, TickMs);
+            StartTickingLocked();
+        }
+    }
+
+    private static void StartTickingLocked()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            if (!s_preciseTickTried)
+            {
+                s_preciseTickTried = true;
+                s_preciseTick = WindowsPreciseTick.TryCreate(static () => Tick());
+            }
+
+            if (s_preciseTick is { } precise)
+            {
+                if (precise.Start(TickMs))
+                {
+                    s_tickSource = PtyCoalesceTickSource.WaitableTimer;
+                    return;
+                }
+
+                // Not armed, or no thread: the coarse timer serves the deadlines from now on.
+                s_preciseTick = null;
+            }
+        }
+        else if (UnixPtyBackend.TryStartCoalesceTicks())
+        {
+            s_tickSource = PtyCoalesceTickSource.UnixLoop;
+            return;
+        }
+
+        s_timer ??= CreateTimer();
+        s_timer.Change(TickMs, TickMs);
+        s_tickSource = PtyCoalesceTickSource.Timer;
+    }
+
+    private static void StopTickingLocked()
+    {
+        var source = s_tickSource;
+        s_tickSource = PtyCoalesceTickSource.None;
+        switch (source)
+        {
+            case PtyCoalesceTickSource.WaitableTimer when OperatingSystem.IsWindows():
+                s_preciseTick!.Stop();
+                break;
+            case PtyCoalesceTickSource.UnixLoop:
+                UnixPtyBackend.StopCoalesceTicks();
+                break;
+            case PtyCoalesceTickSource.Timer:
+                s_timer!.Change(Timeout.Infinite, Timeout.Infinite);
+                break;
         }
     }
 
@@ -344,6 +426,7 @@ internal static class PtyOutputCoalesceScheduler
 
     private static void Tick()
     {
+        Interlocked.Increment(ref s_ticks);
         if (Volatile.Read(ref HoldTicksForTests) || Interlocked.Exchange(ref s_ticking, 1) != 0)
             return;
 
@@ -413,8 +496,24 @@ internal static class PtyOutputCoalesceScheduler
             if (s_count == 0 && s_timerRunning)
             {
                 s_timerRunning = false;
-                s_timer!.Change(Timeout.Infinite, Timeout.Infinite);
+                StopTickingLocked();
             }
         }
     }
+}
+
+/// <summary>What serves <see cref="PtyOutputCoalesceScheduler"/>'s tick while it holds a reader.</summary>
+internal enum PtyCoalesceTickSource : byte
+{
+    /// <summary>Nothing ticks: the scheduler holds no reader.</summary>
+    None,
+
+    /// <summary>A <see cref="System.Threading.Timer"/>, where neither of the others could start.</summary>
+    Timer,
+
+    /// <summary>A high-resolution waitable timer on Windows (<see cref="WindowsPreciseTick"/>).</summary>
+    WaitableTimer,
+
+    /// <summary>The Unix I/O loop's wait timeout (<see cref="UnixPtyBackend.TryStartCoalesceTicks"/>).</summary>
+    UnixLoop,
 }

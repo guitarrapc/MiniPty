@@ -2,7 +2,7 @@
 
 Goal: let a web host (ASP.NET Core, `HttpListener`, or any WebSocket server) keep hundreds to thousands of PTY sessions open while paying only for the ones producing output. No session may hold a thread, an idle session should hold no output buffer, and reading must stay allocation-free. Latency, throughput, backpressure, and every existing lifecycle guarantee must be at least as good as today. This replaces the deferred "Thread-free async I/O" item (G6 of the retired GUI host readiness plan) with a concrete design.
 
-**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; the full suite with it passed on macOS on 2026-10-25. Phase 6 is done on Linux and on macOS (2026-10-25): one loop reads every Unix session, on epoll and on kqueue; FreeBSD runs the kqueue code from source, unverified. On macOS a flood through the WebSocket bridge took about four times the frames of Phase 0 and was about 12% slower; the core stays as it is, and Phase 7 has the bridges coalesce bursts instead ([decision](#phase-6-result-macos)). Phase 7 is implemented and measured on macOS (2026-10-25): a flood there takes half Phase 0's frames and runs faster than with reader threads; Windows and Linux are next ([Phase 7 result](#phase-7-result-macos)). Phase 8 decides whether the bridges join steady output below the burst rate, and Phase 9 retires the reader threads. See [Implementation Phases](#implementation-phases).
+**Status:** Phases 0 and 1 are implemented (2026-10-23) and measured on Windows, Linux, and macOS. Phases 2 and 3 are implemented and measured on Windows and Linux (2026-10-23), and the full suite passed on macOS the same day. Phase 4 is done (2026-10-23): macOS and FreeBSD use `kqueue`, probed on macOS and decided from source for FreeBSD. Phase 5 is implemented and measured on Windows (2026-10-24): Windows sessions read through I/O completions and hold no thread; the full suite with it passed on macOS on 2026-10-25. Phase 6 is done on Linux and on macOS (2026-10-25): one loop reads every Unix session, on epoll and on kqueue; FreeBSD runs the kqueue code from source, unverified. On macOS a flood through the WebSocket bridge took about four times the frames of Phase 0 and was about 12% slower; the core stays as it is, and Phase 7 has the bridges coalesce bursts instead ([decision](#phase-6-result-macos)). Phase 7 is implemented and measured on macOS (2026-10-25): a flood there takes half Phase 0's frames and runs faster than with reader threads ([Phase 7 result](#phase-7-result-macos)). It is measured on Windows and Linux too (2026-10-26), where .NET timers did not keep the 1 ms the deadlines need: Windows now ticks on a high-resolution waitable timer and Unix on the I/O loop's wait, and a flood takes 3.9–4.0 frames per 32 KiB on both, at Phase 6's throughput and echo ([Windows and Linux](#phase-7-result-windows-and-linux)); the loop's tick on macOS still needs a run there. Phase 8 decides whether the bridges join steady output below the burst rate, and Phase 9 retires the reader threads. See [Implementation Phases](#implementation-phases).
 
 ## Background
 
@@ -1022,27 +1022,100 @@ BenchmarkDotNet, one round each, the committed Phase 7 build against Phase 6: ev
 
 **Done on macOS:** throughput 74–76 MB/s against 63–66 with reader threads, 4 frames per 32 KiB against Phase 0's 8, echo at Phase 6's p50 and p99.
 
-**Open:**
+**Open** (the first three are answered in the [Windows and Linux result](#phase-7-result-windows-and-linux)):
 - **Windows and Linux** are not measured: frames, throughput, echo, host CPU, and BenchmarkDotNet against Phase 6, on those machines, and the traffic table above.
 - **The frame tests on Linux.** A Linux read can return 4 KiB, so the three frame tests may pass there without the joining. Check them with coalescing off.
-- **The deadline on Windows.** The tick runs on .NET timers, which on Windows fire at the system timer's resolution, about 15.6 ms. A wait in a burst there may last that long, where on macOS it lasts up to about 2 ms. That covers the end of a burst, the tail of a repaint or paste of 4 KiB or more, and an echo typed while output streams. Echo outside a burst is not affected. Measure it on Windows. If it shows, the tick can move to a high-resolution waitable timer, one per process, or a burst can start at a larger size.
+- **The deadline on Windows.** The tick runs on .NET timers, which on Windows fire at the system timer's resolution, about 15.6 ms. A wait in a burst there may last that long, where on macOS it lasts up to about 2 ms. That covers the end of a burst, the tail of a repaint or paste of 4 KiB or more, and an echo typed while output streams. Echo outside a burst is not affected. Measure it on Windows. If it shows, the tick can move to a high-resolution waitable timer, one per process, or a burst can start at a larger size. (It showed, on Linux too.)
 - **Steady output below about 2 MB/s goes out one frame per read** while each send is quick, as with the Phase 6 loop. Reader threads joined it within 1 ms. This covers log-rate streams of many small writes. Joining it means waiting on output no rate distinguishes from interactive output. It stays as it is for now, and [Phase 8](#phase-8-steady-streams-below-the-burst-rate) decides from measurements on every platform.
 - **An echo during a flood** is not tested against the bound. The tests time the end of a burst only.
 - **Package versions.** `MiniPty.Terminal` now uses MiniPty's internals, as `MiniPty.Capture` already does, while each package declares MiniPty with a lower bound only, through its project reference. A newer MiniPty with changed internals would break an older `MiniPty.Terminal` at run time. Whether to pin the exact version is a release decision.
 - FreeBSD stays from source, as before.
 
+### Phase 7 result (Windows and Linux)
+
+Measured 2026-10-26 on Windows 11 26200 (32 logical CPUs) and Linux (WSL2, kernel 6.6 with `CONFIG_HZ=250`, 8 logical CPUs), .NET 10.0.9. Other sessions shared the Windows machine, so every figure there comes from rounds alternating the builds, and CPU from medians of 8–10 rounds.
+
+**Found: .NET timers did not keep the deadlines' millisecond on either platform.**
+- **Windows:** a 1 ms `Timer` fired every 15.6 ms, the system timer's resolution, as the macOS result expected. A burst's tail waited for it: the real-tick test's tails took a median of 14.9–15.4 ms, against 1.3 ms on macOS, and through ConPTY and the WebSocket bridge the second half of a 6 KiB repaint arrived 14.8 ms after its first.
+- **Linux:** a 1 ms `Timer` fired every 4 ms, which the plan had not expected. .NET timers take their due times from `CLOCK_MONOTONIC_COARSE`, which advances at the kernel's tick rate, 250 Hz here. `Thread.Sleep(1)` and a 1 ms epoll wait each took 1.05 ms. The real-tick test's tails took a median of 2.6–4.2 ms, at most 5.3 ms, and a repaint's tail up to 6.1 ms.
+
+**Delivered:**
+- **Windows ticks on a high-resolution waitable timer** (`WindowsPreciseTick`, `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`, Windows 10 1803 and later, below every ConPTY). A thread of its own waits for it and runs the tick. Waiting on the thread pool instead cost 35–44 µs of CPU per tick with the runtime's own pool, whose wait thread hands each signal to a worker, against 4–9 µs on the thread: about 3% of a core while a flood keeps the tick running. `timeBeginPeriod` would have raised the timer resolution of the whole process. The thread stays 30 s after the last burst, so bursts start no thread each, and then exits.
+- **Unix ticks on the I/O loop.** While the scheduler holds a reader, the loop's wait times out at the next tick, as it does for a hang-up's deadline, and the loop serves the tick after the pass's other work. It runs on the loop thread, which no longer waits for a pool worker to serve a deadline. This covers macOS and FreeBSD too, which have not run it.
+- A `Timer` ticks only where neither can start. The scheduler records which tick runs (`PtyCoalesceTickSource`), so it stops the same one.
+
+**Tests:**
+- `TheTickFiresAboutEveryMillisecond` counts the ticks while a reader waits, and checks which tick runs. With `Timer` ticks it counted 14 in 204 ms on Windows and 48–49 in 200 ms on WSL2, and failed. With the ticks above, the real-tick test's tails took 1.42–1.44 ms on Windows and 1.96–2.00 ms on Linux (medians; slowest 2.07 and 2.15 ms).
+- **The frame tests do decide on Linux.** With coalescing off in all three bridges, 32–53% of a flood's bytes went out in frames of 4 KiB or more, and each test failed its three quarters, in three runs each. With it on, 97–99.9%. On Windows they still skip, since ConPTY's slices make frames of about 6 KiB either way.
+- The coalescing tests pass on both Windows thread pools. The full suite passed on Linux, 667 tests, in five runs of the final code. On Windows it passed in six of eight full runs of the final code. Each of the other two failed one test, `PtyResizeAfterExitWithOpenTransportDoesNotThrow`, which reads no output through a bridge. That test's premise was wrong on Windows 11 24H2 and later, not this phase's code (see Found and fixed in a test).
+- `TheTickStopsOnceNoReaderWaits`: once the last wait ends, the tick stops at the next tick and fires at most once more in 200 ms, and on Linux the loop makes fewer than 100 passes in them. With the stop left out, Windows ticked 145 times in those 200 ms and the Linux loop made 194 passes, and the test failed on both. A tick that runs while no bridge waits would be a wake-up every millisecond for nothing.
+
+**Found and fixed in a test.** `PtyResizeAfterExitWithOpenTransportDoesNotThrow` expected a resize after the child's exit to apply while no close had been requested, because "conhost stays alive until the pseudo-console is closed". MiniPty releases the console host at spawn wherever ConPTY can (the out-of-band ConPTY, and the in-box one from Windows 11 24H2), and the host then ends with the child. Of 20 resizes each, all applied 0–2 ms after the exit, and none 5, 10, 20, or 50 ms after it: `ResizePseudoConsole` fails once the host is gone, and `Resize` skips it as exit tolerance allows. A full run that kept the test's thread off a core for 5 ms failed it. With a 20 ms pause before the resize, the test failed in 5 of 5 runs. A grandchild (`start /b ping`) now keeps the host for it, and with the same pause it passed in 5 of 5. `PtySession.Resize` and [core_session.md](../specs/core_session.md) say that the host can end before the transport closes.
+
+**Measured**, against Phase 6 and the committed Phase 7 build (which ticked on `Timer`), alternating the builds:
+
+`WebTerminalScale bench`, two rounds each (Windows `--sessions 16,64,128`, Linux `--sessions 16,64,256,1000`; `--echo 200 --flood-bytes 33554432`):
+
+| | Windows Phase 6 | Windows Phase 7 | Linux Phase 6 | Linux Phase 7 |
+|---|---:|---:|---:|---:|
+| Flood: frames per 32 KiB (Phase 0: 8.0) | 5.5–5.7 | 3.9 | 13.9–16.5 | 4.0 |
+| Flood throughput (MB/s) | 22.5–24.5 | 24.7–25.5 | 108–141 | 124–133 |
+| Echo p50 / p99 at 64 sessions (ms) | 0.23–0.24 / 0.37–0.38 | 0.23–0.24 / 0.40–0.42 | 0.38–0.43 / 0.53–0.56 | 0.38–0.41 / 0.52–0.60 |
+| Threads at the largest step | 81–101 | 81 | 48–50 | 37–50 |
+
+The thread counts move with the pool workers a burst of connections injects, in every build.
+
+The flood alone, 64 MiB (`--sessions 4 --echo 20 --flood-bytes 67108864`), 10 rounds each on Windows and 8 on Linux:
+
+| | Windows Phase 6 | Windows Phase 7 | Linux Phase 6 | Linux Phase 7, committed | Linux Phase 7 |
+|---|---:|---:|---:|---:|---:|
+| Frames per 32 KiB | 5.8–5.9 | 3.9 | 13.7–18.3 | 4.0 | 4.0 |
+| Throughput (MB/s) | 24.6–25.5 | 25.8–26.7 | 116–141 | 107–137 | 118–137 |
+| Host CPU per MiB (ms), median (range) | 13.9 (10.6–18.9) | 13.2 (10.2–17.4) | 24.2 (23.2–26.4) | 20.4 (17.7–23.4) | 19.1 (18.1–21.1) |
+
+- **Against the committed build, Windows pays for the deadlines it now keeps.** Two runs of 10 and 8 alternating rounds measured the committed build at medians of 13.0 and 15.2 ms per MiB, the final one at 16.3 and 16.5, within the spread of single rounds (9–24 ms). In a 64 MiB flood the final build served 1,044 deadlines, and 303 bursts ended, where the coarse timer served almost none: ConPTY pauses for more than 1 ms now and then, and a deadline kept to the millisecond ends the wait there. The frame count is the same. A build that kept ticking for 32 ticks after the last reader left, so that the scheduler did not start and stop between waits, measured 16.1 ms, so that is not the cost. Against Phase 6 the final build costs no more.
+- On Linux the loop's tick costs nothing measurable against the committed build's `Timer`. One committed round printed no result and did not reproduce in three reruns.
+
+The traffic of the macOS result, through the WebSocket bridge over loopback, two rounds each. The real commands are `dir /s` of `C:\Windows\System32\DriverStore\FileRepository` (0.4 MiB) and `ls -lR /usr/share` (2.4 MiB). A repaint is one write of 6 KiB every 50 ms, and its tail is the time from its first frame to its last:
+
+| Frames per 32 KiB | Windows Phase 6 | Windows committed | Windows final | Linux Phase 6 | Linux committed | Linux final |
+|---|---:|---:|---:|---:|---:|---:|
+| 32 floods of 4 MiB at once | 4.18–4.21 | 3.88–3.93 | 3.65–3.69 | 8.17–8.28 | 4.18–4.20 | 4.74–4.80 |
+| 8 floods of 8 MiB at once | 4.58 | 4.00 | 3.87–4.17 | 8.97–9.01 | 4.01 | 4.01 |
+| The real command | 638 | 638 | 638–639 | 97–122 | 5.7–6.0 | 7.8–8.2 |
+| Steady 7 MB/s, 800 B lines | 39.5–39.7 | 4.03–4.04 | 4.10–4.83 | 41.3–42.6 | 4.08–4.11 | 4.08–4.12 |
+| Steady 4.5 MB/s, 500 B lines | 61.9 | 4.20 | 4.98–5.03 | 64.4–66.9 | 4.68–4.76 | 5.63–5.66 |
+| Steady 2.5 MB/s, 500 B lines | 62.2 | 4.62–4.63 | 7.25–7.28 | 66.0–67.0 | 5.19–5.32 | 7.92–8.05 |
+| Steady 1.4 MB/s, 100 B lines | 326 | 310–324 | 325 | 318 | 306–320 | 319–321 |
+| A repaint's tail, p50 / max (ms) | 0.04 / 0.09 | 14.8 / 16.2 | 1.05–1.41 / 1.61 | 0.00 / 0.06 | 0.00 / 6.12 | 0.00 / 1.11 |
+
+- **Bounding the wait costs some joining of steady streams.** The committed build's coarse timers let a wait last 15.6 or 4 ms, and streams between 2 and 5 MB/s, and `ls -lR`, went out in fewer frames, while every burst's tail waited as long. With the wait bounded at about 2 ms, they take one to three more frames per 32 KiB, still eight to nine times fewer than in Phase 6, and a repaint's tail waits 1–1.4 ms on Windows instead of 15. The second Windows round of the final build ran under load from other sessions: the 7 MB/s stream came out at 4.6 MB/s, in 4.83 frames.
+- `dir /s` writes about 0.5 MB/s, one line at a time, so ConPTY delivers it below the rate that starts a burst, and it goes out one frame per line in every build, as the 1.4 MB/s stream does. Both are [Phase 8](#phase-8-steady-streams-below-the-burst-rate)'s.
+- On Linux a 6 KiB repaint took 1.4 frames in every build, and most repaints went out as one frame, so only some tails waited at all.
+
+BenchmarkDotNet, one round each, Phase 6 against the final build: every allocation is the same, within 20 B. On Windows `Session_Exit0_WaitForExit` stays at 1.28 KB, `Session_32KiB_Bytes` at 38.63–38.64 KB, `Capture_32KiB_Text` at 114.47–114.49 KB, and `Bridge_32KiB_Bytes` is 26.55 against 26.61 KB, inside that row's spread between runs; input writes allocate nothing. On Linux they are 1.23, 33.93, and 100.8 KB in both builds, `Bridge_32KiB_Bytes` 26.29 against 26.32 KB, and input writes 2 B. No time moved beyond the spread between runs. The tick's thread on Windows is created once and kept through the iterations, so it costs a benchmark nothing per operation.
+
+**NativeAOT:** `WebTerminalScale` publishes without warnings for `win-x64` and `linux-x64`, links the native code statically on Linux, and passes `--smoke` on both, whose 256 KiB flood took 3.0 and 4.1 frames per 32 KiB.
+
+**Done on Windows and Linux:** a flood takes 3.9–4.0 frames per 32 KiB, half Phase 0's, at Phase 6's throughput or more and no more host CPU; echo p50 is Phase 6's, and p99 stays within the spread between rounds (0.37–0.67 ms across all builds). A burst's tail now waits about 1–2 ms on every platform, where Phase 6 sent it at once.
+
+**Open:**
+- **macOS runs the loop's tick now**, where it ran a `Timer` that measured about 1.3 ms. The full suite and `TheTickFiresAboutEveryMillisecond` need a run there. FreeBSD stays from source.
+- **An echo during a flood** is still not tested against the bound.
+- Steady output below the burst rate, and the package versions, as in the macOS result.
+
 ### Phase 8: Steady streams below the burst rate
 
 **Goal:** decide, from measurements on Windows, Linux, and macOS, whether the bridges join steady output that never reaches the rate that starts a burst, and record the decision in [terminal.md](../specs/terminal.md). Until then such output goes out one frame per read while the bridge keeps up, as it did before Phase 7.
 
-**Why it is open:** on macOS, 100-byte lines at 1.4 MB/s took 324 frames per 32 KiB, where reader threads took 8–12 ([Phase 7 result](#phase-7-result-macos)). The reader threads' window joined every read, but it also held each echo back: echo became about 1.4 ms faster on macOS once that window and the reader thread's own wait were gone ([Phase 6 result](#phase-6-result-macos)). Before the next write comes, nothing tells such a stream from interactive output that has ended, so joining it means letting each of its chunks wait. A wait lasts up to about 2 ms where timers have millisecond resolution, and up to the timer's resolution where they are coarser, about 15.6 ms on Windows.
+**Why it is open:** on macOS, 100-byte lines at 1.4 MB/s took 324 frames per 32 KiB, where reader threads took 8–12 ([Phase 7 result](#phase-7-result-macos)). The reader threads' window joined every read, but it also held each echo back: echo became about 1.4 ms faster on macOS once that window and the reader thread's own wait were gone ([Phase 6 result](#phase-6-result-macos)). Before the next write comes, nothing tells such a stream from interactive output that has ended, so joining it means letting each of its chunks wait. A wait lasts up to about 2 ms on every platform, now that Windows and Unix tick at about 1 ms ([Phase 7 result (Windows and Linux)](#phase-7-result-windows-and-linux)).
 
 **Changes**
 - Measure the cost on each platform, with the reader threads as the baseline through the rollback switch: frames per 32 KiB and the host's CPU per MiB for steady streams of small writes from about 0.4 to 4 MB/s, and for real commands that write many short lines.
 - Try at least one rule that starts a burst below 4 KiB per millisecond, such as a number of reads within the window. The review tried starting a burst on four chunks within 1 ms, and ending it only at a deadline with nothing unread, on the code before its second round. The 1.4 MB/s stream then took 12.6 frames per 32 KiB, a flood stayed at 4.0, and each chunk of such a stream waited about 1.3 ms on macOS.
 - Measure what each tried rule costs interactive output on each platform: echo p50 and p99, the tail of a repaint, and an echo right after other output.
 - Choose: keep the current rule and record its cost, lower the start rule for every bridge, or let the host choose. A host choice is public API, so it is added to the Public API Decisions above.
-- Decide after the Windows deadline in Phase 7's Open list is measured, since the cost of any wait there depends on the timer.
+- The Windows deadline that this decision waited for is measured and fixed: Windows waits as long as the other platforms.
 
 **Tests** (if the rule changes)
 - The new start rule has a test on each side of its threshold, using the window and deadline overrides of `PtyOutputCoalescingTests`.
@@ -1072,13 +1145,13 @@ BenchmarkDotNet, one round each, the committed Phase 7 build against Phase 6: ev
 - A session with no unread output holds no output buffer.
 - Reads allocate nothing. Allocation per session start, chunk, and exit is not above the Phase 0 baseline, except a few bytes at a session start for having no thread per session: Windows' 40 B completion-port binding, accepted in the [Phase 5 result](#phase-5-result), and the Unix loop's 10–20 B of state, the same price, recorded under the same exception in the [Phase 6 result](#phase-6-result-linux) and paid on macOS too.
 - Keystroke echo latency through the WebSocket bridge is not worse at p50 or p99, and throughput is not lower.
-- Frames per 32 KiB through the bridge are recorded on every platform. More than twice the Phase 0 baseline needs a decision before release: Linux's twice was accepted, and the bridges' coalescing (Phase 7) brought macOS's four times down to half the baseline. Steady output below the burst rate has its own decision (Phase 8).
+- Frames per 32 KiB through the bridge are recorded on every platform. More than twice the Phase 0 baseline needs a decision before release: Linux's twice was accepted, and the bridges' coalescing (Phase 7) brought a flood to half the baseline on every platform, from four times it on macOS and twice on Linux. Steady output below the burst rate has its own decision (Phase 8).
 - The full test suite passes on Windows, Linux, and macOS, and a sample publishes and runs under NativeAOT on Windows and Linux.
 
 ## Risks and Open Questions
 
 - **macOS readiness on a pty master:** settled by Phase 4, `kqueue` holds up, and the Phase 6 loop on it passes the full suite on macOS 27. FreeBSD's choice, and the loop there, rest on source alone until the probe and the suite run there.
-- **macOS flood frames and throughput** through the WebSocket bridge: four times the frames of Phase 0 and about 12% slower with no window, because a macOS read returns at most 1 KiB ([Phase 6 result (macOS)](#phase-6-result-macos)). Decided: the bridges coalesce bursts (Phase 7). On macOS a flood now takes 4 frames per 32 KiB and runs faster than with reader threads; Windows and Linux are still to be measured, and on Windows the end of a burst may wait for the coarser system timer ([Phase 7 result](#phase-7-result-macos)).
+- **macOS flood frames and throughput** through the WebSocket bridge: four times the frames of Phase 0 and about 12% slower with no window, because a macOS read returns at most 1 KiB ([Phase 6 result (macOS)](#phase-6-result-macos)). Decided: the bridges coalesce bursts (Phase 7). On macOS a flood now takes 4 frames per 32 KiB and runs faster than with reader threads ([Phase 7 result](#phase-7-result-macos)), and on Windows and Linux 3.9–4.0, once the deadlines ticked at 1 ms there too ([Windows and Linux](#phase-7-result-windows-and-linux)).
 - **macOS discards output left in the tty when the child's exit is the slave's last close**, 0.6 s after the exit: settled after Phase 4, since the session holds a slave descriptor on macOS ([Phase 4 result](#phase-4-result)). The Unix engine keeps closing that descriptor with the master. If FreeBSD runs need the same guarantee, they need another remedy, because there the descriptor would make the exit discard at once.
 - **Windows chunk count** with a consumer faster than ConPTY's slices; see Coalescing.
 - **Windows thread-pool dependence** of read completions; see Isolation Rules.
