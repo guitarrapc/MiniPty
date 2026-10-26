@@ -924,12 +924,29 @@ function ack(ws, state, length) {
 const term = new Terminal();
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
+term.attachCustomKeyEventHandler(clipboardKeys);
 term.open(document.getElementById('terminal'));
 fit.fit();
 term.focus();
 window.addEventListener('resize', () => fit.fit());
 if (token) connectTerminal();
 else term.write('\x1b[31m[no access token: open the address the server printed, including its #token=...]\x1b[0m\r\n');
+
+// xterm.js sends Ctrl+C and Ctrl+V to the program as ^C and ^V and cancels the browser's own handling of them, so
+// neither copies nor pastes. Returning false skips xterm.js for that key and leaves the browser's default in place:
+// Ctrl+V pastes into the terminal (wrapped for bracketed paste when the program asked for it), and Ctrl+C copies when
+// text is selected and still interrupts when nothing is. Cmd+C and Cmd+V on macOS already work this way.
+function clipboardKeys(e) {
+  if (e.type !== 'keydown' || !e.ctrlKey || e.altKey || e.metaKey) return true;
+  const key = e.key.toLowerCase();
+  if (key === 'v') return false;
+  if (key === 'c' && !e.shiftKey && term.hasSelection()) {
+    // The browser's copy runs after this handler and takes the selection; clear it afterwards, as a terminal does.
+    setTimeout(() => term.clearSelection());
+    return false;
+  }
+  return true;
+}
 
 function connectTerminal() {
   const ws = openSocket();

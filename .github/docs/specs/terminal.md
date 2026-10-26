@@ -197,6 +197,7 @@ Browser (xterm.js) host flow — see [samples/SingleFiles/WebTerminal.cs](../../
 2. Accept a WebSocket (`HttpListenerContext.AcceptWebSocketAsync`, Kestrel `UseWebSockets`, …)
 3. `var status = await PtyWebSocketBridge.RunAsync(shellStartInfo, webSocket, ct);`
 4. Client side: `term.onData(d => ws.send(encode(d)))`, binary `onmessage` → `term.write(bytes, ackCallback)`, ACK every 2^17 processed bytes, resize on `term.onResize`.
+5. Clipboard keys: xterm.js sends Ctrl+V and Ctrl+C to the program as `^V` and `^C` and cancels the browser's copy and paste for them. A `term.attachCustomKeyEventHandler` that returns `false` for Ctrl+V, and for Ctrl+C while `term.hasSelection()`, leaves those keys to the browser. The browser's paste then reaches the program through `onData`, wrapped for bracketed paste when the program asked for it.
 
 The bridge authenticates nothing: whoever holds the socket types into the child. Listening only on loopback does not protect a browser-facing endpoint, so the host must make three checks:
 
