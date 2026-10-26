@@ -33,7 +33,7 @@ macOS
 - NativeAOT ready: no winpty, and no helper process running beside a session ([what ships per platform](#native-files))
 - Cross-platform: Windows, Linux, and macOS (FreeBSD: [experimental](#platforms))
 - Scales to thousands of sessions: an idle session holds no thread and no output buffer (I/O completions on Windows, one epoll/kqueue loop on Unix)
-- Idle sessions cost nothing: an idle session holds no thread and no output buffer ([how each OS reads output](#platform-backends))
+- Idle sessions cost nothing: an idle session holds no thread and no output buffer ([how each OS reads output](#backends))
 - Bounded memory with backpressure: output goes into a 16 KiB buffer per session, and a slow consumer pauses the child instead of growing memory
 - Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call
 - Signals the right process: on Linux, signals go through a pidfd, so a reused PID is never hit
@@ -46,7 +46,7 @@ macOS
 
 ## Platforms
 
-MiniPty creates a real PTY on each supported OS.
+MiniPty creates a real PTY on each supported OS. See [Backends](#backends) for how each OS creates the PTY.
 
 | OS | Architectures | Status |
 |----|---------------|--------|
@@ -54,8 +54,6 @@ MiniPty creates a real PTY on each supported OS.
 | Linux | x64, arm64 | Supported |
 | macOS | x64, arm64 | Supported |
 | FreeBSD | — | Experimental: tested neither locally nor in CI, and the package ships no FreeBSD binary, so MiniPty works there only when built from source |
-
-How each OS creates the PTY is described in [Platform backends](#platform-backends).
 
 ### Native files
 
@@ -67,6 +65,125 @@ Your application carries the following besides the MiniPty assembly. The package
 | Linux (x64, arm64) | `libminipty_unix.so` | None: the shim is linked into the executable |
 | macOS (x64, arm64) | `libminipty_unix.dylib` and `minipty_spawn_helper` | `minipty_spawn_helper` only: the shim is linked into the executable, and the launcher must stay in the same directory, where MiniPty looks for it |
 | FreeBSD (experimental) | `libminipty_unix.so`, which the package does not include: it is built with `cc` when MiniPty is built from source on FreeBSD | Not supported by the package |
+
+
+## Quick start
+
+```bash
+dotnet add package MiniPty            # PTY sessions
+dotnet add package MiniPty.Capture    # timestamped output capture
+dotnet add package MiniPty.Console    # attach the host terminal (vim, etc.)
+dotnet add package MiniPty.Terminal   # backend for xterm.js and editor terminals
+```
+
+### MiniPty
+
+Start a child with `Pty.Start`, then either run it for its result with `CompleteAsync` or drive it with `WriteInputAsync` and `ReadOutputAsync`. Try `dotnet samples/SingleFiles/README_MiniPty.cs`.
+
+```csharp
+using MiniPty;
+
+var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh";
+
+// Run a command for its result: CompleteAsync drains the output and waits for exit.
+await using (var run = Pty.Start(new PtyStartInfo { FileName = shell, Arguments = [OperatingSystem.IsWindows() ? "/c" : "-c", "echo hello"] }))
+{
+    var result = await run.CompleteAsync();
+    Console.WriteLine($"exit={result.ExitCode}: {PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText).Trim()}");
+}
+
+// Drive a session: write input, resize at any time, and stream output until the child exits.
+await using var session = Pty.Start(new PtyStartInfo { FileName = shell, Size = new PtySize(120, 30) });
+await session.WriteInputAsync("echo hello\r");
+await session.WriteInputAsync("exit\r");
+session.Resize(new PtySize(100, 40));
+
+var stdout = Console.OpenStandardOutput();
+await foreach (var chunk in session.ReadOutputAsync())
+    await stdout.WriteAsync(chunk.Data);
+
+Console.WriteLine($"exit={(await session.WaitForExitAsync()).ExitCode}");
+```
+
+### MiniPty.Capture
+
+Run a child and get its output, exit code, and every read with its time since `Pty.Start`. Try `dotnet samples/SingleFiles/README_MiniPty.Capture.cs`.
+
+```csharp
+using MiniPty;
+using MiniPty.Capture;
+
+var result = await PtyCapture.RunAsync(new PtyStartInfo
+{
+    FileName = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",
+    Arguments = [OperatingSystem.IsWindows() ? "/c" : "-c", "echo hello"],
+});
+
+foreach (var chunk in result.Chunks)
+    Console.WriteLine($"{chunk.Time.TotalSeconds:F3}s: {chunk.Data.Length} bytes");
+
+Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));
+```
+
+### MiniPty.Console
+
+Attach the host terminal to a session, so interactive programs such as vim get your keyboard and window size. Reading output stays your job. Try `dotnet samples/SingleFiles/README_MiniPty.Console.cs`.
+
+```csharp
+using MiniPty;
+using MiniPty.Console;
+
+await using var session = Pty.Start(new PtyStartInfo { FileName = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/bash" });
+
+// Keyboard input and window resizes now go to the PTY.
+using var input = PtyConsoleInput.Attach(session);
+
+// MiniPty.Console does not read output: copy it to stdout yourself.
+var output = CopyOutputAsync(session);
+
+// Forward keys until the child exits.
+using var exited = new CancellationTokenSource();
+_ = session.WaitForExitAsync().ContinueWith(_ => exited.Cancel());
+input.PumpInputUntil(exited.Token);
+await output;
+
+static async Task CopyOutputAsync(PtySession session)
+{
+    var stdout = Console.OpenStandardOutput();
+    await foreach (var chunk in session.ReadOutputAsync())
+    {
+        await stdout.WriteAsync(chunk.Data);
+        await stdout.FlushAsync();
+    }
+}
+```
+
+[ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) adds status messages and keeps the shell prompt aligned afterwards.
+
+### MiniPty.Terminal
+
+Serve a PTY to xterm.js or an editor terminal, the role node-pty plays behind VS Code. Try `dotnet samples/SingleFiles/WebTerminal.cs` for a shell in your browser.
+
+```csharp
+using MiniPty;
+using MiniPty.Terminal;
+
+// webSocket: any System.Net.WebSockets.WebSocket (Kestrel, HttpListener, ...)
+// ct: cancel it when the connection ends (for example HttpContext.RequestAborted)
+var status = await PtyWebSocketBridge.RunAsync(
+    new PtyStartInfo { FileName = "/bin/bash", Size = new PtySize(120, 30) },
+    webSocket,
+    cancellationToken: ct);
+Console.WriteLine($"shell exited: {status.ExitCode}");
+```
+
+Other entry points:
+
+- `PtyWebSocketSessionManager`: reconnectable browser sessions with authentication and replay.
+- `PtyStdioBridge`: length-prefixed frames over stdio, for a helper process such as [VsCodeTerminalHelper.cs](samples/SingleFiles/VsCodeTerminalHelper.cs) behind the [VS Code extension sample](samples/VsCodeExtension).
+- `PtyTerminal`: a node-pty-style push API with pause/resume flow control, for your own transport.
+
+Protocol and bridging details: [terminal.md](.github/docs/specs/terminal.md).
 
 ## Backends
 
@@ -88,307 +205,88 @@ MiniPty uses the Unix backend through `libminipty_unix.dylib`, and starts each c
 
 MiniPty uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle.
 
-## Quick start
+## Advanced Usage
 
-Install NuGet packages by running the following commands.
+### Good to know
 
-```bash
-# PTY session management and lifecycle
-dotnet add package MiniPty
+To use MiniPty effectively, keep the following points in mind.
 
-# Timestamped PTY output observation (per-read chunks)
-dotnet add package MiniPty.Capture
+- **Keep reading output.** A PTY nobody reads fills up and blocks the child. `ReadOutputAsync`, `CompleteAsync`, and the `Output` stream all drain it.
+- **Disposing ends the child.** Windows terminates it. Unix hangs it up (`SIGHUP`, so a shell saves its history) and kills it if it has not exited a second later ([Session contract](.github/docs/specs/core_session.md#session-contract)).
+- **`Environment` overlays the parent's.** A null value removes a variable. On Unix, `TerminalName` sets `TERM`, which defaults to `xterm-256color` ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
+- **MiniPty is not a sandbox.** The child runs with your permissions. If a program name, path, or argument comes from untrusted input, read [Untrusted program names and paths](.github/docs/specs/core_session.md#untrusted-program-names-and-paths) and [Batch files](.github/docs/specs/core_session.md#batch-files-windows) first.
 
-# Host terminal input attach for interactive sessions (vim, etc.)
-dotnet add package MiniPty.Console
+### Out-of-band ConPTY for Windows
 
-# Backend PTY for xterm.js / editor terminals (push events, flow control, WebSocket bridge)
-dotnet add package MiniPty.Terminal
+Building a terminal emulator on Windows? Use the out-of-band ConPTY library instead of the in-box ConPTY.
+
+> [!TIP]
+> In-box means the ConPTY that comes with Windows itself.
+
+The in-box ConPTY drops graphics protocols (Sixel, Kitty) and some terminal queries, forwards mouse tracking only to programs that read VT input, and changes behavior with Windows updates. The ConPTY that Windows Terminal ships, published by Microsoft as `Microsoft.Windows.Console.ConPTY`, forwards everything and behaves the same on every Windows build.
+
+```shell
+# Use the out-of-band ConPTY library, 1.25 or later (older ones can stall three seconds at startup)
+dotnet add package Microsoft.Windows.Console.ConPTY --version 1.25.260930003
 ```
 
-**MiniPty** start a session with `Pty.Start`, then choose one pattern:
-- **Persistent stream**: `ReadOutputAsync` + `WriteInputAsync` + `WaitForExitAsync`
-- **One-shot run**: `CompleteAsync`
-
-Disposing a session ends the child if it is still running: on Unix it is hung up first (`SIGHUP`, so a shell can save its history) and killed after a one-second grace period if it has not exited, or at once if the host process exits normally before then. A host ended within that second by a crash or by a signal it does not cancel sends no kill, so a child that ignores the hang-up keeps running. On Windows the child is terminated. If nobody reads output while the child writes, the PTY buffer can fill and the child will block; `ReadOutputAsync`, `CompleteAsync`, and continuous `Output` stream reads avoid that. Try `dotnet samples/SingleFiles/README_MiniPty.cs` to run this sample.
-
-```csharp
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-using MiniPty;
-
-Console.Error.WriteLine("=== 1) Stream mode: chunks arrive over time ===");
-await RunStreamModeAsync();
-
-Console.Error.WriteLine();
-Console.Error.WriteLine("=== 2) One-shot mode: one completion result ===");
-await RunCompleteModeAsync();
-
-static async Task RunStreamModeAsync()
-{
-    await using var session = Pty.Start(CreateTimedOutputStartInfo());
-    var sw = Stopwatch.StartNew();
-    var chunks = 0;
-    await foreach (var chunk in session.ReadOutputAsync())
-        Console.WriteLine($"+{sw.Elapsed.TotalSeconds,4:F1}s chunk#{++chunks} ({chunk.Data.Length} bytes)");
-
-    Console.WriteLine($"stream exit={(await session.WaitForExitAsync()).ExitCode}, chunks={chunks}");
-}
-
-static async Task RunCompleteModeAsync()
-{
-    await using var session = Pty.Start(CreateTimedOutputStartInfo());
-    var result = await session.CompleteAsync();
-    Console.WriteLine($"complete exit={result.ExitCode}, bytes={result.Output.Length}");
-    Console.WriteLine(PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText).TrimEnd());
-}
-
-static PtyStartInfo CreateTimedOutputStartInfo()
-{
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-    {
-        return new PtyStartInfo
-        {
-            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-            Arguments = ["/c", "echo alpha & timeout /t 1 /nobreak >nul & echo beta & timeout /t 1 /nobreak >nul & echo gamma"],
-            Size = new PtySize(120, 30),
-        };
-    }
-
-    return new PtyStartInfo
-    {
-        FileName = "/bin/sh",
-        Arguments = ["-c", "printf 'alpha\\n'; sleep 1; printf 'beta\\n'; sleep 1; printf 'gamma\\n'"],
-        Size = new PtySize(120, 30),
-        TerminalName = "xterm-256color",
-        Environment = new Dictionary<string, string?>
-        {
-            ["NO_COLOR"] = null,
-            ["MINIPTY_SAMPLE"] = "true",
-        },
-    };
-}
-```
-
-`PtyStartInfo.Environment` overlays the parent environment. A null value removes a variable; an empty string sets an empty variable on platforms that preserve empty environment values. A `FileName` without a directory is found on the child's `PATH` on every platform: on Windows, where `CreateProcess` would search only your process's `PATH`, MiniPty searches the child's whenever the overlay sets or removes `PATH`, appending `.exe` as `CreateProcess` does and skipping empty and relative entries, which would point at your process's current directory. That `PATH` therefore chooses the program on every platform: build it only from sources you trust, or give `FileName` as a full path. Only `.exe` is appended, never an extension from `PATHEXT`, so write a batch shim with its extension: `FileName = "npm.cmd"`, not `"npm"`. A `FileName` ending in `.cmd` or `.bat` always runs through the escaped `cmd.exe` path described below. On Windows, a program under a path of 260 characters or more starts only when your application opts into long paths (`longPathAware` in its application manifest, which a .NET project sets through the `ApplicationManifest` property) and the machine allows them (`LongPathsEnabled`). A `WorkingDirectory` must stay under 260 characters in any case. When any part of `FileName`, an argument, or `WorkingDirectory` comes from input you do not control, check what the operating system will resolve, not the string. Resolve the program with `Path.GetFullPath`, compare the result with what you allow (an allowed directory followed by its separator), and pass that full path. A name starting with `.\` or `..\` is relative to your process's current directory, not to `WorkingDirectory`. A NUL in any of these is rejected with `ArgumentException` on every platform ([Untrusted program names and paths](.github/docs/specs/core_session.md#untrusted-program-names-and-paths)). On Unix, `TerminalName` sets `TERM`; if no `TERM` remains, MiniPty defaults it to `xterm-256color`. On Windows, `TerminalName` is currently ignored and `TERM` is only passed when explicitly set in `Environment`.
-
-On Windows, ConPTY clears the frontend's screen when the child starts. Set `PtyStartInfo.InheritCursor = true` to continue below what the frontend already shows, such as an editor's banner or, with MiniPty.Console, the host terminal's prompt (attach before starting the output pump, as [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) does). The frontend must then answer ConPTY's cursor position query, as terminal emulators do on their own; until it does, the child waits, with no timeout on the in-box ConPTY, and input typed meanwhile, Ctrl+C included, is held until then. Try `dotnet samples/SingleFiles/InheritCursorWait.cs` to see each case. Unix ignores the option because its PTY never clears the screen.
-
-On Windows, ending a session ends the child and the processes attached to its console, but a program the child started in a console of its own keeps running, and if the host crashes, everything the child started does. Set `PtyStartInfo.KillProcessTree = true` to run the child in a kill-on-close job: `Dispose`, `Kill`, and the end of the host process, including a crash, then end the whole tree. Unix ignores the option; there disposal hangs the child up, which ends the descendants in the terminal's foreground process group.
-
-| Session | `KillProcessTree` | Why |
-|---|---|---|
-| A command run for its result: a CI step, a test runner, an agent's tool call, an untrusted script | `true` | Nothing it started is wanted afterwards, and leftovers must not survive a crashed host. |
-| An interactive terminal: an editor's terminal panel, a terminal app's tab | `false` (default) | A window the user opened from the shell (`code .`, `start notepad`) should survive closing the tab, as it does in Windows Terminal and VS Code. |
+MiniPty's build targets copy `OpenConsole.exe` beside `conpty.dll` for you. Both are native code that runs as your application, so ship them where your own binaries are protected, and take security fixes through package updates ([details and measurements](.github/docs/specs/core_session.md#out-of-band-conpty)).
 
 ```csharp
 using MiniPty;
 
-// A build step run for its result. Whatever it starts, even in a console of its own, ends with the session:
-// at disposal, after a timeout too, and if this process crashes.
+// Null on Unix, or when conpty.dll is not beside your application: the session then uses the in-box ConPTY.
+var conpty = ConPtyLibrary.TryLoadFromApplicationDirectory();
+if (conpty is { HasConsoleHost: false })
+    Console.Error.WriteLine("OpenConsole.exe is missing; sessions fall back to conhost.exe");
+
+await using var session = Pty.Start(new PtyStartInfo { FileName = "cmd.exe", ConPty = conpty });
+```
+
+### Windows options
+
+`KillProcessTree = true` ends everything the child started, even programs in a console of their own, on dispose, on kill, and when your process crashes. Turn it on for commands run for their result (CI steps, test runners, agent tool calls). Leave it off for interactive terminals, where a window the user opened (`code .`) should outlive the tab ([Process tree](.github/docs/specs/core_session.md#process-tree)).
+
+```csharp
 await using var session = Pty.Start(new PtyStartInfo
 {
-    FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+    FileName = "cmd.exe",
     Arguments = ["/c", "npm test"],
     KillProcessTree = true,
 });
-var result = await session.CompleteAsync(new PtyCompleteOptions { ExitTimeout = TimeSpan.FromMinutes(10) });
-Console.WriteLine($"exit={result.ExitCode}");
 ```
 
-The option also ends programs the user started on purpose, which is why it is off by default. No process can leave the job, so a program that asks to (`CREATE_BREAKAWAY_FROM_JOB`, as some installers and updaters do) fails to start inside such a session.
+`InheritCursor = true` keeps what the frontend already shows instead of letting ConPTY clear the screen. The frontend must then answer ConPTY's cursor position query, or the child waits ([Inherited cursor](.github/docs/specs/core_session.md#inherited-cursor)).
 
-### Out-of-band ConPTY
+Both options are ignored on Unix.
 
-**If you are building a terminal emulator on Windows, use this.** Windows ships ConPTY in `kernel32.dll`, backed by the `conhost.exe` of the user's Windows build, and that host decides what the frontend gets to see: current builds drop graphics protocols (Sixel, Kitty) and some terminal queries (OSC 11, XTGETTCAP), answer others themselves, forward mouse tracking only for programs that read VT input, and reorder sequences relative to text, and the behavior changes with Windows updates. Microsoft publishes the implementation Windows Terminal carries as the NuGet package `Microsoft.Windows.Console.ConPTY` (`conpty.dll` plus `OpenConsole.exe`): it forwards everything, behaves the same on every Windows build, supports `Clear()`, and ends output the moment the child exits on every Windows build. The in-box ConPTY does that too from Windows 11 24H2; before it, the in-box path waits for a 100 ms quiet interval after exit (`cmd /c echo` completes in 33 ms against 141 ms there in `PtyConPtyBenchmarks`). MiniPty ships neither file and depends on nothing; your application references the package and opts in per session:
+### GUI hosts
 
-```xml
-<PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" />
-```
+WinUI, WPF, WinForms, and Avalonia can call every MiniPty API on the UI thread. Nothing blocks it, and no marshaling is needed.
 
 ```csharp
-using MiniPty;
-
-// Null when conpty.dll is not in the application directory: the session then runs on the in-box ConPTY.
-var conpty = ConPtyLibrary.TryLoadFromApplicationDirectory();
-if (conpty is { HasConsoleHost: false })
-    Console.Error.WriteLine($"{conpty.Path} has no OpenConsole.exe beside it and will fall back to conhost.exe");
-
-await using var session = Pty.Start(new PtyStartInfo
+// All on the UI thread.
+var session = Pty.Start(new PtyStartInfo
 {
-    FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-    ConPty = conpty,   // forwards mouse tracking and queries, supports Clear(), ends output as soon as the child exits on every build
+    FileName = shell,
+    Size = new PtySize(columns, rows),
+    ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory(),   // null on Unix, so the same line works everywhere
 });
+
+view.SizeChanged += (_, _) => session.Resize(new PtySize(view.Columns, view.Rows));
+view.TextInput   += async (_, text) => await session.WriteInputAsync(text);
+window.Closed    += async (_, _) => await session.DisposeAsync();
+
+await foreach (var chunk in session.ReadOutputAsync())
+    view.Feed(chunk.Data.Span);   // your VT parser and renderer
 ```
 
-What to know before you ship it:
-
-- **Use package 1.25 or later** (verified with `1.25.260930003`). Any published version loads, but the out-of-band host asks the frontend what terminal it is at startup (`ESC[c`), and hosts before 1.25 wait three seconds for the answer. A terminal emulator answers on its own; a consumer that only reads output, such as `CompleteAsync`, never does, and on 1.25+ the host no longer waits for it.
-- **The two files travel with your application.** MiniPty's build targets place `OpenConsole.exe` (about 1 MB per architecture) beside `conpty.dll` in the output and publish folders whenever the package is referenced, in both the runtime-specific and the portable layout; the package's own build files do that only for C++ or architecture-specific projects. Updating them, security fixes included, is a package update in your project, not a MiniPty release.
-- **A missing host is silent.** `conpty.dll` without `OpenConsole.exe` beside it runs the in-box `conhost.exe` without any error; `ConPtyLibrary.HasConsoleHost` tells you before the first session, as in the snippet above.
-- **Each session gets an `OpenConsole.exe` child process** instead of `conhost.exe`, which matters to process monitoring and allow lists.
-- The library is loaded by absolute path only (a bare `conpty.dll` could bind a copy an operating system ships), once per path, and `Load` fails if the DLL lacks the exports MiniPty uses. On Unix a `ConPtyLibrary` cannot be loaded and `Clear()` is a no-op.
-- **It is native code running as your application.** Give `Load` only a path you control, never one from configuration, the environment, or a command line, and install the two files where your own binaries are protected: whoever can write that directory runs code as your application, since `conpty.dll` also launches the `OpenConsole.exe` beside it. Both files in Microsoft's package are Authenticode-signed by Microsoft; verify the signature before `Load` if your deployment requires it. `TryLoadFromApplicationDirectory` looks nowhere but the application directory, and MiniPty's build targets stage the host only for the DLL that package resolved.
-
-Details and measurements: [Out-of-band ConPTY](.github/docs/specs/core_session.md#out-of-band-conpty).
-
-MiniPty is not a sandbox. Processes run with the parent process permissions unless the host application isolates them with OS users, containers, or another security boundary.
-
-On Windows, `Arguments` for a `.bat` or `.cmd` file are escaped for `cmd.exe`, so user input passed to a tool's batch shim reaches the script as data rather than as commands. A script can still run what an argument holds, for example with `cmd /c %1` or `echo %~1`. An argument with a carriage return, a line feed, or a NUL is rejected with `ArgumentException`, and so is a command line over the 8191 characters `cmd.exe` runs. A raw `CommandLine` reaches `cmd.exe` exactly as you write it, and when you start `cmd.exe` yourself, whatever follows `/c` is parsed as a command, so never pass user input there ([Batch files](.github/docs/specs/core_session.md#batch-files-windows)).
-
-Two limits of that escaping matter when the shim forwards `%*` to a program. A quote inside an argument has to be written as `""`, the only form `cmd.exe` keeps inside quotes. A program that parses its command line with the UCRT, as .NET, Node.js, and Python do, reads it back as one quote. A program that uses `CommandLineToArgvW` or the pre-2008 `msvcrt.dll` rules, as Go and MinGW builds do, reads it as a quote that also ends the quoting, so the argument boundaries after it move: `x" --evil y` arrives there as `x"`, `--evil`, and `y`. If user input can hold a quote and the program behind the shim is one of those, reject the quote yourself before calling `Pty.Start`. The script is also the file `CreateProcess` would find for `FileName` from your process's current directory and `PATH` (the child's `PATH` when `Environment` sets or removes it), and `cmd.exe` receives its full path, so `cmd.exe` no longer searches the child's `WorkingDirectory` for it as it did when `CreateProcess` started the batch file itself.
-
-**GUI hosts** (WinUI, WPF, WinForms, Avalonia) can await every MiniPty API on the UI thread. Asynchronous members never block the caller, so `await foreach` over `ReadOutputAsync` processes each chunk on the UI thread with no copy and no marshaling (during an output flood, a chunk is handed over through the dispatcher every 8 ms so input and rendering keep running), `Resize` from size-changed events is safe at any time (including after the child has exited), and `DisposeAsync` on tab close does not block. Output reading never blocks a thread-pool worker (on Windows it waits on I/O completions, and on Linux and macOS on one loop for every session, so an idle tab holds no thread), so idle tabs do not starve the host's pool. **On Windows, run every session on the out-of-band ConPTY**: reference `Microsoft.Windows.Console.ConPTY` and set `ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()` ([Out-of-band ConPTY](#out-of-band-conpty)). The in-box ConPTY drops graphics protocols and some terminal queries, and forwards mouse tracking only for programs that read VT input. The call returns null on Unix, so the same line works on every platform. See [samples/WinUiTerminal](samples/WinUiTerminal) (code-only WinUI 3, Windows) and [samples/AvaloniaTerminal](samples/AvaloniaTerminal) (Avalonia; Windows, Linux, macOS), two terminal emulators built this way on a shared VT core, and the [GUI hosts](.github/docs/specs/core_session.md#gui-hosts) section of the specification.
-
-**MiniPty.Capture** one call that runs the child, pumps output, and returns merged text, exit code, and per-read chunks. Each chunk's timestamp is elapsed time since `Pty.Start`. Try `dotnet samples/SingleFiles/README_MiniPty.Capture.cs` to run this sample.
-
-```csharp
-using System.Runtime.InteropServices;
-using MiniPty;
-using MiniPty.Capture;
-
-var result = await PtyCapture.RunAsync(CreateCaptureStartInfo());
-
-// Chunk timestamps are measured from session start (immediately after `Pty.Start`).
-foreach (var chunk in result.Chunks)
-    Console.WriteLine($"{chunk.Time.TotalSeconds:F3}: {chunk.Data.Length} bytes");
-
-foreach (var textChunk in result.GetTextChunks())
-    Console.WriteLine($"{textChunk.Time.TotalSeconds:F3}: {textChunk.Text.Span}");
-
-// Or plain text for logging:
-Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));
-
-static PtyStartInfo CreateCaptureStartInfo()
-{
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-    {
-        return new PtyStartInfo
-        {
-            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-            Arguments = ["/c", "echo capture-sample"],
-            Size = new PtySize(120, 30),
-        };
-    }
-
-    return new PtyStartInfo
-    {
-        FileName = "/bin/sh",
-        Arguments = ["-c", "printf '\\e[31mcapture-sample\\e[0m\\n'"],
-        Size = new PtySize(120, 30),
-    };
-}
-```
-
-**MiniPty.Console** attaches the host terminal to a running session for interactive programs (vim, etc.). It forwards raw keyboard bytes to the PTY and syncs host resize events. It does **not** read PTY output — the embedder remains the sole output consumer via `ReadOutputAsync` and writes bytes to host `stdout`. Try `dotnet samples/SingleFiles/README_MiniPty.Console.cs` to run this sample.
-
-```csharp
-using System.Runtime.InteropServices;
-using MiniPty;
-using MiniPty.Console;
-
-if (Console.IsInputRedirected || Console.IsOutputRedirected)
-{
-    Console.Error.WriteLine("Run this sample from an interactive terminal (TTY).");
-    return;
-}
-
-await using var session = Pty.Start(CreateShellStartInfo());
-Console.Error.WriteLine($"[MiniPty] child pid={session.ProcessId}, size={session.Size.Columns}x{session.Size.Rows}");
-Console.Error.WriteLine("[MiniPty] Try: type `echo hello`, resize the window, then `exit`.");
-
-using var attachCts = new CancellationTokenSource();
-var outputStats = new OutputStats();
-var pumpTask = PumpOutputAsync(session, outputStats);
-using var consoleInput = PtyConsoleInput.Attach(session);
-
-var exitTask = session.WaitForExitAsync(attachCts.Token);
-_ = exitTask.ContinueWith(
-    static (_, state) => ((CancellationTokenSource)state!).Cancel(),
-    attachCts,
-    CancellationToken.None,
-    TaskContinuationOptions.ExecuteSynchronously,
-    TaskScheduler.Default);
-
-consoleInput.PumpInputUntil(attachCts.Token);
-var exitCode = (await exitTask).ExitCode;
-await pumpTask;
-ResetHostCursorColumnIfNeeded();
-Console.Error.WriteLine($"[MiniPty] shell exit={exitCode}, chunks={outputStats.Chunks}, bytes={outputStats.Bytes}");
-
-static async Task PumpOutputAsync(PtySession session, OutputStats stats)
-{
-    var stdout = Console.OpenStandardOutput();
-    await foreach (var chunk in session.ReadOutputAsync())
-    {
-        stats.Chunks++;
-        stats.Bytes += chunk.Data.Length;
-        await stdout.WriteAsync(chunk.Data);
-        await stdout.FlushAsync(CancellationToken.None);
-    }
-}
-
-static void ResetHostCursorColumnIfNeeded()
-{
-    if (OperatingSystem.IsWindows())
-        return;
-
-    var stdout = Console.OpenStandardOutput();
-    stdout.Write("\r\n"u8);
-    stdout.Flush();
-}
-
-static PtyStartInfo CreateShellStartInfo()
-{
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-    {
-        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        if (!File.Exists(cmd))
-            throw new InvalidOperationException("cmd.exe is required.");
-
-        return new PtyStartInfo
-        {
-            FileName = cmd,
-            Size = new PtySize(80, 24),
-        };
-    }
-
-    return new PtyStartInfo
-    {
-        FileName = File.Exists("/bin/bash") ? "/bin/bash" : "/bin/sh",
-        Arguments = ["-i"],
-        Size = new PtySize(80, 24),
-    };
-}
-
-sealed class OutputStats
-{
-    public int Chunks;
-    public int Bytes;
-}
-```
-
-On Unix, write status messages to **stderr before** `Attach` and emit `\r\n` on **stdout after** dispose if the parent shell prompt drifts (see [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs)).
-
-**MiniPty.Terminal** turns MiniPty into a backend PTY for frontend terminals (xterm.js, editor integrations) — the role node-pty plays behind VS Code. `PtyWebSocketBridge` serves one-shot browser sessions, while `PtyWebSocketSessionManager` adds authenticated reconnect, bounded replay, one-active-client enforcement, explicit termination, and detached-session expiry. `PtyStdioBridge` uses length-prefixed raw frames for helper processes. `PtyTerminal` also exposes node-pty-style graceful kill, foreground process names, attach, pixel resize, and a safe `Clear` compatibility no-op. Try `dotnet samples/SingleFiles/WebTerminal.cs` for a browser shell; [VsCodeTerminalHelper.cs](samples/SingleFiles/VsCodeTerminalHelper.cs) is the stdio helper entry point, and [VsCodeExtension](samples/VsCodeExtension) runs it in a real VS Code integrated terminal.
-
-```csharp
-using MiniPty;
-using MiniPty.Terminal;
-
-// webSocket: any System.Net.WebSockets.WebSocket (Kestrel accept, HttpListener, ...)
-// ct: also canceled when the connection ends (for example HttpContext.RequestAborted), so the bridge stops
-var status = await PtyWebSocketBridge.RunAsync(
-    new PtyStartInfo { FileName = "/bin/bash", Arguments = ["-i"], Size = new PtySize(120, 30) },
-    webSocket,
-    cancellationToken: ct);
-Console.WriteLine($"shell exited: {status.ExitCode} (signal {status.Signal?.ToString() ?? "none"})");
-```
-
-For custom transports (stdio framing to a VS Code extension, SignalR, …), use the `PtyTerminal` facade directly: a node-pty-shaped push model with an output handler, awaitable `Completion` (exit after all output), and `Pause()` / `Resume()` flow control. It pushes output as soon as it is read, so a handler that keeps up gets each read as a chunk of its own. Only the built-in bridges join a burst of output into larger messages ([Output frames](.github/docs/specs/terminal.md#output-frames)). See [terminal.md](.github/docs/specs/terminal.md) for the protocol and the VS Code `Pseudoterminal` bridging pattern.
+Full terminal emulators built this way: [samples/WinUiTerminal](samples/WinUiTerminal) (Windows) and [samples/AvaloniaTerminal](samples/AvaloniaTerminal) (Windows, Linux, macOS). See also [GUI hosts](.github/docs/specs/core_session.md#gui-hosts).
 
 
 ## Samples
+
+See the [VS Code extension sample instructions](samples/VsCodeExtension) for complete Windows and macOS reproduction steps, including NativeAOT helper publishing and authenticated reconnect.
 
 | Sample | Shows |
 |--------|-------|
@@ -402,11 +300,8 @@ For custom transports (stdio framing to a VS Code extension, SignalR, …), use 
 | [VsCodeTerminalHelper.cs](samples/SingleFiles/VsCodeTerminalHelper.cs) | **MiniPty.Terminal** stdio-framed helper for a VS Code `Pseudoterminal` |
 | [VsCodeExtension](samples/VsCodeExtension) | Dependency-free VS Code extension sample connecting `Pseudoterminal` to the NativeAOT helper |
 | [VsCodePersistentBridge.cs](samples/SingleFiles/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |
-| [WinUiTerminal](samples/WinUiTerminal) | Code-only WinUI 3 terminal emulator (VT parser, screen buffer, Win2D grid, mouse copy/paste) driving `Pty.Start`, `ReadOutputAsync`, `WriteInputAsync`, `Resize`, and `DisposeAsync` from the UI thread (Windows only) |
 | [AvaloniaTerminal](samples/AvaloniaTerminal) | The same terminal emulator as an Avalonia desktop app (Windows, Linux, macOS): `DrawingContext` grid, the same key, mouse, and clipboard handling, the same UI-thread MiniPty calls |
-
-See the [VS Code extension sample instructions](samples/VsCodeExtension) for complete Windows and
-macOS reproduction steps, including NativeAOT helper publishing and authenticated reconnect.
+| [WinUiTerminal](samples/WinUiTerminal) | Code-only WinUI 3 terminal emulator (VT parser, screen buffer, Win2D grid, mouse copy/paste) driving `Pty.Start`, `ReadOutputAsync`, `WriteInputAsync`, `Resize`, and `DisposeAsync` from the UI thread (Windows only) |
 
 Run a sample locally (JIT):
 
