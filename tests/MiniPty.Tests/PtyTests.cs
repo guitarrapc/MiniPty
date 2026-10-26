@@ -935,7 +935,7 @@ public sealed class PtyTests
         }
     }
 
-    // Retried under parallel CI due to occasional Unix exec/path overlay visibility races.
+    // Retried under parallel CI: a script written and executed at once can fail with ETXTBSY (see platform_support.md).
     [Test]
     [Retry(3)]
     public async Task PtyUnixPathLookupUsesOverlayAndFallsBackToShellForPlainScripts()
@@ -1087,8 +1087,8 @@ public sealed class PtyTests
 
     /// <summary>
     /// Empty <c>PATH</c> components resolve as the current directory after <c>chdir</c>.
-    /// Retried under parallel CI: <c>forkpty</c> on Linux arm can still race exec payload visibility
-    /// despite parent hold-until-dispose (see platform_support.md).
+    /// Retried under parallel CI: a child another test forks while this one writes its script holds the script's write
+    /// descriptor until its own exec, and the exec fails with <c>ETXTBSY</c> meanwhile (see platform_support.md).
     /// </summary>
     [Test]
     [Retry(3)]

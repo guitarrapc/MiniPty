@@ -45,20 +45,23 @@ internal static partial class UnixPtyBackend
         var pidfd = -1;
         var slave = -1;
         var startStage = StartStageNone;
+        int spawnError;
         unsafe
         {
-            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd, &slave, &startStage);
-            if (spawnError != 0)
-            {
-                exec.Dispose();
-                throw CreateStartException(startInfo, startStage, spawnError);
-            }
+            spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd, &slave, &startStage);
         }
+
+        // Freed as soon as the spawn returns. A forked child reads its own copy-on-write image of these strings, taken at
+        // the fork, so the parent's copy is no longer needed; posix_spawn on macOS copies them before it returns. The
+        // spawn also returns only once the child has exec'd or reported a failure.
+        exec.Dispose();
+        if (spawnError != 0)
+            throw CreateStartException(startInfo, startStage, spawnError);
 
         try
         {
             PtyStartTestHook.Run(PtyStartStage.Spawned, pid);
-            return new UnixPtyBackendInstance(master, slave, pid, pidfd, size, exec);
+            return new UnixPtyBackendInstance(master, slave, pid, pidfd, size);
         }
         catch
         {
@@ -69,7 +72,6 @@ internal static partial class UnixPtyBackend
             if (pidfd >= 0)
                 UnixInterop.close(pidfd);
 
-            exec.Dispose();
             if (master >= 0)
                 UnixInterop.close(master);
             if (slave >= 0)
@@ -201,7 +203,6 @@ internal static partial class UnixPtyBackend
         // the last close, and there a descriptor of the host would keep output from ending at the exit.
         private readonly int _slave;
         private readonly int _pid;
-        private readonly UnixExecPayload? _execHold;
         // Serializes the child's reap with signal delivery, so Kill can never reach a pid the watcher has
         // already released for reuse.
         private readonly Lock _pidLock = new();
@@ -252,13 +253,12 @@ internal static partial class UnixPtyBackend
         /// <summary>The next session on the watcher's queue. Guarded by its lock.</summary>
         internal UnixPtyBackendInstance? NextService;
 
-        public UnixPtyBackendInstance(int master, int slave, int pid, int pidfd, PtySize size, UnixExecPayload execHold)
+        public UnixPtyBackendInstance(int master, int slave, int pid, int pidfd, PtySize size)
         {
             _master = master;
             _slave = slave;
             _pid = pid;
             _pidfd = pidfd;
-            _execHold = execHold;
             _size = size;
             // Non-blocking, so a write takes what the tty input queue accepts and never blocks its caller. The loop
             // reads only after the master reports readable. A read that still finds nothing waits again.
@@ -1191,8 +1191,6 @@ internal static partial class UnixPtyBackend
                 // The watcher kills a child that ignores the hang-up and reaps it either way, so disposal never waits.
                 ChildWatcher.ScheduleHangupKill(this);
             }
-
-            _execHold?.Dispose();
         }
 
         /// <summary>The tick count at which <see cref="ChildWatcher"/> kills this child if a disposal hung it up.</summary>

@@ -2,7 +2,7 @@
 
 Goal: resolve the items below before the next release, the first since `v1.3.0` (see [next_todo.md](../next_todo.md#release)). They came from reviewing MiniPty as a general-purpose PTY library against the reference libraries under `.references/`: node-pty 1.1.0, Porta.Pty 2.2.3, WezTerm's `portable-pty` 0.9.0, and creack/pty. Each gate is closed by a fix, or by a decision recorded in the specifications, as its own section says.
 
-**Status:** open (2026-10-27). R1 and R2 are implemented and verified locally on Linux and macOS (arm64) (2026-10-27); R3 is implemented (2026-10-27); R4 and R5 are open.
+**Status:** open (2026-10-27). R1 and R2 are implemented and verified locally on Linux and macOS (arm64) (2026-10-27); R3 and R5 are implemented (2026-10-27); R4 is open.
 
 ## Gate Inventory
 
@@ -241,12 +241,34 @@ Holding the payload is harmless: a few hundred bytes per session. But the docume
 - moving the spawn to `vfork` or `posix_spawn`, where the parent's memory is shared until `exec`;
 - adding a step in the child that does depend on timing.
 
-### Decision required
+### Result (implemented 2026-10-27)
 
-Re-verify the cause, then do one of the following:
+**The hold did not fix the flake.** The commit that added it ([#32](https://github.com/guitarrapc/MiniPty/pull/32)) also put `[Retry(3)]` on `PtyUnixPathLookupTreatsEmptyPathEntriesAsCurrentDirectory`, with a comment that it still raced. Native code already freed the `envp` array it builds right after the fork, which was already relying on copy-on-write.
 
-- Correct both documents to the cause that is observed, and keep or drop the hold accordingly.
-- If the cause cannot be found, state that the hold is kept as a precaution without a known mechanism.
+**Measured on WSL.** A stress program started children concurrently. Each checked its working directory, an environment value, an argument, and a bare-name `PATH` lookup.
+
+| Experiment build | Starts | Mismatches or failures |
+|---|---|---|
+| Unchanged | 3,000 (64 at a time) | 0 |
+| The parent overwrites every payload string right after the fork, before the child execs | 3,000 (64) and 3,000 (128) | 0 |
+| The full test suite with that overwrite in every start | 676 tests | 0 failed |
+| Negative control: the same overwrite before the fork | 200 | 200 failed (`chdir` to the overwritten directory) |
+
+**Likely real cause: `ETXTBSY`.**
+
+- The flaking tests write a script and exec it at once.
+- A child another test forks during the write inherits the script's write descriptor until its own exec. Exec of a file open for writing fails with `ETXTBSY`, and the shim then ended every exec failure with 127.
+- Measured: a start of a file held open for writing now fails with `Win32Exception` 26 ("Text file busy").
+- It is a race in the tests' fixtures, as in Go's issue 22315, so their retries stay. With R2 such a flake now names its `errno` in CI logs, which would confirm or refute this.
+
+**Changes:**
+
+- The payload is freed as soon as the spawn returns. The session no longer holds it, and `UnixPtyBackendInstance` lost the field. Since R2, the spawn returns only after the child has exec'd or failed, so the hold would be unneeded even under the old belief.
+- Documents corrected:
+  - [lifecycle.md](../specs/lifecycle.md): the lesson is rewritten with the measurement.
+  - [pty_crossplatform.md](../references/pty_crossplatform.md): `forkpty()` safety.
+  - [platform_support.md](../specs/platform_support.md): the flake row and the lesson.
+  - The retry comments in `PtyTests`.
 
 ## Reviewed and Not a Gate
 
