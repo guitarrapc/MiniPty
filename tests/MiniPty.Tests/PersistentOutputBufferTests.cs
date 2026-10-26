@@ -40,6 +40,48 @@ public sealed class PersistentOutputBufferTests
         await Assert.That(Encoding.UTF8.GetString(read.Data.Span)).IsEqualTo("e");
     }
 
+    /// <summary>
+    /// A full ring resumes a write only once it has room for the resume space, so the bytes freed by one small
+    /// acknowledgement do not go out as a small frame of their own.
+    /// </summary>
+    [Test]
+    public async Task PersistentOutputBufferResumesAWriteOnlyOnceItHasRoomForTheResumeSpace()
+    {
+        using var buffer = new PersistentOutputBuffer(8, resumeSpace: 4);
+        await buffer.WriteAsync("abcdefgh"u8.ToArray(), CancellationToken.None);
+        var blockedWrite = buffer.WriteAsync("ijkl"u8.ToArray(), CancellationToken.None).AsTask();
+
+        await Assert.That(buffer.TryAcknowledge(2, 8)).IsTrue();
+        await Task.Delay(50);
+        await Assert.That(blockedWrite.IsCompleted).IsFalse();
+        await Assert.That(buffer.OffsetRange.End).IsEqualTo(8);
+
+        await Assert.That(buffer.TryAcknowledge(4, 8)).IsTrue();
+        await blockedWrite.WaitAsync(TimeSpan.FromSeconds(1));
+        var read = await buffer.ReadAsync(8, 8, CancellationToken.None);
+        await Assert.That(Encoding.UTF8.GetString(read.Data.Span)).IsEqualTo("ijkl");
+    }
+
+    /// <summary>A write with less left than the resume space needs room only for what it has left.</summary>
+    [Test]
+    public async Task PersistentOutputBufferResumesAShortWriteOnceItsBytesFit()
+    {
+        using var buffer = new PersistentOutputBuffer(8, resumeSpace: 4);
+        await buffer.WriteAsync("abcdefgh"u8.ToArray(), CancellationToken.None);
+        var blockedWrite = buffer.WriteAsync("ij"u8.ToArray(), CancellationToken.None).AsTask();
+
+        await Assert.That(buffer.TryAcknowledge(2, 8)).IsTrue();
+        await blockedWrite.WaitAsync(TimeSpan.FromSeconds(1));
+        await Assert.That(buffer.OffsetRange.End).IsEqualTo(10);
+    }
+
+    [Test]
+    public async Task PersistentOutputBufferRejectsAResumeSpaceOutsideItsCapacity()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Task.FromResult(new PersistentOutputBuffer(8, resumeSpace: 0)));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Task.FromResult(new PersistentOutputBuffer(8, resumeSpace: 9)));
+    }
+
     [Test]
     public async Task PersistentOutputBufferRejectsAcknowledgementBeyondSentOffset()
     {

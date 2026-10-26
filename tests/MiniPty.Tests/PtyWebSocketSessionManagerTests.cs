@@ -282,7 +282,20 @@ public sealed class PtyWebSocketSessionManagerTests
     /// </summary>
     [Test]
     [NotInParallel]
-    public async Task PersistentSessionSendsAFloodInLargeFrames()
+    public Task PersistentSessionSendsAFloodInLargeFrames() => AssertFloodGoesOutInLargeFramesAsync(ackDelayMilliseconds: 0);
+
+    /// <summary>
+    /// A flood to a client slower than the flood still goes out in large frames. The replay buffer then fills with output
+    /// that was sent but not yet acknowledged, and the send loop has nothing to send until an acknowledgement frees room.
+    /// Output once resumed with whatever one acknowledgement freed, so every frame was as small as the one acknowledged
+    /// before it and split further at each ring wrap: about 330 frames and 66–78% of the bytes in large frames on Linux,
+    /// where a hosted arm64 runner's client was slow enough to fail the test above. Each acknowledgement here waits 3 ms.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public Task PersistentSessionSendsAFloodInLargeFramesToASlowClient() => AssertFloodGoesOutInLargeFramesAsync(ackDelayMilliseconds: 3);
+
+    private static async Task AssertFloodGoesOutInLargeFramesAsync(int ackDelayMilliseconds)
     {
         if (OperatingSystem.IsWindows())
             return;
@@ -297,7 +310,7 @@ public sealed class PtyWebSocketSessionManagerTests
         using (socket)
         {
             var connection = manager.ConnectAsync(credentials.SessionId, credentials.AuthenticationToken, 0, server, timeout.Token);
-            var client = new PersistentClient(socket);
+            var client = new PersistentClient(socket) { AckDelayMilliseconds = ackDelayMilliseconds };
             await client.ReceiveUntilAsync("READY", timeout.Token);
             var framesBefore = client.Frames;
             var bytesBefore = client.OutputBytes;
@@ -365,6 +378,9 @@ public sealed class PtyWebSocketSessionManagerTests
         public long OutputBytes { get; private set; }
         public long LargeFrameBytes { get; private set; }
 
+        /// <summary>Gets or sets how long the client waits before it acknowledges each output frame.</summary>
+        public int AckDelayMilliseconds { get; init; }
+
         public Task SendInputAsync(string input, CancellationToken cancellationToken) =>
             socket.SendAsync(
                 Encoding.UTF8.GetBytes(input),
@@ -423,6 +439,8 @@ public sealed class PtyWebSocketSessionManagerTests
             AcknowledgedOffset = _pendingOffset + result.Count;
             _pendingOffset = -1;
             _pendingBytes = 0;
+            if (AckDelayMilliseconds > 0)
+                await Task.Delay(AckDelayMilliseconds, cancellationToken);
             await socket.SendAsync(
                 Encoding.UTF8.GetBytes($"{{\"type\":\"ack\",\"offset\":{AcknowledgedOffset}}}"),
                 WebSocketMessageType.Text,

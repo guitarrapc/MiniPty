@@ -318,7 +318,7 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
             PtyWebSocketSessionManagerOptions options)
         {
             AuthenticationToken = authenticationToken.ToArray();
-            _output = new PersistentOutputBuffer(options.ReplayBufferSize);
+            _output = new PersistentOutputBuffer(options.ReplayBufferSize, options.MaxOutputFrameSize);
             _terminal = PtyTerminal.Start(startInfo, new PtyTerminalOptions { Output = BufferOutputAsync, CoalesceBursts = true });
             _completionObserver = ObserveCompletionAsync();
         }

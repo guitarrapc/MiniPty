@@ -4,9 +4,17 @@ namespace MiniPty.Terminal.Internal;
 /// Fixed-size byte ring retaining unacknowledged terminal output by absolute stream offset.
 /// Allocates once per persistent session; producer and consumer hot paths only copy/slice.
 /// </summary>
+/// <remarks>
+/// A write waits for room to store <c>resumeSpace</c> bytes at once, or all it has left if that is less. Without that
+/// wait a ring that filled with sent but unacknowledged output resumed with whatever one acknowledgement freed, and the
+/// send loop, which has nothing else to send, sent each such piece as its own frame. Frames then stayed as small as
+/// the client's acknowledgements and split further at every ring wrap, so a client slower than a flood got it in
+/// ever smaller frames.
+/// </remarks>
 internal sealed class PersistentOutputBuffer : IDisposable
 {
     private readonly byte[] _buffer;
+    private readonly int _resumeSpace;
     private readonly Lock _lock = new();
     private TaskCompletionSource _dataAvailable = NewSignal();
     private TaskCompletionSource _spaceAvailable = NewSignal();
@@ -18,7 +26,18 @@ internal sealed class PersistentOutputBuffer : IDisposable
     private Exception? _error;
     private bool _disposed;
 
-    public PersistentOutputBuffer(int capacity) => _buffer = new byte[capacity];
+    /// <param name="capacity">Bytes the ring retains until the client acknowledges them.</param>
+    /// <param name="resumeSpace">
+    /// Room a write waits for before it stores more, so that output resumes in pieces large enough for one frame. The
+    /// session manager passes its maximum frame size. It must be between 1 and <paramref name="capacity"/>.
+    /// </param>
+    public PersistentOutputBuffer(int capacity, int resumeSpace = 1)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(resumeSpace, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(resumeSpace, capacity);
+        _buffer = new byte[capacity];
+        _resumeSpace = resumeSpace;
+    }
 
     public int Capacity => _buffer.Length;
 
@@ -41,14 +60,15 @@ internal sealed class PersistentOutputBuffer : IDisposable
             {
                 ThrowIfUnavailable();
                 var free = _buffer.Length - checked((int)(_endOffset - _startOffset));
-                if (free == 0)
+                var remaining = data.Length - consumed;
+                if (free < Math.Min(remaining, _resumeSpace))
                 {
                     _spaceWaiting = true;
                     waitTask = _spaceAvailable.Task;
                 }
                 else
                 {
-                    var count = Math.Min(free, data.Length - consumed);
+                    var count = Math.Min(free, remaining);
                     var writeIndex = (int)(_endOffset % _buffer.Length);
                     var first = Math.Min(count, _buffer.Length - writeIndex);
                     data.Span.Slice(consumed, first).CopyTo(_buffer.AsSpan(writeIndex));
