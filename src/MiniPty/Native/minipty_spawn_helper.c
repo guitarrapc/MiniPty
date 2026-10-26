@@ -14,9 +14,20 @@ int main(int argc, char **argv)
 {
     const char *cwd;
     char **child_envp;
+    int report_fd = MINIPTY_START_REPORT_FD;
+    int err;
 
-    if (argc < 2)
+    /*
+     * The parent passes the start report pipe on this descriptor without close-on-exec, so the helper marks it before
+     * anything can exec. A helper started without one (the descriptor is not open) reports nothing.
+     */
+    if (fcntl(report_fd, F_SETFD, FD_CLOEXEC) != 0)
+        report_fd = -1;
+
+    if (argc < 2) {
+        minipty_report_start_failure(report_fd, MINIPTY_START_STAGE_EXEC, EINVAL);
         _exit(127);
+    }
 
     {
         /*
@@ -43,14 +54,21 @@ int main(int argc, char **argv)
     }
 
     cwd = minipty_env_get_cwd(environ);
-    if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
+    if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0) {
+        err = errno;
+        minipty_report_start_failure(report_fd, MINIPTY_START_STAGE_CHDIR, err);
         _exit(126);
+    }
 
     child_envp = minipty_envp_strip_internal(environ);
-    if (child_envp == NULL)
+    if (child_envp == NULL) {
+        minipty_report_start_failure(report_fd, MINIPTY_START_STAGE_EXEC, ENOMEM);
         _exit(127);
+    }
 
     minipty_execvpe(argv[1], &argv[1], child_envp);
+    err = errno;
+    minipty_report_start_failure(report_fd, MINIPTY_START_STAGE_EXEC, err);
     free(child_envp);
     _exit(127);
 }

@@ -2,7 +2,7 @@
 
 Goal: resolve the items below before the next release, the first since `v1.3.0` (see [next_todo.md](../next_todo.md#release)). They came from reviewing MiniPty as a general-purpose PTY library against the reference libraries under `.references/`: node-pty 1.1.0, Porta.Pty 2.2.3, WezTerm's `portable-pty` 0.9.0, and creack/pty. Each gate is closed by a fix, or by a decision recorded in the specifications, as its own section says.
 
-**Status:** open (2026-10-27). R1 is implemented (2026-10-27); R2–R5 are open.
+**Status:** open (2026-10-27). R1 and R2 are implemented (2026-10-27); R3–R5 are open. R2's macOS path is verified only by CI.
 
 ## Gate Inventory
 
@@ -72,13 +72,13 @@ The macOS helper resolves the program with the same function, so macOS behaves t
 These run on Unix, through `Pty.Start`, in `PtyTests`:
 
 - `PtyUnixPathLookupSkipsFilesWithoutExecutePermission`: a non-executable file earlier on `PATH` is skipped, and the executable in a later entry runs.
-- `PtyUnixPathLookupFailsWhenShebangInterpreterMissing` replaces the test that asserted the old fallback. A script with a missing interpreter exits 127 and its body does not run.
-- `PtyUnixFileWithoutExecutePermissionDoesNotStart`: a non-executable file, found on `PATH` or named by its full path, exits 127 and does not run.
+- `PtyUnixPathLookupFailsWhenShebangInterpreterMissing` replaces the test that asserted the old fallback. A script with a missing interpreter does not run (with R2, the start fails with `ENOENT`).
+- `PtyUnixFileWithoutExecutePermissionDoesNotStart`: a non-executable file, found on `PATH` or named by its full path, does not run (with R2, the start fails with `EACCES`).
 - `PtyUnixPathLookupUsesOverlayAndFallsBackToShellForPlainScripts` is unchanged. A plain script without a shebang still runs through `sh`; this is the `ENOEXEC` path, which stays.
 
 ### Lesson
 
-The shim ends the child with 127 for every exec failure, so the caller cannot tell `EACCES` from `ENOENT`. Only R2 would surface the `errno`.
+The shim ends the child with 127 for every exec failure, so the exit status alone cannot tell `EACCES` from `ENOENT`. R2's report surfaces the `errno`, and the R1 tests now assert it.
 
 ## R2: Unix start failures are not reported by `Pty.Start`
 
@@ -101,12 +101,10 @@ The first group writes the child's `errno` to a close-on-exec pipe. A successful
 - A caller cannot tell a missing program from a program that exits 127 or 126 itself.
 - The same `PtyStartInfo` fails differently per platform, so cross-platform callers need two error paths.
 
-### Decision required
+### Decision
 
-- **Report or keep.** Report Unix `exec` and `chdir` failures from `Pty.Start` (recommended), or keep the exit status and record why.
-- **Exception type.** If reported, choose between:
-  - `Win32Exception` carrying the `errno`, as `Process.Start` throws on Unix and as Windows already throws.
-  - `IOException`, as currently documented.
+- **Report.** Unix `exec` and `chdir` failures fail `Pty.Start`.
+- **`Win32Exception` carrying the `errno`.** `Process.Start` throws it on Unix, Windows already throws it, and a cross-platform caller catches one type. Failures before a child exists (opening the terminal, forking) stay `IOException`; the documentation that promised `IOException` for exec failures is corrected.
 
 ### Constraints known from earlier work
 
@@ -116,16 +114,34 @@ The first group writes the child's `errno` to a close-on-exec pipe. A successful
 - **macOS needs the helper to report too.** The parent spawns `minipty_spawn_helper` with `posix_spawn`, and the `chdir` and `exec` that can fail run inside the helper.
 - **Linux `forkpty` cannot open the pipe for the caller.** The pipe needs `O_CLOEXEC` from creation (`pipe2`), not `fcntl` afterwards, for the reason recorded in [lifecycle.md](../specs/lifecycle.md) (descriptors marked after opening leak to concurrent `Process.Start`).
 
-### Documents
+### Result (implemented 2026-10-27)
 
-These change if failures are reported:
+- **Mechanism:** a close-on-exec report pipe ([Start failure report](../references/pty_crossplatform.md#start-failure-report)).
+  - A child that cannot `chdir` or exec writes the stage and `errno` before `_exit`.
+  - The parent reads until end of file or a report.
+  - On a report, the parent reaps the child, closes the master, the slave, and the pidfd, and returns the `errno` with the stage.
+  - On macOS the helper receives the write end as descriptor 3.
+- **The wait is bounded at 10 s.** It matters only when another process keeps the write end. On macOS, which has no `pipe2`, a concurrent fork can keep it for good. When the wait gives up, the start succeeds as before, and a failure shows as the exit status.
+- **macOS does not retry a reported failure.** Its transient-error retry (`EAGAIN`, `ENOMEM`, `ENXIO`) would otherwise rerun a start whose exec failed with `ENOMEM`.
+- **Documents updated:**
+  - [pty_crossplatform.md](../references/pty_crossplatform.md): new section, the flows, the helper table.
+  - [lifecycle.md](../specs/lifecycle.md): failure table.
+  - [core_session.md](../specs/core_session.md): `FileName` row.
+  - [platform_support.md](../specs/platform_support.md): the `noexec` row.
+  - The `Pty.Start` exception documentation.
+  - The README never described the old behavior.
 
-- [lifecycle.md](../specs/lifecycle.md): failure table.
-- [pty_crossplatform.md](../references/pty_crossplatform.md): the "On total failure" paragraph.
-- [core_session.md](../specs/core_session.md).
-- The `Pty.Start` exception documentation.
-- The README.
-- The `PtyBaselineTests` cases that assert 127 and 126.
+### Tests
+
+- `StartFailureIsReported` now expects `Win32Exception` on every platform. On Unix it expects `ENOENT` for a missing program and for a missing directory, and checks that the messages name the program and the working directory. It also checks that a child that exits 127 or 126 by itself starts normally.
+- `StartFailureLeaksNothing` fails starts on every platform and checks descriptor counts. On Linux it also checks that the test process has no zombie children afterwards: a failed child that the start did not reap would stay one, since no watcher registers it.
+- The R1 tests now expect the start to fail:
+  - a missing interpreter fails with `ENOENT`;
+  - a non-executable file fails with `EACCES`.
+
+### Behavior change for the release note
+
+On Unix, `Pty.Start` throws `Win32Exception` for a program that cannot be executed or a working directory that cannot be entered, where it used to return a session whose child exited 127 or 126.
 
 ## R3: "No bundled helpers"
 

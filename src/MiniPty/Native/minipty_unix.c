@@ -1,8 +1,14 @@
+/* Must precede every system header: glibc declares pipe2 only with _GNU_SOURCE. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
+
 #include "minipty_unix_internal.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -11,6 +17,7 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -101,6 +108,112 @@ static void minipty_default_termios(struct termios *term)
     cfsetospeed(term, B38400);
 }
 
+/*
+ * How long a start waits for the child's report. A successful exec closes the pipe at once, so the bound matters only
+ * when another process holds the write end: a child forked concurrently on another thread inherits it until its own
+ * exec, and on macOS, which has no pipe2, a fork in the instant between pipe() and FD_CLOEXEC keeps it for good. The
+ * start then gives up waiting and succeeds as it did before reports existed, so a failure shows as the exit status.
+ */
+#define MINIPTY_START_REPORT_TIMEOUT_MS 10000
+
+/*
+ * Opens the start report pipe, both ends close-on-exec, with the write end at a descriptor above stdio and above the
+ * descriptor the macOS helper receives it on. A forkpty child replaces stdio with the terminal, and posix_spawn's
+ * adddup2 onto the same descriptor would leave close-on-exec set, so neither may hold the write end.
+ */
+static int minipty_open_report_pipe(int fds[2])
+{
+    int write_fd;
+
+#if defined(__APPLE__)
+    if (pipe(fds) != 0)
+        return errno > 0 ? errno : EMFILE;
+    if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
+        int err = errno > 0 ? errno : EINVAL;
+        close(fds[0]);
+        close(fds[1]);
+        return err;
+    }
+#else
+    if (pipe2(fds, O_CLOEXEC) != 0)
+        return errno > 0 ? errno : EMFILE;
+#endif
+
+    if (fds[1] > MINIPTY_START_REPORT_FD)
+        return 0;
+
+    write_fd = fcntl(fds[1], F_DUPFD_CLOEXEC, MINIPTY_START_REPORT_FD + 1);
+    if (write_fd < 0) {
+        int err = errno > 0 ? errno : EMFILE;
+        close(fds[0]);
+        close(fds[1]);
+        return err;
+    }
+
+    close(fds[1]);
+    fds[1] = write_fd;
+    return 0;
+}
+
+static long long minipty_monotonic_ms(void)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/*
+ * Waits on the read end of the start report pipe, after the parent closed its write end. Returns 1 with the stage and
+ * errno when the child reported a failure. Returns 0 when the pipe closed without a report (the exec succeeded, or the
+ * child ended in another way that its exit status reports) or when the wait gave up.
+ */
+static int minipty_await_start_report(int fd, int *stage_out, int *err_out)
+{
+    int report[2];
+    size_t received = 0;
+    long long deadline = minipty_monotonic_ms() + MINIPTY_START_REPORT_TIMEOUT_MS;
+
+    for (;;) {
+        struct pollfd pfd = { fd, POLLIN, 0 };
+        long long remaining = deadline - minipty_monotonic_ms();
+        int ready;
+        ssize_t n;
+
+        if (remaining <= 0)
+            return 0;
+
+        ready = poll(&pfd, 1, (int)remaining);
+        if (ready < 0) {
+            if (errno == EINTR)
+                continue;
+            return 0;
+        }
+        if (ready == 0)
+            return 0;
+
+        n = read(fd, (char *)report + received, sizeof(report) - received);
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN)
+                continue;
+            return 0;
+        }
+        if (n == 0)
+            return 0;
+
+        received += (size_t)n;
+        if (received < sizeof(report))
+            continue;
+
+        if (report[0] != MINIPTY_START_STAGE_CHDIR && report[0] != MINIPTY_START_STAGE_EXEC)
+            return 0;
+
+        *stage_out = report[0];
+        *err_out = report[1] > 0 ? report[1] : EINVAL;
+        return 1;
+    }
+}
+
 #if !defined(__APPLE__)
 
 #ifndef NSIG
@@ -184,7 +297,8 @@ static int spawn_pty_child_forkpty(
     char *const *argv,
     char *const *envp,
     pid_t *pid_out,
-    int *pidfd_out)
+    int *pidfd_out,
+    int *start_stage_out)
 {
     pid_t pid;
     sigset_t newmask;
@@ -192,11 +306,22 @@ static int spawn_pty_child_forkpty(
     struct termios term;
     char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
     int inherited_fd_scan_limit = 0;
+    int report[2];
+    int report_err;
+    int stage = MINIPTY_START_STAGE_NONE;
+    int child_err = 0;
 
     *pidfd_out = -1;
     if (child_envp == NULL) {
         errno = ENOMEM;
         return ENOMEM;
+    }
+
+    report_err = minipty_open_report_pipe(report);
+    if (report_err != 0) {
+        if (envp == NULL)
+            free(child_envp);
+        return report_err;
     }
 
 #if defined(__linux__)
@@ -217,18 +342,31 @@ static int spawn_pty_child_forkpty(
 
     if (pid < 0) {
         int err = errno > 0 ? errno : EINVAL;
+        close(report[0]);
+        close(report[1]);
         if (envp == NULL)
             free(child_envp);
         return err;
     }
 
     if (pid == 0) {
+        /* errno is saved first: the report's write could change it. */
+        int err;
+
         minipty_prepare_fork_child(inherited_fd_scan_limit);
-        if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
+        if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0) {
+            err = errno;
+            minipty_report_start_failure(report[1], MINIPTY_START_STAGE_CHDIR, err);
             _exit(126);
+        }
         minipty_execvpe(file, argv, child_envp);
+        err = errno;
+        minipty_report_start_failure(report[1], MINIPTY_START_STAGE_EXEC, err);
         _exit(127);
     }
+
+    /* Closed before anything else, so the pipe's end of file depends on the child's exec alone. */
+    close(report[1]);
 
     if (envp == NULL)
         free(child_envp);
@@ -245,6 +383,7 @@ static int spawn_pty_child_forkpty(
         int exit_code;
         int term_signal;
 
+        close(report[0]);
         minipty_signal_child(-1, (int)pid, SIGKILL);
         minipty_reap_child(-1, (int)pid, 1, &exit_code, &term_signal);
         close(*master);
@@ -260,6 +399,30 @@ static int spawn_pty_child_forkpty(
      * spawns on a forkpty that waits for end of file on a pipe of its own.
      */
     *pidfd_out = minipty_pidfd_open((int)pid);
+
+    /*
+     * The child never waits on this pipe, only the parent does. Holding a child until the parent signalled it, as the
+     * pidfd comment describes, deadlocked concurrent spawns; here a concurrent spawn's child that inherited the write
+     * end closes it at its own exec, which delays this read but cannot block it.
+     */
+    if (minipty_await_start_report(report[0], &stage, &child_err)) {
+        int exit_code;
+        int term_signal;
+
+        close(report[0]);
+        /* The child reported just before _exit, so this reaps it promptly and leaves no zombie. */
+        minipty_reap_child(*pidfd_out, (int)pid, 1, &exit_code, &term_signal);
+        if (*pidfd_out >= 0) {
+            close(*pidfd_out);
+            *pidfd_out = -1;
+        }
+        close(*master);
+        *master = -1;
+        *start_stage_out = stage;
+        return child_err;
+    }
+
+    close(report[0]);
     *pid_out = pid;
     return 0;
 }
@@ -354,7 +517,8 @@ static int minipty_spawn_darwin_once(
     char *const *argv,
     char *const *envp,
     pid_t *pid_out,
-    int *slave_out)
+    int *slave_out,
+    int *start_stage_out)
 {
     char helper_path[PATH_MAX];
     char slave_name[128];
@@ -365,6 +529,9 @@ static int minipty_spawn_darwin_once(
     size_t argc = 0;
     int low_fds[3] = {-1, -1, -1};
     size_t low_fd_opened = 0;
+    int report[2] = {-1, -1};
+    int stage = MINIPTY_START_STAGE_NONE;
+    int child_err = 0;
     int slave = -1;
     int err = 0;
     int spawn_err = 0;
@@ -400,6 +567,10 @@ static int minipty_spawn_darwin_once(
         err = ENOENT;
         goto done;
     }
+
+    err = minipty_open_report_pipe(report);
+    if (err != 0)
+        goto done;
 
     *master = minipty_openpt();
     if (*master < 0) {
@@ -496,6 +667,14 @@ static int minipty_spawn_darwin_once(
     spawn_err = posix_spawn_file_actions_addclose(&actions, *master);
     if (spawn_err != 0)
         goto spawn_setup_err;
+    /*
+     * Last, so a slave or master that sat on the report descriptor is already closed. POSIX_SPAWN_CLOEXEC_DEFAULT
+     * closes every descriptor the actions do not name, so the helper receives only stdio and this one, without
+     * close-on-exec; the helper sets it before its exec.
+     */
+    spawn_err = posix_spawn_file_actions_adddup2(&actions, report[1], MINIPTY_START_REPORT_FD);
+    if (spawn_err != 0)
+        goto spawn_setup_err;
 
     spawn_err = posix_spawnattr_setflags(
         &attrs,
@@ -529,6 +708,19 @@ static int minipty_spawn_darwin_once(
         goto done;
     }
 
+    close(report[1]);
+    report[1] = -1;
+    if (minipty_await_start_report(report[0], &stage, &child_err)) {
+        int status;
+
+        /* The helper reported just before _exit, so this reaps it promptly and leaves no zombie. */
+        while (waitpid(*pid_out, &status, 0) < 0 && errno == EINTR) {
+        }
+        *start_stage_out = stage;
+        err = child_err;
+        goto done;
+    }
+
     success = 1;
     goto done;
 
@@ -554,6 +746,10 @@ done:
     }
     if (slave >= 0)
         close(slave);
+    if (report[0] >= 0)
+        close(report[0]);
+    if (report[1] >= 0)
+        close(report[1]);
     for (size_t i = 0; i < low_fd_opened; i++) {
         if (low_fds[i] >= 0)
             close(low_fds[i]);
@@ -581,7 +777,8 @@ static int spawn_pty_child_darwin(
     char *const *argv,
     char *const *envp,
     pid_t *pid_out,
-    int *slave_out)
+    int *slave_out,
+    int *start_stage_out)
 {
     int err = 0;
 
@@ -590,10 +787,11 @@ static int spawn_pty_child_darwin(
     (void)file;
 
     for (int attempt = 0; attempt < MINIPTY_SPAWN_RETRY_MAX; attempt++) {
-        err = minipty_spawn_darwin_once(master, winp, cwd, argv, envp, pid_out, slave_out);
+        err = minipty_spawn_darwin_once(master, winp, cwd, argv, envp, pid_out, slave_out, start_stage_out);
         if (err == 0)
             return 0;
-        if (!minipty_spawn_err_is_transient(err))
+        /* A child that could not chdir or exec is the caller's error, not a transient failure to spawn. */
+        if (*start_stage_out != MINIPTY_START_STAGE_NONE || !minipty_spawn_err_is_transient(err))
             return err;
         if (*master >= 0) {
             close(*master);
@@ -615,14 +813,16 @@ static int spawn_pty_child(
     char *const *envp,
     pid_t *pid_out,
     int *pidfd_out,
-    int *slave_out)
+    int *slave_out,
+    int *start_stage_out)
 {
     *slave_out = -1;
+    *start_stage_out = MINIPTY_START_STAGE_NONE;
 #if defined(__APPLE__)
     *pidfd_out = -1;
-    return spawn_pty_child_darwin(master, winp, cwd, file, argv, envp, pid_out, slave_out);
+    return spawn_pty_child_darwin(master, winp, cwd, file, argv, envp, pid_out, slave_out, start_stage_out);
 #else
-    return spawn_pty_child_forkpty(master, winp, cwd, file, argv, envp, pid_out, pidfd_out);
+    return spawn_pty_child_forkpty(master, winp, cwd, file, argv, envp, pid_out, pidfd_out, start_stage_out);
 #endif
 }
 
@@ -635,12 +835,13 @@ int minipty_fork_pty_exec(
     char *const *envp,
     int *pid_out,
     int *pidfd_out,
-    int *slave_out)
+    int *slave_out,
+    int *start_stage_out)
 {
     pid_t pid = -1;
     int err;
 
-    err = spawn_pty_child(master, winp, working_directory, file, argv, envp, &pid, pidfd_out, slave_out);
+    err = spawn_pty_child(master, winp, working_directory, file, argv, envp, &pid, pidfd_out, slave_out, start_stage_out);
     if (err != 0)
         return err;
 

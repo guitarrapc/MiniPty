@@ -9,9 +9,20 @@
 #define MINIPTY_SPAWN_RETRY_MAX 4
 #define MINIPTY_SPAWN_RETRY_BASE_US 25000
 
+/*
+ * A child that cannot chdir or exec reports the stage and errno on a close-on-exec pipe before it exits, so the start
+ * fails in the parent. A successful exec closes the pipe without a report. The values cross into managed code.
+ */
+#define MINIPTY_START_STAGE_NONE 0
+#define MINIPTY_START_STAGE_CHDIR 1
+#define MINIPTY_START_STAGE_EXEC 2
+/* The descriptor the macOS spawn helper receives the report pipe on. */
+#define MINIPTY_START_REPORT_FD 3
+
 struct winsize;
 
 void minipty_execvpe(const char *file, char *const *argv, char *const *envp);
+void minipty_report_start_failure(int fd, int stage, int err);
 
 const char *minipty_env_get_cwd(char *const *envp);
 char **minipty_envp_for_child(char *const *envp);
@@ -27,7 +38,8 @@ int minipty_fork_pty_exec(
     char *const *envp,
     int *pid_out,
     int *pidfd_out,
-    int *slave_out);
+    int *slave_out,
+    int *start_stage_out);
 
 int minipty_set_winsize(
     int master,

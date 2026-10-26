@@ -44,13 +44,14 @@ internal static partial class UnixPtyBackend
         var master = 0;
         var pidfd = -1;
         var slave = -1;
+        var startStage = StartStageNone;
         unsafe
         {
-            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd, &slave);
+            var spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd, &slave, &startStage);
             if (spawnError != 0)
             {
                 exec.Dispose();
-                throw new IOException($"PTY spawn failed (errno {spawnError})");
+                throw CreateStartException(startInfo, startStage, spawnError);
             }
         }
 
@@ -77,6 +78,29 @@ internal static partial class UnixPtyBackend
         }
     }
 
+    // The stage a child reports when it cannot start (minipty_unix_internal.h, MINIPTY_START_STAGE_*).
+    private const int StartStageNone = 0;
+    private const int StartStageChdir = 1;
+    private const int StartStageExec = 2;
+
+    /// <summary>
+    /// The exception for a failed start. A child that could not enter its working directory or exec its program
+    /// reported the <c>errno</c> before exiting, so the start fails as <c>CreateProcess</c> does on Windows and as
+    /// <see cref="System.Diagnostics.Process.Start()"/> does on Unix: a <see cref="System.ComponentModel.Win32Exception"/>
+    /// whose <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is that <c>errno</c>. Anything else failed
+    /// before a child existed (opening the terminal, forking) and stays an <see cref="IOException"/>.
+    /// </summary>
+    private static Exception CreateStartException(PtyStartInfo startInfo, int startStage, int error) => startStage switch
+    {
+        StartStageChdir => new System.ComponentModel.Win32Exception(
+            error,
+            $"Cannot start '{startInfo.FileName}': working directory '{startInfo.WorkingDirectory}': {Marshal.GetPInvokeErrorMessage(error)}"),
+        StartStageExec => new System.ComponentModel.Win32Exception(
+            error,
+            $"Cannot start '{startInfo.FileName}': {Marshal.GetPInvokeErrorMessage(error)}"),
+        _ => new IOException($"PTY spawn failed (errno {error})"),
+    };
+
     private static unsafe int ForkPtyExec(
         int* master,
         Winsize* winsize,
@@ -86,7 +110,8 @@ internal static partial class UnixPtyBackend
         IntPtr envp,
         int* pid,
         int* pidfd,
-        int* slave) =>
+        int* slave,
+        int* startStage) =>
         minipty_fork_pty_exec(
             master,
             winsize,
@@ -96,7 +121,8 @@ internal static partial class UnixPtyBackend
             (byte**)envp,
             pid,
             pidfd,
-            slave);
+            slave,
+            startStage);
 
     private sealed class UnixExecPayload : IDisposable
     {
@@ -1585,7 +1611,8 @@ internal static partial class UnixPtyBackend
         byte** envp,
         int* pid_out,
         int* pidfd_out,
-        int* slave_out);
+        int* slave_out,
+        int* start_stage_out);
 
     [LibraryImport("minipty_unix", SetLastError = true)]
     private static partial int minipty_set_winsize(

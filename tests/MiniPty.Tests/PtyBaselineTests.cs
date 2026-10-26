@@ -32,6 +32,7 @@ public sealed class PtyBaselineTests
     private const int ErrorFileNotFound = 2;
     private const int ErrorDirectory = 267;
     private const int ESRCH = 3;
+    private const int ENOENT = 2;
     private const int SigKill = 9;
     // Set on this test executable to make it the child of ResizeReachesTheRunningChild on Windows.
     private const string ResizeChildVariable = "MINIPTY_TESTS_RESIZE_CHILD";
@@ -60,27 +61,33 @@ public sealed class PtyBaselineTests
     // ---------------------------------------------------------------- 1. Start failure
 
     /// <summary>
-    /// A missing program and a missing working directory fail the start. Windows reports them from
-    /// <see cref="Pty.Start"/>, because <c>CreateProcess</c> fails. On Unix the fork has already succeeded when the exec
-    /// or <c>chdir</c> fails, so the session starts and the child exits with the shell convention: 127 and 126.
+    /// A missing program and a missing working directory fail the start on every platform with a
+    /// <see cref="Win32Exception"/>. Windows reports them because <c>CreateProcess</c> fails. On Unix the fork has already
+    /// succeeded when the <c>chdir</c> or exec fails, so the child reports the <c>errno</c> before it exits
+    /// (<c>ENOENT</c> for both). A child that exits 127 or 126 by itself has started, and is not a start failure.
     /// </summary>
     [Test]
     public async Task StartFailureIsReported()
     {
+        var missing = await Assert.ThrowsAsync<Win32Exception>(() => StartAndDispose(MissingProgram()));
+        var badDirectory = await Assert.ThrowsAsync<Win32Exception>(() => StartAndDispose(InMissingDirectory()));
         if (OperatingSystem.IsWindows())
         {
-            var missing = await Assert.ThrowsAsync<Win32Exception>(() => StartAndDispose(MissingProgram()));
             await Assert.That(missing!.NativeErrorCode).IsEqualTo(ErrorFileNotFound);
-            var badDirectory = await Assert.ThrowsAsync<Win32Exception>(() => StartAndDispose(InMissingDirectory()));
             await Assert.That(badDirectory!.NativeErrorCode).IsEqualTo(ErrorDirectory);
             return;
         }
 
-        await using (var missing = Pty.Start(MissingProgram()))
-            await Assert.That((await missing.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(127);
+        await Assert.That(missing!.NativeErrorCode).IsEqualTo(ENOENT);
+        await Assert.That(missing.Message).Contains(MissingProgram().FileName);
+        await Assert.That(badDirectory!.NativeErrorCode).IsEqualTo(ENOENT);
+        await Assert.That(badDirectory.Message).Contains("working directory");
 
-        await using (var badDirectory = Pty.Start(InMissingDirectory()))
-            await Assert.That((await badDirectory.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(126);
+        foreach (var code in (int[])[127, 126])
+        {
+            await using var session = Pty.Start(Exits(code));
+            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(code);
+        }
 
         static Task StartAndDispose(PtyStartInfo startInfo)
         {
@@ -91,36 +98,69 @@ public sealed class PtyBaselineTests
 
     /// <summary>
     /// A start that fails releases what it had already created. On Windows that is the pseudo-console, its pipes, and
-    /// the attribute list; on Unix the session of a child whose exec failed.
+    /// the attribute list. On Unix it is the terminal, the start report pipe, the pidfd, and the child that reported
+    /// the failure, which is reaped rather than left a zombie.
     /// </summary>
     [Test]
     [NotInParallel]
     public async Task StartFailureLeaksNothing()
     {
-        await AssertNoLeakAsync(async () =>
+        await AssertNoLeakAsync(() =>
         {
-            await FailToStartAsync(MissingProgram());
-            await FailToStartAsync(InMissingDirectory());
+            FailToStart(MissingProgram());
+            FailToStart(InMissingDirectory());
+            return Task.CompletedTask;
         });
 
-        static async Task FailToStartAsync(PtyStartInfo startInfo)
+        // No watcher ever registers a child that failed to start, so a child the start did not reap stays a zombie for
+        // good. The test runs alone, and a zombie another test left is reaped by the watcher within the wait.
+        if (OperatingSystem.IsLinux())
         {
-            if (OperatingSystem.IsWindows())
+            var zombies = 0;
+            await WaitUntilAsync(() => (zombies = CountZombieChildren()) == 0, TimeSpan.FromSeconds(10));
+            await Assert.That(zombies).IsEqualTo(0);
+        }
+
+        static int CountZombieChildren()
+        {
+            var self = Environment.ProcessId;
+            var count = 0;
+            foreach (var directory in Directory.EnumerateDirectories("/proc"))
             {
+                if (!int.TryParse(Path.GetFileName(directory), out _))
+                    continue;
+
+                string stat;
                 try
                 {
-                    Pty.Start(startInfo).Dispose();
+                    stat = File.ReadAllText(Path.Combine(directory, "stat"));
                 }
-                catch (Win32Exception)
+                catch (IOException)
                 {
-                    return;
+                    continue;
                 }
 
-                throw new InvalidOperationException("The start did not fail.");
+                // "pid (comm) state ppid ...": comm may contain spaces and parentheses, so fields start after the last ')'.
+                var fields = stat[(stat.LastIndexOf(')') + 2)..].Split(' ');
+                if (fields[0] == "Z" && int.Parse(fields[1]) == self)
+                    count++;
             }
 
-            await using var session = Pty.Start(startInfo);
-            await session.WaitForExitAsync().WaitAsync(Timeout);
+            return count;
+        }
+
+        static void FailToStart(PtyStartInfo startInfo)
+        {
+            try
+            {
+                Pty.Start(startInfo).Dispose();
+            }
+            catch (Win32Exception)
+            {
+                return;
+            }
+
+            throw new InvalidOperationException("The start did not fail.");
         }
     }
 

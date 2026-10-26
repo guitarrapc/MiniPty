@@ -56,8 +56,12 @@ public static class Pty
     /// not find, or cannot open, before anything is created, with the error <c>CreateProcess</c> would report; the
     /// same holds for a program MiniPty looks up itself, when <see cref="PtyStartInfo.Environment"/> sets or removes
     /// <c>PATH</c>.
+    /// Unix: the child could not enter <see cref="PtyStartInfo.WorkingDirectory"/> or execute the program, for example
+    /// because it does not exist (<c>ENOENT</c>) or may not be executed (<c>EACCES</c>).
+    /// <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is the <c>errno</c>. The child has already
+    /// been reaped, and nothing the start created remains.
     /// </exception>
-    /// <exception cref="IOException">Unix: <c>openpty</c>, <c>fork</c>, or <c>exec</c> failed.</exception>
+    /// <exception cref="IOException">Unix: opening the pseudo-terminal or forking failed.</exception>
     public static PtySession Start(PtyStartInfo startInfo)
     {
         ArgumentNullException.ThrowIfNull(startInfo);

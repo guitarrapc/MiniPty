@@ -184,6 +184,7 @@ MiniPty uses a small `libminipty_unix` native shim that calls the platform `fork
 ### Child setup
 
 ```text
+pipe2(report, O_CLOEXEC)               /* start failure report */
 forkpty(master, NULL, NULL, winsize)   /* parent blocked all signals before fork */
 child: reset signal handlers to SIG_DFL (while signals still blocked in child)
 child: restore signal mask
@@ -192,6 +193,8 @@ child: scrub inherited fds >= 3 (Linux only; close_range closes, else FD_CLOEXEC
 child: optional chdir(cwd)
 child: resolve file against child PATH when needed
 child: execve(file, argv, envp)
+child: on failure, write stage and errno to the report pipe, then _exit
+parent: close the report write end; read until end of file or a report
 parent: keep master fd for PTY input/output
 ```
 
@@ -213,7 +216,7 @@ The shim follows `execvp`. When `execve(path, …)` fails, the result depends on
 | `EACCES` | No execute permission, or a `noexec` mount | Tries the next `PATH` entry. If no entry succeeds, the start fails with `EACCES` |
 | `ENOENT` | No such file, or a shebang that names a missing interpreter | Tries the next `PATH` entry. If no entry succeeds, the start fails |
 
-When the shim fails, the child exits with status **127**, the common shell convention for a failed `exec` (not only for a missing `PATH` lookup).
+When the shim fails, the child reports the `errno` to the parent and exits with status **127**, and `Pty.Start` throws ([Start failure report](#start-failure-report)).
 
 **Why only `ENOEXEC`:** `EACCES` and `ENOENT` used to fall back to `sh` as well, so that executable scripts on `noexec` mounts would run and scripts with a missing interpreter would still run. That made the program depend on files `execvp`, shells, and `Process.Start` all reject. Measured on WSL before the change:
 
@@ -221,6 +224,33 @@ When the shim fails, the child exits with status **127**, the common shell conve
 - A script whose interpreter was missing ran under `sh` instead of failing.
 
 `noexec` is an administrator's control, and the library does not work around it for every caller. A caller that wants a script run despite it names the interpreter explicitly (`FileName = "/bin/sh"` with the script as an argument). For the same reason, test fixtures that are executed live under the test output directory, not under `/tmp`, which hosted runners may mount `noexec` ([platform_support.md](../specs/platform_support.md)).
+
+### Start failure report
+
+A Unix start that cannot enter `WorkingDirectory` or exec the program fails `Pty.Start` with `Win32Exception`, whose `NativeErrorCode` is the `errno`: `ENOENT` for a missing program, directory, or interpreter, `EACCES` for a file that may not be executed. Windows throws the same type from `CreateProcess`, and .NET's `Process.Start` throws it on Unix. Failures before a child exists (opening the terminal, forking) stay `IOException`.
+
+**Why:** the `chdir` and the exec run in the child, after the fork has succeeded. Before this, the session started and the child exited 127 or 126, so a caller could not tell a missing program from a program that exits 127 itself, and the same `PtyStartInfo` failed differently per platform.
+
+**How the child reports:** Go's `os/exec`, Rust's `std::process::Command`, and the .NET runtime do the same.
+
+1. The parent opens a pipe, both ends close-on-exec.
+2. A child that fails writes the stage (`chdir` or exec) and the `errno` to it, one 8-byte write, before `_exit`.
+3. A successful exec closes the pipe without writing.
+4. The parent closes its write end right after the fork and reads until end of file or a report.
+5. On a report, the parent reaps the child, closes the master, the slave, and the pidfd, and returns the `errno` with the stage. Nothing of the start remains, and no zombie.
+
+On macOS the helper receives the write end as descriptor 3 (a `posix_spawn` file action; `POSIX_SPAWN_CLOEXEC_DEFAULT` passes nothing else), marks it close-on-exec, and reports its own `chdir` and exec failures the same way.
+
+**Constraints:**
+
+- **The child never waits on the parent.** Holding a forked child until the parent signalled it deadlocked concurrent spawns, because each held child had inherited another spawn's pipe. Here only the parent waits. A child forked concurrently on another thread inherits the write end until its own exec, which delays the read but cannot block it.
+- **The wait is bounded (10 s).** A process that keeps the write end open makes the pipe's end of file never arrive:
+  - On macOS, which has no `pipe2`, a process the host forks on another thread between `pipe()` and `FD_CLOEXEC` keeps it for good.
+  - Elsewhere, a process forked without an exec keeps it until it exits.
+  When the wait gives up, the start succeeds as it did before reports existed, and a failure then shows only as the exit status.
+- **The write end must not sit on a descriptor the child replaces.** `forkpty` replaces stdio with the terminal. On macOS, `posix_spawn`'s `adddup2` onto the same descriptor would leave close-on-exec set. The write end is therefore moved above descriptor 3 when it opens lower.
+
+**Lesson:** a shim that ends the child with one status for every exec failure hides the `errno`. With the report, `EACCES` and `ENOENT` reach the caller apart, which the `sh` fallback change above made matter.
 
 ### macOS: posix_spawn + spawn-helper
 
@@ -230,14 +260,18 @@ parent (libminipty_unix.dylib):
   ioctl(TIOCPTYGNAME) → open slave (O_NOCTTY), TIOCSWINSZ, tcsetattr(default termios)
   resolve minipty_spawn_helper via dladdr(dylib path)
   inject MINIPTY_CWD into envp when PtyStartInfo.WorkingDirectory is set
-  posix_spawn(helper, dup2 slave → stdio, SETSID, …)
+  open the start report pipe
+  posix_spawn(helper, dup2 slave → stdio, dup2 report → 3, SETSID, …)
+  wait for the report: end of file, or a failure (reap the helper, fail the start)
   keep master fd, and slave fd until the master closes
 
 minipty_spawn_helper:
+  mark descriptor 3 close-on-exec
   open(ttyname(STDIN), O_RDWR | O_NONBLOCK)   # controlling terminal
   poll → POLLHUP: raise(SIGHUP)                # master already closed
   chdir(MINIPTY_CWD) when present; strip MINIPTY_CWD from env
   minipty_execvpe(file, argv, envp)
+  on failure: write stage and errno to descriptor 3, then _exit
 ```
 
 | Item | Detail |
@@ -250,7 +284,8 @@ minipty_spawn_helper:
 | Low-fd reservation | Before opening the real master, open dummy PTYs on vacant stdio slots (0–2) until the next fd is `>= 3` or three slots are held — keeps `dup2(slave → 0/1/2)` reliable when the embedding host closed or repurposed low fds |
 | `posix_spawn` and `EINTR` | Retry `posix_spawn` in a tight inner loop on `EINTR` only, reusing the same `actions` / `attrs` — separate from the outer transient retry below |
 | Transient spawn errors | macOS only: outer retry up to 4× on `EAGAIN` / `ENOMEM` / `ENXIO` with 25 ms × attempt backoff; closes the master between attempts |
-| Spawn errors to managed | `minipty_fork_pty_exec` returns positive errno; `IOException` uses that value |
+| Spawn errors to managed | `minipty_fork_pty_exec` returns a positive errno and the stage the child reported, if any. A reported `chdir` or exec failure becomes `Win32Exception`; any other error, `IOException` ([Start failure report](#start-failure-report)) |
+| Start report descriptor | The helper receives the report pipe's write end as descriptor 3, marks it close-on-exec, and writes its `chdir` or exec failure there before exiting |
 | The host's slave descriptor | Returned with the master and closed with it, close-on-exec like it, so the child's exit is never the terminal's last close and macOS does not discard output the master has not read yet ([Post-exit drain](#post-exit-drain)) |
 | Host gone before the helper's open | A blocking open of a slave with `CLOCAL` clear waits for carrier, and a closed master never brings it back. The helper therefore opens non-blocking, which still makes the slave its controlling terminal. A terminal that has already hung up reports `POLLHUP` (macOS sets it only when `POLLIN` is requested), and the helper ends by `SIGHUP`, the signal a session leader gets when its terminal hangs up. Before this, a helper whose host crashed right after the spawn waited in `open` forever, reparented to `launchd` |
 

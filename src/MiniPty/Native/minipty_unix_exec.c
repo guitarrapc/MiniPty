@@ -173,6 +173,26 @@ static void minipty_execve_path(const char *dir, size_t dir_len, const char *fil
     minipty_execve_compat(path, argv, envp);
 }
 
+/*
+ * Writes the failed stage and its errno to the start report pipe. Runs in a forked child before exec, so it only calls
+ * write(2), which is async-signal-safe. The 8-byte report is below PIPE_BUF, so it arrives whole. A negative fd (no
+ * pipe) reports nothing, and the parent then sees the child's exit status only.
+ */
+void minipty_report_start_failure(int fd, int stage, int err)
+{
+    int report[2];
+    ssize_t written;
+
+    if (fd < 0)
+        return;
+
+    report[0] = stage;
+    report[1] = err;
+    do {
+        written = write(fd, report, sizeof(report));
+    } while (written < 0 && errno == EINTR);
+}
+
 void minipty_execvpe(const char *file, char *const *argv, char *const *envp)
 {
     const char *path;

@@ -965,8 +965,9 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// A script whose shebang names a missing interpreter fails to exec (<c>ENOENT</c>), as with <c>execvp</c>. It must
-    /// not run under <c>sh</c> instead: the script was written for another interpreter.
+    /// A script whose shebang names a missing interpreter fails to exec (<c>ENOENT</c>), as with <c>execvp</c>, and the
+    /// start fails with that <c>errno</c>. It must not run under <c>sh</c> instead: the script was written for another
+    /// interpreter.
     /// </summary>
     [Test]
     [Retry(3)]
@@ -982,13 +983,12 @@ public sealed class PtyTests
             await File.WriteAllTextAsync(script, "#!/no-such-minipty-interpreter\nprintf bad-shebang-ran-under-sh\n");
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
-            var result = await PtyCapture.RunAsync(Spawn("minipty-bad-shebang-script", []) with
+            var failure = await Assert.ThrowsAsync<System.ComponentModel.Win32Exception>(() => StartAndDispose(Spawn("minipty-bad-shebang-script", []) with
             {
                 Environment = new Dictionary<string, string?> { ["PATH"] = tempRoot }
-            });
+            }));
 
-            await Assert.That(result.ExitCode).IsEqualTo(127);
-            await Assert.That(result.Contains("bad-shebang-ran-under-sh")).IsFalse();
+            await Assert.That(failure!.NativeErrorCode).IsEqualTo(UnixENOENT);
         }
         finally
         {
@@ -1039,7 +1039,7 @@ public sealed class PtyTests
 
     /// <summary>
     /// A file without execute permission does not start, whether it is the only match on <c>PATH</c> or named by its full
-    /// path. The child exits 127, as for any failed exec.
+    /// path: the start fails with <c>EACCES</c>, as <c>execvp</c> reports it.
     /// </summary>
     [Test]
     [Retry(3)]
@@ -1057,13 +1057,12 @@ public sealed class PtyTests
             await File.WriteAllTextAsync(script, "printf not-executable-file-ran\n");
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite);
 
-            var result = await PtyCapture.RunAsync(Spawn(fullPath ? script : "minipty-not-executable", []) with
+            var failure = await Assert.ThrowsAsync<System.ComponentModel.Win32Exception>(() => StartAndDispose(Spawn(fullPath ? script : "minipty-not-executable", []) with
             {
                 Environment = new Dictionary<string, string?> { ["PATH"] = tempRoot }
-            });
+            }));
 
-            await Assert.That(result.ExitCode).IsEqualTo(127);
-            await Assert.That(result.Contains("not-executable-file-ran")).IsFalse();
+            await Assert.That(failure!.NativeErrorCode).IsEqualTo(UnixEACCES);
         }
         finally
         {
@@ -2109,6 +2108,16 @@ public sealed class PtyTests
 
         startInfo = Spawn("head", ["-c", "32768", "/dev/zero"]);
         return true;
+    }
+
+    // errno values shared by Linux, macOS, and FreeBSD.
+    private const int UnixENOENT = 2;
+    private const int UnixEACCES = 13;
+
+    private static Task StartAndDispose(PtyStartInfo startInfo)
+    {
+        Pty.Start(startInfo).Dispose();
+        return Task.CompletedTask;
     }
 
     /// <summary>GitHub-hosted /tmp may be <c>noexec</c>; keep exec-test fixtures under the test output directory.</summary>
