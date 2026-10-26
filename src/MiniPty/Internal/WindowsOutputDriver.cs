@@ -36,7 +36,7 @@ namespace MiniPty.Internal;
 /// so a completion never writes into a ring another session owns.
 /// </para>
 /// <para>
-/// Drivers are pooled across sessions like reader threads, because each owns a <see cref="PreAllocatedOverlapped"/>,
+/// Drivers are pooled across sessions, because each owns a <see cref="PreAllocatedOverlapped"/>,
 /// about 200 B to create. A session pays only its pipe's binding to the completion port (40 B).
 /// </para>
 /// </remarks>

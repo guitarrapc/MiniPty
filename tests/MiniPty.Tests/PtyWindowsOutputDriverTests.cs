@@ -272,39 +272,18 @@ public sealed class PtyWindowsOutputDriverTests
         }
     }
 
-    /// <summary>
-    /// The rollback switch starts sessions on reader threads, reading the anonymous pipe as before; without it, sessions
-    /// read through I/O completions.
-    /// </summary>
+    /// <summary>Windows sessions read through I/O completions on the overlapped output pipe.</summary>
     [Test]
-    [NotInParallel]
-    public async Task TheRollbackSwitchSelectsReaderThreads()
+    public async Task SessionsReadThroughIoCompletions()
     {
         if (!OperatingSystem.IsWindows())
             return;
 
         var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        var startInfo = new PtyStartInfo { FileName = cmd, Arguments = ["/c", "echo rollback-marker"] };
-
-        await using (var session = Pty.Start(startInfo))
-        {
-            await Assert.That(session.OutputPump.Driver).IsTypeOf<WindowsOutputDriver>();
-            var text = System.Text.Encoding.UTF8.GetString(await ReadAllAsync(session).WaitAsync(Timeout));
-            await Assert.That(text).Contains("rollback-marker");
-        }
-
-        AppContext.SetSwitch(PtyOutputDrivers.UseReaderThreadsSwitch, true);
-        try
-        {
-            await using var session = Pty.Start(startInfo);
-            await Assert.That(session.OutputPump.Driver).IsTypeOf<PtyReaderThread>();
-            var text = System.Text.Encoding.UTF8.GetString(await ReadAllAsync(session).WaitAsync(Timeout));
-            await Assert.That(text).Contains("rollback-marker");
-        }
-        finally
-        {
-            AppContext.SetSwitch(PtyOutputDrivers.UseReaderThreadsSwitch, false);
-        }
+        await using var session = Pty.Start(new PtyStartInfo { FileName = cmd, Arguments = ["/c", "echo driver-marker"] });
+        await Assert.That(session.OutputPump.Driver).IsTypeOf<WindowsOutputDriver>();
+        var text = System.Text.Encoding.UTF8.GetString(await ReadAllAsync(session).WaitAsync(Timeout));
+        await Assert.That(text).Contains("driver-marker");
     }
 
     private static byte[] Pattern(int length)
@@ -449,11 +428,6 @@ public sealed class PtyWindowsOutputDriverTests
             thread.Start();
             return thread;
         }
-
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader) => throw new NotSupportedException();
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput) =>
-            throw new NotSupportedException();
 
         public override void Dispose()
         {

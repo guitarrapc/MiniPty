@@ -5,7 +5,7 @@ namespace MiniPty.Tests;
 
 /// <summary>
 /// The kqueue registration of a PTY master that the Unix loop reads on macOS and FreeBSD, driven through the native
-/// watcher calls directly on a PTY pair the test owns (<c>.github/docs/plans/plan_thread_free_io.md</c>, Phases 4 and 6).
+/// watcher calls directly on a PTY pair the test owns (<c>.github/docs/references/pty_crossplatform.md</c>, Readiness on a pty master).
 /// These are the kqueue behaviors the loop relies on that no session can show: a session never opens its slave again,
 /// and its read and write filters are only ever seen through the loop.
 /// </summary>

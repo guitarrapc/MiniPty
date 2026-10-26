@@ -17,10 +17,9 @@ namespace MiniPty.Capture;
 /// <para>
 /// Reads that follow one another closely join one chunk: a read within <see cref="JoinGapMicroseconds"/> of the
 /// previous one extends its chunk while the chunk is younger than <see cref="JoinBudgetMicroseconds"/> and no larger
-/// than <see cref="PtyOutputPump.PublishSize"/>, and keeps its first read's time. These are the reader thread's Windows
-/// coalescing windows, which it no longer applies once a driver publishes each read as it completes (ConPTY delivers
-/// bulk output in slices 20–45 µs apart), so a 32 KiB capture keeps about as few chunks, and as little metadata, as
-/// before. It is decided per write from the reads' own timestamps, so it holds nothing back and needs no timer; output
+/// than <see cref="PtyOutputPump.PublishSize"/>, and keeps its first read's time. These are the windows Windows reads were once joined with
+/// before they were published; drivers now publish each read as it completes (ConPTY delivers bulk output in slices
+/// 20–45 µs apart), so the join keeps a 32 KiB capture at about as few chunks, and as little metadata, as then. It is decided per write from the reads' own timestamps, so it holds nothing back and needs no timer; output
 /// delivered without a read timestamp (read before the sink attached) never joins.
 /// </para>
 /// <para>

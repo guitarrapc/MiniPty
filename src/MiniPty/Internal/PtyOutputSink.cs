@@ -16,14 +16,14 @@ namespace MiniPty.Internal;
 /// the drain wait reports end of output.
 /// </para>
 /// <para>
-/// Delivery runs on I/O completions on Windows, on the loop shared by every session on Unix, and on a reader thread under
-/// the rollback switch, so a sink must cost the same on any thread: no pool with per-thread caches, no growth that copies what
+/// Delivery runs on I/O completions on Windows and on the loop shared by every session on Unix, so a sink must cost the
+/// same on any thread: no pool with per-thread caches, no growth that copies what
 /// was already written, and no result built until the caller asks for it on its own thread.
 /// </para>
 /// <para>
 /// The drain wait is a single reusable wait slot, so awaiting end of output allocates nothing. Its deadlines
 /// follow <see cref="PtyCompleteOptions"/>: the transport closes at <see cref="PtyCompleteOptions.OutputDrainGrace"/>
-/// after exit at the latest, and the wait fails with <see cref="TimeoutException"/> when the reader has not
+/// after exit at the latest, and the wait fails with <see cref="TimeoutException"/> when output reading has not
 /// finished <see cref="PtyCompleteOptions.OutputReaderCloseTimeout"/> after the close.
 /// </para>
 /// </remarks>
@@ -77,7 +77,7 @@ internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
         return graceMs >= 0 && now - exitTick >= graceMs;
     }
 
-    /// <summary>Fails the drain wait once the reader has outlived the close timeout. Runs on a drain tick.</summary>
+    /// <summary>Fails the drain wait once output reading has outlived the close timeout. Runs on a drain tick.</summary>
     /// <returns><see langword="true"/> once the timeout has fired.</returns>
     internal bool CheckCloseTimeout(long now, long closeRequestedTick, PtyOutputPump pump)
     {
@@ -92,10 +92,10 @@ internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
     }
 
     /// <summary>
-    /// Waits for end of output after child exit. Returns <see langword="true"/> once the reader has finished, and
+    /// Waits for end of output after child exit. Returns <see langword="true"/> once output reading has finished, and
     /// <see langword="false"/> on a wake that changed nothing; callers loop until <see langword="true"/>.
     /// </summary>
-    /// <exception cref="TimeoutException">The reader did not finish within the close timeout.</exception>
+    /// <exception cref="TimeoutException">Output reading did not finish within the close timeout.</exception>
     /// <exception cref="ObjectDisposedException">The session was disposed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     internal ValueTask<bool> WaitForDrainAsync(

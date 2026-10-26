@@ -32,8 +32,7 @@ internal static partial class UnixPtyBackend
     /// queued input, and looks at every session that asked (a consumer freed space, input was queued, a sink attached, the
     /// close or disposal began). A session's failure ends that session's output alone. Reading needs no thread-pool worker,
     /// so output keeps flowing into rings while the host's pool is starved; only the consumers' continuations wait for it.
-    /// Sessions read on reader threads under the rollback switch (<see cref="PtyOutputDrivers"/>), and when the watcher
-    /// has no epoll or kqueue.
+    /// A session whose master this thread cannot register (no epoll or kqueue) fails to start: nothing else reads it.
     /// </para>
     /// <para>
     /// While a bridge's reader waits to coalesce a burst, this thread also serves the deadlines' tick
@@ -62,8 +61,8 @@ internal static partial class UnixPtyBackend
     /// It also sends the kill that follows a disposal's hang-up. The deadline joins this thread's wait timeout
     /// rather than getting a timer of its own, so disposal allocates no timer. Until the child is reaped or killed, this
     /// thread also discards its output, because the session's reading has stopped and the master stays open for the
-    /// hang-up: a session read on this loop keeps its registration and discards there, and one read on a reader thread
-    /// has its master watched for output as follows. The master's output wakes the wait, and the polling interval backs that up. A macOS master buffers
+    /// hang-up: a session read on this loop keeps its registration and discards there, and one this loop no longer reads
+    /// (its service failed, or its start failed before it was registered) has its master watched for output as follows. The master's output wakes the wait, and the polling interval backs that up. A macOS master buffers
     /// about 1 KiB, so discarding on the interval alone held a writing child to about 100 KiB/s. When the process exits
     /// normally, hung-up children are killed at once, and so is a child disposed after that, because the process may
     /// end before any deadline passes.
@@ -212,7 +211,7 @@ internal static partial class UnixPtyBackend
         /// <summary>
         /// Registers <paramref name="session"/>'s <paramref name="master"/> for reading on this thread. Returns
         /// <see langword="false"/> when this thread cannot read masters (no epoll or kqueue, or a 32-bit kqueue build, whose
-        /// event cannot carry the token), and the session then reads on a reader thread. The caller holds a reference on the master until
+        /// event cannot carry the token), and the session then fails to start. The caller holds a reference on the master until
         /// <see cref="DeregisterMaster"/>, so its descriptor cannot close, and its number be reused, while registered.
         /// </summary>
         internal static bool TryRegisterMaster(UnixPtyBackendInstance session, int master)

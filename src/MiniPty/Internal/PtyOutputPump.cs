@@ -21,13 +21,11 @@ internal interface IPtyOutputWaiter
 /// <see cref="Finish"/>, and the free-space handshake) as output arrives, and the pump calls the driver back when its
 /// state changes in a way the driver cannot see from the transport: the consumer freed space, a sink attached, the
 /// close was requested, disposal began, or the drain gave up on the transport ending. Windows reads through I/O
-/// completions (<see cref="WindowsOutputDriver"/>), Unix on the exit watcher's loop, and every platform under the
-/// rollback switch on a <see cref="PtyReaderThread"/> blocking in the transport.
+/// completions (<see cref="WindowsOutputDriver"/>), Unix on the exit watcher's loop.
 /// </para>
 /// <para>
 /// <b>Ring.</b> <see cref="Capacity"/> bytes in one pinned buffer from <see cref="PtyBufferPool"/>. Each transport
-/// read, plus the bytes that arrive within a short micro-window after it, is published at once, up to
-/// <see cref="PublishSize"/>, so bulk output is published in few pieces without delaying interactive output. A
+/// read, up to <see cref="PublishSize"/>, is published as it completes, so the pump never delays output. A
 /// consumer takes all contiguous published bytes as one chunk (up to the end of the buffer and the backend's
 /// <see cref="IPtyBackend.OutputChunkLimit"/>), so a consumer that fell behind, such as a WebSocket still sending
 /// the previous chunk, takes several reads at once. When less than <see cref="PublishSize"/> is free the pump stops
@@ -56,15 +54,15 @@ internal interface IPtyOutputWaiter
 /// <b>Lifetime.</b> The ring is taken from the pool when the driver first reads into it (<see cref="HoldRing"/>), and
 /// given back once the driver has let go of it (<see cref="LetGoOfRing"/>) and no unread output remains, or the session
 /// was disposed, whichever comes last, so the driver never writes into an array another renter owns and a consumer's
-/// chunk stays valid until it releases it. A driver that blocks in the transport holds the ring until end of output; one
-/// that can wait without a buffer lets go of it whenever the consumer has caught up, so an idle session holds none.
+/// chunk stays valid until it releases it. The driver lets go of it whenever the consumer has caught up and it waits for
+/// output, so an idle session holds none.
 /// Disposal makes the pump discard output until the transport ends, which ConPTY needs to finish closing.
 /// </para>
 /// </remarks>
 internal sealed class PtyOutputPump : IValueTaskSource
 {
     /// <summary>
-    /// Most bytes the pump publishes at once (one transport read and the continuation reads appended to it), and the
+    /// Most bytes the pump publishes at once (one transport read), and the
     /// free space it waits for before reading again, so a consumer that frees a few bytes at a time does not cause a
     /// read per release.
     /// </summary>
@@ -74,7 +72,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal const int Capacity = 4 * PublishSize;
 
     /// <summary>
-    /// Post-exit silence after which the transport is closed so the reader sees end of output, and after which a
+    /// Post-exit silence after which the transport is closed so the driver sees end of output, and after which a
     /// close that did not end it is given up on. Backends report it through <see cref="IPtyBackend.PostExitQuietMs"/>.
     /// </summary>
     internal const int DefaultPostExitQuietMs = 100;
@@ -83,7 +81,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private const int FlagSessionDisposed = 2;
     private const int FlagCloseRequested = 4;
     private const int FlagExitObserved = 8;
-    /// <summary>The drain has given up on the OS ending the transport; the reader drains without blocking and stops.</summary>
+    /// <summary>The drain has given up on the OS ending the transport; the driver drains without blocking and stops.</summary>
     private const int FlagEndOfOutputForced = 16;
 
     // Who has the ring (_ringState), guarded by lock (this): nobody, the driver, or unread output it left behind.
@@ -146,7 +144,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// <summary>Whether the transport close has started: set before <see cref="IPtyBackend.CloseOutputTransport"/> runs.</summary>
     internal bool IsCloseRequested => (Volatile.Read(ref _flags) & FlagCloseRequested) != 0;
 
-    /// <summary>Whether the reader is parked on a full ring until the consumer frees <see cref="PublishSize"/> bytes.</summary>
+    /// <summary>Whether the driver is parked on a full ring until the consumer frees <see cref="PublishSize"/> bytes.</summary>
     internal bool IsWaitingForFreeSpace => Volatile.Read(ref _producerWaiting) != 0;
 
     /// <summary>The transport failure that ended the pump, if any. Read only after <see cref="IsProducerFinished"/>.</summary>
@@ -265,8 +263,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal void ClearWakeWhenEmpty() => Volatile.Write(ref _wakeWhenEmpty, 0);
 
     /// <summary>
-    /// Stamps a read that returned bytes, for the post-exit quiet interval: per read, so the empty tail of a
-    /// coalescing window does not postpone the quiet close.
+    /// Stamps a read that returned bytes, for the post-exit quiet interval: only such reads, so the driver's empty
+    /// reads and waits do not postpone the quiet close.
     /// </summary>
     internal void OnOutputRead() => Volatile.Write(ref _lastReadTick, Environment.TickCount64);
 
@@ -719,9 +717,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
         // 1 ms and its host exits, which breaks the pipe. It does not when another process holds the pipe's write
         // end: a process the host started with handle inheritance while CreatePseudoConsole was duplicating its
         // ends into the console host inherited them, and the pipe breaks only when that process exits. So once
-        // reads have been quiet for the same interval after the close, the pump ends output itself: the reader is
-        // released from its blocking read and drains what is left without blocking. Repeated every tick until the
-        // reader has finished, because a cancel that lands between two reads cancels nothing.
+        // reads have been quiet for the same interval after the close, the pump ends output itself: the driver's
+        // pending read is canceled and the driver drains what is left without waiting. Repeated every tick until the
+        // driver has finished, because a cancel that lands between two reads cancels nothing.
         var closeRequestedTick = Volatile.Read(ref _closeRequestedTick);
         if (IsQuietSince(now, closeRequestedTick))
         {
@@ -729,12 +727,12 @@ internal sealed class PtyOutputPump : IValueTaskSource
             Volatile.Read(ref _driver)?.CancelRead(this);
         }
 
-        // Only a completion sink has a deadline of its own to watch; every pump ticks until its reader finishes.
+        // Only a completion sink has a deadline of its own to watch; every pump ticks until its driver finishes.
         return sink is not null && sink.CheckCloseTimeout(now, closeRequestedTick, this);
     }
 
     /// <summary>
-    /// Whether the reader has read nothing for the backend's <see cref="IPtyBackend.PostExitQuietMs"/>, counted from
+    /// Whether the driver has read nothing for the backend's <see cref="IPtyBackend.PostExitQuietMs"/>, counted from
     /// the later of its last read and <paramref name="since"/>.
     /// </summary>
     private bool IsQuietSince(long now, long since)
@@ -747,8 +745,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     }
 
     /// <summary>
-    /// Closes the transport so the reader reaches end of output: the pseudo-console on Windows, the master on Unix
-    /// (physically once the reader lets go of it). Never throws.
+    /// Closes the transport so the driver reaches end of output: the pseudo-console on Windows, the master on Unix
+    /// (physically once the loop lets go of it). Never throws.
     /// </summary>
     internal void RequestClose()
     {
@@ -766,7 +764,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
         }
         catch (Exception)
         {
-            // The transport already failed or is being disposed; the reader ends either way.
+            // The transport already failed or is being disposed; the driver ends either way.
         }
 
         Volatile.Read(ref _driver)?.Wake(this);
@@ -846,7 +844,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
         _stopped.OnCompleted(continuation, state, token, flags);
 
     /// <summary>
-    /// Wakes the driver to re-check state. The Unix backend uses it when input is queued, so that the reader thread,
+    /// Wakes the driver to re-check state. The Unix backend uses it when input is queued, so that the loop,
     /// which writes queued input, also waits for the master to take more.
     /// </summary>
     internal void WakeDriver() => Volatile.Read(ref _driver)?.Wake(this);

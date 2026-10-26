@@ -1084,13 +1084,5 @@ public sealed class PtyOutputCoalescingTests
         void IPtyOutputDriver.OnPumpFinished(PtyOutputPump pump)
         {
         }
-
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader) => 0;
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            return 0;
-        }
     }
 }

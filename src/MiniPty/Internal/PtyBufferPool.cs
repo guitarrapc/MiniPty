@@ -9,16 +9,15 @@ namespace MiniPty.Internal;
 /// <para>
 /// Not <see cref="System.Buffers.ArrayPool{T}.Shared"/>, which caches arrays per thread: an array returned on a thread
 /// other than the next renter's stays in the returning thread's cache, and the next rent allocates. A ring is taken
-/// when output arrives and given back by whichever party lets go of it last: the output driver (a reader thread, or an
-/// I/O completion on a pool worker), a consumer, or a disposing thread. One lock-guarded stack has no thread affinity,
+/// when output arrives and given back by whichever party lets go of it last: the output driver (an I/O completion on a pool
+/// worker on Windows, the I/O loop on Unix), a consumer, or a disposing thread. One lock-guarded stack has no thread affinity,
 /// so a buffer returned anywhere serves the next session.
 /// </para>
 /// <para>
 /// Buffers are allocated pinned, on the pinned object heap, so an overlapped read can be posted into one without a pin
 /// of its own. Every returned buffer is kept: the list grows to the peak number of rings held at once and then
 /// allocates nothing. That peak is the number of sessions with output unread at the same moment, not the number of open
-/// sessions, wherever a driver waits without a buffer (Windows); a reader thread holds its ring for the session's whole
-/// output. The list is not trimmed: a peak's worth of 16 KiB buffers is small next to what the sessions behind it cost.
+/// sessions, since every driver waits for output without a buffer. The list is not trimmed: a peak's worth of 16 KiB buffers is small next to what the sessions behind it cost.
 /// </para>
 /// </remarks>
 internal static class PtyBufferPool

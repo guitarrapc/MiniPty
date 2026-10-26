@@ -17,10 +17,9 @@ internal interface IPtyBackend : IDisposable
     public Stream Input { get; }
 
     // Input. A write takes what the transport accepts now on the calling thread, and the rest is queued in order.
-    // On Unix the session's output driver (the watcher loop, or a reader thread under the rollback switch) writes the
-    // queue when the master can take more. On Windows I/O completions on the overlapped input pipe write it as ConPTY
-    // reads input again. PtyInputWrites turns
-    // a queued write into the caller's task or a blocking wait.
+    // On Unix the exit watcher's loop, which also reads the session's output, writes the queue when the master can take
+    // more. On Windows I/O completions on the overlapped input pipe write it as ConPTY reads input again.
+    // PtyInputWrites turns a queued write into the caller's task or a blocking wait.
 
     /// <summary>
     /// Writes what the transport takes now and queues the rest in issue order. Returns the queued write, or null when
@@ -78,9 +77,8 @@ internal interface IPtyBackend : IDisposable
     /// <summary>
     /// Starts reading output for <paramref name="pump"/> with this backend's <see cref="IPtyOutputDriver"/>. Called
     /// once, by the session constructor. Windows starts a <see cref="WindowsOutputDriver"/>, and Unix registers the master
-    /// on the exit watcher's loop; neither holds a thread per session. Under the rollback switch
-    /// (<see cref="PtyOutputDrivers"/>) every platform runs the pump on a <see cref="PtyReaderThread"/> over the backend's
-    /// <see cref="IPtyBlockingOutput"/>.
+    /// on the exit watcher's loop; neither holds a thread per session. Throws when output cannot be started, such as a
+    /// Unix master the loop cannot register; the session constructor then disposes the backend and the start fails.
     /// </summary>
     public void StartOutput(PtyOutputPump pump);
     /// <summary>
@@ -90,7 +88,7 @@ internal interface IPtyBackend : IDisposable
     /// </summary>
     public int OutputChunkLimit { get; }
     /// <summary>
-    /// Reader silence, in milliseconds, that the post-exit drain takes to mean the transport has nothing more:
+    /// Output silence, in milliseconds, that the post-exit drain takes to mean the transport has nothing more:
     /// counted after child exit before the transport is closed, and again after the close before output is ended
     /// without it. Platform backends return <see cref="PtyOutputPump.DefaultPostExitQuietMs"/>; a scripted backend
     /// whose reads are paced by sleeps lengthens it, so that a test's timing margin does not depend on how promptly
@@ -100,8 +98,8 @@ internal interface IPtyBackend : IDisposable
     /// <summary>Gets whether the transport was closed, after which reads report end of output without blocking.</summary>
     public bool IsOutputClosed { get; }
     /// <summary>
-    /// Closes the transport so the reader reaches end of output: the pseudo-console on Windows (output already
-    /// produced still drains), the master on Unix (released once the reader and any in-flight call let go).
+    /// Closes the transport so the output driver reaches end of output: the pseudo-console on Windows (output already
+    /// produced still drains), the master on Unix (released once the loop's registration and any in-flight call let go).
     /// Afterwards <see cref="Resize"/> is a no-op.
     /// </summary>
     public void CloseOutputTransport();

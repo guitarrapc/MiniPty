@@ -8,14 +8,13 @@
 // what each kind of output costs as frames, and what the joining costs interactive output as latency. It starts itself as
 // the PTY child of every session.
 //
-//   dotnet run -c Release samples/SingleFiles/BridgeTraffic.cs -- [--only name,...] [--reader-threads]
+//   dotnet run -c Release samples/SingleFiles/BridgeTraffic.cs -- [--only name,...]
 //
 // Throughput rows report frames per 32 KiB, each session's rate (first frame to last), and this process's CPU per MiB,
 // which includes the client side of the loopback socket. Latency rows report a keystroke's echo: after idle, right after a
 // 5 KiB tail, and right after a prompt-like run of small writes, and how long a 6 KiB repaint's tail waits behind its head.
-// --reader-threads selects the reader-thread drivers through MiniPty's rollback switch, the baseline before the loops.
 //
-// The numbers it prints are recorded in .github/docs/plans/plan_thread_free_io.md (Phases 7 and 8).
+// The numbers it prints are recorded in .github/docs/specs/terminal.md (Output frames).
 
 using System.Diagnostics;
 using System.Net;
@@ -29,15 +28,12 @@ using MiniPty.Terminal;
 if (args.Length > 0 && args[0] == "child")
     return Child.Run(args);
 
-if (args.Contains("--reader-threads"))
-    AppContext.SetSwitch("MiniPty.UseOutputReaderThreads", true);
-
 var onlyIndex = Array.IndexOf(args, "--only");
 var only = onlyIndex >= 0 && onlyIndex + 1 < args.Length ? args[onlyIndex + 1].Split(',') : null;
 bool Want(string name) => only is null || only.Contains(name);
 
 Console.WriteLine($"BridgeTraffic: {RuntimeInformation.OSDescription}, {RuntimeInformation.FrameworkDescription}, " +
-    $"{Environment.ProcessorCount} logical CPUs{(args.Contains("--reader-threads") ? ", reader threads" : "")}");
+    $"{Environment.ProcessorCount} logical CPUs");
 
 var throughput = new (string Name, int Sessions, Func<PtyStartInfo> StartInfo)[]
 {

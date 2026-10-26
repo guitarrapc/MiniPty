@@ -10,9 +10,9 @@ namespace MiniPty.Internal;
 /// <remarks>
 /// <para>
 /// Not <see cref="System.Buffers.ArrayPool{T}.Shared"/>, which caches arrays per thread. A sink is written by whichever
-/// thread delivers output (a reader thread today, I/O completions on pool workers or a loop shared by every session
-/// once reads hold no thread) and its result is built on the caller's thread, so arrays returned to a per-thread cache
-/// stranded there when the thread ended, and the next run allocated its buffers anew. One lock-guarded stack has no
+/// thread delivers output (I/O completions on pool workers, or the loop shared by every session) and its result is built
+/// on the caller's thread, so arrays returned to a per-thread cache strand there, and the next run allocates its buffers
+/// anew. One lock-guarded stack has no
 /// thread affinity.
 /// </para>
 /// <para>

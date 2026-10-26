@@ -24,7 +24,7 @@ public sealed class PtyConcurrentDisposeTests
     /// <summary>
     /// Concurrent <see cref="PtySession.Dispose"/> calls release the backend once. A second release closed the process
     /// handles twice on Windows and freed the exec payload twice on Unix, and it returned the output ring to the pool
-    /// while the reader thread could still write into it.
+    /// while the output driver could still write into it.
     /// </summary>
     [Test]
     public async Task ConcurrentDisposeReleasesTheBackendOnce()
@@ -212,15 +212,9 @@ public sealed class PtyConcurrentDisposeTests
 
         public int DisposeCount => Volatile.Read(ref _disposeCount);
 
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             _disposed.Wait();
-            return 0;
-        }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = true;
             return 0;
         }
 

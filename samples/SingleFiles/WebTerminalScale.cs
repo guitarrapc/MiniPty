@@ -22,7 +22,7 @@
 //
 // Smoke (CI): the published executable with --smoke runs a small bench and exits 0 when every step succeeded.
 //
-// The numbers it prints are recorded in .github/docs/plans/plan_thread_free_io.md.
+// The numbers it prints are recorded in .github/docs/references/pty_crossplatform.md (Output pump).
 
 using System.Diagnostics;
 using System.Net;
@@ -194,8 +194,8 @@ static class Bench
         {
             await WaitForServerAsync(http, server);
 
-            // One session opened, used, and closed first, so that startup work (JIT, Kestrel, the first spawn, a
-            // parked reader thread) is not counted as the cost of the measured sessions.
+            // One session opened, used, and closed first, so that startup work (JIT, Kestrel, the first spawn, the
+            // watcher's and the thread pool's first threads) is not counted as the cost of the measured sessions.
             await using (var warm = await Client.ConnectAsync(baseUri, "shell"))
             {
                 await warm.Ready.WaitAsync(ConnectTimeout);

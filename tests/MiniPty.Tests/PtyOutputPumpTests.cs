@@ -9,61 +9,12 @@ namespace MiniPty.Tests;
 public sealed class PtyOutputPumpTests
 {
     /// <summary>
-    /// Coalescing must not hold a chunk back while a child keeps trickling output faster than the micro-window:
-    /// each continuation read restarted the window, so a slot was published only once it was full.
-    /// </summary>
-    [Test]
-    public async Task TrickledOutputIsNotHeldUntilTheSlotFills()
-    {
-        var backend = new TrickleBackend(interval: TimeSpan.FromMilliseconds(0.3));
-        await using var session = new PtySession(backend);
-
-        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
-        await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
-
-        // A full publish at this rate takes over a second to fill; a bounded window publishes a few bytes.
-        await Assert.That(enumerator.Current.Data.Length).IsLessThan(PtyOutputPump.PublishSize / 4);
-    }
-
-    /// <summary>
-    /// The Unix backend supplies the bound the pump applies above; an unbounded value brings the held slots back.
-    /// </summary>
-    [Test]
-    public async Task UnixBackendBoundsCoalescing()
-    {
-        if (OperatingSystem.IsWindows())
-            return;
-
-        using var backend = UnixPtyBackend.Start(new PtyStartInfo { FileName = "sh", Arguments = ["-c", "exit 0"] });
-
-        await Assert.That(((IPtyBlockingOutput)backend).CoalesceBudgetTicks).IsGreaterThan(0L);
-        await Assert.That(((IPtyBlockingOutput)backend).CoalesceBudgetTicks).IsLessThanOrEqualTo(Stopwatch.Frequency * 5 / 1000);
-    }
-
-    /// <summary>
-    /// The ConPTY backend bounds coalescing too. Unbounded, each continuation window lasted until the next system
-    /// clock tick, so output trickling in faster than about 16 ms kept a slot open and the reader spinning.
-    /// </summary>
-    [Test]
-    public async Task WindowsBackendBoundsCoalescing()
-    {
-        if (!OperatingSystem.IsWindows())
-            return;
-
-        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        using var backend = WindowsPtyBackend.Start(new PtyStartInfo { FileName = cmd, Arguments = ["/c", "exit 0"] });
-
-        await Assert.That(((IPtyBlockingOutput)backend).CoalesceBudgetTicks).IsGreaterThan(0L);
-        await Assert.That(((IPtyBlockingOutput)backend).CoalesceBudgetTicks).IsLessThanOrEqualTo(Stopwatch.Frequency * 5 / 1000);
-    }
-
-    /// <summary>
-    /// End of output completes a pending read on the reader thread, which posts the reader's continuation to the
-    /// context it captured. A context that throws from <c>Post</c> (a shut-down UI dispatcher) must not terminate
+    /// End of output completes a pending read on the output driver's thread, which posts the reader's continuation to
+    /// the context it captured. A context that throws from <c>Post</c> (a shut-down UI dispatcher) must not terminate
     /// the process; without the guard this test crashes the test host.
     /// </summary>
     [Test]
-    public async Task PendingReadUnderThrowingContextDoesNotCrashTheReaderThread()
+    public async Task PendingReadUnderThrowingContextDoesNotCrashTheDriverThread()
     {
         var backend = new SilentBackend();
         var session = new PtySession(backend);
@@ -74,7 +25,7 @@ public sealed class PtyOutputPumpTests
 
         backend.EndOutput();
 
-        await Assert.That((await context.WaitForPostAsync()).ThreadName).IsEqualTo(ReaderThreadName);
+        await Assert.That((await context.WaitForPostAsync()).ThreadName).IsEqualTo(ScriptedOutputDriver.ThreadName);
         await session.DisposeAsync().AsTask().WaitAsync(Timeout);
         await Assert.That(pending.IsCompleted).IsFalse();
     }
@@ -100,11 +51,11 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
-    /// <c>DisposeAsync</c> completes when the reader stops, on the reader thread. Awaiting it under a throwing
-    /// context must not terminate the process from that thread.
+    /// <c>DisposeAsync</c> completes when output reading stops, on the output driver's thread. Awaiting it under a
+    /// throwing context must not terminate the process from that thread.
     /// </summary>
     [Test]
-    public async Task DisposeAsyncAwaitedUnderThrowingContextDoesNotCrashTheReaderThread()
+    public async Task DisposeAsyncAwaitedUnderThrowingContextDoesNotCrashTheDriverThread()
     {
         var backend = new SilentBackend(holdEndOfOutput: true);
         var session = new PtySession(backend);
@@ -116,7 +67,7 @@ public sealed class PtyOutputPumpTests
 
         backend.ReleaseEndOfOutput();
 
-        await Assert.That((await context.WaitForPostAsync()).ThreadName).IsEqualTo(ReaderThreadName);
+        await Assert.That((await context.WaitForPostAsync()).ThreadName).IsEqualTo(ScriptedOutputDriver.ThreadName);
         await Assert.That(disposing.IsCompleted).IsFalse();
     }
 
@@ -415,12 +366,12 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
-    /// A claim on one wait never completes a later one. The reader thread publishes, sees the consumer waiting, and
+    /// A claim on one wait never completes a later one. The output driver publishes, sees the consumer waiting, and
     /// claims the wait. If the consumer meanwhile saw the output on its own, withdrew, consumed it, and waited again, a
     /// claim that only checked that some wait was armed completed the new wait with nothing to read, and the enumeration
     /// failed with "signaled without a state change": a 32 MiB flood through the WebSocket bridge lost the rest of its
     /// output in about one of ten runs on Linux. Here several sessions stream small reads to consumers that do nothing,
-    /// so the consumers keep catching up and waiting again while the reader threads keep signaling.
+    /// so the consumers keep catching up and waiting again while the drivers keep signaling.
     /// </summary>
     [Test]
     public async Task ASignalClaimedForOneWaitNeverCompletesALaterOne()
@@ -570,7 +521,7 @@ public sealed class PtyOutputPumpTests
         return true;
     }
 
-    private const string ReaderThreadName = "MiniPty output reader";
+
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
     /// <summary>Full-size reads (<see cref="PtyOutputPump.PublishSize"/> each) that fill the ring.</summary>
@@ -635,14 +586,14 @@ public sealed class PtyOutputPumpTests
         private readonly ManualResetEventSlim _released = new(initialState: !holdEndOfOutput);
         private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        /// <summary>Completes once the reader thread is inside <see cref="ReadOutput"/>.</summary>
+        /// <summary>Completes once the driver thread is inside <see cref="ReadOutput"/>.</summary>
         public Task Reading => _reading.Task;
 
         public void EndOutput() => _ended.Set();
 
         public void ReleaseEndOfOutput() => _released.Set();
 
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             _reading.TrySetResult();
             _ended.Wait();
@@ -650,43 +601,10 @@ public sealed class PtyOutputPumpTests
             return 0;
         }
 
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = true;
-            return 0;
-        }
-
         public override void Dispose()
         {
             base.Dispose();
             _ended.Set();
-        }
-    }
-
-    /// <summary>Emits one byte per read, each continuation read arriving after <c>interval</c>, until disposed.</summary>
-    private sealed class TrickleBackend(TimeSpan interval) : FakeBackend
-    {
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
-        {
-            if (IsOutputClosed)
-                return 0;
-
-            buffer[0] = (byte)'x';
-            return 1;
-        }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = IsOutputClosed;
-            if (endOfOutput)
-                return 0;
-
-            var until = Stopwatch.GetTimestamp() + (long)(interval.TotalSeconds * Stopwatch.Frequency);
-            while (Stopwatch.GetTimestamp() < until)
-                Thread.SpinWait(20);
-
-            buffer[0] = (byte)'x';
-            return 1;
         }
     }
 
@@ -700,7 +618,7 @@ public sealed class PtyOutputPumpTests
 
         public override int PostExitQuietMs => PacedQuietMs;
 
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             if (IsOutputClosed)
                 return 0;
@@ -715,12 +633,6 @@ public sealed class PtyOutputPumpTests
             buffer[0] = (byte)'x';
             return 1;
         }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            return 0;
-        }
     }
 
     /// <summary>
@@ -732,23 +644,17 @@ public sealed class PtyOutputPumpTests
     {
         private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        /// <summary>Completes once the reader thread is inside <see cref="ReadOutput"/>.</summary>
+        /// <summary>Completes once the driver thread is inside <see cref="ReadOutput"/>.</summary>
         public Task Reading => _reading.Task;
 
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             if (IsDisposed)
                 return 0;
 
             _reading.TrySetResult();
-            reader.WaitForWake(System.Threading.Timeout.Infinite);
+            driver.WaitForWake(System.Threading.Timeout.Infinite);
             return -1;
-        }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            return 0;
         }
     }
 
@@ -769,7 +675,7 @@ public sealed class PtyOutputPumpTests
 
         public override int PostExitQuietMs => PacedQuietMs;
 
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             if (IsDisposed)
                 return 0;
@@ -784,7 +690,7 @@ public sealed class PtyOutputPumpTests
             }
 
             _reading.TrySetResult();
-            reader.WaitForWake(System.Threading.Timeout.Infinite);
+            driver.WaitForWake(System.Threading.Timeout.Infinite);
             return -1;
         }
 
@@ -792,12 +698,6 @@ public sealed class PtyOutputPumpTests
         {
             base.CloseOutputTransport();
             _closed.TrySetResult();
-        }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            return 0;
         }
     }
 
@@ -807,7 +707,7 @@ public sealed class PtyOutputPumpTests
     /// </summary>
     private sealed class EndlessBackend : FakeBackend
     {
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             if (IsDisposed)
                 return 0;
@@ -815,12 +715,6 @@ public sealed class PtyOutputPumpTests
             Thread.Yield();
             buffer[0] = (byte)'x';
             return 1;
-        }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            return 0;
         }
     }
 
@@ -831,7 +725,7 @@ public sealed class PtyOutputPumpTests
     /// </summary>
     private sealed class ScriptedReadsBackend(int[] reads, int chunkLimit, bool endAfter) : FakeBackend
     {
-        // Read and written only by the reader thread.
+        // Read and written only by the driver thread.
         private int _read;
         private int _offset;
         private int _sequence;
@@ -854,7 +748,7 @@ public sealed class PtyOutputPumpTests
 
         private static byte ValueAt(int index) => (byte)(index % 251);
 
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             if (IsDisposed)
                 return 0;
@@ -878,14 +772,8 @@ public sealed class PtyOutputPumpTests
             if (endAfter)
                 return 0;
 
-            reader.WaitForWake(System.Threading.Timeout.Infinite);
+            driver.WaitForWake(System.Threading.Timeout.Infinite);
             return -1;
-        }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            return 0;
         }
     }
 
@@ -898,7 +786,7 @@ public sealed class PtyOutputPumpTests
     {
         private readonly TaskCompletionSource _waiting = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        // Read and written only by the reader thread.
+        // Read and written only by the driver thread.
         private int _beforeClose = beforeClose;
         private int _afterClose = afterClose;
 
@@ -908,7 +796,7 @@ public sealed class PtyOutputPumpTests
         /// <summary>Completes once the post-exit drain has closed the transport.</summary>
         public Task OutputClosed => _closed.Task;
 
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             if (IsDisposed)
                 return 0;
@@ -923,7 +811,7 @@ public sealed class PtyOutputPumpTests
             if (!IsOutputClosed)
             {
                 _waiting.TrySetResult();
-                reader.WaitForWake(System.Threading.Timeout.Infinite);
+                driver.WaitForWake(System.Threading.Timeout.Infinite);
                 return -1;
             }
 
@@ -933,12 +821,6 @@ public sealed class PtyOutputPumpTests
             _afterClose--;
             buffer[..frameSize].Fill((byte)'y');
             return frameSize;
-        }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            return 0;
         }
 
         public override void CloseOutputTransport()
@@ -952,7 +834,7 @@ public sealed class PtyOutputPumpTests
     /// A child that exits only through <see cref="Exit"/>. Subclasses script the output transport, and may script span
     /// writes to the input queue.
     /// </summary>
-    internal abstract class FakeBackend : IPtyBackend, IPtyBlockingOutput
+    internal abstract class FakeBackend : IPtyBackend
     {
         private readonly TaskCompletionSource<PtyExitStatus> _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private volatile bool _closed;
@@ -964,8 +846,7 @@ public sealed class PtyOutputPumpTests
         public virtual PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes) => null;
         public PtyPendingInput? QueueInput(ReadOnlyMemory<byte> bytes, byte[]? ownedBuffer) => null;
         public void SetOutputPump(PtyOutputPump pump) { }
-        public virtual void StartOutput(PtyOutputPump pump) => PtyReaderThread.Run(pump, this);
-        public void WaitWhileOutputBlocked(PtyReaderThread reader) => reader.WaitForWake(System.Threading.Timeout.Infinite);
+        public virtual void StartOutput(PtyOutputPump pump) => ScriptedOutputDriver.Run(pump, this);
         public int ProcessId => 0;
         public bool HasExited => _hasExited;
         public int ExitCode => 0;
@@ -975,7 +856,7 @@ public sealed class PtyOutputPumpTests
         public Task<PtyExitStatus> Exited => _exited.Task;
         public bool IsOutputClosed => _closed;
         public bool IsDisposed => _disposed;
-        public long CoalesceBudgetTicks => Stopwatch.Frequency * 2 / 1000;
+
         public virtual int OutputChunkLimit => PtyOutputPump.PublishSize;
         public virtual int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
@@ -994,12 +875,21 @@ public sealed class PtyOutputPumpTests
         public void Kill(PtySignal signal) { }
         public ValueTask<int> WaitForExitCodeAsync() => new(_exited.Task.ContinueWith(static t => t.Result.ExitCode, TaskScheduler.Default));
         public void SetExitListener(IPtyExitListener listener) => Volatile.Write(ref _listener, listener);
-        public bool TryBeginOutputRead() => !_closed;
-        public void EndOutputRead() { }
+
         public virtual void CloseOutputTransport() => _closed = true;
 
-        public abstract int ReadOutput(Span<byte> buffer, PtyReaderThread reader);
-        public abstract int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput);
+        /// <summary>
+        /// The script's blocking read, on the <see cref="ScriptedOutputDriver"/> thread: the byte count, 0 at end of
+        /// output, or -1 after a <see cref="ScriptedOutputDriver.WaitForWake"/>, so the driver re-checks the pump's state.
+        /// Backends that bring their own driver leave it.
+        /// </summary>
+        public virtual int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver) => throw new NotSupportedException();
+
+        /// <summary>
+        /// What the script holds now, without waiting: the driver's only read once the post-exit drain has forced the end
+        /// of output. 0 when nothing is left.
+        /// </summary>
+        public virtual int ReadOutputNow(Span<byte> buffer) => 0;
 
         public virtual void Dispose()
         {

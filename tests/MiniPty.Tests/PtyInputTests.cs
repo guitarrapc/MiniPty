@@ -5,7 +5,7 @@ namespace MiniPty.Tests;
 
 /// <summary>
 /// Stdin writes: the synchronous fast path, and the ordered queue that takes over when the transport stops taking
-/// input. On Unix the tty input queue fills when the child does not read, and the reader thread writes the queue. On
+/// input. On Unix the tty input queue fills when the child does not read, and the I/O loop writes the queue. On
 /// Windows ConPTY stops reading input while its output is backed up, and I/O completions write the queue.
 /// </summary>
 public sealed class PtyInputTests

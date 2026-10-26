@@ -52,11 +52,6 @@ int minipty_pidfd_open(int pid);
 int minipty_signal_child(int pidfd, int pid, int sig);
 int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_signal);
 
-int minipty_wake_open(int *read_fd, int *write_fd);
-int minipty_wake_signal(int write_fd);
-void minipty_wake_drain(int read_fd);
-void minipty_wake_close(int read_fd, int write_fd);
 int minipty_set_nonblocking(int fd);
-int minipty_pty_wait(int master, int events, int wake_fd, int timeout_ms);
 
 #endif

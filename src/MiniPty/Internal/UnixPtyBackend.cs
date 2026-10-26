@@ -16,16 +16,12 @@ internal static partial class UnixPtyBackend
     // macOS posix_spawn children can still be running short -c scripts when the first EOF tick fires.
     // Sending EOT before they finish leaves /bin/sh waiting on stdin and never exiting.
     private const int MacOsEofAttachDeferPolls = 4;
-    // On a reader thread (the rollback switch, or a master the loop could not register): how long a read keeps appending
-    // output that arrives right after it to the same publish. The loop publishes each read at once instead.
-    private const int CoalesceMicroWindowMs = 1;
-    // Bounds the windows chained into one slot, so output trickling in faster than the window is not held until
-    // the slot fills. The last window may run past it: a slot is held for at most about 3 ms.
-    private const int CoalesceBudgetMs = 2;
-    private static readonly long s_coalesceBudgetTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceBudgetMs / 1000;
 
     /// <summary>A pid whose session's next loop service fails, for the test that one failure ends one session. 0: none.</summary>
     internal static int FailLoopReadsOfPidForTests;
+
+    /// <summary>A pid whose session's master the loop refuses to register, for the test that this fails the start. 0: none.</summary>
+    internal static int FailLoopRegistrationOfPidForTests;
 
     /// <summary>Passes the watcher's loop has made, for tests that check it does not spin.</summary>
     internal static long LoopPassesForTests => ChildWatcher.Passes;
@@ -140,7 +136,7 @@ internal static partial class UnixPtyBackend
         public void Dispose() => FreeUtf8Allocations(_owned);
     }
 
-    private sealed class UnixPtyBackendInstance : IPtyBackend, IPtyBlockingOutput, IPtyOutputDriver, IPtyInputQueue, IValueTaskSource<int>
+    private sealed class UnixPtyBackendInstance : IPtyBackend, IPtyOutputDriver, IPtyInputQueue, IValueTaskSource<int>
     {
         // _loopPhase: how the watcher's loop reads this session, when it does.
         private const byte LoopNone = 0;
@@ -231,7 +227,7 @@ internal static partial class UnixPtyBackend
             _pidfd = pidfd;
             _execHold = execHold;
             _size = size;
-            // Non-blocking, so a write takes what the tty input queue accepts and never blocks its caller. The reader
+            // Non-blocking, so a write takes what the tty input queue accepts and never blocks its caller. The loop
             // reads only after the master reports readable. A read that still finds nothing waits again.
             if (UnixInterop.minipty_set_nonblocking(master) != 0)
                 throw new IOException($"Setting the PTY master non-blocking failed (errno {Marshal.GetLastPInvokeError()})");
@@ -266,13 +262,13 @@ internal static partial class UnixPtyBackend
                     bytes = bytes[written..];
                 }
 
-                // The caller's span does not outlive this call, so what is left is copied for the reader thread.
+                // The caller's span does not outlive this call, so what is left is copied for the loop to write later.
                 var owned = ArrayPool<byte>.Shared.Rent(bytes.Length);
                 bytes.CopyTo(owned);
                 entry = EnqueueLocked(owned.AsMemory(0, bytes.Length), owned);
             }
 
-            WakeReaderForInput();
+            WakeLoopForInput();
             return entry;
         }
 
@@ -302,7 +298,7 @@ internal static partial class UnixPtyBackend
                     owned = null;
                 }
 
-                WakeReaderForInput();
+                WakeLoopForInput();
                 return entry;
             }
             finally
@@ -383,10 +379,11 @@ internal static partial class UnixPtyBackend
             return entry;
         }
 
-        // The reader thread may be waiting for output only. This makes it wait for the master to take input too.
-        private void WakeReaderForInput() => Volatile.Read(ref _pump)?.WakeDriver();
+        // The loop may be watching the master for output only. This has it look at the session, write what it can, and
+        // watch for the master taking input too.
+        private void WakeLoopForInput() => Volatile.Read(ref _pump)?.WakeDriver();
 
-        /// <summary>Writes queued input until the master is full again. Runs on the reader thread.</summary>
+        /// <summary>Writes queued input until the master is full again. Runs on the watcher's loop.</summary>
         private void FlushInput()
         {
             PtyPendingInput? done = null;
@@ -638,36 +635,34 @@ internal static partial class UnixPtyBackend
 
         public bool IsOutputClosed => IsMasterClosed;
 
-        public long CoalesceBudgetTicks => s_coalesceBudgetTicks;
-
         public int OutputChunkLimit => PtyOutputPump.Capacity;
 
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
         /// <summary>
         /// Reads output on the watcher's loop (epoll on Linux, kqueue on macOS and FreeBSD), which holds no thread of the
-        /// session's own. Under the rollback switch, or when the loop cannot register the master, a reader thread reads
-        /// instead: it waits on the master and its wake descriptor together and writes queued input when the master can
-        /// take more (see <see cref="ReadOutput"/> and <see cref="WaitWhileOutputBlocked"/>).
+        /// session's own and also writes queued input when the master can take more. A master the loop cannot register
+        /// fails the start: no other path reads the session.
         /// </summary>
         /// <remarks>
         /// The spawn opened the slave before this runs, which kqueue needs: before a slave first opens, it reports the
-        /// master writable while writes fail with <c>EAGAIN</c>.
+        /// master writable while writes fail with <c>EAGAIN</c>. Registration fails only when the watcher has no epoll or
+        /// kqueue (it could not open one, or its wait failed while no master was registered) or the kernel refuses the
+        /// descriptor, such as Linux at <c>fs.epoll.max_user_watches</c>.
         /// </remarks>
         public void StartOutput(PtyOutputPump pump)
         {
-            if (!PtyOutputDrivers.UseReaderThreads && TryStartOnLoop(pump))
-                return;
-
-            PtyReaderThread.Run(pump, this);
+            if (!TryStartOnLoop(pump))
+                throw new IOException("The PTY master could not be registered with MiniPty's I/O loop.");
         }
 
         /// <summary>Whether the watcher's loop reads this session.</summary>
         internal bool ReadsOnLoop => Volatile.Read(ref _loopPhase) != LoopNone;
 
         /// <summary>
-        /// Whether the loop still reads this session's master, so it discards a hung-up child's output itself; otherwise
-        /// the watcher's separate discard path does.
+        /// Whether the loop still reads this session's master, so it discards a hung-up child's output itself. Otherwise
+        /// the watcher's separate discard path does: the loop stopped reading the master after a failure in its service,
+        /// or never registered it because the start failed.
         /// </summary>
         internal bool DiscardsOnLoop => Volatile.Read(ref _loopPhase) is LoopReading or LoopDiscarding;
 
@@ -679,7 +674,7 @@ internal static partial class UnixPtyBackend
 
             _loopPhase = LoopReading;
             pump.AttachDriver(this);
-            if (ChildWatcher.TryRegisterMaster(this, master))
+            if (FailLoopRegistrationOfPidForTests != _pid && ChildWatcher.TryRegisterMaster(this, master))
                 return true;
 
             _loopPhase = LoopNone;
@@ -738,8 +733,8 @@ internal static partial class UnixPtyBackend
             var pump = _pump!;
             if (_loopPhase == LoopReading && (Volatile.Read(ref _disposed) || pump.IsSessionDisposed))
             {
-                // Disposal ends reading at once, as a reader thread's does. A master that stays open for the hang-up is
-                // read and discarded below until the child is gone.
+                // Disposal ends reading at once. A master that stays open for the hang-up is read and discarded below
+                // until the child is gone.
                 FinishOnLoop(pump, null);
             }
 
@@ -763,7 +758,7 @@ internal static partial class UnixPtyBackend
 
             pump.DeliverBacklogToSink();
             // A full ring after the close is not end of output either: the session stays parked until the consumer frees
-            // space, as a reader thread does.
+            // space.
             if (ParkWhileFull(pump))
             {
                 SetLoopInterest();
@@ -773,7 +768,7 @@ internal static partial class UnixPtyBackend
             if (IsMasterClosed)
             {
                 // The close (the post-exit drain, or disposal after the exit) ends output; what the master still holds is
-                // not read, as with a reader thread.
+                // left unread.
                 EndOnLoop(pump);
                 return;
             }
@@ -888,7 +883,7 @@ internal static partial class UnixPtyBackend
         /// <summary>
         /// Registers the master again when a hang-up report found nothing to read. kqueue keeps reporting <c>EV_EOF</c> on a
         /// registration after the slave is opened again, while reads fail with <c>EAGAIN</c>, and only a new registration
-        /// clears it (the readiness probe, Phase 4 of <c>.github/docs/plans/plan_thread_free_io.md</c>). Output ends on
+        /// clears it (the readiness probe, in <c>.github/docs/references/pty_crossplatform.md</c>). Output ends on
         /// a read that returns 0, never on the report alone, so without this such a master would spin the loop. MiniPty
         /// never opens a slave again, but another process can. epoll never reports a stale hang-up; there this only
         /// modifies the registration.
@@ -1062,140 +1057,7 @@ internal static partial class UnixPtyBackend
             }
         }
 
-
-        public bool TryBeginOutputRead()
-        {
-            if (TryAcquireMaster(out _))
-                return true;
-
-            // The master closed before the reader began. The reader is what writes queued input, so nothing ever will.
-            CloseInput(InputOutputEnded);
-            return false;
-        }
-
-        public void EndOutputRead()
-        {
-            // Queued input is written by this reader; once it stops, nothing can deliver it.
-            CloseInput(InputOutputEnded);
-            ReleaseMaster();
-        }
-
-        /// <summary>
-        /// Waits on the master and the reader's wake descriptor together, then reads; while input is queued the
-        /// same wait also reports when the master can take more, and the queue is written then. Closing the master
-        /// does not interrupt a read blocked on it in another thread, so a close or disposal wakes the reader
-        /// instead, and the reader's reference keeps the descriptor number from being reused under it.
-        /// </summary>
-        public int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
-        {
-            while (true)
-            {
-                if (IsReadingEnded)
-                    return 0;
-
-                var events = UnixInterop.PtyReadable | (HasPendingInput ? UnixInterop.PtyWritable : 0);
-                var ready = UnixInterop.minipty_pty_wait(_master, events, reader.WakeFd, Timeout.Infinite);
-                if (ready < 0)
-                    throw new IOException($"Waiting for PTY output failed (errno {Marshal.GetLastPInvokeError()})");
-
-                if ((ready & UnixInterop.PtyWritable) != 0)
-                    FlushInput();
-
-                if ((ready & UnixInterop.PtyWoken) != 0)
-                {
-                    reader.ConsumeWake();
-                    return -1;
-                }
-
-                if ((ready & UnixInterop.PtyReadable) != 0)
-                {
-                    var read = ReadMaster(buffer);
-                    if (read >= 0)
-                        return read;
-                }
-            }
-        }
-
-        /// <summary>
-        /// Appends output that is available now or arrives within the micro-window. A pending wake is left for
-        /// <see cref="ReadOutput"/>, which re-checks the session state.
-        /// </summary>
-        public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            if (IsReadingEnded)
-                return 0;
-
-            var ready = UnixInterop.minipty_pty_wait(_master, UnixInterop.PtyReadable, reader.WakeFd, CoalesceMicroWindowMs);
-            if (ready <= 0 || (ready & UnixInterop.PtyReadable) == 0)
-                return 0;
-
-            var read = ReadMaster(buffer);
-            endOfOutput = read == 0;
-            return read < 0 ? 0 : read;
-        }
-
-        /// <summary>
-        /// Parks the reader on a full ring, but keeps writing queued input: a child blocked on output may still be
-        /// reading input, and a caller waits for that input to be written.
-        /// </summary>
-        public void WaitWhileOutputBlocked(PtyReaderThread reader)
-        {
-            if (!HasPendingInput || IsMasterClosed)
-            {
-                reader.WaitForWake(Timeout.Infinite);
-                return;
-            }
-
-            var ready = UnixInterop.minipty_pty_wait(_master, UnixInterop.PtyWritable, reader.WakeFd, Timeout.Infinite);
-            if (ready < 0)
-            {
-                // Not expected for descriptors the reader holds; back off rather than spin.
-                Thread.Sleep(10);
-                return;
-            }
-
-            if ((ready & UnixInterop.PtyWritable) != 0)
-                FlushInput();
-
-            if ((ready & UnixInterop.PtyWoken) != 0)
-                reader.ConsumeWake();
-        }
-
-        /// <summary>
-        /// Reads after the master reported ready. Returns the byte count, 0 at end of output, or -1 when nothing was
-        /// there after all (the master is non-blocking).
-        /// </summary>
-        private unsafe int ReadMaster(Span<byte> buffer)
-        {
-            fixed (byte* ptr = buffer)
-            {
-                while (true)
-                {
-                    var read = UnixInterop.Read(_master, ptr, (nuint)buffer.Length);
-                    if (read >= 0)
-                        return read;
-
-                    var errno = Marshal.GetLastPInvokeError();
-                    if (errno == UnixInterop.EINTR)
-                        continue;
-                    if (errno == UnixInterop.EAGAIN)
-                        return -1;
-
-                    // EIO: every slave descriptor closed (Linux reports end of output this way).
-                    if (errno is 0 or UnixInterop.EIO or UnixInterop.EBADF)
-                        return 0;
-
-                    throw new IOException($"read failed (errno {errno})");
-                }
-            }
-        }
-
         private bool IsMasterClosed => (Volatile.Read(ref _masterState) & MasterClosedBit) != 0;
-
-        // Disposal ends reading even while the master stays open for a hung-up child, so the reader never waits for
-        // that child to exit.
-        private bool IsReadingEnded => IsMasterClosed || Volatile.Read(ref _disposed);
 
         /// <summary>Pins the master for one use. Fails once it is closed; pair a success with <see cref="ReleaseMaster"/>.</summary>
         private bool TryAcquireMaster(out int master)
@@ -1230,8 +1092,8 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>
-        /// Stops new uses of the master and drops the owner's reference. The descriptor closes now, or when the
-        /// reader and any in-flight call release theirs, so its number is never reused while someone still uses it.
+        /// Stops new uses of the master and drops the owner's reference. The descriptor closes now, or when the loop's
+        /// registration and any in-flight call release theirs, so its number is never reused while someone still uses it.
         /// </summary>
         private void CloseMaster()
         {
@@ -1258,9 +1120,9 @@ internal static partial class UnixPtyBackend
             if (_disposed)
                 return;
 
-            // Read by the reader thread, which stops on it while the master stays open for a hung-up child.
+            // Read by the loop, which stops reading on it while the master stays open for a hung-up child.
             Volatile.Write(ref _disposed, true);
-            // Queued writes fail now, on the disposing thread, without waiting for the reader to stop. This comes before
+            // Queued writes fail now, on the disposing thread, without waiting for the loop to stop. This comes before
             // the hang-up and the end of reading, which end output, so a queued write reports the disposal rather than
             // the end of output.
             CloseInput(InputDisposed);
@@ -1290,7 +1152,7 @@ internal static partial class UnixPtyBackend
                 _exitSignal.SetDisposedBeforeExit();
                 // The master stays open until the watcher reaps the child or kills it after the grace. Closing it hangs
                 // the tty up, which signals the child a second time, and an interactive bash that gets that signal while
-                // it saves its history dies before it hangs up its jobs. The reader stops now all the same, and the watcher
+                // it saves its history dies before it hangs up its jobs. Output ends now all the same, and the watcher
                 // discards what the child writes meanwhile.
                 SendEotIfPending();
                 // The watcher kills a child that ignores the hang-up and reaps it either way, so disposal never waits.
@@ -1420,10 +1282,10 @@ internal static partial class UnixPtyBackend
 
         /// <summary>
         /// Reads and discards what the child wrote since the last call, while the master stays open for a disposal's
-        /// hang-up. The reader stopped at disposal, and without this a child that writes while it handles the hang-up
-        /// would block on a full terminal until the kill. Called only by <see cref="ChildWatcher"/>, whenever the
-        /// master's output (see <see cref="WatchOutputAfterHangup"/>) or the polling interval wakes it, and bounded per
-        /// call so the watcher stays responsive.
+        /// hang-up and the loop no longer reads it (see <see cref="DiscardsOnLoop"/>). Without this a child that writes
+        /// while it handles the hang-up would block on a full terminal until the kill. Called only by
+        /// <see cref="ChildWatcher"/>, whenever the master's output (see <see cref="WatchOutputAfterHangup"/>) or the
+        /// polling interval wakes it, and bounded per call so the watcher stays responsive.
         /// </summary>
         internal unsafe void DiscardOutputAfterHangup()
         {

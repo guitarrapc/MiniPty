@@ -35,7 +35,7 @@ public sealed class PtyOutputSinkTests
     }
 
     /// <summary>
-    /// Reads that follow one another closely join one chunk, as the reader thread's coalescing window joined them, so a
+    /// Reads that follow one another closely join one chunk, as Windows reads were once joined before they were published, so a
     /// driver that publishes each read as it completes does not multiply Capture's chunks: within the gap of the previous
     /// read, the budget from the chunk's first read, and one publish of size. The joined chunk keeps its first read's
     /// time, and its text joins too. Output delivered without a read timestamp never joins.

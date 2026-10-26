@@ -6,8 +6,7 @@ namespace MiniPty.Tests;
 
 /// <summary>
 /// The Unix engine: one loop, the exit watcher's thread, reads every session's output and writes every session's queued
-/// input, through epoll on Linux and kqueue on macOS and FreeBSD (<c>.github/docs/plans/plan_thread_free_io.md</c>,
-/// Phase 6). These tests cover what one shared thread must get right for every session at once: fairness, a failure that
+/// input, through epoll on Linux and kqueue on macOS and FreeBSD. These tests cover what one shared thread must get right for every session at once: fairness, a failure that
 /// stays with its session, no spinning on a master that stays ready, and many sessions coming and going.
 /// </summary>
 public sealed class PtyUnixLoopTests
@@ -243,35 +242,61 @@ public sealed class PtyUnixLoopTests
     }
 
     /// <summary>
-    /// Unix sessions read on the loop by default, and on reader threads under the rollback switch.
+    /// Unix sessions read on the exit watcher's loop: the backend itself is the session's output driver, and the session
+    /// holds no thread of its own.
     /// </summary>
     [Test]
-    [NotInParallel]
-    public async Task TheRollbackSwitchSelectsReaderThreads()
+    public async Task SessionsReadOnTheLoop()
     {
         if (OperatingSystem.IsWindows())
             return;
 
-        await using (var session = Pty.Start(Shell("echo rollback-marker")))
-        {
-            await Assert.That(session.OutputPump.Driver).IsNotNull();
-            await Assert.That(session.OutputPump.Driver).IsNotTypeOf<PtyReaderThread>();
-            await Assert.That(await ReadAllTextAsync(session)).Contains("rollback-marker");
-        }
+        var backend = UnixPtyBackend.Start(Shell("echo loop-marker"));
+        await using var session = new PtySession(backend);
+        await Assert.That(ReferenceEquals(session.OutputPump.Driver, backend)).IsTrue();
+        await Assert.That(await ReadAllTextAsync(session).WaitAsync(Timeout)).Contains("loop-marker");
+    }
 
-        AppContext.SetSwitch(PtyOutputDrivers.UseReaderThreadsSwitch, true);
+    /// <summary>
+    /// A master the loop cannot register fails the start, since nothing else would read the session: <c>Pty.Start</c>
+    /// throws <see cref="IOException"/>, and the failed start's disposal hangs the child up, which ends it, and the
+    /// watcher reaps it. Registration is refused through a test hook, by pid, because the real causes (no epoll or
+    /// kqueue, a kernel watch limit) cannot be produced for one session. The start hook is process-wide, so this test
+    /// runs alone.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task AMasterTheLoopCannotRegisterFailsTheStartAndEndsTheChild()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var pid = 0;
+        PtyStartTestHook.Fault = (stage, processId) =>
+        {
+            if (stage != PtyStartStage.BackendBuilt || Interlocked.CompareExchange(ref pid, processId, 0) != 0)
+                return;
+
+            UnixPtyBackend.FailLoopRegistrationOfPidForTests = processId;
+        };
+
         try
         {
-            await using var session = Pty.Start(Shell("echo rollback-marker"));
-            await Assert.That(session.OutputPump.Driver).IsTypeOf<PtyReaderThread>();
-            await Assert.That(await ReadAllTextAsync(session)).Contains("rollback-marker");
+            var failure = await Assert.That(() => Pty.Start(Shell("IFS= read -r _"))).Throws<IOException>();
+            await Assert.That(failure!.Message).Contains("could not be registered");
+            await Assert.That(pid).IsNotEqualTo(0);
+            // kill(pid, 0) succeeds on a zombie too, so this also waits for the watcher's reap.
+            await WaitUntilAsync(() => kill(pid, 0) != 0);
         }
         finally
         {
-            AppContext.SetSwitch(PtyOutputDrivers.UseReaderThreadsSwitch, false);
+            PtyStartTestHook.Fault = null;
+            UnixPtyBackend.FailLoopRegistrationOfPidForTests = 0;
         }
     }
 
+    [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
+    private static extern int kill(int pid, int sig);
     private static PtyStartInfo Shell(string command) => new() { FileName = "sh", Arguments = ["-c", command] };
 
     private static async Task<string> ReadAllTextAsync(PtySession session)

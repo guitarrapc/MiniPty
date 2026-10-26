@@ -1,13 +1,13 @@
 /*
- * Readiness probe for PTY masters: Phase 4 of .github/docs/plans/plan_thread_free_io.md.
+ * Readiness probe for PTY masters; its results are in .github/docs/references/pty_crossplatform.md ("Readiness on a pty master").
  *
  * Answers, on the machine it runs on, whether one thread can wait for many PTY masters with kqueue, select, or
- * poll, before the Unix I/O loop is written. It checks level-triggered EVFILT_READ and EVFILT_WRITE, end of file
+ * poll, before the Unix I/O loop was written. It checks level-triggered EVFILT_READ and EVFILT_WRITE, end of file
  * after the slave closes and after the session leader exits, the master's small buffer under a flood, and hundreds
  * of masters in one wait. It uses no MiniPty code. Every child is forked while the probe has one thread; the only
- * threads are the thread-per-session flood baseline, which stands for today's reader threads.
+ * threads are the thread-per-session flood baseline, which stood for the reader threads MiniPty had before its loop.
  *
- * The results and the choice they led to are recorded under "Phase 4 result" in that plan. Rerun it on a new macOS
+ * The results and the choice they led to are recorded there. Rerun it on a new macOS
  * release, or on FreeBSD, where the choice was made from source only.
  *
  * Build and run on macOS or FreeBSD (it takes about three minutes, most of it in the T5 floods):

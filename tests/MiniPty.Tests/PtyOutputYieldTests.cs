@@ -435,7 +435,7 @@ public sealed class PtyOutputYieldTests
 
         private int _reads;
 
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             if (IsDisposed)
                 return 0;
@@ -450,14 +450,8 @@ public sealed class PtyOutputYieldTests
             if (endAfter)
                 return 0;
 
-            reader.WaitForWake(System.Threading.Timeout.Infinite);
+            driver.WaitForWake(System.Threading.Timeout.Infinite);
             return -1;
-        }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            return 0;
         }
     }
 }

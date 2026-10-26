@@ -220,10 +220,5 @@ public sealed class PtyPendingInputTests
     private sealed class QueuingBackend(PtyPendingInput entry) : PtyOutputPumpTests.FakeBackend
     {
         public override PtyPendingInput? QueueInput(ReadOnlySpan<byte> bytes) => entry;
-
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader) => throw new NotSupportedException();
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput) =>
-            throw new NotSupportedException();
     }
 }

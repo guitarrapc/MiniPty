@@ -528,9 +528,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// that group ends too unless it ignores <c>SIGHUP</c>. On Windows the child is terminated.
     /// </para>
     /// <para>
-    /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. The background
-    /// reader stops on its own shortly afterwards; output chunk memory must not be used after this call. Use
-    /// <see cref="DisposeAsync"/> to also wait until the reader has stopped.
+    /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. Background
+    /// output reading stops on its own shortly afterwards; output chunk memory must not be used after this call. Use
+    /// <see cref="DisposeAsync"/> to also wait until it has stopped.
     /// </para>
     /// <para>
     /// Safe to call more than once, also from several threads at once, such as a host's exit handler racing its main
@@ -544,7 +544,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
 
         Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
 
-        // Discard mode first: closing the pseudo-console waits for ConPTY to flush, which needs a reader.
+        // Discard mode first: closing the pseudo-console waits for ConPTY to flush, which needs its output read.
         _pump.OnSessionDisposing();
         _backend.Dispose();
         _pump.OnSessionDisposed();
@@ -552,16 +552,16 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
 
     /// <summary>
     /// Releases PTY and process handles, ending the child if it is still running as <see cref="Dispose"/> does, and
-    /// completes once the background output reader has stopped.
+    /// completes once background output reading has stopped.
     /// </summary>
-    /// <returns>A value task that completes when the reader has released the transport.</returns>
+    /// <returns>A value task that completes when output reading has released the transport.</returns>
     /// <remarks>
-    /// Does not wait for the reader on the calling thread, and does not wait for the child to exit. Every call waits
+    /// Does not block the calling thread, and does not wait for the child to exit. Every call waits
     /// for the same shutdown, including calls after <see cref="Dispose"/> and concurrent ones.
     /// </remarks>
     public ValueTask DisposeAsync()
     {
-        // Idempotent teardown; disposal having started does not mean the reader has stopped.
+        // Idempotent teardown; disposal having started does not mean output reading has stopped.
         Dispose();
         return _pump.WaitForStopAsync();
     }

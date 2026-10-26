@@ -9,7 +9,7 @@ namespace MiniPty.Internal;
 /// <remarks>
 /// <para>
 /// Growing never copies what was already written, so the work of a write is proportional to the write wherever it runs:
-/// on a reader thread, a pool worker, or a loop shared by every session. The single result array is built once, by
+/// on a pool worker or on the loop shared by every session. The single result array is built once, by
 /// <see cref="ToArray"/>, on the thread that takes the result; until then the elements stay in their segments.
 /// </para>
 /// <para>

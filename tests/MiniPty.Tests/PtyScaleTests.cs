@@ -6,7 +6,7 @@ namespace MiniPty.Tests;
 
 /// <summary>
 /// What an open session costs the host while it is idle, which is what a web host serving many browser tabs pays for
-/// (<c>.github/docs/plans/plan_thread_free_io.md</c>).
+/// (<c>.github/docs/references/pty_crossplatform.md</c>, Why this engine).
 /// </summary>
 /// <remarks>
 /// Each test counts process-wide resources, so it runs alone (<c>[NotInParallel]</c> without a key), and compares two
@@ -28,7 +28,7 @@ public sealed class PtyScaleTests
 
     /// <summary>
     /// Idle sessions hold no thread: their output waits on I/O completions (Windows) or on the one watcher loop (Unix), not
-    /// on a reader thread each.
+    /// on a thread each.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -55,8 +55,8 @@ public sealed class PtyScaleTests
 
     /// <summary>
     /// An idle session whose output has been read holds no output buffer: it waits with a zero-byte read (Windows) or for
-    /// the loop's readiness report (Unix), and takes a ring only while output is unread. A reader thread holds its ring
-    /// from spawn to end of output instead, because a blocking read needs its buffer while it waits.
+    /// the loop's readiness report (Unix), and takes a ring only while output is unread. A driver that blocked in the
+    /// transport would hold its ring from spawn to end of output, because a blocking read needs its buffer while it waits.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -79,7 +79,7 @@ public sealed class PtyScaleTests
 
     /// <summary>
     /// A ring buffer returned on one thread serves the next rent on another, so rings released by whichever party lets
-    /// go last (a reader thread, a consumer, a disposing thread) never strand in a per-thread cache.
+    /// go last (an output driver, a consumer, a disposing thread) never strand in a per-thread cache.
     /// </summary>
     [Test]
     [NotInParallel]
