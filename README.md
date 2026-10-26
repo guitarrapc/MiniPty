@@ -28,12 +28,10 @@ macOS
 
 <img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-macos.png" alt="Benchmark macOS" width="600" />
 
-![](https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark.png)
-
 ## Features
 
 - NativeAOT ready, no winpty, and no helper process running beside a session ([what ships per platform](#native-files))
-- Multi-platform ready, Windows, Linux, and macOS (FreeBSD is [experimental](#platform-backends))
+- Multi-platform ready, Windows, Linux, and macOS (FreeBSD is [experimental](#platforms))
 - Spawn a child in a pseudo-terminal (`Pty.Start`)
 - Overlay child environment variables and set Unix `TERM`
 - `Input` / `Output` byte streams; stdout and stderr merged on `Output`
@@ -57,14 +55,18 @@ macOS
 
 MiniPty creates a real PTY on each supported OS; it does not fall back to redirected pipes when PTY creation fails.
 
-| OS | Backend | Notes |
-|----|---------|-------|
-| Windows | ConPTY (`CreatePseudoConsole`) | Uses Win32 ConPTY directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. Requires Windows 10 1809+ / Windows 11. No winpty or helper process is used. Output is read through I/O completions on the runtime's thread pool, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty). |
-| Ubuntu / Linux | `forkpty` | Uses the small `libminipty_unix` native shim to call the platform PTY API, then `execve` the child inside the PTY. Resize uses `TIOCSWINSZ`. One background loop (the exit watcher's thread, on epoll) reads every session's output and writes its queued input, so an idle session holds no thread and no output buffer. |
-| macOS | `posix_spawn` + launcher | Uses the Unix backend through `libminipty_unix.dylib`, and starts each child through `minipty_spawn_helper` (not `forkpty`): a small launcher that `posix_spawn` starts, which takes the terminal as its controlling terminal and then replaces itself with the child by `exec`, so no helper process stays running. Resize uses `TIOCSWINSZ`. Output and input go through the same one loop as on Linux, on kqueue. |
-| FreeBSD (experimental) | `forkpty` | Uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle. Experimental: it is tested neither locally nor in CI, and the package ships no FreeBSD binary, so MiniPty works there only when built from source. |
+| OS | Architectures | Status |
+|----|---------------|--------|
+| Windows 10 1809+ / Windows 11 | x64, arm64 | Supported |
+| Linux | x64, arm64 | Supported |
+| macOS | x64, arm64 | Supported |
+| FreeBSD | — | Experimental: tested neither locally nor in CI, and the package ships no FreeBSD binary, so MiniPty works there only when built from source |
 
-Native files for your application carry the following besides the MiniPty assembly. The package and `dotnet publish` place these files for you.
+How each OS creates the PTY is described in [Platform backends](#platform-backends).
+
+### Native files
+
+Your application carries the following besides the MiniPty assembly. The package and `dotnet publish` place these files for you.
 
 | OS | Files beside the application | Under NativeAOT |
 |----|------------------------------|-----------------|
@@ -371,6 +373,26 @@ Console.WriteLine($"shell exited: {status.ExitCode} (signal {status.Signal?.ToSt
 ```
 
 For custom transports (stdio framing to a VS Code extension, SignalR, …), use the `PtyTerminal` facade directly: a node-pty-shaped push model with an output handler, awaitable `Completion` (exit after all output), and `Pause()` / `Resume()` flow control. It pushes output as soon as it is read, so a handler that keeps up gets each read as a chunk of its own. Only the built-in bridges join a burst of output into larger messages ([Output frames](.github/docs/specs/terminal.md#output-frames)). See [terminal.md](.github/docs/specs/terminal.md) for the protocol and the VS Code `Pseudoterminal` bridging pattern.
+
+## Platform backends
+
+Each OS has its own backend behind the same API. None of them uses winpty, and none keeps a helper process running beside a session.
+
+### Windows: ConPTY
+
+MiniPty calls Win32 ConPTY (`CreatePseudoConsole`) directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. Output is read through I/O completions on the runtime's thread pool, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty).
+
+### Linux: `forkpty`
+
+MiniPty uses the small `libminipty_unix` native shim to call the platform PTY API, then `execve` the child inside the PTY. Resize uses `TIOCSWINSZ`. One background loop (the exit watcher's thread, on epoll) reads every session's output and writes its queued input, so an idle session holds no thread and no output buffer.
+
+### macOS: `posix_spawn` + launcher
+
+MiniPty uses the Unix backend through `libminipty_unix.dylib`, and starts each child through `minipty_spawn_helper` (not `forkpty`): a small launcher that `posix_spawn` starts, which takes the terminal as its controlling terminal and then replaces itself with the child by `exec`, so no helper process stays running. Resize uses `TIOCSWINSZ`. Output and input go through the same one loop as on Linux, on kqueue.
+
+### FreeBSD (experimental): `forkpty`
+
+MiniPty uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle.
 
 ## Samples
 
