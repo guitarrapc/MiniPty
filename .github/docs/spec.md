@@ -6,7 +6,7 @@ User-facing specification entry point for **MiniPty**, **MiniPty.Capture**, **Mi
 
 Many CLI tools and terminal UIs behave differently when stdout is not a TTY: they disable color, skip animations, or refuse to run. A pseudo-terminal gives the child real terminal semantics while the parent reads and writes a byte stream.
 
-MiniPty exists as a **standalone, NativeAOT-friendly** library so any .NET program can spawn PTY children without bundling winpty or external helpers. Observation semantics are split into **MiniPty.Capture** so core callers that only need streams and exit codes are not forced to depend on capture types.
+MiniPty exists as a **standalone, NativeAOT-friendly** library so any .NET program can spawn PTY children without winpty or a helper process running beside each session. Windows needs nothing beyond the OS, Linux (and FreeBSD, which is experimental) needs a small native shim, and macOS also ships a launcher that replaces itself with the child ([platform_support.md](specs/platform_support.md), [README](../../README.md#native-files)). Observation semantics are split into **MiniPty.Capture** so core callers that only need streams and exit codes are not forced to depend on capture types.
 
 ## Use Cases
 

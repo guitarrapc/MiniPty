@@ -2,7 +2,7 @@
 
 Goal: resolve the items below before the next release, the first since `v1.3.0` (see [next_todo.md](../next_todo.md#release)). They came from reviewing MiniPty as a general-purpose PTY library against the reference libraries under `.references/`: node-pty 1.1.0, Porta.Pty 2.2.3, WezTerm's `portable-pty` 0.9.0, and creack/pty. Each gate is closed by a fix, or by a decision recorded in the specifications, as its own section says.
 
-**Status:** open (2026-10-27). R1 and R2 are implemented and verified locally on Linux and macOS (arm64) (2026-10-27); R3–R5 are open.
+**Status:** open (2026-10-27). R1 and R2 are implemented and verified locally on Linux and macOS (arm64) (2026-10-27); R3 is implemented (2026-10-27); R4 and R5 are open.
 
 ## Gate Inventory
 
@@ -181,6 +181,19 @@ State what ships. The helper is a launcher that replaces itself with the child b
 - Linux and FreeBSD need the native shim library.
 - macOS needs the shim library and the launcher.
 - No winpty, on any platform.
+
+### Result (implemented 2026-10-27)
+
+- **README Features:** now says "no winpty, and no helper process running beside a session", and links to a new **Native files** table under Platform backends. The table lists, per platform, the files beside the application and what remains under NativeAOT.
+- **README macOS row:** describes `minipty_spawn_helper` as a launcher that takes the controlling terminal and replaces itself with the child.
+- **spec.md Motivation:** says the same in one sentence.
+
+Two facts surfaced while writing the table, which the earlier wording also hid:
+
+- **Under NativeAOT** (`linux-*` and `osx-*` x64 and arm64), the shim is linked statically into the executable. On macOS the launcher must still sit beside it: MiniPty finds the launcher next to the image that contains the shim (`dladdr`), which is then the executable. `buildTransitive/MiniPty.targets` copies it there.
+- **The package ships no FreeBSD binary.** On FreeBSD the shim exists only when MiniPty is built from source, where the project compiles it with `cc`. The README's "Multi-platform ready, … FreeBSD" therefore held for source builds only.
+
+  **Decided (2026-10-27): FreeBSD is experimental.** The code stays. The README, [spec.md](../spec.md), [platform_support.md](../specs/platform_support.md), [console.md](../specs/console.md), and the `Pty.IsSupported` documentation call it experimental: untested, from source only, and missing the fork child's descriptor scrub. `Pty.IsSupported` keeps returning `true`, because it reports whether the operating system has pseudo-terminals MiniPty can drive, not whether a binary ships.
 
 ## R4: Features other libraries offer
 

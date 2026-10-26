@@ -32,8 +32,8 @@ macOS
 
 ## Features
 
-- NativeAOT ready, in-process backends only, no winpty or bundled helpers
-- Multi-platform ready, Windows, Linux, macOS, and FreeBSD
+- NativeAOT ready, no winpty, and no helper process running beside a session ([what ships per platform](#native-files))
+- Multi-platform ready, Windows, Linux, and macOS (FreeBSD is [experimental](#platform-backends))
 - Spawn a child in a pseudo-terminal (`Pty.Start`)
 - Overlay child environment variables and set Unix `TERM`
 - `Input` / `Output` byte streams; stdout and stderr merged on `Output`
@@ -53,7 +53,7 @@ macOS
 - Full terminal emulation, TUI replay, or faithfully preserving `\r` overwrite lines
 - Falling back to pipe redirect when PTY creation fails—if you need a PTY, MiniPty either gives you one or throws
 
-## Platform backends
+## Platforms
 
 MiniPty creates a real PTY on each supported OS; it does not fall back to redirected pipes when PTY creation fails.
 
@@ -61,8 +61,17 @@ MiniPty creates a real PTY on each supported OS; it does not fall back to redire
 |----|---------|-------|
 | Windows | ConPTY (`CreatePseudoConsole`) | Uses Win32 ConPTY directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. Requires Windows 10 1809+ / Windows 11. No winpty or helper process is used. Output is read through I/O completions on the runtime's thread pool, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty). |
 | Ubuntu / Linux | `forkpty` | Uses the small `libminipty_unix` native shim to call the platform PTY API, then `execve` the child inside the PTY. Resize uses `TIOCSWINSZ`. One background loop (the exit watcher's thread, on epoll) reads every session's output and writes its queued input, so an idle session holds no thread and no output buffer. |
-| macOS | `posix_spawn` + helper | Uses the Unix backend through `libminipty_unix.dylib` with a `posix_spawn` helper process (not `forkpty`). Resize uses `TIOCSWINSZ`. Output and input go through the same one loop as on Linux, on kqueue. |
-| FreeBSD | `forkpty` | Uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle. |
+| macOS | `posix_spawn` + launcher | Uses the Unix backend through `libminipty_unix.dylib`, and starts each child through `minipty_spawn_helper` (not `forkpty`): a small launcher that `posix_spawn` starts, which takes the terminal as its controlling terminal and then replaces itself with the child by `exec`, so no helper process stays running. Resize uses `TIOCSWINSZ`. Output and input go through the same one loop as on Linux, on kqueue. |
+| FreeBSD (experimental) | `forkpty` | Uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle. Experimental: it is tested neither locally nor in CI, and the package ships no FreeBSD binary, so MiniPty works there only when built from source. |
+
+Native files for your application carry the following besides the MiniPty assembly. The package and `dotnet publish` place these files for you.
+
+| OS | Files beside the application | Under NativeAOT |
+|----|------------------------------|-----------------|
+| Windows | None: ConPTY comes with Windows. The [out-of-band ConPTY](#out-of-band-conpty) is optional and supplied by your application | None |
+| Linux (x64, arm64) | `libminipty_unix.so` | None: the shim is linked into the executable |
+| macOS (x64, arm64) | `libminipty_unix.dylib` and `minipty_spawn_helper` | `minipty_spawn_helper` only: the shim is linked into the executable, and the launcher must stay in the same directory, where MiniPty looks for it |
+| FreeBSD (experimental) | `libminipty_unix.so`, which the package does not include: it is built with `cc` when MiniPty is built from source on FreeBSD | Not supported by the package |
 
 ## Quick start
 

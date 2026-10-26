@@ -30,6 +30,11 @@ public static class Pty
     /// <value>
     /// <see langword="true"/> on Windows 10 1809+, Linux, macOS, and FreeBSD; otherwise <see langword="false"/>.
     /// </value>
+    /// <remarks>
+    /// FreeBSD support is experimental: it is not tested, and the package ships no FreeBSD native library, so
+    /// <see cref="Start"/> works there only when MiniPty is built from source. This property reports whether the
+    /// operating system has pseudo-terminals MiniPty can drive, not whether the native library is present.
+    /// </remarks>
     public static bool IsSupported =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ||
         RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ||

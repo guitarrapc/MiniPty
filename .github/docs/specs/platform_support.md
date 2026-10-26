@@ -9,7 +9,15 @@ Implemented public platform support, verification constraints, and platform-leve
 | Windows | ConPTY (`CreatePseudoConsole`), or an out-of-band ConPTY the application supplies (`PtyStartInfo.ConPty`) | Windows 10 1809+, Windows 11 |
 | Linux | `forkpty` + `execve` through native shim | Common glibc/musl targets |
 | macOS | `posix_spawn` + `minipty_spawn_helper` through native shim | Supported runners; helper bundled in `runtimes/osx-*/native/` |
-| FreeBSD | `forkpty` + `execve` through native shim | `libutil` |
+| FreeBSD (experimental) | `forkpty` + `execve` through native shim | `libutil`; built from source only |
+
+**FreeBSD is experimental.** The backend is implemented and compiles when MiniPty is built on FreeBSD, but:
+
+- It is tested neither locally nor in CI. Its termios, its hang-up behavior when the session leader exits, and its `kqueue` readiness follow from source only ([next_todo.md](../next_todo.md#unverified)).
+- The package ships no FreeBSD binary. Through the package, `Pty.Start` fails because the shim cannot be loaded, so MiniPty works there only when built from source.
+- One fork-child step Linux has is missing: inherited descriptors are not closed before exec (see the lessons below).
+
+`Pty.IsSupported` still returns `true` on FreeBSD. It reports whether the operating system has pseudo-terminals MiniPty can drive, not whether this build ships a binary for it.
 
 Pipe redirect without ConPTY is not a PTY. On Windows, TUI tools require ConPTY-backed spawn.
 

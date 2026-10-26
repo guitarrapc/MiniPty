@@ -165,7 +165,7 @@ Host key chords are forwarded as bytes to the PTY. **MiniPty.Console** does not 
 
 ## Platform
 
-Public attach, resize, control-character, dispose, and failure behavior are **the same on all supported platforms** (Windows, Linux, macOS, FreeBSD).
+Public attach, resize, control-character, dispose, and failure behavior are **the same on all supported platforms** (Windows, Linux, macOS, and the experimental FreeBSD backend).
 
 Input pumping is **started differently** per OS (see Input pump); embedders should call `PumpInputUntil` linked to session exit on every platform.
 
