@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using MiniPty.Capture;
@@ -207,7 +207,7 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// Bulk stdout on Windows ConPTY arrives whole, in chunks no larger than a ring slot.
+    /// Bulk stdout on Windows ConPTY arrives whole, in chunks no larger than the output ring.
     /// </summary>
     /// <remarks>
     /// This used to assert that coalescing batched the 32 KiB into fewer than 40 chunks (about 13 on an idle
@@ -241,10 +241,14 @@ public sealed class PtyTests
 
         await Assert.That(totalBytes).IsGreaterThanOrEqualTo(32_768);
         await Assert.That(chunks).IsGreaterThan(0);
-        await Assert.That(maxChunk).IsLessThanOrEqualTo(4096);
+        await Assert.That(maxChunk).IsLessThanOrEqualTo(MiniPty.Internal.PtyOutputPump.Capacity);
     }
 
-    /// <summary>Binary bulk stdout on Unix should remain few large chunks (coalesce must not regress large reads).</summary>
+    /// <summary>
+    /// Bulk output that piles up while the consumer is busy is handed out as few large chunks, whatever size each read
+    /// has. The loop publishes each read as it completes, and a macOS read returns at most 1 KiB, so a consumer that keeps
+    /// up gets about 32 chunks of 32 KiB there; this consumer is slower than the child on purpose.
+    /// </summary>
     [Test]
     public async Task PtyReadOutputAsyncPreservesLargeChunksOnUnix()
     {
@@ -256,12 +260,17 @@ public sealed class PtyTests
         var totalBytes = 0;
         var chunks = 0;
         var maxChunk = 0;
-        await foreach (var chunk in session.ReadOutputAsync())
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+        while (true)
         {
+            await Task.Delay(10);
+            if (!await output.MoveNextAsync())
+                break;
+
             chunks++;
-            totalBytes += chunk.Data.Length;
-            if (chunk.Data.Length > maxChunk)
-                maxChunk = chunk.Data.Length;
+            totalBytes += output.Current.Data.Length;
+            if (output.Current.Data.Length > maxChunk)
+                maxChunk = output.Current.Data.Length;
         }
 
         await Assert.That(totalBytes).IsEqualTo(32_768);
@@ -607,6 +616,74 @@ public sealed class PtyTests
 
         await Assert.That(exitCode).IsEqualTo(0);
         await Assert.That(length).IsGreaterThanOrEqualTo(minimumLength);
+    }
+
+    /// <summary>
+    /// One-shot results keep multi-megabyte output whole, and the text decoded while it arrives matches the bytes.
+    /// This much output spans hundreds of result segments, more than the segment pool keeps. On Unix every line holds
+    /// a three-byte character, so characters split between reads and between segments.
+    /// </summary>
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task OneShotResultsKeepMultiMegabyteOutput(bool capture)
+    {
+        const int Size = 4 * 1024 * 1024;
+
+        PtyStartInfo startInfo;
+        var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        if (windows)
+        {
+            if (!TryResolveWindowsPowerShell(out var powershell))
+                return;
+
+            startInfo = Spawn(powershell, ["-NoLogo", "-NoProfile", "-Command", $"[Console]::Out.Write(('x' * {Size}))"]);
+        }
+        else
+        {
+            // "€\n" is four bytes, so the cut falls between lines.
+            startInfo = UnixShell($"yes € | head -c {Size}");
+        }
+
+        var options = new PtyCompleteOptions { DecodeOutput = true };
+        ReadOnlyMemory<byte> output;
+        string text;
+        int exitCode;
+        if (capture)
+        {
+            var result = await PtyCapture.RunAsync(startInfo, new PtyCaptureOptions { Completion = options });
+            (output, text, exitCode) = (result.Output, result.GetTextString(), result.ExitCode);
+        }
+        else
+        {
+            await using var session = Pty.Start(startInfo);
+            var result = await session.CompleteAsync(options);
+            (output, text, exitCode) = (result.Output, result.GetTextString(), result.ExitCode);
+        }
+
+        await Assert.That(exitCode).IsEqualTo(0);
+        await Assert.That(text).IsEqualTo(Encoding.UTF8.GetString(output.Span));
+        if (windows)
+        {
+            // ConPTY renders the line into rows and adds sequences of its own, so only the characters are counted.
+            var count = 0;
+            foreach (var c in text)
+            {
+                if (c == 'x')
+                    count++;
+            }
+
+            await Assert.That(count).IsGreaterThanOrEqualTo(Size);
+        }
+        else
+        {
+            // The terminal turns each newline into CR LF. A macOS terminal writes CR CR LF instead when its 1 KiB output
+            // queue fills right after the CR, because it puts the CR again when it retries the LF, so those are folded.
+            if (OperatingSystem.IsMacOS())
+                text = text.Replace("\r\r\n", "\r\n", StringComparison.Ordinal);
+
+            await Assert.That(text).IsEqualTo(new StringBuilder().Insert(0, "€\r\n", Size / 4).ToString());
+        }
     }
 
     [Test]
@@ -1267,11 +1344,18 @@ public sealed class PtyTests
                 .Replace("\n", "\\n", StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A resize after the child exits, while the transport is still open, applies the size. On Windows a grandchild keeps
+    /// the console host, and with it the pseudo-console, after the child exits. Without one, a host released at spawn
+    /// (Windows 11 24H2 and later, and the out-of-band ConPTY) ends with its last client 2–5 ms after the child, and a
+    /// resize after that is skipped, as exit tolerance allows, before the output pipe has reported the end: of 20 resizes
+    /// 5 ms after the exit, none applied. A loaded full run delayed this thread that long now and then.
+    /// </summary>
     [Test]
     public async Task PtyResizeAfterExitWithOpenTransportDoesNotThrow()
     {
         using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? WindowsCommand("exit /b 0")
+            ? WindowsCommand("start /b ping -n 6 127.0.0.1 >nul & exit /b 0")
             : UnixShell("exit 0"));
         var initial = session.Size;
 
@@ -1294,9 +1378,9 @@ public sealed class PtyTests
 
         if (OperatingSystem.IsWindows())
         {
-            // conhost stays alive until the pseudo-console is closed, so the size is still applied. A runner that kept
-            // this thread off a core past the drain's quiet period closed it first, and the resize is then the documented
-            // no-op that PtyResizeAfterTransportClosedIsNoOp covers.
+            // The grandchild keeps the host alive, so the size is applied. A runner that kept this thread off a core past
+            // the drain's quiet period closed the pseudo-console first, and the resize is then the documented no-op that
+            // PtyResizeAfterTransportClosedIsNoOp covers.
             if (!closeStarted)
                 await Assert.That(session.Size).IsEqualTo(new PtySize(100, 30));
             else
@@ -2003,12 +2087,13 @@ public sealed class PtyTests
     /// or parked on a full ring. Nothing more reaches the session after that until a consumer reads.
     /// </summary>
     /// <remarks>
-    /// Output need not have ended. The ring holds four reads whatever their size, and under CPU contention ConPTY's
-    /// frames for a single <c>echo</c> arrive as separate small reads, too far apart for the micro-window to join. When
-    /// they fill the ring, the frame ConPTY flushes after the close waits in the pipe, and the reader waits for a consumer
-    /// to free a slot (<c>PtyOutputPumpTests.FramesThatFillTheRingAfterTheCloseReachALateReader</c>). Waiting for end of
-    /// output timed out at 10 s in 3 of 10 full-suite runs pinned to two cores; the reader had taken three reads before
-    /// the close and was parked on the fourth.
+    /// Output need not have ended. When output nobody reads fills the ring, the frame ConPTY flushes after the close waits
+    /// in the pipe, and the reader waits for a consumer to free space
+    /// (<c>PtyOutputPumpTests.FramesThatFillTheRingAfterTheCloseReachALateReader</c>). With a ring of four slots, the few
+    /// small frames of a single <c>echo</c> filled it under CPU contention: waiting for end of output timed out at 10 s in
+    /// 3 of 10 full-suite runs pinned to two cores, with the reader parked on its fourth read. The ring now holds bytes,
+    /// so such frames no longer fill it (<c>PtyOutputPumpTests.SmallFramesDoNotFillTheRing</c>), but a larger output
+    /// still can.
     /// </remarks>
     private static async Task WaitUntilOutputSettled(PtySession session)
     {
@@ -2020,7 +2105,7 @@ public sealed class PtyTests
         await Assert.That(IsSettled(pump)).IsTrue();
 
         static bool IsSettled(MiniPty.Internal.PtyOutputPump pump) =>
-            pump.IsProducerFinished || (pump.IsCloseRequested && pump.IsWaitingForFreeSlot);
+            pump.IsProducerFinished || (pump.IsCloseRequested && pump.IsWaitingForFreeSpace);
     }
 
     private static async Task WaitUntilExited(PtySession session)

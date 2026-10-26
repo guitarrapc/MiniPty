@@ -54,6 +54,39 @@ public sealed class PtyWebSocketBridgeTests
         await Assert.That(client.BinaryText).Contains("BRIDGE_MARKER");
     }
 
+    /// <summary>
+    /// A flood goes out in large frames: the bridge joins reads that arrive in a burst. On macOS a terminal read returns at
+    /// most 1 KiB, and the core publishes each read as it completes, so without the joining hardly any byte would go out in
+    /// a frame of 4 KiB or more. A Linux read can return 4 KiB, so there the test may pass without the joining. The test
+    /// weighs frames by their bytes, so the few small frames a slowdown on a loaded machine causes do not decide it. It
+    /// skips Windows, whose output arrives in frames of a few KiB whether or not the bridge joins them. It runs alone, so
+    /// that other tests do not slow the flood.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task AFloodThroughTheBridgeGoesOutInLargeFrames()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        const int Size = 1024 * 1024;
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var bridgeTask = PtyWebSocketBridge.RunAsync(
+            Spawn("sh", ["-c", $"head -c {Size} /dev/zero | tr '\\0' x"]),
+            serverSocket,
+            cancellationToken: cts.Token);
+        var client = new BridgeTestClient(clientSocket);
+
+        await client.RunToCloseAsync(ackEverything: true, cts.Token);
+        await bridgeTask.WaitAsync(cts.Token);
+
+        var binaryFrames = client.MessageCount - (client.ExitMessage is null ? 0 : 1);
+        await Assert.That(client.BinaryByteCount).IsEqualTo(Size);
+        await Assert.That(client.LargeFrameByteCount * 4).IsGreaterThanOrEqualTo(client.BinaryByteCount * 3)
+            .Because($"{client.LargeFrameByteCount} of {Size} bytes in frames of 4 KiB or more, {binaryFrames} frames");
+    }
+
     [Test]
     public async Task BridgeWritesClientBinaryFramesToChildInput()
     {
@@ -115,10 +148,13 @@ public sealed class PtyWebSocketBridgeTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var options = new PtyBridgeOptions { HighWatermark = 4096, LowWatermark = 1024 };
 
-        // This needs only enough output to cross the watermark and prove an ACK resumes delivery.
+        // This needs enough output that some is still unsent when delivery pauses: more than the
+        // watermark plus one chunk, which can hold the whole output ring (a consumer that fell behind
+        // takes every contiguous read at once). With 64 lines (8 KiB) a Linux child's output arrived
+        // in one chunk, the child exited, and the bridge closed before the test acknowledged anything.
         // A 256 KiB burst creates roughly 64 serialized pause/ACK/resume round trips at this
         // watermark, which exceeds the test budget on loaded macOS arm64 CI runners.
-        var bridgeTask = PtyWebSocketBridge.RunAsync(BulkOutputChild(lineCount: 64), serverSocket, options, cts.Token);
+        var bridgeTask = PtyWebSocketBridge.RunAsync(BulkOutputChild(lineCount: 256), serverSocket, options, cts.Token);
         var client = new BridgeTestClient(clientSocket);
         var clientTask = client.RunToCloseAsync(ackEverything: false, cts.Token);
 
@@ -586,6 +622,9 @@ public sealed class PtyWebSocketBridgeTests
         }
 
         public long BinaryByteCount => Interlocked.Read(ref _binaryByteCount);
+
+        /// <summary>Bytes received in binary frames of 4 KiB or more.</summary>
+        public long LargeFrameByteCount { get; private set; }
         public int MessageCount => _messageCount;
         public JsonElement? ExitMessage { get; private set; }
         public int ExitMessageIndex { get; private set; } = -1;
@@ -658,6 +697,8 @@ public sealed class PtyWebSocketBridgeTests
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
                     Interlocked.Add(ref _binaryByteCount, payload.Length);
+                    if (payload.Length >= 4096)
+                        LargeFrameByteCount += payload.Length;
                     lock (_binaryText)
                     {
                         _binaryText.Append(Encoding.UTF8.GetString(payload));

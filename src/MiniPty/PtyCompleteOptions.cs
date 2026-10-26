@@ -62,7 +62,7 @@ public sealed record PtyCompleteOptions
     public TimeSpan OutputDrainGrace { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
-    /// Gets or sets the maximum time to wait for the output reader to finish after the PTY transport is closed.
+    /// Gets or sets the maximum time to wait for output reading to finish after the PTY transport is closed.
     /// </summary>
     /// <value>Default is 5 seconds. Exceeding this value throws <see cref="TimeoutException"/>.</value>
     public TimeSpan OutputReaderCloseTimeout { get; init; } = TimeSpan.FromSeconds(5);

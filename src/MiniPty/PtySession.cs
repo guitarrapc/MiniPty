@@ -16,8 +16,9 @@ namespace MiniPty;
 /// <c>UnixPtyBackend</c> behind <see cref="IPtyBackend"/>.
 /// </para>
 /// <para>
-/// PTY output is read from spawn on a dedicated background thread into a small bounded buffer, and exactly one
-/// consumer drains it: <see cref="ReadOutputAsync"/>, <see cref="Output"/>, <see cref="CompleteAsync"/>, or the
+/// PTY output is read from spawn into a small bounded buffer, never on the caller's thread and never by blocking a
+/// thread-pool worker (through I/O completions on Windows, on one background loop for every session on Unix), and exactly
+/// one consumer drains it: <see cref="ReadOutputAsync"/>, <see cref="Output"/>, <see cref="CompleteAsync"/>, or the
 /// <c>MiniPty.Capture</c> package. When nothing drains it the buffer fills, reading stops, and the child may block
 /// on its next write, as it would on a terminal nobody reads.
 /// </para>
@@ -138,6 +139,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
 
     internal PtyOutputPump OutputPump => _pump;
 
+    /// <summary>The session's <see cref="ReadOutputAsync"/> enumerator, once one was created. For tests.</summary>
+    internal PtyOutputReader? OutputReader => _outputReader;
+
     internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
     /// <summary>
@@ -179,6 +183,18 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
             ? new PtyOutputReader.WithToken(reader, cancellationToken)
             : reader;
     }
+
+    /// <summary>
+    /// <see cref="ReadOutputAsync"/> for a consumer that pays per chunk, such as a bridge that sends one message per chunk.
+    /// While output arrives in a burst, a chunk waits until 8 KiB is unread or a shared tick serves its deadline, so a flood
+    /// goes out in fewer, larger chunks. That is up to about 2 ms after the read asked, on Windows too, whose tick runs on
+    /// a high-resolution timer (<see cref="PtyOutputCoalescing.MaxDelayMs"/>). Output outside a burst, such as a keystroke
+    /// echo, is handed out at once (<see cref="PtyOutputCoalescing"/>).
+    /// </summary>
+    internal IAsyncEnumerable<PtyOutputChunk> ReadOutputCoalescedAsync(CancellationToken cancellationToken = default) =>
+        new PtyCoalescingOutputReader.CoalescingEnumerable(
+            _outputReader as PtyCoalescingOutputReader ?? CreateCoalescingOutputReader(),
+            cancellationToken);
 
     /// <summary>
     /// Gets a value indicating whether the child process has exited.
@@ -327,7 +343,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// Frontend size changes race child exit, so exit never makes this call fail. While the PTY
     /// transport is open the size is applied, even if the child has already exited. Once the transport
     /// has been closed after exit, the call does nothing and <see cref="Size"/> keeps its last applied
-    /// value. Hosts can therefore forward every layout change without checking <see cref="HasExited"/>.
+    /// value. On Windows the console host can end before the transport closes: from Windows 11 24H2, and with
+    /// the out-of-band ConPTY, it ends with the last process attached to it, a few milliseconds after the child
+    /// unless a grandchild stays, and a resize after that is skipped in the same way. Hosts can therefore forward
+    /// every layout change without checking <see cref="HasExited"/>.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The session has been disposed.</exception>
     /// <exception cref="System.ComponentModel.Win32Exception">Windows: <c>ResizePseudoConsole</c> failed while the child was running.</exception>
@@ -462,8 +481,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// </param>
     /// <returns>A <see cref="PtyResult"/> with merged <see cref="PtyResult.Output"/> bytes and exit code.</returns>
     /// <remarks>
-    /// Output is collected on the session's reader thread while the child runs, so awaiting this method does not
-    /// block the calling thread. <see cref="PtyCompleteOptions.Input"/> is written as by
+    /// Output is collected as it is read while the child runs, never on the calling thread, so awaiting this method
+    /// does not block it. <see cref="PtyCompleteOptions.Input"/> is written as by
     /// <see cref="WriteInputAsync(string, Encoding?, CancellationToken)"/>, without blocking either.
     /// </remarks>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
@@ -509,9 +528,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// that group ends too unless it ignores <c>SIGHUP</c>. On Windows the child is terminated.
     /// </para>
     /// <para>
-    /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. The background
-    /// reader stops on its own shortly afterwards; output chunk memory must not be used after this call. Use
-    /// <see cref="DisposeAsync"/> to also wait until the reader has stopped.
+    /// In-flight output reads and exit waits fail with <see cref="ObjectDisposedException"/>. Background
+    /// output reading stops on its own shortly afterwards; output chunk memory must not be used after this call. Use
+    /// <see cref="DisposeAsync"/> to also wait until it has stopped.
     /// </para>
     /// <para>
     /// Safe to call more than once, also from several threads at once, such as a host's exit handler racing its main
@@ -525,7 +544,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
 
         Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
 
-        // Discard mode first: closing the pseudo-console waits for ConPTY to flush, which needs a reader.
+        // Discard mode first: closing the pseudo-console waits for ConPTY to flush, which needs its output read.
         _pump.OnSessionDisposing();
         _backend.Dispose();
         _pump.OnSessionDisposed();
@@ -533,16 +552,16 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
 
     /// <summary>
     /// Releases PTY and process handles, ending the child if it is still running as <see cref="Dispose"/> does, and
-    /// completes once the background output reader has stopped.
+    /// completes once background output reading has stopped.
     /// </summary>
-    /// <returns>A value task that completes when the reader has released the transport.</returns>
+    /// <returns>A value task that completes when output reading has released the transport.</returns>
     /// <remarks>
-    /// Does not wait for the reader on the calling thread, and does not wait for the child to exit. Every call waits
+    /// Does not block the calling thread, and does not wait for the child to exit. Every call waits
     /// for the same shutdown, including calls after <see cref="Dispose"/> and concurrent ones.
     /// </remarks>
     public ValueTask DisposeAsync()
     {
-        // Idempotent teardown; disposal having started does not mean the reader has stopped.
+        // Idempotent teardown; disposal having started does not mean output reading has stopped.
         Dispose();
         return _pump.WaitForStopAsync();
     }
@@ -610,6 +629,20 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     {
         var created = new PtyOutputReader(this, _pump);
         return Interlocked.CompareExchange(ref _outputReader, created, null) ?? created;
+    }
+
+    /// <summary>
+    /// Makes the session's reader one that can coalesce. It replaces a plain reader an earlier enumeration created; one that
+    /// is still enumerating keeps the session's single output consumer, so the new reader's enumeration fails with the
+    /// conflict, as any second reader does. If another thread replaced the reader meanwhile, which only racing reads do,
+    /// the new one still serves this enumeration, and the session's single output consumer decides between them.
+    /// </summary>
+    private PtyCoalescingOutputReader CreateCoalescingOutputReader()
+    {
+        var current = Volatile.Read(ref _outputReader);
+        var created = new PtyCoalescingOutputReader(this, _pump);
+        Interlocked.CompareExchange(ref _outputReader, created, current);
+        return created;
     }
 
     private PtyOutputStream CreateOutputStream()

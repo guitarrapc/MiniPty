@@ -11,7 +11,8 @@ internal static class PtyCaptureTextDecode
     private readonly record struct TextChunkMeta(TimeSpan Time, int Start, int Length);
 
     /// <summary>
-    /// Replays per-read byte chunks through a streaming decoder (allocates a new char buffer every call).
+    /// Replays per-read byte chunks through a streaming decoder (allocates a new char buffer every call). A byte chunk
+    /// may hold several reads, so the text of one chunk can be any length.
     /// </summary>
     internal static PtyCaptureTextChunk[] DecodeFromByteChunks(
         IReadOnlyList<PtyCaptureChunk> byteChunks,
@@ -20,9 +21,8 @@ internal static class PtyCaptureTextDecode
         if (byteChunks.Count == 0)
             return [];
 
-        using var chars = PtyReadBuffer.RentChars(encoding);
         var decoder = encoding.GetDecoder();
-        using var textBuffer = new PtyGrowingBuffer<char>();
+        var text = default(PtySegmentedBuffer<char>);
         var meta = new List<TextChunkMeta>(byteChunks.Count);
 
         for (var i = 0; i < byteChunks.Count; i++)
@@ -31,22 +31,18 @@ internal static class PtyCaptureTextDecode
             if (data.IsEmpty)
                 continue;
 
-            var charCount = decoder.GetChars(data, chars.Span, flush: false);
-            if (charCount <= 0)
-                continue;
-
-            meta.Add(new TextChunkMeta(byteChunks[i].Time, textBuffer.Length, charCount));
-            textBuffer.Append(chars.Span[..charCount]);
+            var start = text.Length;
+            PtyTextDecoding.Decode(decoder, encoding, data, flush: false, ref text);
+            if (text.Length > start)
+                meta.Add(new TextChunkMeta(byteChunks[i].Time, start, text.Length - start));
         }
 
-        var trailing = decoder.GetChars(ReadOnlySpan<byte>.Empty, chars.Span, flush: true);
-        if (trailing > 0)
-        {
-            meta.Add(new TextChunkMeta(byteChunks[^1].Time, textBuffer.Length, trailing));
-            textBuffer.Append(chars.Span[..trailing]);
-        }
+        var trailingStart = text.Length;
+        PtyTextDecoding.Decode(decoder, encoding, ReadOnlySpan<byte>.Empty, flush: true, ref text);
+        if (text.Length > trailingStart)
+            meta.Add(new TextChunkMeta(byteChunks[^1].Time, trailingStart, text.Length - trailingStart));
 
-        var outputChars = textBuffer.Detach();
+        var outputChars = text.ToArray();
         var chunks = new PtyCaptureTextChunk[meta.Count];
         for (var i = 0; i < meta.Count; i++)
         {

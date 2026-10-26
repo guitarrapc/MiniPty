@@ -274,6 +274,47 @@ public sealed class PtyWebSocketSessionManagerTests
         }
     }
 
+    /// <summary>
+    /// A flood to an attached client goes out in large frames, as through the plain bridge: reads that arrive in a burst
+    /// are joined before they reach the replay buffer, so the send loop mostly finds several reads at once. The child floods
+    /// only once the client is attached, so that the replay buffer does not join the output instead while nobody sends.
+    /// The test weighs frames by their bytes and runs on Unix only and alone, for the reasons the plain bridge's test gives.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task PersistentSessionSendsAFloodInLargeFrames()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        const int Size = 1024 * 1024;
+        await using var manager = new PtyWebSocketSessionManager(TestOptions());
+        var credentials = manager.CreateSession(
+            Spawn("sh", ["-c", $"stty -echo; printf 'READY\\n'; IFS= read -r _; head -c {Size} /dev/zero | tr '\\0' x"]));
+        var (server, socket) = PtyWebSocketBridgeTests.CreateSocketPair();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using (server)
+        using (socket)
+        {
+            var connection = manager.ConnectAsync(credentials.SessionId, credentials.AuthenticationToken, 0, server, timeout.Token);
+            var client = new PersistentClient(socket);
+            await client.ReceiveUntilAsync("READY", timeout.Token);
+            var framesBefore = client.Frames;
+            var bytesBefore = client.OutputBytes;
+            var largeBefore = client.LargeFrameBytes;
+            await client.SendInputAsync("\n", timeout.Token);
+            await client.ReceiveToCloseAsync(timeout.Token);
+            await connection.WaitAsync(timeout.Token);
+
+            var frames = client.Frames - framesBefore;
+            var bytes = client.OutputBytes - bytesBefore;
+            var large = client.LargeFrameBytes - largeBefore;
+            await Assert.That(bytes).IsGreaterThanOrEqualTo(Size);
+            await Assert.That(large * 4).IsGreaterThanOrEqualTo(bytes * 3)
+                .Because($"{large} of {bytes} bytes in frames of 4 KiB or more, {frames} frames");
+        }
+    }
+
     private static PtyWebSocketSessionManagerOptions TestOptions() => new()
     {
         DetachedSessionTimeout = TimeSpan.FromSeconds(10),
@@ -320,6 +361,9 @@ public sealed class PtyWebSocketSessionManagerTests
 
         public string Output => _output.ToString();
         public long AcknowledgedOffset { get; private set; } = acknowledgedOffset;
+        public int Frames { get; private set; }
+        public long OutputBytes { get; private set; }
+        public long LargeFrameBytes { get; private set; }
 
         public Task SendInputAsync(string input, CancellationToken cancellationToken) =>
             socket.SendAsync(
@@ -372,6 +416,10 @@ public sealed class PtyWebSocketSessionManagerTests
             if (_pendingOffset < 0 || _pendingBytes != result.Count)
                 throw new InvalidDataException("Binary output did not match its output envelope.");
             _output.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+            Frames++;
+            OutputBytes += result.Count;
+            if (result.Count >= 4096)
+                LargeFrameBytes += result.Count;
             AcknowledgedOffset = _pendingOffset + result.Count;
             _pendingOffset = -1;
             _pendingBytes = 0;

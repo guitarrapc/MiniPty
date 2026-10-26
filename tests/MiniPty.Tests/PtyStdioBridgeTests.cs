@@ -44,6 +44,37 @@ public sealed class PtyStdioBridgeTests
         await Assert.That(Encoding.UTF8.GetString(JoinPayloads(frames, PtyStdioFrameType.Output))).Contains("INPUT_MARKER");
     }
 
+    /// <summary>
+    /// A flood goes out in large output frames, as through the WebSocket bridge: the bridge joins reads that arrive in a
+    /// burst. 256 KiB stays below the high watermark, so the flood needs no acknowledgement to go through. The test weighs
+    /// frames by their bytes and runs on Unix only and alone, for the reasons the WebSocket bridge's test gives.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task StdioBridgeSendsAFloodInLargeFrames()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        const int Size = 256 * 1024;
+        await using var input = new CancelableInputStream([]);
+        await using var output = new MemoryStream();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        await PtyStdioBridge.RunAsync(
+            Spawn("sh", ["-c", $"head -c {Size} /dev/zero | tr '\\0' x"]),
+            input,
+            output,
+            cancellationToken: cts.Token);
+
+        var frames = ParseFrames(output.ToArray()).Where(frame => frame.Type == PtyStdioFrameType.Output).ToList();
+        var bytes = frames.Sum(frame => frame.Payload.Length);
+        var large = frames.Where(frame => frame.Payload.Length >= 4096).Sum(frame => frame.Payload.Length);
+        await Assert.That(bytes).IsEqualTo(Size);
+        await Assert.That(large * 4).IsGreaterThanOrEqualTo(bytes * 3)
+            .Because($"{large} of {bytes} bytes in frames of 4 KiB or more, {frames.Count} frames");
+    }
+
     [Test]
     public async Task BridgeExitJsonUsesNodePtySignalShape()
     {

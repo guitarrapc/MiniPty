@@ -65,7 +65,7 @@ public sealed class PtyOutputYieldTests
             // Taken before the enumeration starts its run, so the measured time can only overstate the reader's.
             var runStart = Stopwatch.GetTimestamp();
             await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
-            for (var i = 0; i < PtyOutputPump.SlotCount; i++)
+            for (var i = 0; i < PtyOutputPumpTests.ReadsThatFillTheRing; i++)
             {
                 var next = enumerator.MoveNextAsync();
                 completions.Add((next.IsCompleted, Stopwatch.GetTimestamp() - runStart));
@@ -117,7 +117,7 @@ public sealed class PtyOutputYieldTests
         {
             await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
             var completions = new List<bool>();
-            for (var i = 0; i < PtyOutputPump.SlotCount; i++)
+            for (var i = 0; i < PtyOutputPumpTests.ReadsThatFillTheRing; i++)
             {
                 var next = enumerator.MoveNextAsync();
                 completions.Add(next.IsCompleted);
@@ -263,7 +263,7 @@ public sealed class PtyOutputYieldTests
 
         var result = await ui.RunAsync(async () =>
         {
-            var buffer = new byte[PtyOutputPump.SlotSize];
+            var buffer = new byte[PtyOutputPump.PublishSize];
             await TakeFirstSlotAsync(session.Output, buffer);
             SpendBudget();
 
@@ -278,7 +278,7 @@ public sealed class PtyOutputYieldTests
         }).WaitAsync(Timeout);
 
         await Assert.That(result.yielded).IsTrue();
-        await Assert.That(result.read).IsEqualTo(PtyOutputPump.SlotSize);
+        await Assert.That(result.read).IsEqualTo(PtyOutputPump.PublishSize);
         await Assert.That(result.Item4).IsTrue();
         await Assert.That(string.Join(",", result.order)).IsEqualTo("queued,resumed");
     }
@@ -290,9 +290,9 @@ public sealed class PtyOutputYieldTests
 
         var synchronous = await Task.Run(async () =>
         {
-            var buffer = new byte[PtyOutputPump.SlotSize];
+            var buffer = new byte[PtyOutputPump.PublishSize];
             var completions = new List<bool>();
-            for (var i = 0; i < PtyOutputPump.SlotCount; i++)
+            for (var i = 0; i < PtyOutputPumpTests.ReadsThatFillTheRing; i++)
             {
                 var next = session.Output.ReadAsync(buffer);
                 completions.Add(next.IsCompleted);
@@ -317,7 +317,7 @@ public sealed class PtyOutputYieldTests
 
         var (completed, read) = await ui.RunAsync(async () =>
         {
-            var buffer = new byte[PtyOutputPump.SlotSize];
+            var buffer = new byte[PtyOutputPump.PublishSize];
             await TakeFirstSlotAsync(session.Output, buffer);
             SpendBudget();
             var end = session.Output.ReadAsync(buffer);
@@ -337,7 +337,7 @@ public sealed class PtyOutputYieldTests
 
         var (yielded, read) = await ui.RunAsync(async () =>
         {
-            var buffer = new byte[PtyOutputPump.SlotSize];
+            var buffer = new byte[PtyOutputPump.PublishSize];
             await TakeFirstSlotAsync(session.Output, buffer);
             SpendBudget();
             var next = session.Output.ReadAsync(buffer);
@@ -346,7 +346,7 @@ public sealed class PtyOutputYieldTests
         }).WaitAsync(Timeout);
 
         await Assert.That(yielded).IsTrue();
-        await Assert.That(read).IsEqualTo(PtyOutputPump.SlotSize);
+        await Assert.That(read).IsEqualTo(PtyOutputPump.PublishSize);
     }
 
     [Test]
@@ -357,7 +357,7 @@ public sealed class PtyOutputYieldTests
 
         var (yielded, read, intact) = await ui.RunAsync(async () =>
         {
-            var buffer = new byte[PtyOutputPump.SlotSize];
+            var buffer = new byte[PtyOutputPump.PublishSize];
             await TakeFirstSlotAsync(session.Output, buffer);
             SpendBudget();
             var next = session.Output.ReadAsync(buffer);
@@ -369,15 +369,15 @@ public sealed class PtyOutputYieldTests
         }).WaitAsync(Timeout);
 
         await Assert.That(yielded).IsTrue();
-        await Assert.That(read).IsEqualTo(PtyOutputPump.SlotSize);
+        await Assert.That(read).IsEqualTo(PtyOutputPump.PublishSize);
         await Assert.That(intact).IsTrue();
     }
 
     /// <summary>A session whose ring is full of published output, with no more to come until disposal.</summary>
     private static async Task<PtySession> StartWithFullRingAsync()
     {
-        var session = new PtySession(new BufferedBackend(reads: PtyOutputPump.SlotCount, endAfter: false));
-        if (!await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSlot))
+        var session = new PtySession(new BufferedBackend(reads: PtyOutputPumpTests.ReadsThatFillTheRing, endAfter: false));
+        if (!await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace))
         {
             session.Dispose();
             throw new TimeoutException("The output ring did not fill.");
@@ -396,8 +396,8 @@ public sealed class PtyOutputYieldTests
     private static async Task TakeFirstSlotAsync(Stream output, byte[] buffer)
     {
         var read = await output.ReadAsync(buffer);
-        if (read != PtyOutputPump.SlotSize)
-            throw new InvalidOperationException($"The first read took {read} bytes instead of a whole slot.");
+        if (read != PtyOutputPump.PublishSize)
+            throw new InvalidOperationException($"The first read took {read} bytes instead of a whole read.");
     }
 
     /// <summary>Waits on the current thread until more than the budget has passed, as a slow chunk handler does.</summary>
@@ -435,7 +435,7 @@ public sealed class PtyOutputYieldTests
 
         private int _reads;
 
-        public override int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
         {
             if (IsDisposed)
                 return 0;
@@ -450,14 +450,8 @@ public sealed class PtyOutputYieldTests
             if (endAfter)
                 return 0;
 
-            reader.WaitForWake(System.Threading.Timeout.Infinite);
+            driver.WaitForWake(System.Threading.Timeout.Infinite);
             return -1;
-        }
-
-        public override int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            return 0;
         }
     }
 }

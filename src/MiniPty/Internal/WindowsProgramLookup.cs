@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 
 namespace MiniPty.Internal;
@@ -52,6 +53,12 @@ internal static partial class WindowsProgramLookup
     private const uint InvalidFileAttributes = 0xFFFFFFFF;
     private const uint FileAttributeDirectory = 0x10;
     private const string ExecutableExtension = ".exe";
+
+    /// <summary>
+    /// Measured on Windows 11 26200: a program path of 259 characters starts through <c>CreateProcess</c>'s own lookup,
+    /// one of 260 does not.
+    /// </summary>
+    private const int MaxPath = 260;
 
     private static string? s_systemDirectory;
     private static string? s_windowsDirectory;
@@ -180,6 +187,47 @@ internal static partial class WindowsProgramLookup
             return Accept(found);
 
         throw new Win32Exception(ErrorFileNotFound, "CreateProcess failed");
+    }
+
+    /// <summary>
+    /// The application name for a program <c>CreateProcess</c> does not search for (<see cref="IsSearched"/> is false)
+    /// whose full path reaches <c>MAX_PATH</c>. <c>CreateProcess</c>'s own lookup of the command line, which is what a
+    /// null application name gets, fails from there: <c>ERROR_FILENAME_EXCED_RANGE</c> in a host that opted into long
+    /// paths, <c>ERROR_FILE_NOT_FOUND</c> in one that did not. Given as the application name, the same path starts in a
+    /// host that opted in, and in no other way does it start at all.
+    /// </summary>
+    /// <remarks>
+    /// Only from <c>MAX_PATH</c> on: below it the lookup works, and leaving it there costs a spawn nothing. The name
+    /// gets <c>.exe</c> as the lookup would add it, and the file is checked first, so a missing file still fails with
+    /// <c>ERROR_FILE_NOT_FOUND</c> and a directory with <c>ERROR_ACCESS_DENIED</c>, whatever <c>CreateProcess</c>
+    /// reports for an application name (a missing directory there is <c>ERROR_PATH_NOT_FOUND</c>). In a host that did
+    /// not opt into long paths the check cannot see the file and fails with <c>ERROR_FILE_NOT_FOUND</c>, as the spawn
+    /// did before. A fully qualified name is measured as given, so a short one costs nothing. Any other name is resolved
+    /// first and measured as resolved, since the process's current directory is not always its base: a drive-relative
+    /// name (<c>C:tool.exe</c>) is relative to that drive's own current directory, and a root-relative one
+    /// (<c>\tool.exe</c>) to the current drive's root.
+    /// </remarks>
+    /// <param name="fileName">The program name as given.</param>
+    /// <param name="program">The full path to pass as the application name, when the method returns true.</param>
+    /// <returns><see langword="false"/> for a name that is searched for, or whose full path is shorter than
+    /// <c>MAX_PATH</c>; such a name stays with <c>CreateProcess</c>.</returns>
+    /// <exception cref="Win32Exception">
+    /// No such file (<c>ERROR_FILE_NOT_FOUND</c>), or a directory (<c>ERROR_ACCESS_DENIED</c>), as from
+    /// <c>CreateProcess</c>.
+    /// </exception>
+    internal static bool TryResolveLongProgramPath(string fileName, [NotNullWhen(true)] out string? program)
+    {
+        program = null;
+        if (IsSearched(fileName))
+            return false;
+
+        var extension = NeedsExecutableExtension(fileName) ? ExecutableExtension : "";
+        var fullPath = Path.IsPathFullyQualified(fileName) ? null : Path.GetFullPath(fileName);
+        if ((fullPath ?? fileName).Length + extension.Length < MaxPath)
+            return false;
+
+        program = Accept((fullPath ?? Path.GetFullPath(fileName)) + extension);
+        return true;
     }
 
     /// <summary>

@@ -177,7 +177,7 @@ public sealed class PtyCallerContextTests
     public Task WriteInputAsyncTextOnUiThreadDoesNotBlockItWhenTheChildIsNotReading() =>
         AssertWriteInputDoesNotBlockUiThreadAsync(textOverload: true);
 
-    // Both overloads take what the tty accepts and queue the rest for the reader thread.
+    // Both overloads take what the tty accepts and queue the rest for the output driver to write.
     [Test]
     public Task WriteInputAsyncBytesOnUiThreadDoesNotBlockItWhenTheChildIsNotReading() =>
         AssertWriteInputDoesNotBlockUiThreadAsync(textOverload: false);

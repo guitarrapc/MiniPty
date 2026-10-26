@@ -21,6 +21,20 @@ public sealed class PtyUnixDisposeTests
     // The value names how the host exits.
     private const string DisposeHostVariable = "MINIPTY_TESTS_DISPOSE_HOST";
 
+    /// <summary>
+    /// What a hung-up child writes in the discard tests, which must finish within the 1 s grace. On macOS, whose terminal
+    /// buffers 1 KiB, it took about 40 ms on Apple silicon when the output was discarded as it arrived, and about 3.2 s
+    /// when it was discarded only on the watcher's polling interval, so the grace still tells the two apart. 1 MB took
+    /// about 0.1 s there, and went past the grace on a slower macOS Intel runner running the suite in parallel.
+    /// </summary>
+    private const int HungUpOutputBytes = 256 * 1024;
+
+    /// <summary>
+    /// The discard tests each flood a terminal against the grace's deadline, so they run one at a time rather than slow
+    /// each other down toward it.
+    /// </summary>
+    private const string HungUpOutput = "hung-up-output";
+
     [Test]
     public async Task DisposeHangsUpAChildThatExitsOnHangup()
     {
@@ -251,18 +265,19 @@ public sealed class PtyUnixDisposeTests
 
     /// <summary>
     /// The master stays open while a hung-up child runs, and nothing reads the session's output after disposal, so the
-    /// output must still be taken from the terminal. The trap writes far more than a terminal buffers before it records
-    /// that it finished, so a child whose output nobody took would block until the grace kill. A macOS terminal buffers
-    /// only 1 KiB, so there it also fails when the output is taken only on the watcher's polling interval.
+    /// output must still be taken from the terminal. The trap writes several times what a terminal buffers before it
+    /// records that it finished, so a child whose output nobody took would block until the grace kill. A macOS terminal
+    /// buffers only 1 KiB, so there it also fails when the output is taken only on the watcher's polling interval.
     /// </summary>
     [Test]
+    [NotInParallel(HungUpOutput)]
     public async Task DisposeDiscardsWhatAHungUpChildWrites()
     {
         if (OperatingSystem.IsWindows())
             return;
 
         var marker = NewMarkerPath();
-        var session = Pty.Start(HangupScript($"trap 'yes xxxxxxxxxxxxxxx | head -c 1000000; echo written > \"{marker}\"; exit 0' HUP"));
+        var session = Pty.Start(HangupScript($"trap 'yes xxxxxxxxxxxxxxx | head -c {HungUpOutputBytes}; echo written > \"{marker}\"; exit 0' HUP"));
         var pid = session.ProcessId;
         try
         {
@@ -273,6 +288,41 @@ public sealed class PtyUnixDisposeTests
             await Assert.That(await WaitForFileContentAsync(marker)).Contains("written");
             await Assert.That(await WaitForProcessGoneAsync(pid)).IsTrue();
             await Assert.That(await WaitForExitStatusAsync(session)).IsEqualTo(new PtyExitStatus(0, null));
+        }
+        finally
+        {
+            session.Dispose();
+            File.Delete(marker);
+        }
+    }
+
+    /// <summary>
+    /// The same when the loop that reads the session sees the disposal before the hang-up. Session disposal marks the
+    /// output pump disposed first and hangs the child up only after, and a loop that served the session in between
+    /// ended it there and removed its master, so nothing discarded what the hung-up child then wrote, and the child
+    /// blocked until the grace kill. Under a loaded full suite that happened by chance; here the pump is marked first and
+    /// the loop given time to see it.
+    /// </summary>
+    [Test]
+    [NotInParallel(HungUpOutput)]
+    public async Task DisposeDiscardsWhatAHungUpChildWritesWhenTheLoopSeesTheDisposalFirst()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var marker = NewMarkerPath();
+        var session = Pty.Start(HangupScript($"trap 'yes xxxxxxxxxxxxxxx | head -c {HungUpOutputBytes}; echo written > \"{marker}\"; exit 0' HUP"));
+        var pid = session.ProcessId;
+        try
+        {
+            await WaitForReadyAsync(session);
+
+            session.OutputPump.OnSessionDisposing();
+            await Assert.That(await WaitForAsync(() => session.OutputPump.IsProducerFinished, 10_000)).IsTrue();
+            session.Dispose();
+
+            await Assert.That(await WaitForFileContentAsync(marker)).Contains("written");
+            await Assert.That(await WaitForProcessGoneAsync(pid)).IsTrue();
         }
         finally
         {

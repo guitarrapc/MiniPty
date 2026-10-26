@@ -5,7 +5,7 @@ namespace MiniPty.Tests;
 
 /// <summary>
 /// Stdin writes: the synchronous fast path, and the ordered queue that takes over when the transport stops taking
-/// input. On Unix the tty input queue fills when the child does not read, and the reader thread writes the queue. On
+/// input. On Unix the tty input queue fills when the child does not read, and the I/O loop writes the queue. On
 /// Windows ConPTY stops reading input while its output is backed up, and I/O completions write the queue.
 /// </summary>
 public sealed class PtyInputTests
@@ -363,6 +363,39 @@ public sealed class PtyInputTests
         {
             var (write, _) = await IssueUntilPendingAsync(_ => session.WriteInputAsync(BlockingPayload()));
 
+            session.Dispose();
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(async () => await write.AsTask().WaitAsync(Timeout));
+        }
+        finally
+        {
+            await session.DisposeAsync().AsTask().WaitAsync(Timeout);
+        }
+    }
+
+    /// <summary>
+    /// The same when the Unix loop sees the disposal first. Session disposal marks the output pump disposed before the
+    /// backend fails its queued writes, and a loop that ended the session in between closed the input as the end of
+    /// output, so the write failed with <see cref="IOException"/> instead. One full Linux run in two met it by chance;
+    /// here the pump is marked first and the loop given time to see it.
+    /// </summary>
+    [Test]
+    public async Task DisposeFailsAQueuedWriteWhenTheLoopSeesTheDisposalFirst()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var session = StartWithInputBlocked();
+        try
+        {
+            var (write, _) = await IssueUntilPendingAsync(_ => session.WriteInputAsync(BlockingPayload()));
+
+            session.OutputPump.OnSessionDisposing();
+            var deadline = Environment.TickCount64 + 10_000;
+            while (!session.OutputPump.IsProducerFinished && Environment.TickCount64 < deadline)
+                await Task.Delay(10);
+
+            await Assert.That(session.OutputPump.IsProducerFinished).IsTrue();
             session.Dispose();
 
             await Assert.ThrowsAsync<ObjectDisposedException>(async () => await write.AsTask().WaitAsync(Timeout));

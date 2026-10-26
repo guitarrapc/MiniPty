@@ -106,7 +106,6 @@ internal static class WindowsPtyBackend
     private const int EofTickMs = 100;
     private const byte InputEofCtrlZ = 0x1A;
     private const byte InputEofSubmit = 0x0D;
-    private const int ErrorInvalidHandle = 6;
     private const int ErrorBrokenPipe = 109;
     private const int ErrorNoData = WindowsInterop.ErrorNoData;
     private const int ErrorOperationAborted = 995;
@@ -123,36 +122,25 @@ internal static class WindowsPtyBackend
     /// </summary>
     private const int InputPipeBufferSize = 4096;
     private const string InputPipeNamePrefix = @"\\.\pipe\minipty-input-";
+    /// <summary>
+    /// The output pipe's buffer: what ConPTY can write ahead of MiniPty's reads, beyond the ring. It bounds the output
+    /// still in flight when a child is interrupted during a flood, and keeps the anonymous pipe's default size.
+    /// </summary>
+    private const int OutputPipeBufferSize = 4096;
+    private const string OutputPipeNamePrefix = @"\\.\pipe\minipty-output-";
+    private const uint PipeAccessInbound = 0x00000001;
     private const uint PipeAccessOutbound = 0x00000002;
     private const uint FileFlagOverlapped = 0x40000000;
     private const uint FileFlagFirstPipeInstance = 0x00080000;
     // PIPE_TYPE_BYTE, PIPE_READMODE_BYTE, and PIPE_WAIT are zero.
     private const uint PipeRejectRemoteClients = 0x00000008;
     private const uint GenericRead = 0x80000000;
+    private const uint GenericWrite = 0x40000000;
     private const uint OpenExisting = 3;
     private const uint SecuritySqosPresent = 0x00100000;
     private const uint SecurityIdentification = 0x00010000;
     private const byte FileSkipCompletionPortOnSuccess = 0x1;
     private const byte FileSkipSetEventOnHandle = 0x2;
-    /// <summary>
-    /// How long a continuation read waits for the next ConPTY slice. ConPTY delivers bulk output in slices of up to
-    /// about 1.7 KB that arrive 20–45 µs apart (median and 90th percentile measured on Windows 11), so this window
-    /// joins them into full slots with ample margin, while output trickling in is published within it.
-    /// </summary>
-    /// <remarks>
-    /// Measured with <see cref="System.Diagnostics.Stopwatch"/>, not <see cref="Environment.TickCount64"/>: a
-    /// tick-count window lasts until the next system clock tick (up to about 16 ms), during which the reader spun
-    /// a whole core for any session whose child wrote small pieces.
-    /// </remarks>
-    private const int CoalesceWindowMicroseconds = 500;
-    private static readonly long s_coalesceWindowTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceWindowMicroseconds / 1_000_000;
-    /// <summary>
-    /// Bounds the windows chained into one slot, as on Unix, so output trickling in faster than the window is
-    /// published within about 2.5 ms instead of being held until the slot fills. Bulk output fills a slot within
-    /// a few slices, long before the budget.
-    /// </summary>
-    private const int CoalesceBudgetMs = 2;
-    private static readonly long s_coalesceBudgetTicks = System.Diagnostics.Stopwatch.Frequency * CoalesceBudgetMs / 1000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -429,8 +417,9 @@ internal static class WindowsPtyBackend
     {
         private static readonly IOCompletionCallback s_inputWriteCompleted = OnInputWriteCompleted;
 
-        // MiniPty's end of the input pipe, opened overlapped (see CreateInputPipe).
+        // MiniPty's end of the input pipe, opened overlapped (see CreateConPtyPipes).
         private readonly SafeFileHandle _inputWriteHandle;
+        // MiniPty's end of the output pipe, opened overlapped and read by WindowsOutputDriver.
         private readonly SafeFileHandle _outputReadHandle;
         // Resizes, clears, and closes through the ConPTY implementation that created the pseudo-console.
         private readonly SafePseudoConsoleHandle _hpc;
@@ -579,7 +568,7 @@ internal static class WindowsPtyBackend
                 entry.Complete(new OperationCanceledException(entry.Token));
         }
 
-        // Input is written by I/O completions on Windows, so the reader has nothing to write while it waits.
+        // Input is written by its own I/O completions on Windows, so input never needs to wake the output driver.
         public void SetOutputPump(PtyOutputPump pump)
         {
         }
@@ -915,7 +904,6 @@ internal static class WindowsPtyBackend
             internal bool IsIdle => Head is null && StagedLength == 0 && !WriteInFlight;
         }
 
-        public void WaitWhileOutputBlocked(PtyReaderThread reader) => reader.WaitForWake(Timeout.Infinite);
         public int ProcessId => _processId;
 
         public Task<PtyExitStatus> Exited => _exitSignal.GetTask();
@@ -1163,7 +1151,7 @@ internal static class WindowsPtyBackend
 
         /// <summary>
         /// Closes the pseudo-console. ConPTY then flushes what it has rendered and closes its end of the output
-        /// pipe, so the reader drains the rest and sees end of output. The output pipe itself stays open for that
+        /// pipe, so the output driver drains the rest and sees end of output. The output pipe itself stays open for that
         /// drain and closes with <see cref="Dispose"/>.
         /// </summary>
         public void CloseOutputTransport()
@@ -1174,155 +1162,12 @@ internal static class WindowsPtyBackend
 
         public bool IsOutputClosed => Volatile.Read(ref _outputClosed);
 
-        public long CoalesceBudgetTicks => s_coalesceBudgetTicks;
+        public int OutputChunkLimit => PtyOutputPump.Capacity;
 
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
-        // The output pipe handle is pinned by each ReadFile call (SafeHandle reference counting), so a concurrent
-        // Dispose defers the close until the read returns, and later reads see ObjectDisposedException.
-        public bool TryBeginOutputRead() => true;
-
-        public void EndOutputRead()
-        {
-        }
-
-        /// <summary>
-        /// Blocking <c>ReadFile</c> on the ConPTY output pipe. Closing the pseudo-console normally ends it: ConPTY
-        /// writes its final frame and its host exits, which breaks the pipe. When another process holds the pipe's
-        /// write end open, <see cref="PtyReaderThread.CancelRead"/> releases the read instead, and it reports -1 so
-        /// the pump re-checks its state.
-        /// </summary>
-        public unsafe int ReadOutput(Span<byte> buffer, PtyReaderThread reader)
-        {
-            // Disposal closes the handle under a blocked read and cancels the read; the pump then re-checks its state
-            // and reads again to let the transport end. Reading a closed handle would throw, and that exception cost
-            // every out-of-band session about 330 B (a released host exits with the child, so the cancel wins the race
-            // with the pipe break nearly every time; on an in-box host that was not released, 2 of 300 sessions). The
-            // catch below keeps the race.
-            if (_outputReadHandle.IsClosed)
-                return 0;
-
-            try
-            {
-                fixed (byte* ptr = buffer)
-                {
-                    if (WindowsInterop.ReadFile(_outputReadHandle, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
-                        return (int)read;
-                }
-            }
-            catch (ObjectDisposedException)
-            {
-                return 0;
-            }
-
-            var error = Marshal.GetLastPInvokeError();
-            if (error is ErrorBrokenPipe or ErrorInvalidHandle)
-                return 0;
-
-            // Canceled by CancelRead. A canceled read transfers nothing, so no output is lost.
-            if (error == ErrorOperationAborted)
-                return -1;
-
-            throw new IOException($"ReadFile failed (Win32 {error})");
-        }
-
-        /// <summary>
-        /// Appends output that is available now or arrives within the micro-window. ConPTY delivers bulk output in
-        /// small slices shortly after one another, and <c>PeekNamedPipe</c> often reports zero bytes on its pipes
-        /// while more is in flight, so this reads with <c>PIPE_NOWAIT</c> and retries until the window ends. The
-        /// anonymous pipe cannot be waited on, so the window is a short yield loop.
-        /// </summary>
-        /// <remarks>
-        /// The handle is pinned once for the whole window, not by each call: disposal can close it at any moment, and
-        /// every marshalled call that found it closed threw <see cref="ObjectDisposedException"/>, 330 B each once
-        /// caught. A session disposed right after exit, whose console host writes its last frame as the child exits,
-        /// met that in about a third of sessions. Disposal is still noticed between attempts through
-        /// <see cref="SafeHandle.IsClosed"/>, which turns true at once while the close itself waits for the pin.
-        /// </remarks>
-        public int ReadMoreOutput(Span<byte> buffer, PtyReaderThread reader, out bool endOfOutput)
-        {
-            endOfOutput = true;
-            if (_outputReadHandle.IsClosed)
-                return 0;
-
-            var pinned = false;
-            try
-            {
-                // Throws only when disposal closes the handle between the check above and here.
-                _outputReadHandle.DangerousAddRef(ref pinned);
-            }
-            catch (ObjectDisposedException)
-            {
-                return 0;
-            }
-
-            try
-            {
-                var pipe = _outputReadHandle.DangerousGetHandle();
-                var read = TryReadOutputNow(pipe, buffer, out endOfOutput);
-                if (read > 0 || endOfOutput)
-                    return read;
-
-                var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + s_coalesceWindowTicks;
-                while (System.Diagnostics.Stopwatch.GetTimestamp() < deadline)
-                {
-                    Thread.Sleep(0);
-                    if (_outputReadHandle.IsClosed)
-                    {
-                        endOfOutput = true;
-                        return 0;
-                    }
-
-                    read = TryReadOutputNow(pipe, buffer, out endOfOutput);
-                    if (read > 0 || endOfOutput)
-                        return read;
-                }
-
-                return 0;
-            }
-            finally
-            {
-                if (pinned)
-                    _outputReadHandle.DangerousRelease();
-            }
-        }
-
-        /// <summary>One non-blocking read of the output pipe, which the caller has pinned.</summary>
-        private static unsafe int TryReadOutputNow(IntPtr pipe, Span<byte> buffer, out bool endOfOutput)
-        {
-            endOfOutput = false;
-            uint nowait = WindowsInterop.PipeNowait;
-            if (!WindowsInterop.SetNamedPipeHandleState(pipe, &nowait, IntPtr.Zero, IntPtr.Zero))
-                return 0;
-
-            try
-            {
-                fixed (byte* ptr = buffer)
-                {
-                    if (WindowsInterop.ReadFile(pipe, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
-                        return (int)read;
-                }
-
-                var error = Marshal.GetLastPInvokeError();
-                // ERROR_OPERATION_ABORTED: a CancelRead aimed at the blocking read landed here instead; nothing
-                // was transferred, and the pump re-checks its state on its next blocking read.
-                if (error is WindowsInterop.ErrorNoData or ErrorOperationAborted)
-                    return 0;
-
-                if (error is ErrorBrokenPipe or ErrorInvalidHandle)
-                {
-                    endOfOutput = true;
-                    return 0;
-                }
-
-                throw new IOException($"ReadFile failed (Win32 {error})");
-            }
-            finally
-            {
-                uint wait = WindowsInterop.PipeWait;
-                _ = WindowsInterop.SetNamedPipeHandleState(pipe, &wait, IntPtr.Zero, IntPtr.Zero);
-            }
-        }
+        /// <summary>Reads output through I/O completions on the overlapped output pipe, holding no thread.</summary>
+        public void StartOutput(PtyOutputPump pump) => WindowsOutputDriver.Run(pump, _outputReadHandle);
 
         public void Dispose()
         {
@@ -1484,8 +1329,9 @@ internal static class WindowsPtyBackend
     }
 
     /// <summary>
-    /// Creates the ConPTY pipes: an anonymous output pipe, which the session's reader thread reads with blocking
-    /// reads, and an input pipe whose MiniPty end is overlapped (see <see cref="CreateInputPipe"/>).
+    /// Creates the ConPTY pipes. MiniPty's end of each is the server end of a named pipe opened overlapped (see
+    /// <see cref="CreateOverlappedPipe"/>): input waits without blocking a thread while ConPTY is not taking it, and
+    /// output is read through I/O completions.
     /// </summary>
     /// <remarks>
     /// Every handle is non-inheritable. ConPTY duplicates its ends into its host process itself, and the child is
@@ -1497,46 +1343,52 @@ internal static class WindowsPtyBackend
         out SafeFileHandle outputRead,
         out SafeFileHandle outputWrite)
     {
-        CreateInputPipe(out inputRead, out inputWrite);
-        if (!WindowsInterop.CreatePipe(out outputRead, out outputWrite, IntPtr.Zero, 0))
+        CreateOverlappedPipe(InputPipeNamePrefix, inbound: false, InputPipeBufferSize, out inputRead, out inputWrite);
+        try
         {
-            var error = Marshal.GetLastPInvokeError();
-            outputRead.Dispose();
-            outputWrite.Dispose();
+            CreateOverlappedPipe(OutputPipeNamePrefix, inbound: true, OutputPipeBufferSize, out outputWrite, out outputRead);
+        }
+        catch
+        {
             inputRead.Dispose();
             inputWrite.Dispose();
-            throw new Win32Exception(error, "CreatePipe failed");
+            throw;
         }
     }
 
     /// <summary>
-    /// Creates the input pipe. MiniPty's end is the server end of a named pipe opened overlapped, because an
-    /// anonymous pipe cannot be. A write that ConPTY is not taking yet then waits without blocking a thread.
-    /// ConPTY's end is opened synchronously by name, as ConPTY reads it with blocking reads.
+    /// Creates one ConPTY pipe. MiniPty's end is the server end of a named pipe opened overlapped, because an
+    /// anonymous pipe cannot be: it writes input (<paramref name="inbound"/> false) or reads output. ConPTY's end is
+    /// opened synchronously by name, as ConPTY uses it with blocking calls.
     /// </summary>
     /// <remarks>
     /// The name is random; the pipe allows one instance, must be the first instance of that name, and rejects remote
     /// clients. If anything else connects first, opening ConPTY's end fails and so does the spawn, instead of sharing
-    /// the pipe. The buffer keeps the anonymous pipe's default size; with none, every write would wait for ConPTY to
-    /// read it.
+    /// the pipe. The buffer keeps the anonymous pipe's default size: with none, every write would wait for the other end
+    /// to read it.
     /// </remarks>
-    private static unsafe void CreateInputPipe(out SafeFileHandle conPtySide, out SafeFileHandle ourSide)
+    internal static unsafe void CreateOverlappedPipe(
+        string namePrefix,
+        bool inbound,
+        int bufferSize,
+        out SafeFileHandle conPtySide,
+        out SafeFileHandle ourSide)
     {
         // Prefix, 32 hexadecimal digits, and the terminating NUL.
-        Span<char> name = stackalloc char[InputPipeNamePrefix.Length + 33];
-        InputPipeNamePrefix.CopyTo(name);
-        Guid.NewGuid().TryFormat(name[InputPipeNamePrefix.Length..], out var digits, "N");
-        name[InputPipeNamePrefix.Length + digits] = '\0';
+        Span<char> name = stackalloc char[namePrefix.Length + 33];
+        namePrefix.CopyTo(name);
+        Guid.NewGuid().TryFormat(name[namePrefix.Length..], out var digits, "N");
+        name[namePrefix.Length + digits] = '\0';
 
         fixed (char* path = name)
         {
             ourSide = WindowsInterop.CreateNamedPipe(
                 path,
-                PipeAccessOutbound | FileFlagOverlapped | FileFlagFirstPipeInstance,
+                (inbound ? PipeAccessInbound : PipeAccessOutbound) | FileFlagOverlapped | FileFlagFirstPipeInstance,
                 PipeRejectRemoteClients,
                 1,
-                InputPipeBufferSize,
-                0,
+                inbound ? 0u : (uint)bufferSize,
+                inbound ? (uint)bufferSize : 0u,
                 0,
                 IntPtr.Zero);
             if (ourSide.IsInvalid)
@@ -1548,7 +1400,7 @@ internal static class WindowsPtyBackend
 
             conPtySide = WindowsInterop.CreateFile(
                 path,
-                GenericRead,
+                inbound ? GenericWrite : GenericRead,
                 0,
                 IntPtr.Zero,
                 OpenExisting,
@@ -1559,7 +1411,9 @@ internal static class WindowsPtyBackend
                 var error = Marshal.GetLastPInvokeError();
                 conPtySide.Dispose();
                 ourSide.Dispose();
-                throw new Win32Exception(error, "Opening the ConPTY end of the input pipe failed");
+                throw new Win32Exception(error, inbound
+                    ? "Opening the ConPTY end of the output pipe failed"
+                    : "Opening the ConPTY end of the input pipe failed");
             }
         }
     }
@@ -1581,9 +1435,11 @@ internal static class WindowsPtyBackend
     /// the same lookup found, with the file name quoted by the MSVCRT rules and the quoted arguments after it. A
     /// program name that <c>CreateProcess</c> would search for is looked up here when the overlay sets or removes
     /// <c>PATH</c> (<paramref name="pathOverridden"/>), since <c>CreateProcess</c> searches only the host's
-    /// <c>PATH</c>; the file found becomes the application name, so it makes no lookup of its own. Anything else is
-    /// left to <c>CreateProcessW</c>'s own lookup, with the quoted arguments or the raw command line after the quoted
-    /// file name.
+    /// <c>PATH</c>; the file found becomes the application name, so it makes no lookup of its own. A rooted or
+    /// dot-relative program path of <c>MAX_PATH</c> or more becomes the application name too, since
+    /// <c>CreateProcess</c>'s own lookup fails there (<see cref="WindowsProgramLookup.TryResolveLongProgramPath"/>).
+    /// Anything else is left to <c>CreateProcessW</c>'s own lookup, with the quoted arguments or the raw command line
+    /// after the quoted file name.
     /// </summary>
     /// <param name="startInfo">The spawn options.</param>
     /// <param name="pathOverridden">Whether the overlay sets or removes <c>PATH</c>.</param>
@@ -1618,6 +1474,11 @@ internal static class WindowsPtyBackend
             var program = WindowsProgramLookup.ResolveProgram(fileName, WindowsProgramLookup.ChildLocations(fileName, childPath));
             return (program, BuildCommandLine(startInfo));
         }
+
+        // A rooted or dot-relative program path of MAX_PATH or more fails CreateProcess's own lookup even in a host that
+        // opted into long paths; as the application name it starts there. Shorter paths stay with the lookup.
+        if (!isBatchFile && WindowsProgramLookup.TryResolveLongProgramPath(fileName, out var longProgram))
+            return (longProgram, BuildCommandLine(startInfo));
 
         return (null, BuildCommandLine(startInfo));
     }
@@ -1830,9 +1691,6 @@ internal static class WindowsPtyBackend
 
 internal static partial class WindowsInterop
 {
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool CreatePipe(out SafeFileHandle hReadPipe, out SafeFileHandle hWritePipe, IntPtr lpPipeAttributes, uint nSize);
 
     [LibraryImport("kernel32.dll", EntryPoint = "CreateNamedPipeW", SetLastError = true)]
     internal static unsafe partial SafeFileHandle CreateNamedPipe(

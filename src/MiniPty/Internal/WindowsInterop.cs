@@ -5,31 +5,38 @@ namespace MiniPty.Internal;
 
 internal static partial class WindowsInterop
 {
-    internal const uint WaitObject0 = 0;
     internal const uint WaitTimeout = 0x00000102;
     internal const uint WaitFailed = 0xFFFFFFFF;
-    internal const uint PipeWait = 0;
-    internal const uint PipeNowait = 1;
     internal const int ErrorNoData = 232;
 
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static unsafe partial bool ReadFile(
-        SafeFileHandle hFile,
-        byte* lpBuffer,
-        uint nNumberOfBytesToRead,
-        out uint lpNumberOfBytesRead,
-        IntPtr lpOverlapped);
-
-    /// <summary>For a handle the caller has already pinned (<see cref="SafeHandle.DangerousAddRef"/>).</summary>
+    /// <summary>
+    /// Overlapped read of a handle the caller has pinned: pass a null byte count and read the count from the overlapped
+    /// structure.
+    /// </summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static unsafe partial bool ReadFile(
         IntPtr hFile,
         byte* lpBuffer,
         uint nNumberOfBytesToRead,
-        out uint lpNumberOfBytesRead,
-        IntPtr lpOverlapped);
+        IntPtr lpNumberOfBytesRead,
+        NativeOverlapped* lpOverlapped);
+
+    /// <summary>For a handle the caller has already pinned. A null overlapped pointer cancels all of this process's I/O on it.</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool CancelIoEx(IntPtr hFile, IntPtr lpOverlapped);
+
+    /// <summary>For a pipe handle the caller has already pinned; reports the bytes waiting without reading them.</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool PeekNamedPipe(
+        IntPtr hNamedPipe,
+        IntPtr lpBuffer,
+        uint nBufferSize,
+        IntPtr lpBytesRead,
+        uint* lpTotalBytesAvail,
+        IntPtr lpBytesLeftThisMessage);
 
     /// <summary>Overlapped write: pass a null byte count and read the count from the overlapped structure.</summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
@@ -67,41 +74,37 @@ internal static partial class WindowsInterop
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool CloseHandle(IntPtr hObject);
 
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    internal static partial IntPtr CreateEventW(
-        IntPtr lpEventAttributes,
-        [MarshalAs(UnmanagedType.Bool)] bool bManualReset,
-        [MarshalAs(UnmanagedType.Bool)] bool bInitialState,
-        IntPtr lpName);
+    /// <summary>
+    /// <c>CREATE_WAITABLE_TIMER_HIGH_RESOLUTION</c>: a waitable timer that fires at sub-millisecond resolution without
+    /// raising the system timer's resolution. Windows 10 1803 and later; earlier versions fail the call with
+    /// <c>ERROR_INVALID_PARAMETER</c>.
+    /// </summary>
+    internal const uint CreateWaitableTimerHighResolution = 0x00000002;
 
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool SetEvent(IntPtr hEvent);
+    /// <summary><c>TIMER_MODIFY_STATE | SYNCHRONIZE</c>: enough to set, cancel, and wait for a timer.</summary>
+    internal const uint TimerModifyStateAndSynchronize = 0x0002 | 0x00100000;
 
+    /// <summary>Creates an unnamed synchronization (auto-reset) waitable timer.</summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
-    internal static partial IntPtr OpenThread(
-        uint dwDesiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle,
-        uint dwThreadId);
-
-    [LibraryImport("kernel32.dll")]
-    internal static partial uint GetCurrentThreadId();
+    internal static partial SafeWaitHandle CreateWaitableTimerExW(IntPtr lpTimerAttributes, IntPtr lpTimerName, uint dwFlags, uint dwDesiredAccess);
 
     /// <summary>
-    /// Cancels the synchronous I/O in progress on <paramref name="hThread"/> (which needs <c>THREAD_TERMINATE</c>
-    /// access); the canceled call fails with <c>ERROR_OPERATION_ABORTED</c>. Fails with <c>ERROR_NOT_FOUND</c>
-    /// when nothing is in progress.
+    /// Arms a waitable timer: <paramref name="lpDueTime"/> in 100 ns units, negative for a time relative to now, then every
+    /// <paramref name="lPeriod"/> milliseconds, or once when it is 0.
     /// </summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool CancelSynchronousIo(IntPtr hThread);
+    internal static partial bool SetWaitableTimerEx(
+        SafeWaitHandle hTimer,
+        in long lpDueTime,
+        int lPeriod,
+        IntPtr pfnCompletionRoutine,
+        IntPtr lpArgToCompletionRoutine,
+        IntPtr wakeContext,
+        uint tolerableDelay);
 
-    /// <summary>For a handle the caller has already pinned (<see cref="SafeHandle.DangerousAddRef"/>).</summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static unsafe partial bool SetNamedPipeHandleState(
-        IntPtr hNamedPipe,
-        uint* lpMode,
-        IntPtr lpMaxCollectionCount,
-        IntPtr lpCollectDataTimeout);
+    internal static partial bool CancelWaitableTimer(SafeWaitHandle hTimer);
+
 }

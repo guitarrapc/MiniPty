@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using System.Threading.Tasks.Sources;
 
@@ -5,7 +6,8 @@ namespace MiniPty.Internal;
 
 /// <summary>
 /// <see cref="PtySession.ReadOutputAsync"/>: one enumerator per session, reused by every enumeration, that hands
-/// out ring slots in place.
+/// out ring slots in place. A session's first coalescing read replaces it with a <see cref="PtyCoalescingOutputReader"/>,
+/// which serves the enumerations after it.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,13 +23,20 @@ namespace MiniPty.Internal;
 /// (<see cref="PtyConsumerYield"/>).
 /// </para>
 /// <para>
+/// An enumeration started through <see cref="PtySession.ReadOutputCoalescedAsync"/>, an internal mode the bridges use
+/// through <c>PtyTerminal</c>, waits for a larger chunk while output arrives in a burst, instead of taking each read as it
+/// is published, until a deadline that <see cref="PtyOutputCoalesceScheduler"/> serves (<see cref="PtyOutputCoalescing"/>).
+/// Only such an enumeration coalesces. One started through <see cref="PtySession.ReadOutputAsync"/> does not, even when
+/// a coalescing reader serves it.
+/// </para>
+/// <para>
 /// A chunk is the unread part of one ring slot, valid until the next <c>MoveNextAsync</c>, which releases the
 /// slot back to the pump. Enumeration holds the session's single-consumer ownership from
 /// <see cref="GetAsyncEnumerator"/> until end of output, a failure, or <see cref="DisposeAsync"/>, matching the
 /// iterator it replaced.
 /// </para>
 /// </remarks>
-internal sealed class PtyOutputReader :
+internal class PtyOutputReader :
     IAsyncEnumerable<PtyOutputChunk>,
     IAsyncEnumerator<PtyOutputChunk>,
     IValueTaskSource<bool>,
@@ -36,7 +45,7 @@ internal sealed class PtyOutputReader :
     private static readonly Action<object?> s_onCanceled = static state => ((PtyOutputReader)state!).OnCanceled();
 
     private readonly PtySession _session;
-    private readonly PtyOutputPump _pump;
+    private protected readonly PtyOutputPump _pump;
     private ManualResetValueTaskSourceCore<bool> _core;
     private CancellationTokenRegistration _registration;
     private CancellationToken _token;
@@ -46,6 +55,11 @@ internal sealed class PtyOutputReader :
     private bool _active;
     // A yield was returned and completes when it is awaited (OnCompleted) or read (GetResult).
     private bool _yieldPending;
+    // Whether the current enumeration coalesces bursts. Only a PtyCoalescingOutputReader can, and it holds the state, so a
+    // session read plainly pays nothing for it.
+    private bool _coalesce;
+
+    private PtyCoalescingOutputReader Coalescing => (PtyCoalescingOutputReader)this;
 
     internal PtyOutputReader(PtySession session, PtyOutputPump pump)
     {
@@ -57,13 +71,14 @@ internal sealed class PtyOutputReader :
     public PtyOutputChunk Current => _current;
 
     public IAsyncEnumerator<PtyOutputChunk> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-        Begin(default, cancellationToken);
+        Begin(default, cancellationToken, coalesce: false);
 
     /// <summary>
-    /// Starts an enumeration. Failures surface from the first <c>MoveNextAsync</c>, as they did from the iterator,
-    /// so a conflicting reader can still be created and disposed without disturbing the active one.
+    /// Starts an enumeration, coalescing bursts when <paramref name="coalesce"/> is set. Failures surface from the first
+    /// <c>MoveNextAsync</c>, as they did from the iterator, so a conflicting reader can still be created and disposed
+    /// without disturbing the active one.
     /// </summary>
-    internal IAsyncEnumerator<PtyOutputChunk> Begin(CancellationToken readToken, CancellationToken enumeratorToken)
+    internal IAsyncEnumerator<PtyOutputChunk> Begin(CancellationToken readToken, CancellationToken enumeratorToken, bool coalesce)
     {
         if (_session.IsDisposed)
             return FaultedEnumerator.Disposed;
@@ -88,6 +103,10 @@ internal sealed class PtyOutputReader :
         _holdsChunk = false;
         _current = default;
         _yieldPending = false;
+        Debug.Assert(!coalesce || this is PtyCoalescingOutputReader);
+        _coalesce = coalesce;
+        if (coalesce)
+            Coalescing.ResetCoalescing();
         PtyConsumerYield.StartRun();
         _active = true;
         return this;
@@ -105,7 +124,9 @@ internal sealed class PtyOutputReader :
             _token.ThrowIfCancellationRequested();
             while (true)
             {
-                if (TryTakeOrEnd(out var hasChunk))
+                // In a burst, a small amount of unread output is left for a larger chunk, unless output has ended.
+                var minimum = _coalesce ? Coalescing.NextMinimum() : 1;
+                if (minimum == 1 && TryTakeOrEnd(out var hasChunk))
                 {
                     // End of output is never delayed; only a chunk can be handed over through a yield.
                     if (hasChunk && PtyConsumerYield.ShouldYield())
@@ -125,8 +146,16 @@ internal sealed class PtyOutputReader :
                 _core.Reset();
                 // A yield abandoned without being awaited must not complete this wait before the pump signals it.
                 _yieldPending = false;
-                if (!_pump.ArmWait(this, wakeOnData: true))
+                if (minimum > 1)
+                    Coalescing.BeforeWait();
+
+                if (!_pump.ArmWait(this, wakeOnData: true, minimum))
                     continue;
+
+                // After arming, so its deadline can only lower this wait's minimum. A signal may complete the wait meanwhile,
+                // but GetResult, which ends it, cannot run before this method returns.
+                if (minimum > 1)
+                    Coalescing.OnWaitArmed();
 
                 if (_token.CanBeCanceled)
                     _registration = _token.UnsafeRegister(s_onCanceled, this);
@@ -152,7 +181,13 @@ internal sealed class PtyOutputReader :
         return default;
     }
 
-    void IPtyOutputWaiter.OnOutputSignaled() => _core.SetResult(true);
+    void IPtyOutputWaiter.OnOutputSignaled()
+    {
+        if (_coalesce)
+            Coalescing.OnWaitCompleted();
+
+        _core.SetResult(true);
+    }
 
     bool IValueTaskSource<bool>.GetResult(short token)
     {
@@ -164,6 +199,8 @@ internal sealed class PtyOutputReader :
         // A yield read without being awaited (blocking on the value task) completes here, as a synchronous
         // completion would have.
         CompletePendingYield();
+        if (_coalesce)
+            Coalescing.OnWaitEnded();
         // The caller resumed from an asynchronous completion, so its context has run its queue: a new run starts.
         PtyConsumerYield.StartRun();
 
@@ -252,6 +289,10 @@ internal sealed class PtyOutputReader :
         if (!_holdsChunk)
             return;
 
+        // Counted when released, so a chunk a yield handed over again is counted once.
+        if (_coalesce)
+            Coalescing.OnDelivered(_current.Data.Length);
+
         _holdsChunk = false;
         _current = default;
         _pump.Release();
@@ -264,6 +305,11 @@ internal sealed class PtyOutputReader :
 
         _active = false;
         _token = default;
+        if (_coalesce)
+        {
+            _coalesce = false;
+            Coalescing.OnEnded();
+        }
         var linked = _linkedTokenSource;
         _linkedTokenSource = null;
         linked?.Dispose();
@@ -291,7 +337,7 @@ internal sealed class PtyOutputReader :
     internal sealed class WithToken(PtyOutputReader reader, CancellationToken readToken) : IAsyncEnumerable<PtyOutputChunk>
     {
         public IAsyncEnumerator<PtyOutputChunk> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-            reader.Begin(readToken, cancellationToken);
+            reader.Begin(readToken, cancellationToken, coalesce: false);
     }
 
     /// <summary>An enumeration that could not start; it fails from its first <c>MoveNextAsync</c>.</summary>
@@ -310,3 +356,4 @@ internal sealed class PtyOutputReader :
         public ValueTask DisposeAsync() => default;
     }
 }
+

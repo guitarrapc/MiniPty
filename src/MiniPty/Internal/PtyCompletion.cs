@@ -5,7 +5,7 @@
 /// output into a sink, apply input, wait for exit, then wait for end of output within the drain deadlines.
 /// </summary>
 /// <remarks>
-/// Output flows into the sink on the session's reader thread from the moment it attaches, so nothing waits for
+/// Output flows into the sink on the session's output driver from the moment it attaches, so nothing waits for
 /// output on the caller's thread and the exit wait and the drain wait hold no thread. The caller owns the
 /// session's single-consumer ownership for the duration.
 /// </remarks>

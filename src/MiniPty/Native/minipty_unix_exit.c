@@ -43,7 +43,7 @@
 /*
  * Child exit watcher, child signaling and reaping.
  *
- * One managed thread blocks in minipty_child_watch_wait for every child that one load of the managed assembly
+ * One managed thread blocks in minipty_watch_wait for every child that one load of the managed assembly
  * starts, so observing exit adds no thread per session. The watcher keeps no state here: the caller holds its
  * descriptors and passes them back. Two loads in one process, such as two AssemblyLoadContexts, share this library,
  * and one shared epoll or kqueue handed one load's exits to the other load's thread. Linux watches pidfds with epoll.
@@ -65,6 +65,9 @@
  * A PTY master that a disposal keeps open for its hang-up can also wake the wait when it has output, so the caller
  * discards a hung-up child's output as fast as the child writes it (minipty_child_watch_add_output). Such a wake reports
  * no child.
+ *
+ * The same wait is the I/O loop of every session: each session's master is registered with the interest its state needs
+ * (minipty_watch_add), and minipty_watch_wait reports masters' readiness alongside children's exits.
  */
 
 #define MINIPTY_CHILD_WATCH_MAX_EVENTS 16
@@ -297,7 +300,194 @@ int minipty_child_watch_wake(int watch_fd, int wake_write)
 #endif
 }
 
-int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds, int capacity, int timeout_ms)
+/*
+ * Session I/O on the watcher: a session's PTY master registered with the interest its state needs, so the one watcher
+ * thread reads every session's output and writes every session's queued input. Level-triggered, keyed by a token the
+ * caller chooses, whose top bit is set so that it never meets a child's report, the wake, or a hung-up master's.
+ *
+ * epoll: interest 0 arms the registration for one report (EPOLLONESHOT). A master whose every slave closed reports
+ * hang-up whatever the interest, and a level-triggered report would repeat on every wait while the caller cannot read
+ * (its ring is full). Setting the interest again re-arms it.
+ *
+ * kqueue (macOS, FreeBSD): read and write interest are two registrations of the master, EVFILT_READ and EVFILT_WRITE,
+ * each enabled or disabled with the interest. A disabled filter reports nothing, end of file included, so interest 0 is
+ * silent; enabling it again reports at once what arrived meanwhile. The readiness probe's rules (pty_crossplatform.md,
+ * "Readiness on a pty master") apply: a master is registered only after its slave is open, because before that kqueue reports it writable
+ * while writes fail with EAGAIN. EV_EOF is reported as hang-up, and the caller ends output only on a read that returns 0:
+ * EV_EOF stays on a registration after a slave is opened again, while reads fail with EAGAIN, so the caller renews the
+ * registration (minipty_watch_renew) when a hang-up report found nothing to read. The caller removes the master at end of
+ * output, because EV_EOF repeats on every wait until then. A token needs 64 bits of udata, so a 32-bit build reports
+ * ENOTSUP and its sessions fail to start.
+ */
+#define MINIPTY_WATCH_READ 1
+#define MINIPTY_WATCH_WRITE 2
+
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+static uint32_t minipty_watch_epoll_events(int interest)
+{
+    uint32_t events = 0;
+
+    if (interest & MINIPTY_WATCH_READ)
+        events |= EPOLLIN | EPOLLRDHUP;
+    if (interest & MINIPTY_WATCH_WRITE)
+        events |= EPOLLOUT;
+
+    return events == 0 ? EPOLLONESHOT : events;
+}
+#elif defined(MINIPTY_CHILD_WATCH_KQUEUE)
+/*
+ * Applies a master's registration in one kevent call: with renew, both filters are deleted first, which clears an EV_EOF
+ * left from a slave closed earlier. EV_RECEIPT makes the kernel apply every change and return each one's result in order,
+ * instead of stopping at the first failure, and return without waiting for events. Deleting a filter that is not there
+ * fails with ENOENT, which is fine. EV_ADD on a filter already there updates it, so adding and modifying are one call.
+ */
+static int minipty_watch_kqueue_apply(int watch_fd, int fd, uint64_t token, int interest, int renew)
+{
+    static const struct timespec no_wait = { 0, 0 };
+    struct kevent changes[4];
+    struct kevent receipts[4];
+    void *udata = (void *)(uintptr_t)token;
+    int count = 0;
+    int first_add;
+    int done;
+    int i;
+
+    if (sizeof(void *) < sizeof(uint64_t)) {
+        errno = ENOTSUP;
+        return -1;
+    }
+
+    if (renew) {
+        EV_SET(&changes[count++], (uintptr_t)fd, EVFILT_READ, EV_DELETE | EV_RECEIPT, 0, 0, NULL);
+        EV_SET(&changes[count++], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE | EV_RECEIPT, 0, 0, NULL);
+    }
+
+    first_add = count;
+    EV_SET(&changes[count++], (uintptr_t)fd, EVFILT_READ,
+        EV_ADD | EV_RECEIPT | ((interest & MINIPTY_WATCH_READ) ? EV_ENABLE : EV_DISABLE), 0, 0, udata);
+    EV_SET(&changes[count++], (uintptr_t)fd, EVFILT_WRITE,
+        EV_ADD | EV_RECEIPT | ((interest & MINIPTY_WATCH_WRITE) ? EV_ENABLE : EV_DISABLE), 0, 0, udata);
+
+    do {
+        done = kevent(watch_fd, changes, count, receipts, count, &no_wait);
+    } while (done < 0 && errno == EINTR);
+
+    if (done < 0)
+        return -1;
+
+    for (i = first_add; i < done; i++) {
+        if ((receipts[i].flags & EV_ERROR) != 0 && receipts[i].data != 0) {
+            errno = (int)receipts[i].data;
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+/* Deletes both filters of a master; a filter that is not there (ENOENT) is fine. */
+static void minipty_watch_kqueue_remove(int watch_fd, int fd)
+{
+    static const struct timespec no_wait = { 0, 0 };
+    struct kevent changes[2];
+    struct kevent receipts[2];
+    int done;
+
+    EV_SET(&changes[0], (uintptr_t)fd, EVFILT_READ, EV_DELETE | EV_RECEIPT, 0, 0, NULL);
+    EV_SET(&changes[1], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE | EV_RECEIPT, 0, 0, NULL);
+    do {
+        done = kevent(watch_fd, changes, 2, receipts, 2, &no_wait);
+    } while (done < 0 && errno == EINTR);
+}
+#endif
+
+int minipty_watch_add(int watch_fd, int fd, uint64_t token, int interest)
+{
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+    struct epoll_event event;
+
+    event.events = minipty_watch_epoll_events(interest);
+    event.data.u64 = token;
+    return epoll_ctl(watch_fd, EPOLL_CTL_ADD, fd, &event) == 0 ? 0 : -1;
+#elif defined(MINIPTY_CHILD_WATCH_KQUEUE)
+    int saved_errno;
+
+    if (minipty_watch_kqueue_apply(watch_fd, fd, token, interest, 0) == 0)
+        return 0;
+
+    /* One filter may have been added before the other failed; the caller reads this master another way. */
+    saved_errno = errno;
+    minipty_watch_kqueue_remove(watch_fd, fd);
+    errno = saved_errno;
+    return -1;
+#else
+    (void)watch_fd;
+    (void)fd;
+    (void)token;
+    (void)interest;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+int minipty_watch_modify(int watch_fd, int fd, uint64_t token, int interest)
+{
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+    struct epoll_event event;
+
+    event.events = minipty_watch_epoll_events(interest);
+    event.data.u64 = token;
+    return epoll_ctl(watch_fd, EPOLL_CTL_MOD, fd, &event) == 0 ? 0 : -1;
+#elif defined(MINIPTY_CHILD_WATCH_KQUEUE)
+    return minipty_watch_kqueue_apply(watch_fd, fd, token, interest, 0);
+#else
+    (void)watch_fd;
+    (void)fd;
+    (void)token;
+    (void)interest;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+/*
+ * Registers a master again with the same interest, which clears a stale end of file under kqueue (see above). With
+ * epoll a hang-up is never stale, since a slave whose every descriptor closed cannot open again, so this only modifies.
+ */
+int minipty_watch_renew(int watch_fd, int fd, uint64_t token, int interest)
+{
+#if defined(MINIPTY_CHILD_WATCH_KQUEUE)
+    return minipty_watch_kqueue_apply(watch_fd, fd, token, interest, 1);
+#else
+    return minipty_watch_modify(watch_fd, fd, token, interest);
+#endif
+}
+
+void minipty_watch_remove(int watch_fd, int fd)
+{
+#if defined(MINIPTY_CHILD_WATCH_EPOLL)
+    epoll_ctl(watch_fd, EPOLL_CTL_DEL, fd, NULL);
+#elif defined(MINIPTY_CHILD_WATCH_KQUEUE)
+    minipty_watch_kqueue_remove(watch_fd, fd);
+#else
+    (void)watch_fd;
+    (void)fd;
+#endif
+}
+
+/*
+ * Waits for child exits, master events, and wakes. Each report is a token and its events: MINIPTY_WATCH_CHILD with a
+ * token of the pidfd (upper half, -1 under kqueue) and the pid (lower half), or a master's token with its readiness. The
+ * wake is drained here and never reported, and a hung-up master registered with minipty_child_watch_add_output only
+ * makes the wait return. Returns the report count, 0 on timeout or interruption, -1 on failure.
+ */
+#define MINIPTY_WATCH_READABLE 1
+#define MINIPTY_WATCH_WRITABLE 2
+#define MINIPTY_WATCH_HANGUP 4
+#define MINIPTY_WATCH_ERROR 8
+#define MINIPTY_WATCH_CHILD 16
+
+int minipty_watch_wait(int watch_fd, int wake_read, uint64_t *tokens, int *reports, int capacity, int timeout_ms)
 {
 #if defined(MINIPTY_CHILD_WATCH_EPOLL) || defined(MINIPTY_CHILD_WATCH_KQUEUE)
     int max_events = capacity < MINIPTY_CHILD_WATCH_MAX_EVENTS ? capacity : MINIPTY_CHILD_WATCH_MAX_EVENTS;
@@ -305,7 +495,7 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
     int ready;
     int i;
 
-    if (pids == NULL || pidfds == NULL || max_events <= 0) {
+    if (tokens == NULL || reports == NULL || max_events <= 0) {
         errno = EINVAL;
         return -1;
     }
@@ -319,22 +509,39 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
             return errno == EINTR ? 0 : -1;
 
         for (i = 0; i < ready; i++) {
-            if (events[i].data.u64 == MINIPTY_CHILD_WATCH_WAKE_TOKEN) {
+            uint64_t token = events[i].data.u64;
+            uint32_t got = events[i].events;
+            int report = 0;
+
+            if (token == MINIPTY_CHILD_WATCH_WAKE_TOKEN) {
                 minipty_drain_wake_pipe(wake_read);
                 continue;
             }
 
             /* A hung-up child's master has output; returning is the whole report. */
-            if (events[i].data.u64 == MINIPTY_CHILD_WATCH_OUTPUT_TOKEN)
+            if (token == MINIPTY_CHILD_WATCH_OUTPUT_TOKEN)
                 continue;
 
-            /*
-             * The one-shot registration is now disarmed. It stays until the caller removes it, and the pidfd stays
-             * open, because the caller signals the child through it until the reap. The pidfd is reported too, so
-             * the caller can tell this report from one for a pidfd it has since closed.
-             */
-            pids[count] = (int)(uint32_t)events[i].data.u64;
-            pidfds[count] = (int)(events[i].data.u64 >> 32);
+            if ((token >> 63) != 0) {
+                if (got & EPOLLIN)
+                    report |= MINIPTY_WATCH_READABLE;
+                if (got & EPOLLOUT)
+                    report |= MINIPTY_WATCH_WRITABLE;
+                if (got & (EPOLLHUP | EPOLLRDHUP))
+                    report |= MINIPTY_WATCH_HANGUP;
+                if (got & EPOLLERR)
+                    report |= MINIPTY_WATCH_ERROR;
+            } else {
+                /*
+                 * A child's pidfd. The one-shot registration is now disarmed. It stays until the caller removes it, and
+                 * the pidfd stays open, because the caller signals the child through it until the reap. The pidfd is
+                 * reported too, so the caller can tell this report from one for a pidfd it has since closed.
+                 */
+                report = MINIPTY_WATCH_CHILD;
+            }
+
+            tokens[count] = token;
+            reports[count] = report;
             count++;
         }
     }
@@ -371,9 +578,43 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
              * EVFILT_READ is a hung-up child's master with output, and returning is the whole report.
              */
             if (events[i].filter == EVFILT_PROC) {
-                pids[count] = (int)events[i].ident;
-                pidfds[count] = -1;
+                /* No pidfd under kqueue: the upper half is -1. */
+                tokens[count] = ((uint64_t)UINT32_MAX << 32) | (uint32_t)events[i].ident;
+                reports[count] = MINIPTY_WATCH_CHILD;
                 count++;
+                continue;
+            }
+
+            /*
+             * A session's master, by the token in udata; a hung-up child's master has none. Its two filters are
+             * separate events, joined into one report as epoll gives, so the caller serves the session once per wait.
+             * EV_EOF is a hint that a read returning 0 confirms (see minipty_watch_renew).
+             */
+            if ((events[i].filter == EVFILT_READ || events[i].filter == EVFILT_WRITE)
+                && (((uint64_t)(uintptr_t)events[i].udata) >> 63) != 0) {
+                uint64_t token = (uint64_t)(uintptr_t)events[i].udata;
+                int report;
+                int j;
+
+                if (events[i].flags & EV_ERROR)
+                    report = MINIPTY_WATCH_ERROR;
+                else
+                    report = events[i].filter == EVFILT_READ ? MINIPTY_WATCH_READABLE : MINIPTY_WATCH_WRITABLE;
+                if (events[i].flags & EV_EOF)
+                    report |= MINIPTY_WATCH_HANGUP;
+
+                for (j = 0; j < count; j++) {
+                    if (tokens[j] == token)
+                        break;
+                }
+
+                if (j < count) {
+                    reports[j] |= report;
+                } else {
+                    tokens[count] = token;
+                    reports[count] = report;
+                    count++;
+                }
             }
         }
     }
@@ -383,8 +624,8 @@ int minipty_child_watch_wait(int watch_fd, int wake_read, int *pids, int *pidfds
 #else
     (void)watch_fd;
     (void)wake_read;
-    (void)pids;
-    (void)pidfds;
+    (void)tokens;
+    (void)reports;
     (void)capacity;
     (void)timeout_ms;
     errno = ENOTSUP;

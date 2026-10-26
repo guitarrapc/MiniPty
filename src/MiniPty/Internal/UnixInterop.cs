@@ -41,23 +41,7 @@ internal static partial class UnixInterop
     [LibraryImport("libc", SetLastError = true)]
     internal static partial int close(int fd);
 
-    // Output reader wake descriptors and PTY master readiness (minipty_unix_output.c).
-    internal const int PtyReadable = 1;
-    internal const int PtyWoken = 2;
-    internal const int PtyWritable = 4;
-
-    [LibraryImport("minipty_unix", SetLastError = true)]
-    internal static unsafe partial int minipty_wake_open(int* readFd, int* writeFd);
-
-    [LibraryImport("minipty_unix", SetLastError = true)]
-    internal static partial int minipty_wake_signal(int writeFd);
-
-    [LibraryImport("minipty_unix")]
-    internal static partial void minipty_wake_drain(int readFd);
-
-    [LibraryImport("minipty_unix")]
-    internal static partial void minipty_wake_close(int readFd, int writeFd);
-
+    // PTY master setup (minipty_unix_output.c).
     [LibraryImport("minipty_unix", SetLastError = true)]
     internal static partial int minipty_set_nonblocking(int fd);
 
@@ -88,13 +72,4 @@ internal static partial class UnixInterop
     [LibraryImport("minipty_unix", SetLastError = true)]
     internal static partial int minipty_reap_child(int pidfd, int pid, int block, out int exitCode, out int termSignal);
 
-    /// <summary>
-    /// Waits until <paramref name="master"/> is ready for the requested <paramref name="events"/>
-    /// (<see cref="PtyReadable"/>, <see cref="PtyWritable"/>; hang-up and errors count as ready),
-    /// <paramref name="wakeFd"/> is signaled, or the timeout elapses. Returns a mask of <see cref="PtyReadable"/>,
-    /// <see cref="PtyWoken"/>, and <see cref="PtyWritable"/>, 0 on timeout or interruption, and -1 on failure. A
-    /// negative descriptor is left out of the wait.
-    /// </summary>
-    [LibraryImport("minipty_unix", SetLastError = true)]
-    internal static partial int minipty_pty_wait(int master, int events, int wakeFd, int timeoutMs);
 }
