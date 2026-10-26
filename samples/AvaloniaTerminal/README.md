@@ -49,7 +49,7 @@ Nothing in the window is platform-specific: the same `Pty.Start` runs a ConPTY o
 
 When the program exits with code 0 (`exit` in the shell) the window closes. Any other exit code prints `[process exited with code N]` in the terminal and the window stays until a key is pressed, so the reason can be read.
 
-A status line below the grid shows who hosts the PTY: `MiniPty 1.3.0 hosting PTY (forkpty) · pid 26284 · 118×35 · /bin/bash · running`, updated on resize and on exit.
+A status line below the grid shows who hosts the PTY: `MiniPty 1.4.0 hosting PTY (forkpty) · pid 26284 · 118×35 · /bin/bash · running`, updated on resize and on exit.
 
 ## Code-only Avalonia
 
