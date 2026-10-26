@@ -38,6 +38,8 @@ public sealed class PtyMacExitDrainTests
 
         await using var session = Pty.Start(TailScript());
         var tty = await TerminalOfAsync(session.ProcessId);
+        var node = NodeOf(tty);
+        await Assert.That(node).IsNotEmpty();
 
         var exit = session.WaitForExitAsync();
         var exitedWhileStalled = await Task.WhenAny(exit, Task.Delay(StalledMs)) == exit;
@@ -54,12 +56,12 @@ public sealed class PtyMacExitDrainTests
         await Assert.That(status).IsEqualTo(new PtyExitStatus(0, null));
 
         await session.DisposeAsync();
-        await Assert.That(HostHoldsTerminal(tty)).IsFalse().Because($"the session's descriptor of {tty} closes with it");
+        await Assert.That(await WaitForTerminalGoneAsync(tty, node)).IsTrue().Because($"the session's descriptors of {tty} close with it");
     }
 
     /// <summary>
     /// A child held in its exit by a stalled consumer must not hold up disposal: disposal discards the output, the
-    /// exit completes, the child is reaped, and MiniPty's descriptor of the slave closes.
+    /// exit completes, the child is reaped, and the session's descriptors of the terminal close.
     /// </summary>
     [Test]
     public async Task DisposeEndsAChildHeldInItsExitByAStalledConsumer()
@@ -70,8 +72,10 @@ public sealed class PtyMacExitDrainTests
         var session = Pty.Start(TailScript());
         var pid = session.ProcessId;
         var tty = await TerminalOfAsync(pid);
+        var node = NodeOf(tty);
         try
         {
+            await Assert.That(node).IsNotEmpty();
             await Assert.That(HostHoldsTerminal(tty)).IsTrue().Because($"the session holds a descriptor of {tty}");
             await Task.Delay(StalledMs);
 
@@ -80,7 +84,7 @@ public sealed class PtyMacExitDrainTests
             await Assert.That(sw.ElapsedMilliseconds).IsLessThan(UnixPtyBackend.DisposeHangupGraceMs + 5_000);
 
             await Assert.That(await WaitForProcessGoneAsync(pid)).IsTrue();
-            await Assert.That(HostHoldsTerminal(tty)).IsFalse().Because($"the session's descriptor of {tty} closes with it");
+            await Assert.That(await WaitForTerminalGoneAsync(tty, node)).IsTrue().Because($"the session's descriptors of {tty} close with it");
         }
         finally
         {
@@ -185,6 +189,49 @@ public sealed class PtyMacExitDrainTests
         lsof.StandardError.ReadToEnd();
         lsof.WaitForExit();
         return output.Contains(tty, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The inode of the terminal's device node, or empty once the node is gone. Each terminal gets a node of its own, so
+    /// the inode tells the session's terminal from a later one of the same name.
+    /// </summary>
+    private static string NodeOf(string tty)
+    {
+        using var stat = Process.Start(new ProcessStartInfo("/usr/bin/stat", ["-f", "%i", $"/dev/{tty}"])
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        })!;
+        var node = stat.StandardOutput.ReadToEnd().Trim();
+        stat.StandardError.ReadToEnd();
+        stat.WaitForExit();
+        return node;
+    }
+
+    /// <summary>
+    /// True once the session's terminal is gone. macOS removes a terminal's node only once every descriptor of it, master
+    /// and slave, is closed, and the child is gone by then, so a descriptor the session kept would keep the node. The
+    /// name is no proof: macOS gives a new terminal the lowest free number, so a test running alongside can open one
+    /// under it as soon as the session lets go, and the host then holds the name again, under a node of its own. The
+    /// watcher closes the session's descriptors just after it reaps the child, so this waits rather than checks once.
+    /// </summary>
+    /// <remarks>
+    /// A slave descriptor left open alone would not show here: the session leader's exit revokes the terminal, which
+    /// detaches that descriptor from it. A master left open keeps the node.
+    /// </remarks>
+    private static async Task<bool> WaitForTerminalGoneAsync(string tty, string node)
+    {
+        var deadline = Environment.TickCount64 + 5_000;
+        while (NodeOf(tty) == node)
+        {
+            if (Environment.TickCount64 >= deadline)
+                return false;
+
+            await Task.Delay(50);
+        }
+
+        return true;
     }
 
     /// <summary>True once the pid is gone; <c>kill(pid, 0)</c> succeeds on a zombie, so this also covers the reap.</summary>
