@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -47,7 +48,8 @@ public sealed class PtyStdioBridgeTests
     /// <summary>
     /// A flood goes out in large output frames, as through the WebSocket bridge: the bridge joins reads that arrive in a
     /// burst. 256 KiB stays below the high watermark, so the flood needs no acknowledgement to go through. The test weighs
-    /// frames by their bytes and runs on Unix only and alone, for the reasons the WebSocket bridge's test gives.
+    /// frames by their bytes, runs on Unix only and alone, and is skipped on a host too slow to flood, for the reasons the
+    /// WebSocket bridge's test gives.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -58,7 +60,7 @@ public sealed class PtyStdioBridgeTests
 
         const int Size = 256 * 1024;
         await using var input = new CancelableInputStream([]);
-        await using var output = new MemoryStream();
+        await using var output = new TimedOutputStream();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         await PtyStdioBridge.RunAsync(
@@ -67,12 +69,9 @@ public sealed class PtyStdioBridgeTests
             output,
             cancellationToken: cts.Token);
 
-        var frames = ParseFrames(output.ToArray()).Where(frame => frame.Type == PtyStdioFrameType.Output).ToList();
-        var bytes = frames.Sum(frame => frame.Payload.Length);
-        var large = frames.Where(frame => frame.Payload.Length >= 4096).Sum(frame => frame.Payload.Length);
-        await Assert.That(bytes).IsEqualTo(Size);
-        await Assert.That(large * 4).IsGreaterThanOrEqualTo(bytes * 3)
-            .Because($"{large} of {bytes} bytes in frames of 4 KiB or more, {frames.Count} frames");
+        var flood = output.OutputFrames();
+        await Assert.That(flood.Sum(frame => frame.Bytes)).IsEqualTo(Size);
+        await PtyWebSocketBridgeTests.AssertFloodFramesAreLargeAsync(flood);
     }
 
     [Test]
@@ -165,6 +164,50 @@ public sealed class PtyStdioBridgeTests
 
     private static string WindowsComSpec() =>
         Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+
+    /// <summary>
+    /// The bridge's output, with the time of each write, so that a test can tell when each frame had arrived whatever
+    /// writes the bridge split it into.
+    /// </summary>
+    private sealed class TimedOutputStream : MemoryStream
+    {
+        // The stream's length after each write, and the write's Stopwatch timestamp.
+        private readonly List<(long End, long Timestamp)> _writes = [];
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            base.Write(buffer, offset, count);
+            _writes.Add((Length, Stopwatch.GetTimestamp()));
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            base.Write(buffer);
+            _writes.Add((Length, Stopwatch.GetTimestamp()));
+        }
+
+        /// <summary>Each output frame's arrival, the timestamp of the write that completed it, and its size, in order.</summary>
+        public List<(long Timestamp, int Bytes)> OutputFrames()
+        {
+            var frames = new List<(long, int)>();
+            var bytes = ToArray();
+            var offset = 0;
+            var write = 0;
+            while (offset < bytes.Length)
+            {
+                var type = (PtyStdioFrameType)bytes[offset];
+                var length = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset + 1, 4)));
+                offset += 5 + length;
+                while (_writes[write].End < offset)
+                    write++;
+
+                if (type == PtyStdioFrameType.Output)
+                    frames.Add((_writes[write].Timestamp, length));
+            }
+
+            return frames;
+        }
+    }
 
     private sealed class CancelableInputStream(byte[] prefix) : Stream
     {

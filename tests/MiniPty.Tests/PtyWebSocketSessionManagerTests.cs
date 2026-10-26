@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -278,7 +279,8 @@ public sealed class PtyWebSocketSessionManagerTests
     /// A flood to an attached client goes out in large frames, as through the plain bridge: reads that arrive in a burst
     /// are joined before they reach the replay buffer, so the send loop mostly finds several reads at once. The child floods
     /// only once the client is attached, so that the replay buffer does not join the output instead while nobody sends.
-    /// The test weighs frames by their bytes and runs on Unix only and alone, for the reasons the plain bridge's test gives.
+    /// The test weighs frames by their bytes, runs on Unix only and alone, and is skipped on a host too slow to flood, for
+    /// the reasons the plain bridge's test gives.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -290,6 +292,10 @@ public sealed class PtyWebSocketSessionManagerTests
     /// Output once resumed with whatever one acknowledgement freed, so every frame was as small as the one acknowledged
     /// before it and split further at each ring wrap: about 330 frames and 66–78% of the bytes in large frames on Linux,
     /// where a hosted arm64 runner's client was slow enough to fail the test above. Each acknowledgement here waits 3 ms.
+    /// The frames still follow the flood: whenever acknowledgements leave the buffer room, the send loop sends each chunk
+    /// as it comes, so a child that writes 1 KiB every 500 µs (1.35 MB/s) sent 55% of its bytes in small frames. The client
+    /// sets the rate the frames arrive at, so the test measures beforehand how fast this host floods
+    /// (<see cref="HostFloodRateAsync"/>) and is skipped where it does not.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -301,31 +307,56 @@ public sealed class PtyWebSocketSessionManagerTests
             return;
 
         const int Size = 1024 * 1024;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        if (ackDelayMilliseconds > 0)
+            PtyWebSocketBridgeTests.SkipUnlessFlood(await HostFloodRateAsync(Size, timeout.Token), "the host's flood, read through a plain session");
+
         await using var manager = new PtyWebSocketSessionManager(TestOptions());
         var credentials = manager.CreateSession(
             Spawn("sh", ["-c", $"stty -echo; printf 'READY\\n'; IFS= read -r _; head -c {Size} /dev/zero | tr '\\0' x"]));
         var (server, socket) = PtyWebSocketBridgeTests.CreateSocketPair();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using (server)
         using (socket)
         {
             var connection = manager.ConnectAsync(credentials.SessionId, credentials.AuthenticationToken, 0, server, timeout.Token);
             var client = new PersistentClient(socket) { AckDelayMilliseconds = ackDelayMilliseconds };
             await client.ReceiveUntilAsync("READY", timeout.Token);
-            var framesBefore = client.Frames;
+            var framesBefore = client.OutputFrames.Count;
             var bytesBefore = client.OutputBytes;
-            var largeBefore = client.LargeFrameBytes;
             await client.SendInputAsync("\n", timeout.Token);
             await client.ReceiveToCloseAsync(timeout.Token);
             await connection.WaitAsync(timeout.Token);
 
-            var frames = client.Frames - framesBefore;
-            var bytes = client.OutputBytes - bytesBefore;
-            var large = client.LargeFrameBytes - largeBefore;
-            await Assert.That(bytes).IsGreaterThanOrEqualTo(Size);
-            await Assert.That(large * 4).IsGreaterThanOrEqualTo(bytes * 3)
-                .Because($"{large} of {bytes} bytes in frames of 4 KiB or more, {frames} frames");
+            var flood = client.OutputFrames[framesBefore..];
+            await Assert.That(client.OutputBytes - bytesBefore).IsGreaterThanOrEqualTo(Size);
+            await PtyWebSocketBridgeTests.AssertFloodFramesAreLargeAsync(flood, measureRate: ackDelayMilliseconds == 0);
         }
+    }
+
+    /// <summary>
+    /// How fast this host's terminal delivers the flood to a reader that keeps up, in bytes per millisecond: what the
+    /// persistent session's producer does whenever the replay buffer has room.
+    /// </summary>
+    private static async Task<double> HostFloodRateAsync(int size, CancellationToken cancellationToken)
+    {
+        await using var session = Pty.Start(Spawn("sh", ["-c", $"head -c {size} /dev/zero | tr '\\0' x"]));
+        long first = 0;
+        long last = 0;
+        long bytes = 0;
+        long firstBytes = 0;
+        await foreach (var chunk in session.ReadOutputAsync(cancellationToken))
+        {
+            last = Stopwatch.GetTimestamp();
+            if (first == 0)
+            {
+                first = last;
+                firstBytes = chunk.Data.Length;
+            }
+
+            bytes += chunk.Data.Length;
+        }
+
+        return (bytes - firstBytes) / Math.Max(Stopwatch.GetElapsedTime(first, last).TotalMilliseconds, double.Epsilon);
     }
 
     private static PtyWebSocketSessionManagerOptions TestOptions() => new()
@@ -374,9 +405,10 @@ public sealed class PtyWebSocketSessionManagerTests
 
         public string Output => _output.ToString();
         public long AcknowledgedOffset { get; private set; } = acknowledgedOffset;
-        public int Frames { get; private set; }
         public long OutputBytes { get; private set; }
-        public long LargeFrameBytes { get; private set; }
+
+        /// <summary>Each output frame's <see cref="Stopwatch"/> timestamp of arrival and size, in order.</summary>
+        public List<(long Timestamp, int Bytes)> OutputFrames { get; } = [];
 
         /// <summary>Gets or sets how long the client waits before it acknowledges each output frame.</summary>
         public int AckDelayMilliseconds { get; init; }
@@ -431,11 +463,9 @@ public sealed class PtyWebSocketSessionManagerTests
 
             if (_pendingOffset < 0 || _pendingBytes != result.Count)
                 throw new InvalidDataException("Binary output did not match its output envelope.");
+            OutputFrames.Add((Stopwatch.GetTimestamp(), result.Count));
             _output.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-            Frames++;
             OutputBytes += result.Count;
-            if (result.Count >= 4096)
-                LargeFrameBytes += result.Count;
             AcknowledgedOffset = _pendingOffset + result.Count;
             _pendingOffset = -1;
             _pendingBytes = 0;

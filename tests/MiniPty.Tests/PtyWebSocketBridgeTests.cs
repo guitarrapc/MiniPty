@@ -1,9 +1,11 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using MiniPty.Internal;
 using MiniPty.Terminal;
 using MiniPty.Terminal.Internal;
 
@@ -57,10 +59,9 @@ public sealed class PtyWebSocketBridgeTests
     /// <summary>
     /// A flood goes out in large frames: the bridge joins reads that arrive in a burst. On macOS a terminal read returns at
     /// most 1 KiB, and the core publishes each read as it completes, so without the joining hardly any byte would go out in
-    /// a frame of 4 KiB or more. A Linux read can return 4 KiB, so there the test may pass without the joining. The test
-    /// weighs frames by their bytes, so the few small frames a slowdown on a loaded machine causes do not decide it. It
-    /// skips Windows, whose output arrives in frames of a few KiB whether or not the bridge joins them. It runs alone, so
-    /// that other tests do not slow the flood.
+    /// a frame of 4 KiB or more. A Linux read can return 4 KiB, so there the test may pass without the joining. It skips
+    /// Windows, whose output arrives in frames of a few KiB whether or not the bridge joins them. It runs alone, so that
+    /// other tests do not slow the flood, and is skipped on a host too slow to flood (<see cref="AssertFloodFramesAreLargeAsync"/>).
     /// </summary>
     [Test]
     [NotInParallel]
@@ -81,10 +82,66 @@ public sealed class PtyWebSocketBridgeTests
         await client.RunToCloseAsync(ackEverything: true, cts.Token);
         await bridgeTask.WaitAsync(cts.Token);
 
-        var binaryFrames = client.MessageCount - (client.ExitMessage is null ? 0 : 1);
         await Assert.That(client.BinaryByteCount).IsEqualTo(Size);
-        await Assert.That(client.LargeFrameByteCount * 4).IsGreaterThanOrEqualTo(client.BinaryByteCount * 3)
-            .Because($"{client.LargeFrameByteCount} of {Size} bytes in frames of 4 KiB or more, {binaryFrames} frames");
+        await AssertFloodFramesAreLargeAsync(client.BinaryFrames);
+    }
+
+    /// <summary>
+    /// Asserts that a flood went out in large frames: three quarters of its bytes in frames of 4 KiB or more. Frames are
+    /// weighed by their bytes, so the few small frames a slowdown hands out do not decide it. <paramref name="frames"/> are
+    /// the flood's output frames in order, each with the <see cref="Stopwatch"/> timestamp at which the client had it.
+    /// </summary>
+    /// <remarks>
+    /// The bridges join only output that comes at least at the rate that starts a burst (<see cref="SkipUnlessFlood"/>),
+    /// and send a slower stream read by read, as specified. So with <paramref name="measureRate"/> the test is skipped
+    /// when the output reached the client slower than that, because small frames then prove nothing. A bridge that
+    /// stopped joining still fails, because a client that keeps up then receives the flood at its full rate, in small
+    /// frames.
+    /// </remarks>
+    /// <param name="measureRate">
+    /// <see langword="false"/> when the client itself sets the rate at which the frames arrive, as a slow client does. The
+    /// caller then checks beforehand that the host floods (<see cref="SkipUnlessFlood"/>).
+    /// </param>
+    internal static async Task AssertFloodFramesAreLargeAsync(IReadOnlyList<(long Timestamp, int Bytes)> frames, bool measureRate = true)
+    {
+        long bytes = 0;
+        long large = 0;
+        foreach (var (_, length) in frames)
+        {
+            bytes += length;
+            if (length >= 4096)
+                large += length;
+        }
+
+        var summary = $"{large} of {bytes} bytes in frames of 4 KiB or more, {frames.Count} frames";
+        if (measureRate && frames.Count > 1)
+        {
+            // The bytes that came after the first frame, over the time from its arrival to the last frame's.
+            var elapsed = Stopwatch.GetElapsedTime(frames[0].Timestamp, frames[^1].Timestamp);
+            SkipUnlessFlood((bytes - frames[0].Bytes) / Math.Max(elapsed.TotalMilliseconds, double.Epsilon), summary);
+        }
+
+        await Assert.That(large * 4).IsGreaterThanOrEqualTo(bytes * 3).Because(summary);
+    }
+
+    /// <summary>
+    /// Skips a frame-size test whose output came at <paramref name="bytesPerMillisecond"/>, below the rate that starts a
+    /// burst: 4 KiB per millisecond (<see cref="PtyOutputCoalescing.BurstBytes"/> per
+    /// <see cref="PtyOutputCoalescing.BurstWindowMs"/>). Such output is no flood, and the bridges rightly send it read by
+    /// read.
+    /// </summary>
+    /// <remarks>
+    /// A slow host gives such a flood. On macOS a read returns at most 1 KiB, so a flood goes only as fast as the
+    /// terminal's writes and reads take turns, and a hosted macOS Intel runner whose suite ran three times slower than
+    /// usual took about 2 s for 1 MiB and sent a third to two thirds of its bytes in small frames. A host that is only busy
+    /// still floods: its output comes in bursts, which the bridges join.
+    /// </remarks>
+    internal static void SkipUnlessFlood(double bytesPerMillisecond, string detail)
+    {
+        const double BurstBytesPerMs = (double)PtyOutputCoalescing.BurstBytes / PtyOutputCoalescing.BurstWindowMs;
+        Skip.Unless(
+            bytesPerMillisecond >= BurstBytesPerMs,
+            $"The output came at {bytesPerMillisecond / 1000:F2} MB/s, below the {BurstBytesPerMs / 1000:F1} MB/s that starts a burst, so it was no flood and went out read by read as specified ({detail}).");
     }
 
     [Test]
@@ -623,8 +680,11 @@ public sealed class PtyWebSocketBridgeTests
 
         public long BinaryByteCount => Interlocked.Read(ref _binaryByteCount);
 
-        /// <summary>Bytes received in binary frames of 4 KiB or more.</summary>
-        public long LargeFrameByteCount { get; private set; }
+        /// <summary>
+        /// Each binary frame's <see cref="Stopwatch"/> timestamp of arrival and size, in order. Read once
+        /// <see cref="RunToCloseAsync"/> has returned.
+        /// </summary>
+        public List<(long Timestamp, int Bytes)> BinaryFrames { get; } = [];
         public int MessageCount => _messageCount;
         public JsonElement? ExitMessage { get; private set; }
         public int ExitMessageIndex { get; private set; } = -1;
@@ -696,9 +756,8 @@ public sealed class PtyWebSocketBridgeTests
 
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
+                    BinaryFrames.Add((Stopwatch.GetTimestamp(), payload.Length));
                     Interlocked.Add(ref _binaryByteCount, payload.Length);
-                    if (payload.Length >= 4096)
-                        LargeFrameByteCount += payload.Length;
                     lock (_binaryText)
                     {
                         _binaryText.Append(Encoding.UTF8.GetString(payload));
