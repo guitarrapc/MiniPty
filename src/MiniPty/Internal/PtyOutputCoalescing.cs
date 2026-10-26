@@ -103,8 +103,12 @@ internal static class PtyOutputCoalescing
 /// </remarks>
 internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPump pump) : PtyOutputReader(session, pump)
 {
-    private bool _inBurst;
-    private bool _waitArmed;
+    private const byte FlagInBurst = 1;
+    private const byte FlagWaitArmed = 2;
+
+    // Whether the reader is in a burst and whether a coalescing wait is armed, in one byte that only the consumer writes,
+    // so that the reader's own fields fit in 48 bytes. Two flags of their own grew every bridge session's reader by 8 B.
+    private byte _consumerFlags;
     // The output a burst left unread when a late wait ended it. It is not counted toward the next burst, however many
     // chunks it comes out as.
     private int _skipBytes;
@@ -137,13 +141,25 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
     internal int ScheduleIndex = -1;
 
     /// <summary>Whether the reader is in a burst. For tests, on the consumer's thread.</summary>
-    internal bool IsInBurst => _inBurst;
+    internal bool IsInBurst => InBurst;
+
+    private bool InBurst
+    {
+        get => (_consumerFlags & FlagInBurst) != 0;
+        set => _consumerFlags = value ? (byte)(_consumerFlags | FlagInBurst) : (byte)(_consumerFlags & ~FlagInBurst);
+    }
+
+    private bool WaitArmed
+    {
+        get => (_consumerFlags & FlagWaitArmed) != 0;
+        set => _consumerFlags = value ? (byte)(_consumerFlags | FlagWaitArmed) : (byte)(_consumerFlags & ~FlagWaitArmed);
+    }
 
     /// <summary>Starts an enumeration outside a burst.</summary>
     internal void ResetCoalescing()
     {
-        _inBurst = false;
-        _waitArmed = false;
+        InBurst = false;
+        WaitArmed = false;
         _skipBytes = 0;
         _windowBytes = 0;
         _windowChunks = 0;
@@ -157,7 +173,7 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
     /// </summary>
     internal int NextMinimum()
     {
-        if (!_inBurst
+        if (!InBurst
             || _pump.UnreadCount >= PtyOutputCoalescing.MinimumBytes
             || _pump.IsProducerFinished
             || _pump.IsSessionDisposed)
@@ -181,7 +197,7 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
     /// <summary>The pump armed the coalescing wait: its deadline goes to the scheduler.</summary>
     internal void OnWaitArmed()
     {
-        _waitArmed = true;
+        WaitArmed = true;
         // A full fence before reading Scheduled, paired with the one in the scheduler's Remove: either this sees the
         // reader dropped and schedules it again, or Remove sees the new deadline and keeps the reader.
         Interlocked.Exchange(ref Deadline, _waitDeadline);
@@ -202,10 +218,10 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
     /// </summary>
     internal void OnWaitEnded()
     {
-        if (!_waitArmed)
+        if (!WaitArmed)
             return;
 
-        _waitArmed = false;
+        WaitArmed = false;
         Volatile.Write(ref Deadline, 0);
         var completedAt = Volatile.Read(ref _completedAt);
         if (completedAt != 0 && completedAt < _waitDeadline)
@@ -225,7 +241,7 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
                 return;
         }
 
-        _inBurst = false;
+        InBurst = false;
         _windowBytes = 0;
         _windowChunks = 0;
         _windowStart = 0;
@@ -237,7 +253,7 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
     /// </summary>
     internal void OnDelivered(int length)
     {
-        if (_inBurst)
+        if (InBurst)
             return;
 
         if (_skipBytes > 0)
@@ -260,13 +276,13 @@ internal sealed class PtyCoalescingOutputReader(PtySession session, PtyOutputPum
         _windowBytes += length;
         _windowChunks++;
         if (_windowBytes >= PtyOutputCoalescing.BurstBytes || _windowChunks >= PtyOutputCoalescing.BurstChunks)
-            _inBurst = true;
+            InBurst = true;
     }
 
     /// <summary>The enumeration ended. The scheduler drops a reader without a deadline at its next tick.</summary>
     internal void OnEnded()
     {
-        _waitArmed = false;
+        WaitArmed = false;
         Volatile.Write(ref Deadline, 0);
     }
 

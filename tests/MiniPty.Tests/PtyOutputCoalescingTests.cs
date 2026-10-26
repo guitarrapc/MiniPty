@@ -851,6 +851,29 @@ public sealed class PtyOutputCoalescingTests
         await output.DisposeAsync();
     }
 
+    /// <summary>
+    /// A bridge's session allocates its coalescing reader and the enumerable that carries a read's token once, 208 bytes in
+    /// a 64-bit process. The reader's own fields fill 48 bytes, so one more field grows every bridge session by 8 bytes,
+    /// which no bridge benchmark resolves. A warm-up call on another session first, so that the measured call allocates
+    /// only those two objects.
+    /// </summary>
+    [Test]
+    public async Task ACoalescingReadAllocatesNoMoreThanItsReaderAndEnumerable()
+    {
+        if (!Environment.Is64BitProcess)
+            return;
+
+        await using (var warm = new PtySession(new ManualOutputBackend()))
+            _ = warm.ReadOutputCoalescedAsync();
+
+        await using var session = new PtySession(new ManualOutputBackend());
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        _ = session.ReadOutputCoalescedAsync();
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        await Assert.That(allocated).IsLessThanOrEqualTo(208L).Because($"{allocated} bytes allocated");
+    }
+
     /// <summary>A plain read is never held for a larger chunk, even after the same burst.</summary>
     [Test]
     public async Task APlainReadIsNeverHeld()
