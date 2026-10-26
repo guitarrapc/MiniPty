@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using MiniPty.Internal;
 
@@ -295,8 +296,69 @@ public sealed class PtyUnixLoopTests
         }
     }
 
+    /// <summary>
+    /// A first open of the watcher's epoll or kqueue that fails does not disable a load of MiniPty for good. The start that
+    /// meets it fails, since no master can be registered; the next start opens the descriptors again, its session reads on
+    /// the loop, and its exit is reported. Before, the open was never retried, and every later start failed. The test runs
+    /// in a load of MiniPty of its own, whose watcher has opened nothing yet, so the open really fails and the test's own
+    /// load is untouched.
+    /// </summary>
+    [Test]
+    // A second load context exists only under the JIT, which runs this suite. The warnings are about trimming and
+    // single-file publishing, which this test never meets.
+#pragma warning disable IL2026, IL2072, IL2075, IL3000
+    public async Task AFailedFirstOpenOfTheLoopIsRetriedByTheNextStart()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var context = new System.Runtime.Loader.AssemblyLoadContext(nameof(AFailedFirstOpenOfTheLoopIsRetriedByTheNextStart));
+        var assembly = context.LoadFromAssemblyPath(typeof(Pty).Assembly.Location);
+        var failOpen = assembly.GetType("MiniPty.Internal.UnixPtyBackend", throwOnError: true)!
+            .GetField(nameof(UnixPtyBackend.FailWatchOpenForTests), BindingFlags.NonPublic | BindingFlags.Static)!;
+        var startInfoType = assembly.GetType("MiniPty.PtyStartInfo", throwOnError: true)!;
+        var start = assembly.GetType("MiniPty.Pty", throwOnError: true)!.GetMethod(nameof(Pty.Start), [startInfoType])!;
+
+        failOpen.SetValue(null, true);
+        Exception? failure = null;
+        try
+        {
+            await ((IAsyncDisposable)StartIn("IFS= read -r _")).DisposeAsync();
+        }
+        catch (TargetInvocationException ex)
+        {
+            failure = ex.InnerException;
+        }
+        finally
+        {
+            failOpen.SetValue(null, false);
+        }
+
+        await Assert.That(failure).IsTypeOf<IOException>();
+
+        var session = StartIn("echo retry-marker");
+        await using ((IAsyncDisposable)session)
+        {
+            var output = (Stream)session.GetType().GetProperty(nameof(PtySession.Output))!.GetValue(session)!;
+            var text = await new StreamReader(output).ReadToEndAsync().WaitAsync(Timeout);
+            await Assert.That(text).Contains("retry-marker");
+            var exit = (Task)session.GetType().GetMethod(nameof(PtySession.WaitForExitAsync))!.Invoke(session, [CancellationToken.None])!;
+            await exit.WaitAsync(Timeout);
+        }
+
+        object StartIn(string command)
+        {
+            var startInfo = Activator.CreateInstance(startInfoType)!;
+            startInfoType.GetProperty(nameof(PtyStartInfo.FileName))!.SetValue(startInfo, "sh");
+            startInfoType.GetProperty(nameof(PtyStartInfo.Arguments))!.SetValue(startInfo, new[] { "-c", command });
+            return start.Invoke(null, [startInfo])!;
+        }
+    }
+#pragma warning restore IL2026, IL2072, IL2075, IL3000
+
     [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
     private static extern int kill(int pid, int sig);
+
     private static PtyStartInfo Shell(string command) => new() { FileName = "sh", Arguments = ["-c", command] };
 
     private static async Task<string> ReadAllTextAsync(PtySession session)

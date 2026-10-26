@@ -45,7 +45,8 @@ internal static partial class UnixPtyBackend
     /// <c>EVFILT_PROC</c> (macOS, FreeBSD). A child the shim cannot register joins a polling set that the same
     /// thread checks every <see cref="PollIntervalMs"/>. On Linux that is a child the spawn got no pidfd for, because
     /// the kernel gave none, a seccomp filter blocked it, or the pidfd named no child. With <c>kqueue</c> it is a child
-    /// that exited before its registration. When the watcher's descriptors could not be opened, every child is polled.
+    /// that exited before its registration. When the watcher's descriptors could not be opened, every child is polled, and
+    /// each later registration tries to open them again (see <see cref="EnsureStarted"/>).
     /// </para>
     /// <para>
     /// The epoll or kqueue and its wake descriptors belong to this class, not to the shim. A second
@@ -372,19 +373,36 @@ internal static partial class UnixPtyBackend
         /// </summary>
         internal static void UnwatchOutputLocked(int master) => minipty_child_watch_remove_output(s_watchFd, master);
 
+        /// <summary>
+        /// Starts this thread on the first registration, and opens its epoll or kqueue while none is open. Caller holds
+        /// <see cref="s_lock"/>.
+        /// </summary>
+        /// <remarks>
+        /// An open that failed is retried on every later registration. Without the descriptors no master can be
+        /// registered and every start fails, so a moment without descriptors or kernel memory at the first start would
+        /// otherwise disable this load of MiniPty for good. Once an open succeeds, this thread leaves its polling-only
+        /// wait for the native one, and children registered meanwhile stay polled until they are reaped. A loop that fell
+        /// back to polling because its wait failed keeps its descriptors open and is not retried: the native wait turns
+        /// <c>EINTR</c> into an empty report, so a wait that fails points at a broken descriptor, not at a passing shortage.
+        /// </remarks>
         private static void EnsureStarted()
         {
             if (s_started)
-                return;
-
-            // The descriptors are opened only once. A thread start that fails below leaves them open for the next
-            // registration, and opening a second set then would leak the first.
-            if (s_watchFd < 0 && minipty_child_watch_open(out var watchFd, out var wakeRead, out var wakeWrite) == 0)
             {
-                s_watchFd = watchFd;
-                s_wakeRead = wakeRead;
-                s_wakeWrite = wakeWrite;
+                if (s_watchFd < 0 && TryOpenWatchLocked())
+                {
+                    Volatile.Write(ref s_nativeWatch, true);
+                    // The thread may be asleep in the polling-only wait; its next pass waits natively.
+                    Monitor.PulseAll(s_lock);
+                }
+
+                return;
             }
+
+            // A set that opened is kept. A thread start that fails below leaves it open for the next registration, and
+            // opening a second set then would leak the first.
+            if (s_watchFd < 0)
+                TryOpenWatchLocked();
 
             s_nativeWatch = s_watchFd >= 0;
 
@@ -397,6 +415,24 @@ internal static partial class UnixPtyBackend
             // This thread stops with the process, so the exit itself must send the pending kills.
             AppDomain.CurrentDomain.ProcessExit += static (_, _) => OnProcessExit();
             s_started = true;
+        }
+
+        /// <summary>
+        /// Opens this watcher's epoll or kqueue and its wake descriptors. Caller holds <see cref="s_lock"/> and has checked
+        /// that none are open.
+        /// </summary>
+        private static bool TryOpenWatchLocked()
+        {
+            if (Volatile.Read(ref FailWatchOpenForTests)
+                || minipty_child_watch_open(out var watchFd, out var wakeRead, out var wakeWrite) != 0)
+            {
+                return false;
+            }
+
+            s_watchFd = watchFd;
+            s_wakeRead = wakeRead;
+            s_wakeWrite = wakeWrite;
+            return true;
         }
 
         private static void WakeLocked()
@@ -434,7 +470,8 @@ internal static partial class UnixPtyBackend
             while (true)
             {
                 Volatile.Write(ref s_passes, s_passes + 1);
-                var count = s_nativeWatch ? WaitNative(tokens, reports) : WaitManaged();
+                // Read on each pass: a registration can turn the native wait on (see EnsureStarted), and a failed wait off.
+                var count = Volatile.Read(ref s_nativeWatch) ? WaitNative(tokens, reports) : WaitManaged();
                 for (var i = 0; i < count; i++)
                 {
                     var token = tokens[i];

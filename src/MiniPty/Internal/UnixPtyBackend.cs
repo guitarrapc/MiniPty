@@ -23,6 +23,13 @@ internal static partial class UnixPtyBackend
     /// <summary>A pid whose session's master the loop refuses to register, for the test that this fails the start. 0: none.</summary>
     internal static int FailLoopRegistrationOfPidForTests;
 
+    /// <summary>
+    /// While set, the watcher's epoll or kqueue fails to open, for the test that a load recovers from a first open that
+    /// failed. It affects only a load whose watcher has not opened them yet, so a test sets it in a load of MiniPty of
+    /// its own.
+    /// </summary>
+    internal static bool FailWatchOpenForTests;
+
     /// <summary>Passes the watcher's loop has made, for tests that check it does not spin.</summary>
     internal static long LoopPassesForTests => ChildWatcher.Passes;
 
