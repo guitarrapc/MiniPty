@@ -21,6 +21,17 @@ namespace MiniPty.Terminal;
 /// Unknown control <c>type</c> values are ignored (forward compatibility). Malformed JSON or an
 /// oversize control message closes the socket with <c>PolicyViolation</c> and kills the child.
 /// </para>
+/// <para>
+/// The bridge authenticates nothing: whoever holds the socket types into the child. The host must
+/// authenticate the request and check its <c>Origin</c> and <c>Host</c> headers before it accepts
+/// the WebSocket. Listening only on loopback does not protect a browser-facing endpoint. Browsers
+/// let any page open a WebSocket to any host, <c>localhost</c> included, and leave the
+/// <c>Origin</c> check to the server, so an unchecked endpoint hands the child to every site the
+/// user visits. A page that points its own domain at 127.0.0.1 (DNS rebinding) passes an
+/// <c>Origin</c> check alone; checking <c>Host</c> refuses it. Other local users can reach a
+/// loopback port and forge any header, so a shell also needs a secret such as a per-run token.
+/// <c>samples/SingleFiles/WebTerminal.cs</c> does all three.
+/// </para>
 /// </remarks>
 public static class PtyWebSocketBridge
 {
@@ -33,7 +44,9 @@ public static class PtyWebSocketBridge
     /// <param name="startInfo">Child process launch configuration.</param>
     /// <param name="webSocket">
     /// An open <see cref="WebSocket"/> (Kestrel/HttpListener accept, <see cref="ClientWebSocket"/>,
-    /// or <see cref="WebSocket.CreateFromStream(Stream, WebSocketCreationOptions)"/>).
+    /// or <see cref="WebSocket.CreateFromStream(Stream, WebSocketCreationOptions)"/>). Accept it only
+    /// after authenticating the request and checking its <c>Origin</c> and <c>Host</c>; the bridge
+    /// does neither (see <see cref="PtyWebSocketBridge"/>).
     /// </param>
     /// <param name="options">Bridge behavior, or <see langword="null"/> for defaults.</param>
     /// <param name="cancellationToken">When canceled, the child is killed and the session torn down.</param>

@@ -28,7 +28,7 @@ Bridging to a browser needs one more layer. The WebSocket protocol has no backpr
 | N2 | Output recording / timestamping ([Capture](capture.md)) |
 | N3 | Host console attach ([Console](console.md); use case 3) |
 | N4 | Remote shell protocols (`ssh`), user identity/authentication, or multi-user session management. Per-session bridge bearer authentication is included. |
-| N6 | HTTP serving — the embedder accepts the WebSocket (Kestrel, `HttpListener`, …) and hands it to the bridge |
+| N6 | HTTP serving and request authentication — the embedder authenticates the request, checks its `Origin` and `Host`, accepts the WebSocket (Kestrel, `HttpListener`, …), and hands it to the bridge ([Embedder Pattern](#embedder-pattern-use-case-4)) |
 | N7 | A buffer clear on the in-box Windows ConPTY, which exposes no clear operation: there `PtyTerminal.Clear()` is a safe no-op. On the out-of-band ConPTY an application supplies ([Out-of-band ConPTY](core_session.md#out-of-band-conpty)) it clears the host's buffer. |
 | N9 | node-pty `open()` (a PTY pair without a spawned child). Neither VS Code nor any known embedder calls it. |
 | N10 | `uid` / `gid` on spawn. Switching identity is security-sensitive and outside a minimal PTY library. |
@@ -193,9 +193,20 @@ VS Code cannot swap its internal node-pty; integration is a **`vscode.Pseudoterm
 
 Browser (xterm.js) host flow — see [samples/SingleFiles/WebTerminal.cs](../../../samples/SingleFiles/WebTerminal.cs) for the complete version:
 
-1. Accept a WebSocket (`HttpListenerContext.AcceptWebSocketAsync`, Kestrel `UseWebSockets`, …)
-2. `var status = await PtyWebSocketBridge.RunAsync(shellStartInfo, webSocket, ct);`
-3. Client side: `term.onData(d => ws.send(encode(d)))`, binary `onmessage` → `term.write(bytes, ackCallback)`, ACK every 2^17 processed bytes, resize on `term.onResize`.
+1. Authenticate the request and check its `Origin` and `Host` before accepting it (below).
+2. Accept a WebSocket (`HttpListenerContext.AcceptWebSocketAsync`, Kestrel `UseWebSockets`, …)
+3. `var status = await PtyWebSocketBridge.RunAsync(shellStartInfo, webSocket, ct);`
+4. Client side: `term.onData(d => ws.send(encode(d)))`, binary `onmessage` → `term.write(bytes, ackCallback)`, ACK every 2^17 processed bytes, resize on `term.onResize`.
+
+The bridge authenticates nothing: whoever holds the socket types into the child. Listening only on loopback does not protect a browser-facing endpoint, so the host must make three checks:
+
+| Check | What it refuses |
+|---|---|
+| `Origin`, when present, is the server's own origin | Any other site's page. Browsers let a page open a WebSocket to any host, `localhost` included, and leave this check to the server. A client that is not a browser sends no `Origin`. |
+| `Host` is the server's own loopback name and port | A page that points its own domain at 127.0.0.1 (DNS rebinding). It is same-origin with itself, so it passes the `Origin` check. |
+| The request carries a per-run secret | Other local users and non-browser clients, which can reach a loopback port and forge any header. |
+
+The browser samples print an address whose fragment carries a 256-bit per-run token. Browsers never send a URL fragment to the server. The page sends the token as the WebSocket subprotocol `minipty-token.<hex>`, not in the URL, so request logs do not record it. A browser fails a handshake whose answer names none of the subprotocols it offered, so the server answers with `minipty`. `PtyWebSocketSessionManager` hosts carry their per-session token the same way ([VsCodePersistentBridge.cs](../../../samples/SingleFiles/VsCodePersistentBridge.cs)).
 
 Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` directly for other transports such as SignalR.
 
@@ -232,6 +243,7 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 - After sending final output, the exit control, and a WebSocket close frame, do not cancel an already-running `ReceiveAsync` to stop the receive loop. `ManagedWebSocket` can turn that cancellation into an abort and discard the frames already queued to the peer, especially under NativeAOT timing. Wait for the peer's close reply within `CloseTimeout`; abort only after that bounded wait expires.
 - TerminateProcess-based `Kill` is fire-and-forget: `HasExited` can lag `Completion` by a scheduler tick; tests must poll, not assert immediately.
 - `HttpListener` on `http://localhost:<port>/` works for the sample cross-platform without URL ACLs; ephemeral binding retries random ports because `HttpListener` cannot bind port 0.
+- The browser samples first served a shell to any WebSocket on `localhost` with no checks. A security review found that any site the user visited while they ran could open the socket and run commands: binding to loopback stops other machines, not pages in the user's own browser. ASP.NET Core's `WebSocketOptions.AllowedOrigins` was not enough on its own: it lets a request without `Origin` through and cannot express "the same host and port as this request". Both samples therefore make their own three checks, and their smoke modes assert that a request without the token, with a wrong token, or from another origin is refused.
 - Flow control pauses before the next chunk, not within one, so unacknowledged bytes can pass `HighWatermark` by up to a chunk, and a chunk can hold the session's whole output buffer (16 KiB). A test that needs a pause before output ends produces more than the watermark plus one chunk: 64 lines (8 KiB) against a 4 KiB watermark arrived in one chunk on Linux, and the bridge closed before the test acknowledged anything.
 - A WebSocket harness has to watch the bridge while it waits for frames. A benchmark client that only received hung for hours when `RunAsync` failed at spawn (`CreateProcess` error 206, a program path over `MAX_PATH` in a deep build directory): nothing ever closed its socket. The harness must also close the server's connection once `RunAsync` returns, as a web server does when its handler returns. A .NET client otherwise waits up to a second after the close handshake for the server to close it, and that second was most of every measured session (1.08 s against 90 ms).
 - What a session costs the host is measured from outside the host, with thread-pool workers counted apart from other threads. A burst of WebSocket connections injected 14–37 pool workers that retire later. The other threads grew by exactly one per open session on Windows and Linux while each session had a reader thread, and by none once the engines read without one ([Why this engine](../references/pty_crossplatform.md#why-this-engine)). [WebTerminalScale.cs](../../../samples/SingleFiles/WebTerminalScale.cs) runs that census.
@@ -245,7 +257,7 @@ Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` direc
 - [spec.md](../spec.md) — four use cases and package map
 - [core_session.md](core_session.md) — `ReadOutputAsync` bounded buffering, chunk lifetime, backpressure
 - [lifecycle.md](lifecycle.md) — exit, kill, disposal semantics the facade builds on
-- [samples/SingleFiles/WebTerminal.cs](../../../samples/SingleFiles/WebTerminal.cs) — browser demo with the client-side protocol
+- [samples/SingleFiles/WebTerminal.cs](../../../samples/SingleFiles/WebTerminal.cs) — browser demo with the client-side protocol and Origin, Host, and per-run token checks
 - [samples/SingleFiles/VsCodeTerminalHelper.cs](../../../samples/SingleFiles/VsCodeTerminalHelper.cs) — stdio-framed helper entry point
 - [samples/SingleFiles/VsCodePersistentBridge.cs](../../../samples/SingleFiles/VsCodePersistentBridge.cs) — authenticated loopback service and reconnect E2E smoke
 - [samples/VsCodeExtension](../../../samples/VsCodeExtension) — runnable one-shot and persistent VS Code `Pseudoterminal` clients

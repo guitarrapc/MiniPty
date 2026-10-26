@@ -11,7 +11,8 @@
 //
 // Serve:  dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs
 //   Opens http://localhost:5171/ with an xterm.js terminal, buttons that open and close idle sessions from the browser,
-//   and the host's session count, thread count, and memory, refreshed every second.
+//   and the host's session count, thread count, and memory, refreshed every second. Open the address the server
+//   prints: its #token=... fragment is this run's access token (see LocalAccess).
 //
 // Bench:  dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench [--sessions 16,64] [--echo 200]
 //                                                                             [--flood-bytes 4194304]
@@ -29,6 +30,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using MiniPty;
@@ -62,7 +64,7 @@ catch (Exception ex)
 
 static int Usage()
 {
-    Console.Error.WriteLine("usage: WebTerminalScale [serve [--port N] | bench [--sessions 16,64] [--echo N] [--flood-bytes N] | --smoke]");
+    Console.Error.WriteLine("usage: WebTerminalScale [serve [--port N] [--token-stdin] | bench [--sessions 16,64] [--echo N] [--flood-bytes N] | --smoke]");
     return 2;
 }
 
@@ -71,11 +73,18 @@ static class Server
 {
     private const int MaxFloodBytes = 256 * 1024 * 1024;
     private static int s_sessions;
+    private static int s_port;
+    private static string s_token = "";
 
     public static async Task<int> RunAsync(string[] args)
     {
         var port = Args.GetInt(args, "--port", 5171);
         var quiet = args.Contains("--quiet");
+        s_port = port;
+        // The bench passes its token on stdin, which, unlike arguments, other users cannot list.
+        s_token = args.Contains("--token-stdin")
+            ? Console.In.ReadLine() is { Length: 64 } piped ? piped : throw new InvalidOperationException("--token-stdin expects 64 hex characters on stdin.")
+            : LocalAccess.CreateToken();
 
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.UseUrls($"http://localhost:{port}");
@@ -92,8 +101,9 @@ static class Server
         app.MapGet("/stats", WriteStatsAsync);
         app.Map("/ws", HandleTerminalAsync);
 
+        // The address carries the token, so it is printed only to this console, for the user who started the server.
         if (!quiet)
-            Console.Error.WriteLine($"WebTerminalScale listening on http://localhost:{port}/ (Ctrl+C to stop)");
+            Console.Error.WriteLine($"WebTerminalScale listening on http://localhost:{port}/#token={s_token} (Ctrl+C to stop)");
 
         await app.RunAsync();
         return 0;
@@ -111,11 +121,27 @@ static class Server
             return;
         }
 
+        // PtyWebSocketBridge authenticates nothing: whoever holds the socket types into the shell. UseWebSockets'
+        // AllowedOrigins is not used, because it lets a request without Origin through and cannot follow the port.
+        var refusal = LocalAccess.Check(
+            context.Request.Headers.Host,
+            context.Request.Headers.Origin,
+            context.Request.Headers.SecWebSocketProtocol,
+            s_port,
+            s_token);
+        if (refusal is not null)
+        {
+            // Reported even with --quiet: a refused connection must not look like a failed spawn.
+            Console.Error.WriteLine($"refused a terminal connection: {refusal}");
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+
         var startInfo = context.Request.Query["mode"] == "flood"
             ? Self.FloodStartInfo(Math.Clamp(Args.ParseInt(context.Request.Query["bytes"], 1024 * 1024), 1, MaxFloodBytes))
             : Shell.StartInfo();
 
-        using var socket = await context.WebSockets.AcceptWebSocketAsync();
+        using var socket = await context.WebSockets.AcceptWebSocketAsync(LocalAccess.Protocol);
         Interlocked.Increment(ref s_sessions);
         try
         {
@@ -186,17 +212,22 @@ static class Bench
         var floodBytes = Args.GetInt(args, "--flood-bytes", 4 * 1024 * 1024);
         var port = FreePort();
         var baseUri = new Uri($"http://127.0.0.1:{port}/");
+        var token = LocalAccess.CreateToken();
 
-        using var server = Self.Start(["serve", "--port", port.ToString(), "--quiet"]);
+        using var server = Self.Start(["serve", "--port", port.ToString(), "--quiet", "--token-stdin"], standardInput: token);
         using var http = new HttpClient { BaseAddress = baseUri, Timeout = TimeSpan.FromSeconds(30) };
         var clients = new List<Client>();
         try
         {
             await WaitForServerAsync(http, server);
 
+            var refused = !smoke || await RefusesUnauthorizedAsync(baseUri, token);
+            if (!refused)
+                Console.Error.WriteLine("An unauthorized connection was accepted.");
+
             // One session opened, used, and closed first, so that startup work (JIT, Kestrel, the first spawn, the
             // watcher's and the thread pool's first threads) is not counted as the cost of the measured sessions.
-            await using (var warm = await Client.ConnectAsync(baseUri, "shell"))
+            await using (var warm = await Client.ConnectAsync(baseUri, "shell", token))
             {
                 await warm.Ready.WaitAsync(ConnectTimeout);
                 await warm.EchoAsync(EchoTimeout);
@@ -208,7 +239,7 @@ static class Bench
             var rows = new List<(int Sessions, Stats Stats, double[] Echo)>();
             foreach (var target in steps)
             {
-                await OpenUntilAsync(baseUri, clients, target);
+                await OpenUntilAsync(baseUri, token, clients, target);
                 var stats = await SettledStatsAsync(http);
                 var echo = await MeasureEchoAsync(clients, echoSamples);
                 rows.Add((target, stats, echo));
@@ -217,12 +248,12 @@ static class Bench
             await CloseAllAsync(clients);
             await WaitForSessionsAsync(http, 0);
 
-            var flood = await MeasureFloodAsync(http, baseUri, floodBytes);
+            var flood = await MeasureFloodAsync(http, baseUri, token, floodBytes);
             Report(baseline, rows, flood);
 
             if (smoke)
             {
-                var ok = rows.Count == steps.Length && rows.All(r => r.Echo.Length > 0) && flood.Bytes > 0 && flood.Exited;
+                var ok = refused && rows.Count == steps.Length && rows.All(r => r.Echo.Length > 0) && flood.Bytes > 0 && flood.Exited;
                 Console.WriteLine(ok ? "WebTerminalScale smoke OK" : "WebTerminalScale smoke FAILED");
                 return ok ? 0 : 1;
             }
@@ -243,7 +274,40 @@ static class Bench
         }
     }
 
-    private static async Task OpenUntilAsync(Uri baseUri, List<Client> clients, int target)
+    /// <summary>
+    /// Each of these would otherwise get a shell: no token, a wrong token, and the right token from another site's page.
+    /// </summary>
+    private static async Task<bool> RefusesUnauthorizedAsync(Uri baseUri, string token)
+    {
+        var endpoint = Client.Endpoint(baseUri, "shell");
+        return await IsRefusedAsync(endpoint, [LocalAccess.Protocol], origin: null)
+            && await IsRefusedAsync(endpoint, LocalAccess.Protocols(LocalAccess.CreateToken()), origin: null)
+            && await IsRefusedAsync(endpoint, LocalAccess.Protocols(token), origin: "https://attacker.example");
+    }
+
+    private static async Task<bool> IsRefusedAsync(Uri endpoint, string[] protocols, string? origin)
+    {
+        using var socket = new ClientWebSocket();
+        foreach (var protocol in protocols)
+            socket.Options.AddSubProtocol(protocol);
+        if (origin is not null)
+            socket.Options.SetRequestHeader("Origin", origin);
+
+        try
+        {
+            await socket.ConnectAsync(endpoint, CancellationToken.None);
+        }
+        catch (WebSocketException)
+        {
+            return true;
+        }
+
+        // Accepted: aborting the socket ends the bridge, and with it the shell it started.
+        socket.Abort();
+        return false;
+    }
+
+    private static async Task OpenUntilAsync(Uri baseUri, string token, List<Client> clients, int target)
     {
         // Connect in small batches: a burst of spawns on a small machine otherwise times out the slowest.
         while (clients.Count < target)
@@ -251,7 +315,7 @@ static class Bench
             var batch = Math.Min(16, target - clients.Count);
             var connects = new Task<Client>[batch];
             for (var i = 0; i < batch; i++)
-                connects[i] = Client.ConnectAsync(baseUri, "shell");
+                connects[i] = Client.ConnectAsync(baseUri, "shell", token);
 
             foreach (var connect in connects)
                 clients.Add(await connect);
@@ -279,11 +343,11 @@ static class Bench
         return [.. latencies];
     }
 
-    private static async Task<FloodResult> MeasureFloodAsync(HttpClient http, Uri baseUri, int bytes)
+    private static async Task<FloodResult> MeasureFloodAsync(HttpClient http, Uri baseUri, string token, int bytes)
     {
         // The host's CPU over the flood: its bridge, its output loop, and its thread-pool workers, not the client's.
         var before = await GetStatsAsync(http);
-        await using var client = await Client.ConnectAsync(baseUri, $"flood&bytes={bytes}");
+        await using var client = await Client.ConnectAsync(baseUri, $"flood&bytes={bytes}", token);
         await client.Closed.WaitAsync(TimeSpan.FromMinutes(5));
         var after = await GetStatsAsync(http);
         // Only the bridge's exit message means the child finished; a connection that just closed may have lost output.
@@ -445,11 +509,15 @@ sealed class Client : IAsyncDisposable
     public int Frames { get; private set; }
     public double OutputSeconds => _firstOutput == 0 ? 0 : (_lastOutput - _firstOutput) / (double)Stopwatch.Frequency;
 
-    public static async Task<Client> ConnectAsync(Uri baseUri, string mode)
+    public static Uri Endpoint(Uri baseUri, string mode) =>
+        new(new Uri(baseUri, $"ws?mode={mode}").ToString().Replace("http://", "ws://", StringComparison.Ordinal));
+
+    public static async Task<Client> ConnectAsync(Uri baseUri, string mode, string token)
     {
         var client = new Client();
-        var uri = new Uri(baseUri, $"ws?mode={mode}");
-        await client._socket.ConnectAsync(new Uri(uri.ToString().Replace("http://", "ws://", StringComparison.Ordinal)), CancellationToken.None);
+        foreach (var protocol in LocalAccess.Protocols(token))
+            client._socket.Options.AddSubProtocol(protocol);
+        await client._socket.ConnectAsync(Endpoint(baseUri, mode), CancellationToken.None);
         client._receive = client.ReceiveLoopAsync();
         return client;
     }
@@ -645,16 +713,20 @@ static class Self
         return new PtyStartInfo { FileName = fileName, Arguments = [.. prefix, "flood", bytes.ToString()], Size = new PtySize(80, 24) };
     }
 
-    public static Process Start(string[] arguments)
+    /// <summary>Starts this program with <paramref name="arguments"/> and writes <paramref name="standardInput"/> as its one line of input.</summary>
+    public static Process Start(string[] arguments, string standardInput)
     {
         var (fileName, prefix) = Command();
-        var startInfo = new ProcessStartInfo(fileName) { UseShellExecute = false };
+        var startInfo = new ProcessStartInfo(fileName) { UseShellExecute = false, RedirectStandardInput = true };
         foreach (var argument in prefix)
             startInfo.ArgumentList.Add(argument);
         foreach (var argument in arguments)
             startInfo.ArgumentList.Add(argument);
 
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the server process.");
+        var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the server process.");
+        process.StandardInput.WriteLine(standardInput);
+        process.StandardInput.Close();
+        return process;
     }
 
     /// <summary>
@@ -701,9 +773,94 @@ static class Args
 }
 
 /// <summary>
+/// Decides whether a WebSocket request may open a shell; the same rules as WebTerminal.cs. <see cref="PtyWebSocketBridge"/>
+/// authenticates nothing, so the host must. Listening on localhost is not enough: browsers let any page open a WebSocket
+/// to any host, loopback included, and leave the Origin check to the server, so without these checks every site the
+/// user visits while the server runs could type into a shell.
+/// </summary>
+/// <remarks>
+/// A request must pass all three checks:
+/// <list type="bullet">
+/// <item><description>
+/// <c>Host</c> is this server's loopback name and port. A page that points its own domain at 127.0.0.1 (DNS
+/// rebinding) is same-origin with itself and sends that domain as Host, so it is refused here.
+/// </description></item>
+/// <item><description>
+/// <c>Origin</c>, when present, is this server's own origin. Browsers always send it on a WebSocket request, so a page
+/// from another site is refused. A client that is not a browser, such as the bench, sends none and is judged by the
+/// token alone.
+/// </description></item>
+/// <item><description>
+/// The request offers this run's token as the subprotocol <c>minipty-token.&lt;hex&gt;</c>. Other local users can
+/// reach a loopback port and forge any header, but not the token. The browser gets it from the URL fragment the
+/// server prints, which browsers never send to a server, and sends it in a header rather than the URL, so request logs
+/// do not record it.
+/// </description></item>
+/// </list>
+/// </remarks>
+static class LocalAccess
+{
+    /// <summary>The subprotocol the server answers with; a browser fails a handshake that answers none it offered.</summary>
+    public const string Protocol = "minipty";
+
+    private const string TokenPrefix = "minipty-token.";
+
+    /// <summary>A random 256-bit token as 64 lowercase hex characters, created once per run.</summary>
+    public static string CreateToken() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+
+    /// <summary>The subprotocols a client offers to present <paramref name="token"/>.</summary>
+    public static string[] Protocols(string token) => [Protocol, TokenPrefix + token];
+
+    /// <summary>Returns why the request is refused, or null when it may open a shell. The reason never holds the token.</summary>
+    public static string? Check(string? host, string? origin, string? protocols, int port, string token)
+    {
+        if (!IsLoopbackHost(host, port))
+            return "Host is not this server";
+
+        if (!string.IsNullOrEmpty(origin) && !string.Equals(origin, "http://" + host, StringComparison.OrdinalIgnoreCase))
+            return "Origin is another site";
+
+        return OffersToken(protocols, token) ? null : "missing or wrong access token";
+    }
+
+    private static bool IsLoopbackHost(string? host, int port)
+    {
+        if (host is null)
+            return false;
+
+        var suffix = ":" + port;
+        if (!host.EndsWith(suffix, StringComparison.Ordinal))
+            return false;
+
+        var name = host[..^suffix.Length];
+        return name.Equals("localhost", StringComparison.OrdinalIgnoreCase) || name == "127.0.0.1" || name == "[::1]";
+    }
+
+    private static bool OffersToken(string? protocols, string token)
+    {
+        if (protocols is null)
+            return false;
+
+        foreach (var protocol in protocols.Split(',', StringSplitOptions.TrimEntries))
+        {
+            if (protocol.StartsWith(TokenPrefix, StringComparison.Ordinal))
+            {
+                // Compared in fixed time so the response time does not reveal how much of a guess matched.
+                return CryptographicOperations.FixedTimeEquals(
+                    Encoding.ASCII.GetBytes(protocol[TokenPrefix.Length..]),
+                    Encoding.ASCII.GetBytes(token));
+            }
+        }
+
+        return false;
+    }
+}
+
+/// <summary>
 /// The dashboard. Embedded so the NativeAOT publish stays a single asset-free executable. Its terminal speaks the
 /// <c>PtyWebSocketBridge</c> protocol (binary frames for data, JSON text frames for resize, ack, and exit), and its
-/// idle sessions acknowledge output the same way, so they never stall on flow control.
+/// idle sessions acknowledge output the same way, so they never stall on flow control. The page itself holds no secret:
+/// it reads the access token from its own URL fragment (see <see cref="LocalAccess"/>).
 /// </summary>
 static class Page
 {
@@ -751,6 +908,9 @@ static class Page
 const ACK_CHUNK = 131072;
 const wsUrl = `ws://${location.host}/ws`;
 const encoder = new TextEncoder();
+// The access token comes from this page's URL fragment, which the browser never sends to a server.
+const token = new URLSearchParams(location.hash.slice(1)).get('token');
+const openSocket = () => new WebSocket(wsUrl, ['minipty', `minipty-token.${token}`]);
 
 function ack(ws, state, length) {
   state.unacked += length;
@@ -767,35 +927,41 @@ term.loadAddon(fit);
 term.open(document.getElementById('terminal'));
 fit.fit();
 term.focus();
-const ws = new WebSocket(wsUrl);
-ws.binaryType = 'arraybuffer';
-const termState = { unacked: 0 };
-ws.onopen = () => {
-  sendResize();
-  term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(data)); });
-  term.onResize(() => sendResize());
-};
-ws.onmessage = e => {
-  if (typeof e.data === 'string') {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'exit') term.write(`\r\n\x1b[33m[process exited with code ${msg.exitCode}]\x1b[0m\r\n`);
-    return;
-  }
-  const bytes = new Uint8Array(e.data);
-  term.write(bytes, () => ack(ws, termState, bytes.length));
-};
-ws.onclose = () => term.write('\r\n\x1b[31m[connection closed]\x1b[0m\r\n');
 window.addEventListener('resize', () => fit.fit());
-function sendResize() {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+if (token) connectTerminal();
+else term.write('\x1b[31m[no access token: open the address the server printed, including its #token=...]\x1b[0m\r\n');
+
+function connectTerminal() {
+  const ws = openSocket();
+  ws.binaryType = 'arraybuffer';
+  const termState = { unacked: 0 };
+  const sendResize = () => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  };
+  ws.onopen = () => {
+    sendResize();
+    term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(data)); });
+    term.onResize(() => sendResize());
+  };
+  ws.onmessage = e => {
+    if (typeof e.data === 'string') {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'exit') term.write(`\r\n\x1b[33m[process exited with code ${msg.exitCode}]\x1b[0m\r\n`);
+      return;
+    }
+    const bytes = new Uint8Array(e.data);
+    term.write(bytes, () => ack(ws, termState, bytes.length));
+  };
+  ws.onclose = () => term.write('\r\n\x1b[31m[connection closed]\x1b[0m\r\n');
 }
 
 // Idle sessions: a shell each, output acknowledged and discarded.
 const idle = [];
 function updateIdle() { document.getElementById('idle').textContent = `${idle.length} idle sessions open`; }
 document.querySelectorAll('[data-open]').forEach(button => button.onclick = () => {
+  if (!token) return;
   for (let i = 0; i < Number(button.dataset.open); i++) {
-    const s = new WebSocket(wsUrl);
+    const s = openSocket();
     s.binaryType = 'arraybuffer';
     const state = { unacked: 0 };
     s.onmessage = e => { if (typeof e.data !== 'string') ack(s, state, e.data.byteLength); };

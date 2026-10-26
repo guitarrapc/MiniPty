@@ -391,8 +391,8 @@ dotnet samples/SingleFiles/Interactive.cs
 dotnet samples/SingleFiles/ConsoleAttach.cs
 dotnet samples/SingleFiles/Observe.cs
 dotnet samples/SingleFiles/Capture.cs
-dotnet samples/SingleFiles/WebTerminal.cs   # then open http://localhost:5170/
-dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs   # then open http://localhost:5171/
+dotnet samples/SingleFiles/WebTerminal.cs   # then open the http://localhost:5170/#token=... address it prints
+dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs   # then open the http://localhost:5171/#token=... address it prints
 dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench --sessions 16,64,256
 dotnet run --project samples/WinUiTerminal   # Windows only
 dotnet run --project samples/AvaloniaTerminal   # Windows, Linux, macOS
