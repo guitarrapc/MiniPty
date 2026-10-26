@@ -34,6 +34,9 @@ Bridging to a browser needs one more layer. The WebSocket protocol has no backpr
 | N10 | `uid` / `gid` on spawn. Switching identity is security-sensitive and outside a minimal PTY library. |
 | N11 | An `encoding` spawn option that decodes output to strings. The library is bytes-first; frontends decode at their boundary with an incremental decoder. |
 | N12 | node-pty `handleFlowControl` (XON/XOFF interception). VS Code throttles with pause/resume plus ACK credit, which `PtyTerminal` and both bridges provide. |
+| N13 | Reading or setting the termios (`portable-pty` reads it). The child changes its own line discipline (`stty`, raw mode), and MiniPty's defaults, such as `IUTF8`, are chosen for correctness ([pty_crossplatform.md](../references/pty_crossplatform.md)). A setter would let a host undo them under a running child. Reading it needs the tty path, which is deferred until an embedder needs it ([next_todo.md](../next_todo.md#a-sessions-tty-path)). |
+| N14 | Delivering a signal on Windows. Windows has no POSIX signals, so `Kill(PtySignal)` terminates the child whatever the signal (`Kill`). A host that wants an interrupt writes Ctrl+C (`0x03`) as input, which ConPTY turns into `CTRL_C_EVENT` for the processes in its console, as a keystroke does. |
+| N15 | `ActiveProcessName` on Windows. A console has no foreground process group to read, and VS Code titles its tabs from its own process-tree lookup, not from node-pty. It stays null there. |
 
 ## `PtyTerminal` — push facade
 

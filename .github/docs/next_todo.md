@@ -4,11 +4,24 @@ GUI host readiness is implemented, and its plan is retired: caller-context safet
 
 Thread-free I/O for web hosts that keep many sessions open is implemented, and its plan is retired: Windows reads every session through I/O completions and Unix on one loop, the exit watcher's thread (epoll on Linux, kqueue on macOS and FreeBSD), so an idle session holds no thread and no output buffer ([Output pump](references/pty_crossplatform.md#output-pump), [Why this engine](references/pty_crossplatform.md#why-this-engine)); the output buffer is a 16 KiB byte ring, and a chunk is all contiguous unread output ([Backpressure](specs/core_session.md#backpressure)); one-shot sinks cost the same on any delivering thread ([capture.md](specs/capture.md)); and the built-in bridges join bursts and streams of short lines into larger messages ([Output frames](specs/terminal.md#output-frames)). The reader threads, and the `MiniPty.UseOutputReaderThreads` switch that could bring them back, are removed. Along the way it fixed a pre-existing race in the output pump that could end a session and lose its remaining output under a flood, a macOS loss of a child's last output at its exit when the consumer had stopped reading, and a regression in which `CompleteAsync` and Capture with `DecodeOutput` threw for a backlog of several reads. Its lessons live in those documents and in [lifecycle.md](specs/lifecycle.md) and [platform_support.md](specs/platform_support.md), and the choice of kqueue in the readiness probe's results ([Readiness on a pty master](references/pty_crossplatform.md#readiness-on-a-pty-master)). What else is left is listed below. Remaining deferred and won't-do node-pty parity items are recorded as non-goals in [specs/terminal.md](specs/terminal.md).
 
+A pre-release review against node-pty, Porta.Pty, WezTerm's `portable-pty`, and creack/pty is done, and its gate plan is retired. It found and fixed four things:
+
+- **The Unix `sh` fallback** now runs only for `ENOEXEC`, as `execvp` does ([Plain scripts and shell fallback](references/pty_crossplatform.md#plain-scripts-and-shell-fallback)).
+- **Unix start failures** now fail `Pty.Start` with `Win32Exception` and the `errno` ([Start failure report](references/pty_crossplatform.md#start-failure-report)).
+- **The README** now states which native files ship, and calls FreeBSD experimental ([platform_support.md](specs/platform_support.md)).
+- **The Unix exec payload** is freed when the spawn returns. The reason documented for holding it was wrong ([lifecycle.md](specs/lifecycle.md)).
+
+Features other libraries offer were decided as non-goals in [terminal.md](specs/terminal.md#non-goals), except a session's tty path, deferred below. Everything was verified on Linux and macOS.
+
 ## Release
 
 - None of the GUI host work is released. `v1.3.0` (2026-07-15) predates it, and `Directory.Build.props` still says `1.3.0`.
 - The release breaks the API: `WaitForExitAsync` returns `Task<PtyExitStatus>`, and `WaitForExitStatusAsync` is removed. Behavior a release note should name: `Dispose` no longer blocks, and chunk memory is invalid after it; output is read from spawn into a bounded 16 KiB buffer, and a `ReadOutputAsync` chunk is all the contiguous output buffered when it is taken (up to 16 KiB), not one read; exit waits no longer close the transport, so on the in-box ConPTY before Windows 11 24H2 output ends about 100 ms after the last output rather than at exit (from 24H2 it ends at exit, as on the out-of-band ConPTY); `Resize` after exit no longer throws, and sizes clamp to the platform limit instead of 512; Unix `Dispose` hangs the child up and kills it one second later instead of killing at once; `SendEof` with no input sends Ctrl+Z + CR instead of closing the pipe; on Windows a `.bat` or `.cmd` runs through `cmd.exe` with its arguments escaped, and a bare `FileName` is looked up on the child's `PATH` when `Environment` sets or removes it; `Pty.Start` throws `ArgumentException` for a NUL in `FileName`, an argument, `WorkingDirectory`, or `CommandLine` on every platform, where it used to start whatever the string named before the NUL; on Windows a program under a path of 260 characters or more starts when the host opted into long paths, where it used to fail with `ERROR_FILENAME_EXCED_RANGE`; on macOS a child that exits while its last output is still in the terminal, because the output buffer is full, finishes exiting once a consumer reads, where macOS used to discard up to 1 KiB of that output 0.6 s after the exit; output is read through I/O completions on the runtime's thread pool on Windows, and by one loop, the exit watcher's thread, on Unix, instead of a reader thread per session, so an idle session holds no thread and no output buffer, chunks are no longer held for a coalescing window (500 µs on Windows, 1 ms on Unix), and a Unix session whose master that loop cannot register fails `Pty.Start` with `IOException`; the built-in bridges join output that arrives in a burst, and streams of short lines read one by one, into larger messages, so such output waits up to about 2 ms, and while a bridge waits a deadline tick runs about every millisecond (on Windows on a thread of its own, which stays 30 s after the last burst).
-- `MiniPty.Terminal` now uses MiniPty's internals (the bridges' coalescing), as `MiniPty.Capture` already does, while each package declares MiniPty with a lower bound only, through its project reference. A newer MiniPty with changed internals would break an older `MiniPty.Terminal` at run time. Whether to pin the exact version is a release decision.
+- More behavior a release note should name, from the pre-release review:
+  - On Unix, `Pty.Start` throws `Win32Exception` with the `errno` (`ENOENT`, `EACCES`, …) for a program that cannot be executed or a `WorkingDirectory` that cannot be entered. It used to return a session whose child exited 127 or 126.
+  - On Unix, only a file without a shebang (`ENOEXEC`) runs through `sh`. A script on a `noexec` mount started directly, and a script whose interpreter is missing, now fail instead of running under `sh`. A non-executable file earlier on `PATH` is now skipped for the executable in a later entry, where it used to run through `sh`.
+  - FreeBSD is documented as experimental.
+- `MiniPty.Terminal` and `MiniPty.Capture` use MiniPty's internals while each declares MiniPty with a lower bound only. That is settled: the packages are released and updated together, so no version pin is needed.
 - The README samples under `samples/SingleFiles` (`README_MiniPty.cs`, `README_MiniPty.Console.cs`, `README_MiniPty.Capture.cs`) pin `MiniPty@1.2.0`, but the first two already use the new exit API (`(await session.WaitForExitAsync()).ExitCode`), so they do not build until the pins move to the release. CI does not build them.
 
 ## Deferred Until an Embedder Needs It
@@ -32,6 +45,17 @@ Windows output completions need a thread-pool worker, as Kestrel's sockets do, s
 ### Out-of-process PTY host guidance
 
 A web host that serves untrusted users would run MiniPty in a separate, less privileged process or container and talk to it over `PtyStdioBridge`, as VS Code runs node-pty in its pty host. That gives crash and privilege isolation and lets the web tier restart without ending shells. It is documentation and a sample, not a library change.
+
+### A session's tty path
+
+node-pty (`ptsName`), `portable-pty` (`tty_name`), and creack/pty (`Name`) expose the path of the terminal's slave device, such as `/dev/pts/3`. No known embedder needs it. Adding a read-only property later breaks nothing, while removing one would.
+
+If an embedder asks:
+
+- **Getting the path:** it is cheap to read once at spawn. macOS already reads it with `TIOCPTYGNAME`, and Linux and FreeBSD can use `ptsname_r` on the master.
+- **Windows:** ConPTY has no device, so the property is null there, as `ActiveProcessName` is.
+- **Naming:** name it for a path (`TtyPath`). `PtyStartInfo.TerminalName` already means the `TERM` value.
+- **Reading termios:** a caller that wants to read the termios can open this path with `O_NOCTTY` and call `tcgetattr`, so no termios API is needed for that.
 
 ### Metrics
 
