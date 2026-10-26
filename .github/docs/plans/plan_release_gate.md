@@ -2,7 +2,7 @@
 
 Goal: resolve the items below before the next release, the first since `v1.3.0` (see [next_todo.md](../next_todo.md#release)). They came from reviewing MiniPty as a general-purpose PTY library against the reference libraries under `.references/`: node-pty 1.1.0, Porta.Pty 2.2.3, WezTerm's `portable-pty` 0.9.0, and creack/pty. Each gate is closed by a fix, or by a decision recorded in the specifications, as its own section says.
 
-**Status:** open (2026-10-27). R1 and R2 are implemented (2026-10-27); R3–R5 are open. R2's macOS path is verified only by CI.
+**Status:** open (2026-10-27). R1 and R2 are implemented and verified locally on Linux and macOS (arm64) (2026-10-27); R3–R5 are open.
 
 ## Gate Inventory
 
@@ -138,6 +138,28 @@ The first group writes the child's `errno` to a close-on-exec pipe. A successful
 - The R1 tests now expect the start to fail:
   - a missing interpreter fails with `ENOENT`;
   - a non-executable file fails with `EACCES`.
+
+### macOS verification (2026-10-27)
+
+Run locally on macOS (arm64, Apple clang 21, .NET 10.0.402):
+
+- **Build:** the shim and the helper compile without warnings, also with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion`.
+- **Tests:** the full suite passes (676 tests).
+  - No start-failure test comes near the 10 s bound. The R1 tests take about 30 ms each, and `StartFailureIsReported` takes 0.44 s, most of it the two children that exit 127 and 126 by themselves.
+  - Descriptor counts do not change.
+  - The zombie check runs only on Linux. A driver that called `minipty_fork_pty_exec` directly found no unreaped child instead.
+- **Cost:** a start now returns only after the helper has execed the target, where it used to return once the helper was spawned. The start cannot succeed before the exec does, so this is the price of the report.
+  - Measured through `minipty_fork_pty_exec`: about 2.8 ms per start against 0.65 ms before, about 2 ms more. The same holds for starts that succeed and starts that fail.
+  - 8 threads starting at once took about the same total time as before (412 ms against 449 ms).
+  - The full suite took about 32 s, against 29–30 s before.
+  - The cost on Linux was not measured.
+- **The bounded wait:**
+  - 7,200 concurrent starts never waited over 1 s, with about 3,500 plain `fork` + `exec` calls on other threads, the calls `Process.Start` makes on macOS.
+  - A test build then slept 20 ms between `pipe()` and `FD_CLOEXEC`, so that the forked processes kept the write end.
+  - A start that succeeds then waited until that process exited (2 s), or for the 10 s bound, and still succeeded.
+  - A start that fails was still reported at once, because the report arrives before end of file.
+
+**Lesson:** a leaked write end delays only starts that succeed. A start failure that takes about 10 s means the helper did not write its report, not that another process holds the pipe.
 
 ### Behavior change for the release note
 
