@@ -12,22 +12,6 @@ NativeAOT-friendly minimal cross-platform pseudo-terminal library for .NET.
 
 I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries don't reliably work with NativeAOT. MiniPty is a minimal PTY library with a simple API, no third-party dependencies, and in-process backends built for AOT publish.
 
-**Benchmarks**
-
-You can check various benchmark patterns at [GitHub Actions/Benchmark](https://github.com/guitarrapc/MiniPty/actions/runs/29358193020).
-
-Ubuntu
-
-<img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-ubuntu.png" alt="Benchmark Ubuntu" width="600" />
-
-Windows
-
-<img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-windows.png" alt="Benchmark Windows" width="600" />
-
-macOS
-
-<img src="https://raw.githubusercontent.com/guitarrapc/MiniPty/refs/heads/main/assets/benchmark-macos.png" alt="Benchmark macOS" width="600" />
-
 ## Features
 
 - NativeAOT ready: no winpty, and no helper process running beside a session ([what ships per platform](#native-files))
