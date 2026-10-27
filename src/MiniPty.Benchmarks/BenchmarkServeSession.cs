@@ -1,21 +1,38 @@
 ﻿using System.Globalization;
-using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace MiniPty.Benchmarks;
+
+/// <summary>A PTY library that the steady-state benchmarks run the serve child on.</summary>
+internal enum ServeLibrary
+{
+    /// <summary>MiniPty, reading through one long-lived <see cref="PtySession.ReadOutputAsync"/> enumeration.</summary>
+    MiniPty,
+
+    /// <summary>Porta.Pty as it starts by default: blocking pipes, so each <c>ReadAsync</c> holds a thread-pool thread.</summary>
+    PortaPty,
+
+    /// <summary>Porta.Pty with <c>UseAsyncIo</c>: overlapped pipes on Windows, one shared poll loop on Unix.</summary>
+    PortaPtyAsyncIo,
+}
 
 /// <summary>
 /// One long-lived session on <c>MiniPty.Benchmarks.Child --serve</c> for the steady-state benchmarks: the child is
 /// spawned and ready before the first operation, so an operation measures only input, output, and the terminal.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The protocol (ready marker, flood triggers, alternating end markers, echo into column 0) is described in the
-/// child's <c>Serve.cs</c>; the constants here must match it. Output is read through one
-/// <see cref="PtySession.ReadOutputAsync"/> enumeration that lives as long as the session, as a terminal frontend
-/// reads it. Bytes after a marker in the same chunk are dropped; the protocol sends nothing after a marker that an
-/// operation needs.
+/// child's <c>Serve.cs</c>; the constants here must match it. Bytes after a marker in the same chunk are dropped; the
+/// protocol sends nothing after a marker that an operation needs.
+/// </para>
+/// <para>
+/// Each library has its own subclass whose <see cref="RoundTripAsync"/> writes and reads the way that library's
+/// documentation shows, while the marker scan, the stall watchdog, and the output tail are shared here, so the
+/// libraries differ only in their own write and read calls.
+/// </para>
 /// </remarks>
-internal sealed class BenchmarkServeSession : IDisposable
+internal abstract class BenchmarkServeSession : IDisposable
 {
     internal static readonly byte[] FloodA = [(byte)'g'];
     internal static readonly byte[] FloodB = [(byte)'h'];
@@ -37,11 +54,9 @@ internal sealed class BenchmarkServeSession : IDisposable
     // so the run fails instead of hanging until the CI job's timeout.
     private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(60);
 
-    // What a nudge writes: a byte the child echoes into column 0 of the empty line below the end marker.
-    private static readonly byte[] Nudge = [(byte)'%'];
+    /// <summary>What a nudge writes: a byte the child echoes into column 0 of the empty line below the end marker.</summary>
+    protected static readonly byte[] Nudge = [(byte)'%'];
 
-    private readonly PtySession session;
-    private readonly IAsyncEnumerator<PtyOutputChunk> output;
     private readonly Timer watchdog;
     private volatile bool stalled;
     private volatile bool nudgeArmed;
@@ -50,49 +65,37 @@ internal sealed class BenchmarkServeSession : IDisposable
     private readonly byte[] tail = new byte[512];
     private int tailLength;
 
-    private BenchmarkServeSession(PtySession session)
+    protected BenchmarkServeSession()
     {
-        this.session = session;
-        output = session.ReadOutputAsync().GetAsyncEnumerator();
         watchdog = new Timer(static state => ((BenchmarkServeSession)state!).OnWatchdog(), this, Timeout.Infinite, Timeout.Infinite);
     }
 
+    /// <summary>Whether the watchdog gave up and ended the session, which makes the pending read fail.</summary>
+    protected bool Stalled => stalled;
+
     /// <summary>
-    /// Nudges a flood whose marker is overdue once, and fails the operation if the marker still does not arrive.
+    /// Starts the serve child on <paramref name="library"/> and waits until it has finished its setup and switched its
+    /// input to raw.
     /// </summary>
-    /// <remarks>
-    /// The in-box ConPTY occasionally sends nothing of a flood the child has finished writing until the screen changes
-    /// again: with the child's own log showing the flood written, MiniPty had a zero-byte read posted, nothing unread,
-    /// and nothing in the output pipe, and another input made the whole flood arrive at once. That happened about once
-    /// in 5 to 10 runs of this class, and never on the out-of-band ConPTY in 15 runs. A nudge changes the screen, so
-    /// the operation completes; it is reported on the console, and its time is an outlier that the summary drops.
-    /// </remarks>
-    private void OnWatchdog()
+    /// <param name="library">The PTY library to run the child on.</param>
+    /// <param name="floodBytes">Bytes the child writes per flood.</param>
+    /// <param name="conPty">The ConPTY implementation on Windows (a <c>BenchmarkPtyCommands.ConPty*</c> value).</param>
+    internal static BenchmarkServeSession Start(ServeLibrary library, int floodBytes, string conPty)
     {
-        if (nudgeArmed)
-        {
-            nudgeArmed = false;
-            System.Console.WriteLine(
-                $"// No end marker within {NudgeAfter.TotalSeconds} s of the trigger; nudging the terminal with a keystroke " +
-                "(the in-box ConPTY at times withholds a finished flood until its screen changes). " +
-                $"Last output: {DescribeTail()}");
-            _ = session.WriteInputAsync(Nudge).AsTask();
-            watchdog.Change(StallTimeout, Timeout.InfiniteTimeSpan);
-            return;
-        }
-
-        stalled = true;
-        session.Dispose();
-    }
-
-    /// <summary>Starts the child and waits until it has finished its setup and switched its input to raw.</summary>
-    internal static BenchmarkServeSession Start(PtyStartInfo startInfo)
-    {
-        var serve = new BenchmarkServeSession(Pty.Start(startInfo));
+        BenchmarkServeSession serve = library == ServeLibrary.MiniPty
+            ? new MiniPtyServeSession(Pty.Start(BenchmarkPtyCommands.Serve(floodBytes, conPty)))
+            : PortaPtyServeSession.Start(floodBytes, conPty, asyncIo: library == ServeLibrary.PortaPtyAsyncIo);
         try
         {
             if (!serve.RoundTripAsync(ReadOnlyMemory<byte>.Empty, Ready).AsTask().Wait(TimeSpan.FromSeconds(30)))
                 throw new TimeoutException("The serve child did not report ready within 30 seconds.");
+
+            if (conPty == BenchmarkPtyCommands.ConPtyOutOfBand && !OutOfBandHostRuns())
+            {
+                throw new InvalidOperationException(
+                    $"{library} reported the out-of-band ConPTY, but no OpenConsole.exe from the benchmark output runs; " +
+                    "the session is on the in-box console host.");
+            }
         }
         catch
         {
@@ -104,55 +107,110 @@ internal sealed class BenchmarkServeSession : IDisposable
     }
 
     /// <summary>
+    /// Whether an <c>OpenConsole.exe</c> from this benchmark's output directory is running, which proves an
+    /// out-of-band session runs on that host: a <c>conpty.dll</c> that cannot find its host falls back to the in-box
+    /// conhost without an error, and both libraries would then measure the in-box ConPTY under the out-of-band label.
+    /// </summary>
+    private static bool OutOfBandHostRuns()
+    {
+        foreach (var process in System.Diagnostics.Process.GetProcessesByName("OpenConsole"))
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.MainModule?.FileName.StartsWith(AppContext.BaseDirectory, StringComparison.OrdinalIgnoreCase) == true)
+                        return true;
+                }
+                catch (System.ComponentModel.Win32Exception)
+                {
+                    // Another user's or an elevated process; not ours.
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Writes <paramref name="input"/>, then reads output until <paramref name="marker"/> has arrived; returns the
     /// bytes read, marker included.
     /// </summary>
     /// <remarks>
-    /// The write and the read are one async method, which a benchmark returns as its own result, so a whole operation
-    /// rents one pooled state-machine box on the thread that starts it. BenchmarkDotNet waits for an operation on that
-    /// same thread, so the box goes back to that thread's cache and the next operation reuses it. An async read nested
-    /// in an async operation completed on a thread-pool thread instead, which kept its box: on Linux every operation
-    /// then allocated a new one (144 B per keystroke) that looked like MiniPty's cost.
+    /// An implementation is one pooled async method that a benchmark returns as its own result, and that calls
+    /// <see cref="Arm"/> first and <see cref="Accept"/> on every chunk. See <see cref="MiniPtyServeSession"/> for why
+    /// it must be a single method.
     /// </remarks>
     /// <exception cref="EndOfStreamException">Output ended before the marker.</exception>
     /// <exception cref="TimeoutException">The marker did not arrive within <see cref="StallTimeout"/>.</exception>
-    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
-    internal async ValueTask<long> RoundTripAsync(ReadOnlyMemory<byte> input, byte[] marker)
-    {
-        long total = 0;
-        var matched = 0;
+    internal abstract ValueTask<long> RoundTripAsync(ReadOnlyMemory<byte> input, byte[] marker);
 
+    /// <summary>Writes <see cref="Nudge"/> without waiting for it; called from the watchdog's timer thread.</summary>
+    protected abstract void WriteNudge();
+
+    /// <summary>Ends the child and the library's session from the watchdog, which makes a pending read complete or fail.</summary>
+    protected abstract void Abort();
+
+    /// <summary>Releases the library's session and its reader once no operation is running.</summary>
+    protected abstract void DisposeSession();
+
+    /// <summary>Starts the watchdog for one operation that waits for <paramref name="marker"/>.</summary>
+    protected void Arm(byte[] marker)
+    {
         // Only a flood is nudged: its end marker sits above the line a nudge's echo lands on. A nudge during a keystroke
         // would overwrite the very echo the operation waits for.
         var flood = ReferenceEquals(marker, EndA) || ReferenceEquals(marker, EndB);
         nudgeArmed = flood;
         watchdog.Change(flood ? NudgeAfter : StallTimeout, Timeout.InfiniteTimeSpan);
-        try
-        {
-            if (!input.IsEmpty)
-                await session.WriteInputAsync(input).ConfigureAwait(false);
+    }
 
-            while (await output.MoveNextAsync().ConfigureAwait(false))
-            {
-                var data = output.Current.Data;
-                total += data.Length;
-                KeepTail(data.Span);
-                if (Scan(data.Span, marker, ref matched))
-                {
-                    watchdog.Change(Timeout.Infinite, Timeout.Infinite);
-                    nudgeArmed = false;
-                    return total;
-                }
-            }
-        }
-        catch (ObjectDisposedException) when (stalled)
+    /// <summary>
+    /// Takes one chunk of output: keeps its tail and advances the marker match; true once the marker is complete, which
+    /// also stops the watchdog.
+    /// </summary>
+    protected bool Accept(ReadOnlySpan<byte> data, byte[] marker, ref int matched)
+    {
+        KeepTail(data);
+        if (!Scan(data, marker, ref matched))
+            return false;
+
+        watchdog.Change(Timeout.Infinite, Timeout.Infinite);
+        nudgeArmed = false;
+        return true;
+    }
+
+    /// <summary>The error for an operation that the watchdog ended.</summary>
+    protected TimeoutException StallException(byte[] marker, long total) =>
+        new($"The serve child's output did not reach the marker \"{Encoding.ASCII.GetString(marker)}\" within " +
+            $"{StallTimeout.TotalSeconds} seconds; {total} bytes arrived in this operation, ending with: {DescribeTail()}");
+
+    /// <summary>
+    /// Nudges a flood whose marker is overdue once, and fails the operation if the marker still does not arrive.
+    /// </summary>
+    /// <remarks>
+    /// The in-box ConPTY occasionally sends nothing of a flood the child has finished writing until the screen changes
+    /// again: with the child's own log showing the flood written, MiniPty had a zero-byte read posted, nothing unread,
+    /// and nothing in the output pipe, and another input made the whole flood arrive at once. That happened about once
+    /// in 5 to 10 runs of the throughput benchmarks, and never on the out-of-band ConPTY in 15 runs. A nudge changes
+    /// the screen, so the operation completes; it is reported on the console, and its time is an outlier that the
+    /// summary drops.
+    /// </remarks>
+    private void OnWatchdog()
+    {
+        if (nudgeArmed)
         {
-            throw new TimeoutException(
-                $"The serve child's output did not reach the marker \"{Encoding.ASCII.GetString(marker)}\" within " +
-                $"{StallTimeout.TotalSeconds} seconds; {total} bytes arrived in this operation, ending with: {DescribeTail()}");
+            nudgeArmed = false;
+            System.Console.WriteLine(
+                $"// No end marker within {NudgeAfter.TotalSeconds} s of the trigger; nudging the terminal with a keystroke " +
+                "(the in-box ConPTY at times withholds a finished flood until its screen changes). " +
+                $"Last output: {DescribeTail()}");
+            WriteNudge();
+            watchdog.Change(StallTimeout, Timeout.InfiniteTimeSpan);
+            return;
         }
 
-        throw new EndOfStreamException("The serve child's output ended before the expected marker.");
+        stalled = true;
+        Abort();
     }
 
     /// <summary>Keeps the last <c>tail.Length</c> bytes of output; a copy of at most that many bytes per chunk.</summary>
@@ -235,14 +293,6 @@ internal sealed class BenchmarkServeSession : IDisposable
     public void Dispose()
     {
         watchdog.Dispose();
-        session.Dispose();
-        try
-        {
-            output.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
-        }
-        catch (AggregateException)
-        {
-            // The enumeration ends with the disposed session; nothing is left to clean up.
-        }
+        DisposeSession();
     }
 }

@@ -8,14 +8,20 @@ using BenchmarkDotNet.Running;
 namespace MiniPty.Benchmarks;
 
 /// <summary>
-/// Steady-state output throughput: how fast a running child's output reaches the reader through the PTY.
+/// Steady-state output throughput: how fast a running child's output reaches the reader through the PTY, on MiniPty
+/// and on Porta.Pty.
 /// </summary>
 /// <remarks>
 /// <para>
 /// One child (<c>MiniPty.Benchmarks.Child --serve</c>) lives for the whole run, so spawn and exit are outside the
 /// measurement; <see cref="PtyStartupBenchmarks"/> covers those. Each operation writes one trigger byte and reads
-/// <see cref="PayloadBytes"/> of 77-character lines plus an end marker through <see cref="PtySession.ReadOutputAsync"/>.
+/// <see cref="PayloadBytes"/> of 77-character lines plus an end marker through the library's read.
 /// The <c>MiB/s</c> column is <see cref="PayloadBytes"/> divided by the mean, so it includes the trigger's way in.
+/// </para>
+/// <para>
+/// Each method is one library on the same child (<see cref="BenchmarkServeSession"/>): <see cref="MiniPty"/> is the
+/// baseline, <see cref="PortaPty"/> is Porta.Pty as it starts by default, and <see cref="PortaPtyAsyncIo"/> is Porta.Pty
+/// with <c>UseAsyncIo</c>.
 /// </para>
 /// <para>
 /// On Windows the bytes read are not the bytes written: ConPTY renders the child's output and sends its own VT
@@ -25,8 +31,8 @@ namespace MiniPty.Benchmarks;
 /// changes again, which the harness nudges and reports (<see cref="BenchmarkServeSession"/>).
 /// </para>
 /// <para>
-/// The operation is one pooled async round trip (<see cref="BenchmarkServeSession.RoundTripAsync"/>), so the
-/// allocation column shows MiniPty's own cost per flood rather than the harness's async state.
+/// An operation is one pooled async round trip (<see cref="BenchmarkServeSession.RoundTripAsync"/>), so the allocation
+/// column shows each library's own cost per flood rather than the harness's async state.
 /// </para>
 /// </remarks>
 [MemoryDiagnoser]
@@ -47,19 +53,37 @@ public class PtyThroughputBenchmarks
 
     public static IEnumerable<string> ConPtyChoices() => BenchmarkPtyCommands.ConPtyChoices();
 
-    [GlobalSetup]
-    public void Setup()
-    {
-        if (BenchmarkPtyCommands.IsSupported)
-            serve = BenchmarkServeSession.Start(BenchmarkPtyCommands.Serve(PayloadBytes, ConPty));
-    }
+    [GlobalSetup(Target = nameof(MiniPty))]
+    public void SetupMiniPty() => Setup(ServeLibrary.MiniPty);
+
+    [GlobalSetup(Target = nameof(PortaPty))]
+    public void SetupPortaPty() => Setup(ServeLibrary.PortaPty);
+
+    [GlobalSetup(Target = nameof(PortaPtyAsyncIo))]
+    public void SetupPortaPtyAsyncIo() => Setup(ServeLibrary.PortaPtyAsyncIo);
 
     [GlobalCleanup]
     public void Cleanup() => serve?.Dispose();
 
     [BenchmarkCategory("Steady", "Throughput")]
+    [Benchmark(Baseline = true)]
+    public ValueTask<long> MiniPty() => ReadOutput();
+
+    [BenchmarkCategory("Steady", "Throughput")]
     [Benchmark]
-    public ValueTask<long> ReadOutput()
+    public ValueTask<long> PortaPty() => ReadOutput();
+
+    [BenchmarkCategory("Steady", "Throughput")]
+    [Benchmark]
+    public ValueTask<long> PortaPtyAsyncIo() => ReadOutput();
+
+    private void Setup(ServeLibrary library)
+    {
+        if (BenchmarkPtyCommands.IsSupported)
+            serve = BenchmarkServeSession.Start(library, PayloadBytes, ConPty);
+    }
+
+    private ValueTask<long> ReadOutput()
     {
         if (serve is null)
             return new ValueTask<long>(0L);

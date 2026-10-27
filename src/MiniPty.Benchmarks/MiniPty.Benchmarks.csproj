@@ -4,12 +4,16 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- StageConPtyAtRoot places the out-of-band ConPTY for both libraries; Porta.Pty's own staging is not needed. -->
+    <PortaPtyStageConPtyHost>false</PortaPtyStageConPtyHost>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" />
     <!-- The out-of-band ConPTY that PtyConPtyBenchmarks compares with the in-box one (see Directory.Packages.props); Windows only. -->
     <PackageReference Include="Microsoft.Windows.Console.ConPTY" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
+    <!-- The library the steady-state benchmarks compare MiniPty with. Benchmarks only: MiniPty itself takes no dependency. -->
+    <PackageReference Include="Porta.Pty" />
     <ProjectReference Include="..\..\src\MiniPty\MiniPty.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Capture\MiniPty.Capture.csproj" />
     <ProjectReference Include="..\..\src\MiniPty.Console\MiniPty.Console.csproj" />
@@ -37,6 +41,28 @@
     <Copy SourceFiles="@(_ChildOutputFiles)"
           DestinationFolder="$(OutputPath)"
           SkipUnchangedFiles="true" />
+  </Target>
+
+  <!--
+    A portable build keeps the out-of-band ConPTY under runtimes\win-<arch>\native\. MiniPty looks there, but Porta.Pty
+    looks only beside its assembly and otherwise falls back to the in-box ConPTY without saying so. Copying this
+    architecture's conpty.dll and OpenConsole.exe to the output root lets both libraries load the same two files.
+    Porta.Pty also requires the host in an architecture subdirectory (<root>\x64\OpenConsole.exe) before it reports
+    the out-of-band ConPTY as usable, so the host is copied there as well.
+  -->
+  <Target Name="StageConPtyAtRoot" AfterTargets="Build" Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <PropertyGroup>
+      <_ConPtyNativeDir>$(OutputPath)runtimes\$(NETCoreSdkRuntimeIdentifier)\native\</_ConPtyNativeDir>
+      <_ConPtyArchitecture>$(NETCoreSdkRuntimeIdentifier.Substring(4))</_ConPtyArchitecture>
+    </PropertyGroup>
+    <Copy SourceFiles="$(_ConPtyNativeDir)conpty.dll;$(_ConPtyNativeDir)OpenConsole.exe"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_ConPtyNativeDir)conpty.dll')" />
+    <Copy SourceFiles="$(_ConPtyNativeDir)OpenConsole.exe"
+          DestinationFolder="$(OutputPath)$(_ConPtyArchitecture)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_ConPtyNativeDir)OpenConsole.exe')" />
   </Target>
 
 </Project>

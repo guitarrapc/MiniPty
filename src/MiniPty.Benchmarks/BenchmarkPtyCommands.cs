@@ -39,10 +39,22 @@ internal static class BenchmarkPtyCommands
     /// <paramref name="floodBytes"/> (see <see cref="BenchmarkServeSession"/>).
     /// </summary>
     internal static PtyStartInfo Serve(int floodBytes, string conPty) =>
-        Spawn(ResolveBenchmarkChildPath(), ["--serve", floodBytes.ToString(CultureInfo.InvariantCulture)]) with
+        Spawn(ResolveBenchmarkChildPath(), ServeArguments(floodBytes)) with
         {
             ConPty = conPty == ConPtyOutOfBand ? LoadOutOfBandConPty() : null,
         };
+
+    /// <summary>The serve child's path, for libraries other than MiniPty to start it.</summary>
+    internal static string BenchmarkChildPath => ResolveBenchmarkChildPath();
+
+    /// <summary>The serve child's arguments (see <see cref="Serve"/>).</summary>
+    internal static string[] ServeArguments(int floodBytes) => ["--serve", floodBytes.ToString(CultureInfo.InvariantCulture)];
+
+    /// <summary>Columns of every benchmark terminal.</summary>
+    internal const int Columns = 80;
+
+    /// <summary>Rows of every benchmark terminal.</summary>
+    internal const int Rows = 24;
 
     /// <summary><c>ConPty</c> parameter value off Windows, where there is no ConPTY to choose.</summary>
     internal const string ConPtyNone = "none";
@@ -95,7 +107,7 @@ internal static class BenchmarkPtyCommands
     }
 
     private static PtyStartInfo Spawn(string fileName, IReadOnlyList<string> arguments) =>
-        new() { FileName = fileName, Arguments = arguments, Size = new(80, 24) };
+        new() { FileName = fileName, Arguments = arguments, Size = new(Columns, Rows) };
 
     private static PtyStartInfo UnixShell(string command) => Spawn("sh", ["-c", command]);
 
