@@ -1,5 +1,4 @@
-﻿using System.Runtime.CompilerServices;
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Jobs;
@@ -21,11 +20,13 @@ namespace MiniPty.Benchmarks;
 /// <para>
 /// On Windows the bytes read are not the bytes written: ConPTY renders the child's output and sends its own VT
 /// stream, so the throughput there is that of ConPTY's renderer, not of a byte pipe. The operation returns the bytes
-/// it read so the two can be compared.
+/// it read so the two can be compared. <see cref="ConPty"/> runs it on the ConPTY Windows ships and on the out-of-band
+/// one, which renders about twice as fast; the in-box one occasionally withholds a finished flood until the screen
+/// changes again, which the harness nudges and reports (<see cref="BenchmarkServeSession"/>).
 /// </para>
 /// <para>
-/// The operation and the harness's read loop use pooled <see cref="ValueTask"/> builders, so the allocation column
-/// shows MiniPty's own cost per flood rather than the harness's async state.
+/// The operation is one pooled async round trip (<see cref="BenchmarkServeSession.RoundTripAsync"/>), so the
+/// allocation column shows MiniPty's own cost per flood rather than the harness's async state.
 /// </para>
 /// </remarks>
 [MemoryDiagnoser]
@@ -40,11 +41,17 @@ public class PtyThroughputBenchmarks
     [Params(65_536, 1_048_576)]
     public int PayloadBytes { get; set; }
 
+    /// <summary>The ConPTY implementation on Windows (both when the out-of-band one is staged); <c>none</c> elsewhere.</summary>
+    [ParamsSource(nameof(ConPtyChoices))]
+    public string ConPty { get; set; } = BenchmarkPtyCommands.ConPtyNone;
+
+    public static IEnumerable<string> ConPtyChoices() => BenchmarkPtyCommands.ConPtyChoices();
+
     [GlobalSetup]
     public void Setup()
     {
         if (BenchmarkPtyCommands.IsSupported)
-            serve = BenchmarkServeSession.Start(BenchmarkPtyCommands.Serve(PayloadBytes));
+            serve = BenchmarkServeSession.Start(BenchmarkPtyCommands.Serve(PayloadBytes, ConPty));
     }
 
     [GlobalCleanup]
@@ -52,16 +59,16 @@ public class PtyThroughputBenchmarks
 
     [BenchmarkCategory("Steady", "Throughput")]
     [Benchmark]
-    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
-    public async ValueTask<long> ReadOutput()
+    public ValueTask<long> ReadOutput()
     {
         if (serve is null)
-            return 0;
+            return new ValueTask<long>(0L);
 
         // Alternate the end marker, so a repaint of the previous one cannot end this operation early.
         second = !second;
-        await serve.WriteAsync(second ? BenchmarkServeSession.FloodB : BenchmarkServeSession.FloodA).ConfigureAwait(false);
-        return await serve.ReadUntilAsync(second ? BenchmarkServeSession.EndB : BenchmarkServeSession.EndA).ConfigureAwait(false);
+        return second
+            ? serve.RoundTripAsync(BenchmarkServeSession.FloodB, BenchmarkServeSession.EndB)
+            : serve.RoundTripAsync(BenchmarkServeSession.FloodA, BenchmarkServeSession.EndA);
     }
 
     private sealed class Config : ManualConfig

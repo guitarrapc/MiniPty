@@ -38,8 +38,36 @@ internal static class BenchmarkPtyCommands
     /// Persistent child for the steady-state benchmarks: answers each input byte with an echo or a flood of
     /// <paramref name="floodBytes"/> (see <see cref="BenchmarkServeSession"/>).
     /// </summary>
-    internal static PtyStartInfo Serve(int floodBytes) =>
-        Spawn(ResolveBenchmarkChildPath(), ["--serve", floodBytes.ToString(CultureInfo.InvariantCulture)]);
+    internal static PtyStartInfo Serve(int floodBytes, string conPty) =>
+        Spawn(ResolveBenchmarkChildPath(), ["--serve", floodBytes.ToString(CultureInfo.InvariantCulture)]) with
+        {
+            ConPty = conPty == ConPtyOutOfBand ? LoadOutOfBandConPty() : null,
+        };
+
+    /// <summary><c>ConPty</c> parameter value off Windows, where there is no ConPTY to choose.</summary>
+    internal const string ConPtyNone = "none";
+
+    /// <summary><c>ConPty</c> parameter value for the ConPTY that Windows ships.</summary>
+    internal const string ConPtyInBox = "in-box";
+
+    /// <summary><c>ConPty</c> parameter value for the out-of-band ConPTY staged from Microsoft.Windows.Console.ConPTY.</summary>
+    internal const string ConPtyOutOfBand = "out-of-band";
+
+    /// <summary>
+    /// The ConPTY implementations a steady-state benchmark runs on: both on Windows when the out-of-band one is staged
+    /// with its console host, the in-box one alone when it is not, and <see cref="ConPtyNone"/> elsewhere.
+    /// </summary>
+    internal static string[] ConPtyChoices() =>
+        !OperatingSystem.IsWindows()
+            ? [ConPtyNone]
+            : ConPtyLibrary.TryLoadFromApplicationDirectory() is { HasConsoleHost: true }
+                ? [ConPtyInBox, ConPtyOutOfBand]
+                : [ConPtyInBox];
+
+    private static ConPtyLibrary LoadOutOfBandConPty() =>
+        ConPtyLibrary.TryLoadFromApplicationDirectory() is { HasConsoleHost: true } library
+            ? library
+            : throw new InvalidOperationException("The out-of-band ConPTY (conpty.dll with OpenConsole.exe beside it) is not staged in the benchmark output.");
 
     private static string ResolveBenchmarkChildPath()
     {

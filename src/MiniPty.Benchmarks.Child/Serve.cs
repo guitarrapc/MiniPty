@@ -19,6 +19,12 @@ using Microsoft.Win32.SafeHandles;
 /// reason an echo overwrites column 0 instead of extending a line, so every echo changes a cell.
 /// </para>
 /// <para>
+/// The two end markers differ in every character. A flood that ConPTY takes in within one frame leaves a screen that
+/// differs from the one two operations earlier only in the marker row, and ConPTY then sends only the cells that
+/// changed: with markers that differed in one letter, it sent that letter alone, and the benchmark waited forever for a
+/// marker that never arrived whole.
+/// </para>
+/// <para>
 /// Input is raw so that the terminal neither waits for a line nor echoes on its own: on Unix the child runs
 /// <c>stty raw -echo</c>, and on Windows it reads key events, which the console never echoes.
 /// </para>
@@ -27,7 +33,7 @@ internal static class Serve
 {
     private const string Ready = "#MINIPTY-READY#";
     private const string EndA = "#MINIPTY-END-A#";
-    private const string EndB = "#MINIPTY-END-B#";
+    private const string EndB = "@minipty_end_b@"; // Differs from EndA in every position.
     private const string Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private const int LineLength = 79; // 77 characters plus CR LF: fits an 80-column terminal without wrapping.
 

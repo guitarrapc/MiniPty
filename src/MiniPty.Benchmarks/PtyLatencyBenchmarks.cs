@@ -1,5 +1,4 @@
-﻿using System.Runtime.CompilerServices;
-using BenchmarkDotNet.Attributes;
+﻿using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Jobs;
@@ -16,7 +15,8 @@ namespace MiniPty.Benchmarks;
 /// editor runs, and echoes each byte itself; spawn and exit are outside the measurement. The path is
 /// <see cref="PtySession.WriteInputAsync(ReadOnlyMemory{byte}, CancellationToken)"/>, the terminal's input side, the
 /// child's read and write, the terminal's output side, and <see cref="PtySession.ReadOutputAsync"/>. On Windows that
-/// includes ConPTY parsing the input into a key event and rendering the echo.
+/// includes ConPTY parsing the input into a key event and rendering the echo, and <see cref="ConPty"/> runs it on both
+/// implementations: the in-box one paints on its own frame schedule, which sets the round trip there.
 /// </para>
 /// <para>
 /// Each iteration is one round trip (invocation count 1), so the percentile columns are percentiles of single
@@ -26,8 +26,8 @@ namespace MiniPty.Benchmarks;
 /// end a round trip early.
 /// </para>
 /// <para>
-/// The operation and the harness's read loop use pooled <see cref="ValueTask"/> builders, so the allocation column
-/// shows MiniPty's own cost per keystroke rather than the harness's async state.
+/// The operation is one pooled async round trip (<see cref="BenchmarkServeSession.RoundTripAsync"/>), so the
+/// allocation column shows MiniPty's own cost per keystroke rather than the harness's async state.
 /// </para>
 /// </remarks>
 [MemoryDiagnoser]
@@ -39,11 +39,17 @@ public class PtyLatencyBenchmarks
     private BenchmarkServeSession? serve;
     private bool second;
 
+    /// <summary>The ConPTY implementation on Windows (both when the out-of-band one is staged); <c>none</c> elsewhere.</summary>
+    [ParamsSource(nameof(ConPtyChoices))]
+    public string ConPty { get; set; } = BenchmarkPtyCommands.ConPtyNone;
+
+    public static IEnumerable<string> ConPtyChoices() => BenchmarkPtyCommands.ConPtyChoices();
+
     [GlobalSetup]
     public void Setup()
     {
         if (BenchmarkPtyCommands.IsSupported)
-            serve = BenchmarkServeSession.Start(BenchmarkPtyCommands.Serve(0));
+            serve = BenchmarkServeSession.Start(BenchmarkPtyCommands.Serve(0, ConPty));
     }
 
     [GlobalCleanup]
@@ -51,16 +57,14 @@ public class PtyLatencyBenchmarks
 
     [BenchmarkCategory("Steady", "Latency")]
     [Benchmark]
-    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
-    public async ValueTask<long> KeystrokeEcho()
+    public ValueTask<long> KeystrokeEcho()
     {
         if (serve is null)
-            return 0;
+            return new ValueTask<long>(0L);
 
         second = !second;
         var key = second ? BenchmarkServeSession.KeyB : BenchmarkServeSession.KeyA;
-        await serve.WriteAsync(key).ConfigureAwait(false);
-        return await serve.ReadUntilAsync(key).ConfigureAwait(false);
+        return serve.RoundTripAsync(key, key);
     }
 
     private sealed class Config : ManualConfig
