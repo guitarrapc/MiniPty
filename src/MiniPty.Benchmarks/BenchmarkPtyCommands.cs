@@ -34,6 +34,13 @@ internal static class BenchmarkPtyCommands
     /// <summary>Child that reads stdin until end of input and discards it, for input-path benchmarks.</summary>
     internal static PtyStartInfo StdinSink() => Spawn(ResolveBenchmarkChildPath(), ["--stdin-sink"]);
 
+    /// <summary>
+    /// Persistent child for the steady-state benchmarks: answers each input byte with an echo or a flood of
+    /// <paramref name="floodBytes"/> (see <see cref="BenchmarkServeSession"/>).
+    /// </summary>
+    internal static PtyStartInfo Serve(int floodBytes) =>
+        Spawn(ResolveBenchmarkChildPath(), ["--serve", floodBytes.ToString(CultureInfo.InvariantCulture)]);
+
     private static string ResolveBenchmarkChildPath()
     {
         var baseDir = AppContext.BaseDirectory;

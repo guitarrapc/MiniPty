@@ -6,58 +6,25 @@
 #:property PublishAot=true
 #:package MiniPty@1.2.0
 
-using System.Diagnostics;
-using System.Runtime.InteropServices;
 using MiniPty;
 
-Console.Error.WriteLine("=== 1) Stream mode: chunks arrive over time ===");
-await RunStreamModeAsync();
+var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh";
 
-Console.Error.WriteLine();
-Console.Error.WriteLine("=== 2) One-shot mode: one completion result ===");
-await RunCompleteModeAsync();
-
-static async Task RunStreamModeAsync()
+// Run a command for its result: CompleteAsync drains the output and waits for exit.
+await using (var run = Pty.Start(new PtyStartInfo { FileName = shell, Arguments = [OperatingSystem.IsWindows() ? "/c" : "-c", "echo hello"] }))
 {
-    await using var session = Pty.Start(CreateTimedOutputStartInfo());
-    var sw = Stopwatch.StartNew();
-    var chunks = 0;
-    await foreach (var chunk in session.ReadOutputAsync())
-        Console.WriteLine($"+{sw.Elapsed.TotalSeconds,4:F1}s chunk#{++chunks} ({chunk.Data.Length} bytes)");
-
-    Console.WriteLine($"stream exit={(await session.WaitForExitAsync()).ExitCode}, chunks={chunks}");
+    var result = await run.CompleteAsync();
+    Console.WriteLine($"exit={result.ExitCode}: {PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText).Trim()}");
 }
 
-static async Task RunCompleteModeAsync()
-{
-    await using var session = Pty.Start(CreateTimedOutputStartInfo());
-    var result = await session.CompleteAsync();
-    Console.WriteLine($"complete exit={result.ExitCode}, bytes={result.Output.Length}");
-    Console.WriteLine(PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText).TrimEnd());
-}
+// Drive a session: write input, resize at any time, and stream output until the child exits.
+await using var session = Pty.Start(new PtyStartInfo { FileName = shell, Size = new PtySize(120, 30) });
+await session.WriteInputAsync("echo hello\r");
+await session.WriteInputAsync("exit\r");
+session.Resize(new PtySize(100, 40));
 
-static PtyStartInfo CreateTimedOutputStartInfo()
-{
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-    {
-        return new PtyStartInfo
-        {
-            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-            Arguments = ["/c", "echo alpha & timeout /t 1 /nobreak >nul & echo beta & timeout /t 1 /nobreak >nul & echo gamma"],
-            Size = new PtySize(120, 30),
-        };
-    }
+var stdout = Console.OpenStandardOutput();
+await foreach (var chunk in session.ReadOutputAsync())
+    await stdout.WriteAsync(chunk.Data);
 
-    return new PtyStartInfo
-    {
-        FileName = "/bin/sh",
-        Arguments = ["-c", "printf 'alpha\\n'; sleep 1; printf 'beta\\n'; sleep 1; printf 'gamma\\n'"],
-        Size = new PtySize(120, 30),
-        TerminalName = "xterm-256color",
-        Environment = new Dictionary<string, string?>
-        {
-            ["NO_COLOR"] = null,
-            ["MINIPTY_SAMPLE"] = "true",
-        },
-    };
-}
+Console.WriteLine($"exit={(await session.WaitForExitAsync()).ExitCode}");

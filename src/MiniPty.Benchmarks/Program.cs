@@ -5,5 +5,5 @@
 //   dotnet run -c Release --project src/MiniPty.Benchmarks
 //   dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter *categories*Binary*
 //   dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter *categories*Text*
-//   dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter *Integration*
+//   dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter *Startup*
 BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args);

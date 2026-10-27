@@ -1,6 +1,18 @@
 using System.Buffers;
 using System.Globalization;
 
+if (args is ["--serve", var serveBytes])
+{
+    // Steady-state benchmarks: stay running and answer each input byte (Serve.cs).
+    if (!int.TryParse(serveBytes, NumberStyles.None, CultureInfo.InvariantCulture, out var floodBytes))
+    {
+        Console.Error.WriteLine("Usage: MiniPty.Benchmarks.Child --serve <flood bytes>");
+        return 2;
+    }
+
+    return Serve.Run(floodBytes);
+}
+
 if (args is ["--stdin-sink"])
 {
     // Input benchmarks: read stdin until end of input and discard it.
@@ -15,7 +27,7 @@ if (args is ["--stdin-sink"])
 
 if (!TryParseBytesArg(args, out var byteCount))
 {
-    Console.Error.WriteLine("Usage: MiniPty.Benchmarks.Child --bytes <count> | --stdin-sink");
+    Console.Error.WriteLine("Usage: MiniPty.Benchmarks.Child --bytes <count> | --stdin-sink | --serve <flood bytes>");
     return 2;
 }
 

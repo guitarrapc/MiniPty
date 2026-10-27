@@ -10,12 +10,12 @@ if (-not (Test-Path $BaselinePath)) {
 }
 
 $baseline = Get-Content $BaselinePath -Raw | ConvertFrom-Json
-$csv = Get-ChildItem -Path $ResultsDirectory -Filter "MiniPty.Benchmarks.PtyIntegrationBenchmarks-report.csv" -Recurse |
+$csv = Get-ChildItem -Path $ResultsDirectory -Filter "MiniPty.Benchmarks.PtyStartupBenchmarks-report.csv" -Recurse |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 
 if (-not $csv) {
-    Write-Error "No PtyIntegrationBenchmarks CSV found under $ResultsDirectory. Run benchmarks first."
+    Write-Error "No PtyStartupBenchmarks CSV found under $ResultsDirectory. Run benchmarks first."
 }
 
 $rows = Import-Csv $csv.FullName

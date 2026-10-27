@@ -7,7 +7,7 @@ namespace MiniPty.Benchmarks;
 
 /// <summary>
 /// The in-box ConPTY against the out-of-band one an application supplies (<see cref="PtyStartInfo.ConPty"/>), on the
-/// same scenarios as <see cref="PtyIntegrationBenchmarks"/>. Windows only: elsewhere, and when <c>conpty.dll</c> is not
+/// same scenarios as <see cref="PtyStartupBenchmarks"/>. Windows only: elsewhere, and when <c>conpty.dll</c> is not
 /// staged in the benchmark output, the methods return 0 without spawning.
 /// </summary>
 /// <remarks>

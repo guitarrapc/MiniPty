@@ -8,9 +8,16 @@ using MiniPty.Internal;
 namespace MiniPty.Benchmarks;
 
 /// <summary>
-/// End-to-end PTY benchmarks split by output path.
+/// Startup benchmarks: every operation spawns a child, reads what it writes, and waits for its exit, split by output
+/// path.
 /// </summary>
 /// <remarks>
+/// <para>
+/// Each time is dominated by process creation (and on Windows by starting the console host), not by moving output:
+/// the 32 KiB scenarios cost mostly the .NET startup of the benchmark child. Read them for spawn and exit cost and for
+/// the allocations of each path. Output throughput and keystroke latency on a running session are measured by
+/// <see cref="PtyThroughputBenchmarks"/> and <see cref="PtyLatencyBenchmarks"/>.
+/// </para>
 /// <para><b>Binary</b> — <see cref="MiniPty.PtyCompleteOptions.DecodeOutput"/> = false; only merged bytes are retained.</para>
 /// <para><b>Text</b> — default decode during pump (bytes + decoded chars) and display helpers.</para>
 /// <para><b>Exit</b> — <see cref="PtySession.WaitForExitAsync"/> on a persistent session that never reads output.</para>
@@ -22,7 +29,7 @@ namespace MiniPty.Benchmarks;
 [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
 [CategoriesColumn]
 [SimpleJob(RuntimeMoniker.Net10_0, warmupCount: 2, iterationCount: 5, launchCount: 1)]
-public class PtyIntegrationBenchmarks
+public class PtyStartupBenchmarks
 {
     private PtyStartInfo echo = null!;
     private PtyStartInfo exit0 = null!;
@@ -41,7 +48,7 @@ public class PtyIntegrationBenchmarks
         smallStdout = BenchmarkPtyCommands.SmallStdout(32_768);
     }
 
-    [BenchmarkCategory("Integration", "Binary")]
+    [BenchmarkCategory("Startup", "Binary")]
     [Benchmark]
     public async Task<int> Session_Exit0_Bytes()
     {
@@ -53,7 +60,7 @@ public class PtyIntegrationBenchmarks
         return result.ExitCode;
     }
 
-    [BenchmarkCategory("Integration", "Exit")]
+    [BenchmarkCategory("Startup", "Exit")]
     [Benchmark]
     public async Task<int> Session_Exit0_WaitForExit()
     {
@@ -64,7 +71,7 @@ public class PtyIntegrationBenchmarks
         return (await session.WaitForExitAsync().ConfigureAwait(false)).ExitCode;
     }
 
-    [BenchmarkCategory("Integration", "Binary")]
+    [BenchmarkCategory("Startup", "Binary")]
     [Benchmark]
     public async Task<int> Session_Echo_Bytes()
     {
@@ -76,7 +83,7 @@ public class PtyIntegrationBenchmarks
         return result.Output.Length;
     }
 
-    [BenchmarkCategory("Integration", "Binary")]
+    [BenchmarkCategory("Startup", "Binary")]
     [Benchmark]
     public async Task<int> Capture_Echo_Bytes()
     {
@@ -87,7 +94,7 @@ public class PtyIntegrationBenchmarks
         return result.Output.Length;
     }
 
-    [BenchmarkCategory("Integration", "Binary")]
+    [BenchmarkCategory("Startup", "Binary")]
     [Benchmark]
     public async Task<int> Session_32KiB_Bytes()
     {
@@ -99,7 +106,7 @@ public class PtyIntegrationBenchmarks
         return result.Output.Length;
     }
 
-    [BenchmarkCategory("Integration", "Streaming", "Binary")]
+    [BenchmarkCategory("Startup", "Streaming", "Binary")]
     [Benchmark]
     public async Task<int> Session_32KiB_StreamBytes()
     {
@@ -114,7 +121,7 @@ public class PtyIntegrationBenchmarks
         return length;
     }
 
-    [BenchmarkCategory("Integration", "Streaming", "Binary")]
+    [BenchmarkCategory("Startup", "Streaming", "Binary")]
     [Benchmark]
     public async Task<int> Session_32KiB_OutputStreamBytes()
     {
@@ -142,7 +149,7 @@ public class PtyIntegrationBenchmarks
         return length;
     }
 
-    [BenchmarkCategory("Integration", "Binary")]
+    [BenchmarkCategory("Startup", "Binary")]
     [Benchmark]
     public async Task<int> Capture_32KiB_Bytes()
     {
@@ -153,7 +160,7 @@ public class PtyIntegrationBenchmarks
         return result.Output.Length;
     }
 
-    [BenchmarkCategory("Integration", "Text")]
+    [BenchmarkCategory("Startup", "Text")]
     [Benchmark]
     public async Task<int> Session_Echo_Text()
     {
@@ -165,7 +172,7 @@ public class PtyIntegrationBenchmarks
         return result.GetText().Length;
     }
 
-    [BenchmarkCategory("Integration", "Text")]
+    [BenchmarkCategory("Startup", "Text")]
     [Benchmark]
     public async Task<int> Capture_Echo_Text()
     {
@@ -176,7 +183,7 @@ public class PtyIntegrationBenchmarks
         return result.GetText().Length;
     }
 
-    [BenchmarkCategory("Integration", "Text")]
+    [BenchmarkCategory("Startup", "Text")]
     [Benchmark]
     public async Task<int> Capture_32KiB_Text()
     {
@@ -187,7 +194,7 @@ public class PtyIntegrationBenchmarks
         return result.GetText().Length;
     }
 
-    [BenchmarkCategory("Integration", "Text")]
+    [BenchmarkCategory("Startup", "Text")]
     [Benchmark]
     public async Task<int> Capture_32KiB_DisplayPlain()
     {
