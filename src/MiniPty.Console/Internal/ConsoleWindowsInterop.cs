@@ -15,6 +15,8 @@ internal static partial class ConsoleWindowsInterop
 
     internal const int ErrorOperationAborted = 995;
 
+    internal const uint Utf8CodePage = 65001;
+
     internal const uint EnableProcessedOutput = 0x0001;
     internal const uint EnableWrapAtEolOutput = 0x0002;
     internal const uint EnableVirtualTerminalProcessing = 0x0004;
@@ -120,6 +122,17 @@ internal static partial class ConsoleWindowsInterop
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial uint GetConsoleCP();
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SetConsoleCP(uint wCodePageID);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool FlushConsoleInputBuffer(IntPtr hConsoleInput);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -8,6 +8,7 @@ internal sealed class WindowsHostTerminal : IHostTerminal
     private readonly IntPtr _stdout;
     private readonly uint _stdinModeSnapshot;
     private readonly uint _stdoutModeSnapshot;
+    private readonly uint _inputCodePageSnapshot;
     private int _lastColumns;
     private int _lastRows;
     private bool _disposed;
@@ -49,6 +50,18 @@ internal sealed class WindowsHostTerminal : IHostTerminal
         if (!ConsoleWindowsInterop.SetConsoleMode(_stdout, stdoutMode))
         {
             ConsoleWindowsInterop.SetConsoleMode(_stdin, _stdinModeSnapshot);
+            throw new InvalidOperationException("Failed to configure the host terminal.");
+        }
+
+        // ReadFile converts console input to the input code page, and the bytes are forwarded unchanged to a
+        // UTF-8 PTY. Under a legacy code page (for example 932) non-ASCII keys would arrive as Shift-JIS bytes
+        // or '?', so input is read as UTF-8 while attached and the previous code page is restored on detach.
+        _inputCodePageSnapshot = ConsoleWindowsInterop.GetConsoleCP();
+        if (_inputCodePageSnapshot != ConsoleWindowsInterop.Utf8CodePage
+            && !ConsoleWindowsInterop.SetConsoleCP(ConsoleWindowsInterop.Utf8CodePage))
+        {
+            ConsoleWindowsInterop.SetConsoleMode(_stdin, _stdinModeSnapshot);
+            ConsoleWindowsInterop.SetConsoleMode(_stdout, _stdoutModeSnapshot);
             throw new InvalidOperationException("Failed to configure the host terminal.");
         }
 
@@ -114,6 +127,8 @@ internal sealed class WindowsHostTerminal : IHostTerminal
         CancelPendingRead();
         ConsoleWindowsInterop.SetConsoleMode(_stdin, _stdinModeSnapshot);
         ConsoleWindowsInterop.SetConsoleMode(_stdout, _stdoutModeSnapshot);
+        if (_inputCodePageSnapshot != 0 && _inputCodePageSnapshot != ConsoleWindowsInterop.Utf8CodePage)
+            ConsoleWindowsInterop.SetConsoleCP(_inputCodePageSnapshot);
     }
 
     private unsafe int ReadInputCancelable(Span<byte> buffer, CancellationToken cancellationToken)

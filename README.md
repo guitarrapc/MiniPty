@@ -180,6 +180,8 @@ static async Task CopyOutputAsync(PtySession session)
 }
 ```
 
+On Windows, the host console reads input as UTF-8 while attached (the previous input code page is restored on detach), so non-ASCII keys such as Japanese text reach the PTY as UTF-8. Output is still yours: a console with a legacy output code page misdecodes the PTY's UTF-8 bytes, so set `Console.OutputEncoding = Encoding.UTF8` while copying output.
+
 [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) adds status messages and keeps the shell prompt aligned afterwards.
 
 ### MiniPty.Terminal
