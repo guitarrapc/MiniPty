@@ -45,7 +45,7 @@ Your application carries the following besides the MiniPty assembly. The package
 
 | OS | Files beside the application | Under NativeAOT |
 |----|------------------------------|-----------------|
-| Windows | None: ConPTY comes with Windows. The [out-of-band ConPTY](#out-of-band-conpty) is optional and supplied by your application | None |
+| Windows | None: ConPTY comes with Windows. The [out-of-band ConPTY](#out-of-band-conpty-for-windows) is optional and supplied by your application | None |
 | Linux (x64, arm64) | `libminipty_unix.so` | None: the shim is linked into the executable |
 | macOS (x64, arm64) | `libminipty_unix.dylib` and `minipty_spawn_helper` | `minipty_spawn_helper` only: the shim is linked into the executable, and the launcher must stay in the same directory, where MiniPty looks for it |
 | FreeBSD (experimental) | `libminipty_unix.so`, which the package does not include: it is built with `cc` when MiniPty is built from source on FreeBSD | Not supported by the package |
@@ -124,7 +124,7 @@ dotnet add package MiniPty.Terminal   # backend for xterm.js and editor terminal
 
 ### MiniPty
 
-Start a child with `Pty.Start`, then either run it for its result with `CompleteAsync` or drive it with `WriteInputAsync` and `ReadOutputAsync`. Try `dotnet samples/SingleFiles/README_MiniPty.cs`.
+Start a child with `Pty.Start`, then either run it for its result with `CompleteAsync` or drive it with `WriteInputAsync` and `ReadOutputAsync`. To run this code: `dotnet samples/SingleFiles/README_MiniPty.cs`.
 
 ```csharp
 using MiniPty;
@@ -151,9 +151,11 @@ await foreach (var chunk in session.ReadOutputAsync())
 Console.WriteLine($"exit={(await session.WaitForExitAsync()).ExitCode}");
 ```
 
+Advanced: [run a command for its result](samples/SingleFiles/README.md#run-a-command-for-its-result) with stdin and EOF, and [drive an interactive program](samples/SingleFiles/README.md#drive-an-interactive-program) that waits for output before it answers.
+
 ### MiniPty.Capture
 
-Run a child and get its output, exit code, and every read with its time since `Pty.Start`. Try `dotnet samples/SingleFiles/README_MiniPty.Capture.cs`.
+Run a child and get its output, exit code, and every read with its time since `Pty.Start`. To run this code: `dotnet samples/SingleFiles/README_MiniPty.Capture.cs`.
 
 ```csharp
 using MiniPty;
@@ -171,9 +173,13 @@ foreach (var chunk in result.Chunks)
 Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));
 ```
 
+Advanced: [capture output with timing](samples/SingleFiles/README.md#capture-output-with-timing), with stdin and a printed timeline.
+
 ### MiniPty.Console
 
-Attach the host terminal to a session, so interactive programs such as vim get your keyboard and window size. Reading output stays your job. Try `dotnet samples/SingleFiles/README_MiniPty.Console.cs`.
+Attach the host terminal to a session, so interactive programs such as vim get your keyboard and window size. Reading output stays your job. To run this code: `dotnet samples/SingleFiles/README_MiniPty.Console.cs`, from an interactive terminal.
+
+On Windows, the host console reads input as UTF-8 while attached (the previous input code page is restored on detach), so non-ASCII keys such as Japanese text reach the PTY as UTF-8. Output is still yours: a console with a legacy output code page misdecodes the PTY's UTF-8 bytes, so set `Console.OutputEncoding = Encoding.UTF8` while copying output.
 
 ```csharp
 using MiniPty;
@@ -204,13 +210,11 @@ static async Task CopyOutputAsync(PtySession session)
 }
 ```
 
-On Windows, the host console reads input as UTF-8 while attached (the previous input code page is restored on detach), so non-ASCII keys such as Japanese text reach the PTY as UTF-8. Output is still yours: a console with a legacy output code page misdecodes the PTY's UTF-8 bytes, so set `Console.OutputEncoding = Encoding.UTF8` while copying output.
-
-[ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) adds status messages and keeps the shell prompt aligned afterwards.
+Advanced: [hand your terminal to a program](samples/SingleFiles/README.md#hand-your-terminal-to-a-program), which adds status messages and keeps the shell prompt aligned afterwards, and the [TUI demo](samples/TuiDemo) for full-screen programs.
 
 ### MiniPty.Terminal
 
-Serve a PTY to xterm.js or an editor terminal, the role node-pty plays behind VS Code. Try `dotnet samples/SingleFiles/WebTerminal.cs` for a shell in your browser.
+Serve a PTY to xterm.js or an editor terminal, the role node-pty plays behind VS Code. For a complete server, run `dotnet samples/SingleFiles/WebTerminal.cs` and open the address it prints.
 
 ```csharp
 using MiniPty;
@@ -224,6 +228,8 @@ var status = await PtyWebSocketBridge.RunAsync(
     cancellationToken: ct);
 Console.WriteLine($"shell exited: {status.ExitCode}");
 ```
+
+Advanced: the [web terminal guide](samples/SingleFiles/README.md#web-terminal) (who may connect, the browser side, flow control) and the [VS Code terminal backend](samples/VsCodeExtension).
 
 Other entry points:
 
@@ -239,7 +245,7 @@ Each OS has its own backend behind the same API. None of them uses winpty, and n
 
 ### Windows: ConPTY
 
-MiniPty calls Win32 ConPTY (`CreatePseudoConsole`) directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. Output is read through I/O completions on the runtime's thread pool, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty).
+MiniPty calls Win32 ConPTY (`CreatePseudoConsole`) directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. Output is read through I/O completions on the runtime's thread pool, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty-for-windows).
 
 ### Linux: `forkpty`
 
@@ -295,6 +301,8 @@ await using var session = Pty.Start(new PtyStartInfo { FileName = "cmd.exe", Con
 
 `KillProcessTree = true` ends everything the child started, even programs in a console of their own, on dispose, on kill, and when your process crashes. Turn it on for commands run for their result (CI steps, test runners, agent tool calls). Leave it off for interactive terminals, where a window the user opened (`code .`) should outlive the tab ([Process tree](.github/docs/specs/core_session.md#process-tree)).
 
+`InheritCursor = true` keeps what the frontend already shows instead of letting ConPTY clear the screen. The frontend must then answer ConPTY's cursor position query, or the child waits ([Inherited cursor](.github/docs/specs/core_session.md#inherited-cursor)). Both options are ignored on Unix.
+
 ```csharp
 await using var session = Pty.Start(new PtyStartInfo
 {
@@ -304,13 +312,10 @@ await using var session = Pty.Start(new PtyStartInfo
 });
 ```
 
-`InheritCursor = true` keeps what the frontend already shows instead of letting ConPTY clear the screen. The frontend must then answer ConPTY's cursor position query, or the child waits ([Inherited cursor](.github/docs/specs/core_session.md#inherited-cursor)).
-
-Both options are ignored on Unix.
-
 ### GUI hosts
 
-WinUI, WPF, WinForms, and Avalonia can call every MiniPty API on the UI thread. Nothing blocks it, and no marshaling is needed.
+WinUI, WPF, WinForms, and Avalonia can call every MiniPty API on the UI thread. Nothing blocks it, and no marshaling is needed. Full terminal emulators built this way: [samples/WinUiTerminal](samples/WinUiTerminal) (Windows) and [samples/AvaloniaTerminal](samples/AvaloniaTerminal) (Windows, Linux, macOS). See also [GUI hosts](.github/docs/specs/core_session.md#gui-hosts).
+
 
 ```csharp
 // All on the UI thread.
@@ -329,49 +334,38 @@ await foreach (var chunk in session.ReadOutputAsync())
     view.Feed(chunk.Data.Span);   // your VT parser and renderer
 ```
 
-Full terminal emulators built this way: [samples/WinUiTerminal](samples/WinUiTerminal) (Windows) and [samples/AvaloniaTerminal](samples/AvaloniaTerminal) (Windows, Linux, macOS). See also [GUI hosts](.github/docs/specs/core_session.md#gui-hosts).
-
-
 ## Samples
 
-How to build each kind of host with MiniPty: a [WinUI](samples/WinUiTerminal) or [Avalonia](samples/AvaloniaTerminal) terminal window, a [TUI](samples/TuiDemo) shown in the terminal you are using, a [web terminal](samples/SingleFiles/README_WebTerminal.md) with xterm.js, and a [VS Code terminal backend](samples/VsCodeExtension).
+Each guide shows how to build that kind of application with MiniPty.
 
-| Sample | Shows |
-|--------|-------|
-| [Capture.cs](samples/SingleFiles/Capture.cs) | Minimal `MiniPty.Capture` smoke |
-| [Session.cs](samples/SingleFiles/Session.cs) | `Pty.Start`, background `Output` reads, `WriteInputAsync` / `SendEof`, `CompleteAsync`, `Resize` |
-| [Interactive.cs](samples/SingleFiles/Interactive.cs) | `ReadOutputAsync` persistent loop, marker-driven writes, mid-session `Resize`, natural child exit |
-| [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) | **MiniPty.Console** host attach: keyboard → PTY, `ReadOutputAsync` → host display (requires interactive TTY) |
-| [TuiDemo](samples/TuiDemo) | Dependency-free full-screen TUI through **MiniPty.Console**: tabs with an animated dashboard (spinners, progress bars, a scrolling log, a modal dialog), a file tree with a filter box, and braille charts, filling the terminal, mouse/keys, Unicode, 24-bit color, resize, and a headless `--smoke` mode (NativeAOT compatible) |
-| [Observe.cs](samples/SingleFiles/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
-| [WebTerminal.cs](samples/SingleFiles/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner, Ctrl+V paste and Ctrl+C copy of a selection |
-| [WebTerminalScale.cs](samples/SingleFiles/WebTerminalScale.cs) | **MiniPty.Terminal** in an ASP.NET Core host serving many sessions: a dashboard of what each session costs the host (threads, memory, handles), and a `bench` mode that measures it with keystroke echo latency, and a flood's WebSocket frames per 32 KiB and host CPU per MiB |
-| [VsCodeTerminalHelper.cs](samples/SingleFiles/VsCodeTerminalHelper.cs) | **MiniPty.Terminal** stdio-framed helper for a VS Code `Pseudoterminal` |
-| [VsCodeExtension](samples/VsCodeExtension) | Dependency-free VS Code extension sample connecting `Pseudoterminal` to the NativeAOT helper |
-| [VsCodePersistentBridge.cs](samples/SingleFiles/VsCodePersistentBridge.cs) | Authenticated loopback service for real VS Code detach/reconnect testing |
-| [AvaloniaTerminal](samples/AvaloniaTerminal) | The same terminal emulator as an Avalonia desktop app (Windows, Linux, macOS): `DrawingContext` grid, the same key, mouse, and clipboard handling, the same UI-thread MiniPty calls |
-| [WinUiTerminal](samples/WinUiTerminal) | Code-only WinUI 3 terminal emulator (VT parser, screen buffer, Win2D grid, mouse copy/paste) driving `Pty.Start`, `ReadOutputAsync`, `WriteInputAsync`, `Resize`, and `DisposeAsync` from the UI thread (Windows only) |
+| Building | Guide | Package |
+|----------|-------|---------|
+| A tool that runs commands, drives programs, or records their output | [Single-file samples](samples/SingleFiles/README.md) | MiniPty, MiniPty.Capture |
+| A program that hands your terminal to a shell or an editor | [ConsoleAttach.cs](samples/SingleFiles/README.md#hand-your-terminal-to-a-program) | MiniPty.Console |
+| A full-screen TUI shown in the terminal you are using | [TuiDemo](samples/TuiDemo) | MiniPty.Console |
+| A terminal window on Windows | [WinUiTerminal](samples/WinUiTerminal) | MiniPty |
+| A terminal window on Windows, Linux, and macOS | [AvaloniaTerminal](samples/AvaloniaTerminal) | MiniPty |
+| A terminal in the browser (xterm.js) | [Web terminal](samples/SingleFiles/README.md#web-terminal) | MiniPty.Terminal |
+| A VS Code terminal backend | [VsCodeExtension](samples/VsCodeExtension) | MiniPty.Terminal |
 
-Run a sample locally (JIT):
+Run them locally (JIT):
 
 ```bash
 dotnet samples/SingleFiles/Session.cs
-dotnet samples/SingleFiles/Interactive.cs
-dotnet samples/SingleFiles/ConsoleAttach.cs
-dotnet samples/SingleFiles/Observe.cs
-dotnet samples/SingleFiles/Capture.cs
-dotnet samples/SingleFiles/WebTerminal.cs   # then open the http://localhost:5170/#token=... address it prints
-dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs   # then open the http://localhost:5171/#token=... address it prints
-dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench --sessions 16,64,256
-dotnet run --project samples/WinUiTerminal   # Windows only
-dotnet run --project samples/AvaloniaTerminal   # Windows, Linux, macOS
-dotnet run --project samples/TuiDemo -c Release   # interactive TUI; add -- --smoke for automated checks
+# open the http://localhost:5170/#token=... address it prints
+dotnet samples/SingleFiles/WebTerminal.cs
+# interactive terminal
+dotnet run --project samples/TuiDemo -c Release
+# Windows only
+dotnet run --project samples/WinUiTerminal
+# Windows, Linux, macOS GUI terminal
+dotnet run --project samples/AvaloniaTerminal
 ```
 
-NativeAOT publish (same flags as CI):
+NativeAOT publish, with the same flags as CI (on Linux and macOS, run `bash scripts/build-native.sh <rid>` first):
 
 ```bash
-dotnet samples/SingleFiles/Session.cs -c Release --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
+dotnet publish samples/SingleFiles/Session.cs -c Release -r linux-x64 --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
 ```
 
 ## Development
