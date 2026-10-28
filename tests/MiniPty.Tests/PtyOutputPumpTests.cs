@@ -113,7 +113,9 @@ public sealed class PtyOutputPumpTests
     /// period, resuming must restart it; otherwise a drain tick before the next read closes the transport and the
     /// output still waiting in it is lost.
     /// </summary>
+    /// <remarks>Paced against the quiet period, so it runs alone (see <see cref="PacedQuietMs"/>).</remarks>
     [Test]
+    [NotInParallel]
     public async Task ResumingAfterBackpressureDoesNotCloseTheTransport()
     {
         var backend = new StallThenSlowBackend();
@@ -239,10 +241,15 @@ public sealed class PtyOutputPumpTests
     /// a slow final flush is delivered in full before the pump ends output on its own; measured from the close alone,
     /// the forced end would cut it short.
     /// </summary>
+    /// <remarks>
+    /// Paced against the quiet period, so it runs alone (see <see cref="PacedQuietMs"/>). The flush lasts one and a half
+    /// quiet periods: with 8 reads it ended before one, and the test passed with the forced end measured from the close.
+    /// </remarks>
     [Test]
+    [NotInParallel]
     public async Task OutputStillDrainingAfterTheCloseIsDelivered()
     {
-        const int FlushReads = 8;
+        const int FlushReads = 15;
         var backend = new SlowFlushAfterCloseBackend(FlushReads, intervalMs: PacedQuietMs / 10);
         await using var session = new PtySession(backend);
         await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
@@ -532,6 +539,12 @@ public sealed class PtyOutputPumpTests
     /// 2× margin, which loaded hosted runners (3–4 cores running the suite in parallel) exceeded on every macOS run:
     /// a reader delayed past the period looked quiet, and the transport was closed or output ended early.
     /// </summary>
+    /// <remarks>
+    /// The tests that pace reads against it (a sleep of a tenth of it between reads) also run alone. Beside the parallel
+    /// suite, windows-11-arm once left the reader idle past the whole period in each of them, in the same run: after two
+    /// of eight flush reads, and in the reads after the stall. Neither failed in 25 runs on a desktop under six concurrent
+    /// suites pinned to four cores.
+    /// </remarks>
     private const int PacedQuietMs = 500;
 
     /// <summary>
@@ -895,7 +908,11 @@ public sealed class PtyOutputPumpTests
         {
             _disposed = true;
             _closed = true;
-            _exited.TrySetException(new ObjectDisposedException(GetType().Name));
+            // The platform backends create the exit task only when someone waits on it, so a disposal nobody waits for
+            // faults nothing. This one exists from the start: mark the fault observed, or the finalizer reports it as an
+            // unobserved task exception on the test host's error output, once per fake session disposed before exit.
+            if (_exited.TrySetException(new ObjectDisposedException(GetType().Name)))
+                _ = _exited.Task.Exception;
         }
     }
 }

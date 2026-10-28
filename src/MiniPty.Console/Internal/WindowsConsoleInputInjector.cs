@@ -1,6 +1,11 @@
 namespace MiniPty.Console.Internal;
 
 /// <summary>Test and diagnostic helper for injecting host console key events on Windows.</summary>
+/// <remarks>
+/// Injection goes through <c>WriteConsoleInput</c>. <c>WriteFile</c> on the console input handle fails with
+/// <c>ERROR_INVALID_HANDLE</c> on conhost, so raw UTF-8 bytes cannot be injected; non-ASCII text is injected as
+/// Unicode key events and the console encodes it with the input code page when it is read.
+/// </remarks>
 internal static class WindowsConsoleInputInjector
 {
     internal static unsafe void InjectUnicodeKeyDown(char ch)
@@ -11,9 +16,9 @@ internal static class WindowsConsoleInputInjector
             EventType = ConsoleWindowsInterop.KeyEvent,
             KeyEvent = new ConsoleWindowsInterop.KeyEventRecord
             {
-                KeyDown = true,
+                KeyDown = 1,
                 RepeatCount = 1,
-                UnicodeChar = (ushort)ch,
+                UnicodeChar = ch,
             },
         };
 
@@ -21,14 +26,15 @@ internal static class WindowsConsoleInputInjector
             throw new InvalidOperationException("WriteConsoleInput failed.");
     }
 
-    internal static unsafe void InjectUtf8Byte(byte value)
+    /// <summary>
+    /// Empties the console input queue. It deliberately does not absorb an orphaned read (a <c>ReadFile</c>
+    /// cancelled with <c>CancelIoEx</c> stays registered in conhost and swallows the next record): the host
+    /// terminal must never leave one behind, and a test that follows would fail if it did.
+    /// </summary>
+    internal static void ResetInputQueue()
     {
-        var stdin = ConsoleWindowsInterop.GetStdHandle(ConsoleWindowsInterop.StdInputHandle);
-        Span<byte> span = stackalloc byte[1] { value };
-        fixed (byte* ptr = span)
-        {
-            if (!ConsoleWindowsInterop.WriteFile(stdin, ptr, 1, out _, IntPtr.Zero))
-                throw new InvalidOperationException("WriteFile failed.");
-        }
+        if (!ConsoleWindowsInterop.FlushConsoleInputBuffer(
+                ConsoleWindowsInterop.GetStdHandle(ConsoleWindowsInterop.StdInputHandle)))
+            throw new InvalidOperationException("FlushConsoleInputBuffer failed.");
     }
 }

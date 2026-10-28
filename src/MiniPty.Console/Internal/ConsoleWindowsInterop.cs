@@ -15,11 +15,14 @@ internal static partial class ConsoleWindowsInterop
 
     internal const int ErrorOperationAborted = 995;
 
+    internal const uint Utf8CodePage = 65001;
+
     internal const uint EnableProcessedOutput = 0x0001;
     internal const uint EnableWrapAtEolOutput = 0x0002;
     internal const uint EnableVirtualTerminalProcessing = 0x0004;
 
     internal const ushort KeyEvent = 0x0001;
+    internal const ushort MouseEvent = 0x0002;
     internal const ushort WindowBufferSizeEvent = 0x0004;
 
     internal const ushort VkUp = 0x26;
@@ -40,14 +43,21 @@ internal static partial class ConsoleWindowsInterop
         public short Y;
     }
 
+    /// <summary>
+    /// <c>KEY_EVENT_RECORD</c>. Records cross P/Invoke as raw <see cref="InputRecord"/> pointers, so the managed
+    /// in-memory layout must equal the native one: <c>BOOL bKeyDown</c> is declared as a 4-byte <see cref="int"/>.
+    /// A <c>[MarshalAs(Bool)] bool</c> would occupy 1 byte in memory and shift every following field by 2 bytes,
+    /// while <c>Marshal.OffsetOf</c> would still report the native offsets.
+    /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct KeyEventRecord
     {
-        [MarshalAs(UnmanagedType.Bool)]
-        public bool KeyDown;
+        /// <summary>Native <c>BOOL</c>; nonzero for key down.</summary>
+        public int KeyDown;
 
         public ushort RepeatCount;
         public ushort VirtualKeyCode;
+        public ushort VirtualScanCode;
         public ushort UnicodeChar;
         public uint ControlKeyState;
     }
@@ -56,6 +66,15 @@ internal static partial class ConsoleWindowsInterop
     internal struct WindowBufferSizeRecord
     {
         public Coord Size;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MouseEventRecord
+    {
+        public Coord MousePosition;
+        public uint ButtonState;
+        public uint ControlKeyState;
+        public uint EventFlags;
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 20)]
@@ -69,6 +88,9 @@ internal static partial class ConsoleWindowsInterop
 
         [FieldOffset(4)]
         public WindowBufferSizeRecord WindowBufferSizeEvent;
+
+        [FieldOffset(4)]
+        public MouseEventRecord MouseEvent;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -100,6 +122,21 @@ internal static partial class ConsoleWindowsInterop
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial uint GetConsoleCP();
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SetConsoleCP(uint wCodePageID);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool FlushConsoleInputBuffer(IntPtr hConsoleInput);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetNumberOfConsoleInputEvents(IntPtr hConsoleInput, out uint lpNumberOfEvents);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

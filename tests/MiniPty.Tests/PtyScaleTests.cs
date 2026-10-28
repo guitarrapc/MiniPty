@@ -19,10 +19,19 @@ public sealed class PtyScaleTests
     private const int ManySessions = 64;
 
     /// <summary>
-    /// Threads the runtime may add between the two counts on its own, such as a thread-pool worker injected while the
-    /// sessions start, a tiered-compilation worker, or a timer thread.
+    /// Threads outside the thread pool that the runtime may add between the two counts on its own, such as a
+    /// tiered-compilation worker or a timer thread.
     /// </summary>
     private const int RuntimeThreadTolerance = 4;
+
+    /// <summary>
+    /// Thread-pool workers the runtime may add between the two counts. The pool injects workers while a burst of spawns
+    /// keeps the CPU busy, and keeps each for 20 s before it retires, so the count after the burst is the pool's choice,
+    /// not MiniPty's. Hosted Windows runners counted 6–7 threads more at 64 sessions than at 16 under a single tolerance
+    /// of 4 that covered pool workers too, and a desktop under load counted up to 2 pool workers more. A worker held by
+    /// each idle session would add one for each of the 48 sessions added; half of that tells the two apart.
+    /// </summary>
+    private const int PoolThreadTolerance = (ManySessions - FewSessions) / 2;
 
     private static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(60);
 
@@ -38,14 +47,16 @@ public sealed class PtyScaleTests
         try
         {
             await StartIdleSessionsAsync(sessions, FewSessions);
-            var few = await SettledThreadCountAsync();
+            var few = await SettledThreadCountsAsync();
 
             await StartIdleSessionsAsync(sessions, ManySessions);
-            var many = await SettledThreadCountAsync();
+            var many = await SettledThreadCountsAsync();
 
             // Windows exit watchers each wait on up to 63 children, so 64 sessions may take one watcher thread more.
             var watcherThreads = OperatingSystem.IsWindows() ? WatcherThreads(ManySessions) - WatcherThreads(FewSessions) : 0;
-            await Assert.That(many - few - watcherThreads).IsLessThanOrEqualTo(RuntimeThreadTolerance);
+            var counts = $"{FewSessions} sessions: {few}; {ManySessions} sessions: {many}";
+            await Assert.That(many.OutsidePool - few.OutsidePool - watcherThreads).IsLessThanOrEqualTo(RuntimeThreadTolerance).Because(counts);
+            await Assert.That(many.PoolWorkers - few.PoolWorkers).IsLessThanOrEqualTo(PoolThreadTolerance).Because(counts);
         }
         finally
         {
@@ -142,22 +153,28 @@ public sealed class PtyScaleTests
     }
 
     /// <summary>
-    /// The lowest thread count over a few samples once startup work has settled: helper threads the runtime started
-    /// for the burst of spawns retire on their own, and a single sample can catch one still running.
+    /// The lowest thread counts over a few samples once startup work has settled: helper threads the runtime started
+    /// for the burst of spawns retire on their own, and a single sample can catch one still running. Threads outside the
+    /// thread pool and pool workers are counted apart (see <see cref="PoolThreadTolerance"/>).
     /// </summary>
-    private static async Task<int> SettledThreadCountAsync()
+    private static async Task<ThreadCounts> SettledThreadCountsAsync()
     {
         await Task.Delay(1000);
-        var lowest = int.MaxValue;
+        var outsidePool = int.MaxValue;
+        var poolWorkers = int.MaxValue;
         for (var i = 0; i < 5; i++)
         {
             using var process = Process.GetCurrentProcess();
-            lowest = Math.Min(lowest, process.Threads.Count);
+            var workers = ThreadPool.ThreadCount;
+            outsidePool = Math.Min(outsidePool, process.Threads.Count - workers);
+            poolWorkers = Math.Min(poolWorkers, workers);
             await Task.Delay(200);
         }
 
-        return lowest;
+        return new ThreadCounts(outsidePool, poolWorkers);
     }
+
+    private readonly record struct ThreadCounts(int OutsidePool, int PoolWorkers);
 
     /// <summary>Prints READY, then waits for a line of input that never comes.</summary>
     private static PtyStartInfo IdleChild() =>

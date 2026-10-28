@@ -4,7 +4,7 @@
 #:property ImplicitUsings=enable
 #:property AllowUnsafeBlocks=true
 #:property PublishAot=true
-#:package MiniPty@1.2.0
+#:package MiniPty@1.4.0
 
 using MiniPty;
 

@@ -180,6 +180,8 @@ static async Task CopyOutputAsync(PtySession session)
 }
 ```
 
+On Windows, the host console reads input as UTF-8 while attached (the previous input code page is restored on detach), so non-ASCII keys such as Japanese text reach the PTY as UTF-8. Output is still yours: a console with a legacy output code page misdecodes the PTY's UTF-8 bytes, so set `Console.OutputEncoding = Encoding.UTF8` while copying output.
+
 [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) adds status messages and keeps the shell prompt aligned afterwards.
 
 ### MiniPty.Terminal
@@ -316,6 +318,7 @@ See the [VS Code extension sample instructions](samples/VsCodeExtension) for com
 | [Session.cs](samples/SingleFiles/Session.cs) | `Pty.Start`, background `Output` reads, `WriteInputAsync` / `SendEof`, `CompleteAsync`, `Resize` |
 | [Interactive.cs](samples/SingleFiles/Interactive.cs) | `ReadOutputAsync` persistent loop, marker-driven writes, mid-session `Resize`, natural child exit |
 | [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) | **MiniPty.Console** host attach: keyboard → PTY, `ReadOutputAsync` → host display (requires interactive TTY) |
+| [TuiDemo](samples/TuiDemo) | Dependency-free full-screen TUI through **MiniPty.Console**: tabs with an animated dashboard (spinners, progress bars, a scrolling log, a modal dialog), a file tree with a filter box, and braille charts, filling the terminal, mouse/keys, Unicode, 24-bit color, resize, and a headless `--smoke` mode (NativeAOT compatible) |
 | [Observe.cs](samples/SingleFiles/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
 | [WebTerminal.cs](samples/SingleFiles/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner, Ctrl+V paste and Ctrl+C copy of a selection |
 | [WebTerminalScale.cs](samples/SingleFiles/WebTerminalScale.cs) | **MiniPty.Terminal** in an ASP.NET Core host serving many sessions: a dashboard of what each session costs the host (threads, memory, handles), and a `bench` mode that measures it with keystroke echo latency, and a flood's WebSocket frames per 32 KiB and host CPU per MiB |
@@ -338,6 +341,7 @@ dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs   # then open the 
 dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench --sessions 16,64,256
 dotnet run --project samples/WinUiTerminal   # Windows only
 dotnet run --project samples/AvaloniaTerminal   # Windows, Linux, macOS
+dotnet run --project samples/TuiDemo -c Release   # interactive TUI; add -- --smoke for automated checks
 ```
 
 NativeAOT publish (same flags as CI):

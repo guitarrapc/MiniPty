@@ -8,7 +8,7 @@ internal static class WindowsConsoleInputEncoder
         in ConsoleWindowsInterop.KeyEventRecord keyEvent,
         Span<byte> destination)
     {
-        if (!keyEvent.KeyDown)
+        if (keyEvent.KeyDown == 0)
             return 0;
 
         if (keyEvent.UnicodeChar != 0)
