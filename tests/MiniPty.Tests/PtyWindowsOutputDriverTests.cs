@@ -100,9 +100,51 @@ public sealed class PtyWindowsOutputDriverTests
     }
 
     /// <summary>
-    /// Once the consumer has released everything, the read left posted into the ring is canceled and the ring goes back
-    /// to the pool, so an idle session holds none. The zero-byte read posted instead still wakes the driver for the next
-    /// output.
+    /// While output is unread, the driver waits with a zero-byte read, not a read posted into the ring: such a read had
+    /// to be canceled each time the consumer caught up, which cost a completion and a pool hop per ConPTY write. The wait
+    /// still reads the next output while the first is unread, and the ring goes back once the consumer releases both.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task UnreadOutputLeavesTheDriverWaitingWithoutABuffer()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var backend = new PipeBackend();
+        await using var session = new PtySession(backend);
+        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+        var before = PtyBufferPool.RentedCount;
+
+        backend.Write("first"u8);
+        await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+        await Assert.That(System.Text.Encoding.ASCII.GetString(enumerator.Current.Data.Span)).IsEqualTo("first");
+
+        // The chunk is held, so its output is unread; the driver still waits without a buffer.
+        var driver = (WindowsOutputDriver)session.OutputPump.DriverForTests!;
+        await WaitUntilAsync(() => OperatingSystem.IsWindows() && driver.IsWaitingWithoutBufferForTests);
+        await Assert.That(session.OutputPump.HasUnreadOutput).IsTrue();
+
+        // The wait reads output that arrives while the first chunk is still held.
+        backend.Write("second"u8);
+        await WaitUntilAsync(() => session.OutputPump.UnreadCount == "firstsecond".Length);
+        await WaitUntilAsync(() => OperatingSystem.IsWindows() && driver.IsWaitingWithoutBufferForTests);
+
+        await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+        await Assert.That(System.Text.Encoding.ASCII.GetString(enumerator.Current.Data.Span)).IsEqualTo("second");
+
+        // Releasing the last chunk gives the ring back, with no wake of the driver needed.
+        var next = enumerator.MoveNextAsync().AsTask();
+        await WaitUntilAsync(() => PtyBufferPool.RentedCount == before);
+
+        backend.Write("third"u8);
+        await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
+        await Assert.That(System.Text.Encoding.ASCII.GetString(enumerator.Current.Data.Span)).IsEqualTo("third");
+    }
+
+    /// <summary>
+    /// Once the consumer has released everything, the ring goes back to the pool, so an idle session holds none. The
+    /// zero-byte read the driver waits with still wakes it for the next output.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -132,8 +174,8 @@ public sealed class PtyWindowsOutputDriverTests
 
     /// <summary>
     /// When the close does not end the pipe (another process holds its write end), the drain forces end of output by
-    /// canceling the posted read. That read is a zero-byte read when nothing is unread, and a read into the ring when the
-    /// consumer has not taken the output yet, which must still arrive.
+    /// canceling the posted zero-byte read, whether or not the consumer has taken the output yet; output it has not
+    /// taken must still arrive.
     /// </summary>
     [Test]
     [Arguments(false)]

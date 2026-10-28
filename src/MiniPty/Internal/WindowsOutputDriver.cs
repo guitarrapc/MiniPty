@@ -13,13 +13,19 @@ namespace MiniPty.Internal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Waiting.</b> While nothing is unread, the driver waits with a zero-byte read, which completes when output arrives
-/// and leaves it in the pipe, so the session holds no ring. It then takes a ring and reads what the pipe holds with reads
-/// that complete at once (completion-port notification is skipped for those), and publishes each. While output it
-/// published is still unread (a consumer that has not caught up), the next read is posted into the ring itself, which
-/// saves a round trip during a burst; once the consumer has released everything, that read is canceled and replaced
-/// by a zero-byte read, and the ring goes back to the pool. While the ring is full, no read is posted at all: the pipe
-/// fills, ConPTY stops, and the consumer's release resumes reading.
+/// <b>Waiting.</b> The driver always waits with a zero-byte read, which completes when output arrives and leaves it in the
+/// pipe. It then takes a ring, reads what the pipe holds with a read that completes at once (completion-port
+/// notification is skipped for those), publishes it, and waits again. A wait that has to stay posted lets go of the
+/// ring, which goes back to the pool once the consumer has released everything, so an idle session holds none. While
+/// the ring is full, no read is posted at all: the pipe fills, ConPTY stops, and the consumer's release resumes reading.
+/// </para>
+/// <para>
+/// The driver never posts a read into the ring while it waits, even when published output is still unread. Such a read
+/// would save the zero-byte read's round trip, but it holds the ring, and a consumer that keeps up releases everything
+/// right after each publish, so the read must then be canceled with <c>CancelIoEx</c> to give the ring back: one more
+/// completion, and one more pool hop, per write. The out-of-band ConPTY writes a flood about 256 B at a time, so that
+/// cost a third more work items and CPU than the zero-byte wait alone. Reads into the ring stay posted only after
+/// disposal, to let the transport end, and in the forced end of output.
 /// </para>
 /// <para>
 /// <b>Running.</b> At most one read is posted at a time, and at most one step runs: a completion, or a work item queued
@@ -65,7 +71,7 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
     private const int StateParked = 2;
     /// <summary>A zero-byte read is posted.</summary>
     private const int StateZeroPosted = 3;
-    /// <summary>A read into the ring is posted.</summary>
+    /// <summary>A read into the ring is posted: after disposal, or in the forced end of output.</summary>
     private const int StateRingPosted = 4;
 
     private static readonly IOCompletionCallback s_completed = OnCompleted;
@@ -89,6 +95,9 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
 
     /// <summary>The driver's state, for tests that report where a session stalled.</summary>
     internal int StateForTests => Volatile.Read(ref _state);
+
+    /// <summary>Whether the driver waits with a zero-byte read posted, which holds no ring.</summary>
+    internal bool IsWaitingWithoutBufferForTests => Volatile.Read(ref _state) == StateZeroPosted;
     // A wake arrived while a step ran; the step looks again before it parks.
     private bool _recheck;
     // The posted read was canceled already, so a second cancel cannot reach the read posted after it.
@@ -149,8 +158,8 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
     }
 
     /// <summary>
-    /// Resumes a driver parked on a full ring; cancels a read posted into the ring once nothing in it is unread, so the
-    /// ring can go back; otherwise has the running step look again. Never blocks, and ignores a pump it no longer serves.
+    /// Resumes a driver parked on a full ring; otherwise has the running step look again. A posted read needs no wake:
+    /// its completion runs the next step. Never blocks, and ignores a pump it no longer serves.
     /// </summary>
     public void Wake(PtyOutputPump pump)
     {
@@ -160,19 +169,14 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
             if (_pump != pump)
                 return;
 
-            switch (_state)
+            if (_state == StateParked)
             {
-                case StateParked:
-                    _state = StateRunning;
-                    resume = true;
-                    break;
-                case StateRunning:
-                    _recheck = true;
-                    break;
-                case StateRingPosted:
-                    if (!pump.HasUnreadOutput && !pump.IsSessionDisposed)
-                        CancelPostedReadLocked();
-                    break;
+                _state = StateRunning;
+                resume = true;
+            }
+            else if (_state == StateRunning)
+            {
+                _recheck = true;
             }
         }
 
@@ -325,7 +329,6 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
                         return EndOrThrow((int)errorCode);
                     break;
                 case Completion.Ring:
-                    pump.ClearWakeWhenEmpty();
                     if (errorCode == 0 || (errorCode == ErrorOperationAborted && numBytes > 0))
                     {
                         if (numBytes > 0)
@@ -393,7 +396,7 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
                 if (posted)
                 {
                     // Not expected with bytes waiting; the next forced-end cancel releases it.
-                    if (EnterPosted(pump, StateRingPosted, out var early))
+                    if (EnterPosted(StateRingPosted, out var early))
                         return true;
 
                     if (!HandleEarlyRing(pump, early))
@@ -410,15 +413,18 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
                 continue;
             }
 
-            // After disposal reads only let the transport end, into the ring, which nothing reads any more.
-            if (disposed || dataReady || pump.HasUnreadOutput)
+            // Output is waiting, so this read completes at once. After disposal reads only let the transport end, into the
+            // ring, which nothing reads any more, and may stay posted there.
+            if (disposed || dataReady)
             {
                 dataReady = false;
                 pump.HoldRing();
                 var read = ReadNow(handle, pump.NextReadSpan, out var posted);
                 if (posted)
                 {
-                    if (EnterPosted(pump, StateRingPosted, out var early))
+                    // Before disposal not expected: the wait reported output waiting, and only this driver reads the
+                    // pipe. Such a read would hold the ring until output arrives.
+                    if (EnterPosted(StateRingPosted, out var early))
                         return true;
 
                     if (!HandleEarlyRing(pump, early))
@@ -437,12 +443,15 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
                 continue;
             }
 
-            // Nothing is unread: wait for output without a buffer.
-            pump.LetGoOfRing();
+            // Wait for output without a buffer, even while output is unread (see the remarks).
             var zero = ReadNow(handle, Span<byte>.Empty, out var zeroPosted);
             if (zeroPosted)
             {
-                if (EnterPosted(pump, StateZeroPosted, out var early))
+                // The wait stays posted, so let go of the ring: it goes back once the consumer has released everything.
+                // Not before the read, so output already waiting keeps the ring. Still this step's to do: a completion
+                // that arrives meanwhile is left for it.
+                pump.LetGoOfRing();
+                if (EnterPosted(StateZeroPosted, out var early))
                     return true;
 
                 if (early.Error != 0 && early.Error != ErrorOperationAborted)
@@ -455,16 +464,14 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
             if (zero < 0)
                 return false;
 
-            // Output is waiting in the pipe.
+            // Output is waiting in the pipe. Only the read that takes it counts toward the step's bound.
             dataReady = true;
-            readsNow++;
         }
     }
 
     /// <summary>Handles a ring read that completed before its step left; returns <see langword="false"/> at end of output.</summary>
     private static bool HandleEarlyRing(PtyOutputPump pump, (uint Error, uint Bytes) early)
     {
-        pump.ClearWakeWhenEmpty();
         if (early.Error == 0 || early.Error == ErrorOperationAborted)
         {
             if (early.Bytes > 0)
@@ -480,15 +487,10 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
     /// Leaves the step with a read posted. Returns <see langword="false"/> when the read's completion already arrived,
     /// with its result, and the step goes on; otherwise the completion runs the next step.
     /// </summary>
-    private bool EnterPosted(PtyOutputPump pump, int posted, out (uint Error, uint Bytes) early)
+    private bool EnterPosted(int posted, out (uint Error, uint Bytes) early)
     {
-        // A read posted into the ring keeps the ring; once the consumer has released everything, it is canceled so the
-        // ring can go back. Asked for before the state is published, because from then on the completion may run the
-        // next step at once, and this step must not touch the driver.
-        var watchEmpty = posted == StateRingPosted && !pump.IsSessionDisposed;
-        if (watchEmpty)
-            pump.WakeDriverWhenEmpty();
-
+        // From the state's publication on, the completion may run the next step at once, and this step must not touch
+        // the driver.
         lock (_lock)
         {
             if (_earlyCompletion)
@@ -501,9 +503,6 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver, IThreadPool
             _state = posted;
             _cancelIssued = false;
             _recheck = false;
-            // The consumer may have released everything before the request above; a wake after it finds this state.
-            if (watchEmpty && !pump.HasUnreadOutput)
-                CancelPostedReadLocked();
         }
 
         early = default;
