@@ -1,6 +1,7 @@
 ﻿using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Environments;
 using BenchmarkDotNet.Jobs;
 using Perfolizer.Mathematics.OutlierDetection;
 
@@ -36,11 +37,18 @@ namespace MiniPty.Benchmarks;
 /// An operation is one pooled async round trip (<see cref="BenchmarkServeSession.RoundTripAsync"/>), so the allocation
 /// column shows each library's own cost per keystroke rather than the harness's async state.
 /// </para>
+/// <para>
+/// The run turns tiered compilation off (<c>DOTNET_TieredCompilation=0</c>, which the serve child inherits too), so each
+/// method is compiled once, fully optimized, before the first measured keystroke. With tiering on, the runtime recompiles
+/// the hot methods in the background about 100 ms after the last new method, which lands inside the measured iterations
+/// however long the warmup: on 2 to 4 CPUs those compiles took the CPU from the round trip, and 1 to 2.5 ms keystrokes
+/// matched them one for one, for every library, which one depending on when its run happened. That is the cost of
+/// starting a process, not of a running session.
+/// </para>
 /// </remarks>
 [MemoryDiagnoser]
 [Outliers(OutlierMode.DontRemove)]
 [Config(typeof(Config))]
-[SimpleJob(RuntimeMoniker.Net10_0, launchCount: 1, warmupCount: 20, iterationCount: 200, invocationCount: 1)]
 public class PtyLatencyBenchmarks
 {
     private BenchmarkServeSession? serve;
@@ -94,6 +102,17 @@ public class PtyLatencyBenchmarks
 
     private sealed class Config : ManualConfig
     {
-        public Config() => AddColumn(StatisticColumn.P50, StatisticColumn.P95, StatisticColumn.Max);
+        public Config()
+        {
+            AddJob(Job.Default
+                .WithRuntime(CoreRuntime.Core10_0)
+                .WithLaunchCount(1)
+                .WithWarmupCount(20)
+                .WithIterationCount(200)
+                .WithInvocationCount(1)
+                .WithUnrollFactor(1)
+                .WithEnvironmentVariable("DOTNET_TieredCompilation", "0"));
+            AddColumn(StatisticColumn.P50, StatisticColumn.P95, StatisticColumn.Max);
+        }
     }
 }
