@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
-internal enum DemoCommand { None, Up, Down, Toggle, Quit, Mouse }
+internal enum DemoCommand { None, Up, Down, Details, Pause, Quit, Mouse }
 
 internal readonly record struct DemoEvent(DemoCommand Command, int Column = 0, int Row = 0, int Button = 0);
 
@@ -49,7 +49,8 @@ internal struct DemoInputParser
                     'q' or 'Q' => new(DemoCommand.Quit),
                     'k' or 'K' => new(DemoCommand.Up),
                     'j' or 'J' => new(DemoCommand.Down),
-                    '\r' or '\n' or ' ' => new(DemoCommand.Toggle),
+                    '\r' or '\n' => new(DemoCommand.Details),
+                    ' ' or 'p' or 'P' => new(DemoCommand.Pause),
                     _ => default,
                 };
             case 1:

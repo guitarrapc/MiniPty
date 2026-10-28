@@ -1,10 +1,13 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 
 /// <summary>
-/// A small independent TUI: a colored flow diagram and block-art landscape, keyboard/mouse selection,
-/// and resize. The application owns hit testing; MiniPty carries the terminal's output and input.
+/// A small independent TUI that looks like a typical terminal application: spinners, job progress bars, a
+/// scrolling log, and a modal dialog, with keyboard/mouse selection and resize. The animation clock advances in the
+/// input poll loop (no timers or tasks) and stops while paused or while the dialog is open. The application owns
+/// hit testing; MiniPty carries the terminal's output and input.
 /// </summary>
 internal static partial class DemoTui
 {
@@ -29,27 +32,28 @@ internal static partial class DemoTui
             Console.Write("\u001b[?1049h\u001b[?25l\u001b[?1000h\u001b[?1006h");
             var renderer = new DemoRenderer(Console.Out);
             var selected = 0;
-            var enabled = false;
-            var width = 0;
-            var height = 0;
-            var dirty = true;
+            var paused = false;
+            var dialog = false;
             var mouseColumn = 0;
             var mouseRow = 0;
+            var ticksPerFrame = Stopwatch.Frequency * DemoJobs.FrameMilliseconds / 1000;
+            var animationTicks = 0L;
+            var last = Stopwatch.GetTimestamp();
             while (true)
             {
-                var newWidth = Console.WindowWidth;
-                var newHeight = Console.WindowHeight;
-                if (dirty || width != newWidth || height != newHeight)
-                {
-                    width = newWidth;
-                    height = newHeight;
-                    renderer.Draw(new DemoView(width, height, selected, enabled, mouseColumn, mouseRow));
-                    dirty = false;
-                }
+                var now = Stopwatch.GetTimestamp();
+                if (!paused && !dialog)
+                    animationTicks += now - last;
+                last = now;
+
+                // The renderer emits nothing for an unchanged view, so drawing every poll costs only a comparison.
+                var width = Console.WindowWidth;
+                var height = Console.WindowHeight;
+                renderer.Draw(new DemoView(width, height, selected, paused, dialog, mouseColumn, mouseRow, animationTicks / ticksPerFrame));
 
                 if (!input.TryRead(out var key))
                 {
-                    Thread.Sleep(20); // Poll size even when the user is not typing; no per-frame tasks or timers.
+                    Thread.Sleep(20); // Poll size and the clock even when the user is not typing; no tasks or timers.
                     continue;
                 }
 
@@ -57,43 +61,31 @@ internal static partial class DemoTui
                     break;
                 switch (key.Command)
                 {
-                    case DemoCommand.Up:
-                        selected = (selected + 2) % 3;
+                    case DemoCommand.Up when !dialog:
+                        selected = (selected + DemoJobs.Count - 1) % DemoJobs.Count;
                         break;
-                    case DemoCommand.Down:
-                        selected = (selected + 1) % 3;
+                    case DemoCommand.Down when !dialog:
+                        selected = (selected + 1) % DemoJobs.Count;
                         break;
-                    case DemoCommand.Toggle:
-                        enabled = !enabled;
+                    case DemoCommand.Pause when !dialog:
+                        paused = !paused;
+                        break;
+                    case DemoCommand.Details:
+                        dialog = !dialog;
                         break;
                     case DemoCommand.Mouse:
                         mouseColumn = key.Column;
                         mouseRow = key.Row;
-                        if (width >= 72 && height >= 22 && key.Column <= width && key.Row <= height)
-                        {
-                            if (key.Button is 64 or 65)
-                                selected = (selected + (key.Button == 64 ? 2 : 1)) % 3;
-                            else if (key.Row is >= 6 and <= 9)
-                            {
-                                for (var i = 0; i < 3; i++)
-                                {
-                                    if (key.Column >= 1 + i * 24 && key.Column <= 20 + i * 24)
-                                        selected = i;
-                                }
-                            }
-                            else if (key.Row == 17 && key.Column is >= 34 and <= 41)
-                                enabled = !enabled;
-                        }
+                        if (width >= DemoLayout.MinWidth && height >= DemoLayout.MinHeight && key.Column <= width && key.Row <= height)
+                            Click(key, ref selected, ref paused, ref dialog);
                         break;
-                    default:
-                        continue;
                 }
-                dirty = true;
             }
         }
         finally
         {
-            Console.Write("\u001b[?1000l\u001b[?1006l\u001b[0m\u001b[?25h\u001b[?1049l");
+            // Also reset the scroll region in case the TUI stopped between a log scroll and its reset.
+            Console.Write("\u001b[r\u001b[?1000l\u001b[?1006l\u001b[0m\u001b[?25h\u001b[?1049l");
             Console.Out.Flush();
             Console.TreatControlCAsInput = savedControlC;
             if (OperatingSystem.IsWindows())
@@ -101,6 +93,31 @@ internal static partial class DemoTui
         }
         Console.Write("TUI exited cleanly.\r\n");
         return 0;
+    }
+
+    /// <summary>Hit testing for a press or wheel report; the dialog is modal and only its Close button reacts.</summary>
+    private static void Click(DemoEvent key, ref int selected, ref bool paused, ref bool dialog)
+    {
+        if (dialog)
+        {
+            if (key.Button == 0 && key.Row == DemoLayout.CloseRow && key.Column is >= DemoLayout.CloseLeft and <= DemoLayout.CloseRight)
+                dialog = false;
+            return;
+        }
+
+        if (key.Button is 64 or 65)
+        {
+            selected = (selected + (key.Button == 64 ? DemoJobs.Count - 1 : 1)) % DemoJobs.Count;
+            return;
+        }
+
+        var job = key.Row - DemoLayout.FirstJobRow;
+        if (job is >= 0 and < DemoJobs.Count && key.Column is >= DemoLayout.JobLeft and <= DemoLayout.JobRight)
+            selected = job;
+        else if (key.Row == DemoLayout.ButtonRow && key.Column is >= DemoLayout.PauseLeft and <= DemoLayout.PauseRight)
+            paused = !paused;
+        else if (key.Row == DemoLayout.ButtonRow && key.Column is >= DemoLayout.DetailsLeft and <= DemoLayout.DetailsRight)
+            dialog = true;
     }
 
     // Only the child needs to enable Windows VT output; the host uses MiniPty.Console for its own modes.

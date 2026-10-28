@@ -38,18 +38,20 @@ public sealed class TuiDemoInputTests
     {
         var parser = new DemoInputParser();
         var events = new List<DemoEvent>();
-        foreach (var character in "\u001b[<64;50;7M\u001b[<65;50;7M\u001b[A\u001bOB\r\u0003")
+        foreach (var character in "\u001b[<64;50;7M\u001b[<65;50;7M\u001b[A\u001bOB\r p\u0003")
         {
             var input = parser.Feed(character);
             if (input.Command != DemoCommand.None)
                 events.Add(input);
         }
-        await Assert.That(events.Count).IsEqualTo(6);
+        await Assert.That(events.Count).IsEqualTo(8);
         await Assert.That(events[0]).IsEqualTo(new DemoEvent(DemoCommand.Mouse, 50, 7, 64));
         await Assert.That(events[1]).IsEqualTo(new DemoEvent(DemoCommand.Mouse, 50, 7, 65));
         await Assert.That(events[2].Command).IsEqualTo(DemoCommand.Up);
         await Assert.That(events[3].Command).IsEqualTo(DemoCommand.Down);
-        await Assert.That(events[4].Command).IsEqualTo(DemoCommand.Toggle);
-        await Assert.That(events[5].Command).IsEqualTo(DemoCommand.Quit);
+        await Assert.That(events[4].Command).IsEqualTo(DemoCommand.Details);
+        await Assert.That(events[5].Command).IsEqualTo(DemoCommand.Pause);
+        await Assert.That(events[6].Command).IsEqualTo(DemoCommand.Pause);
+        await Assert.That(events[7].Command).IsEqualTo(DemoCommand.Quit);
     }
 }
