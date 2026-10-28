@@ -5,13 +5,17 @@ using MiniPty.Console.Internal;
 
 namespace MiniPty.Tests;
 
+/// <summary>
+/// Host console input tests. They share one process-wide console input queue (the attached console or one
+/// allocated per test), so they run one at a time: a concurrent read would consume another test's records.
+/// </summary>
+[NotInParallel(nameof(PtyConsoleWindowsInputTests))]
 public sealed class PtyConsoleWindowsInputTests
 {
     private const string EchoMarker = "pty-console-echo-Q";
 
     [Test]
-    [NotInParallel]
-    public async Task WindowsHostTerminal_ReadInput_PreservesQueuedMouseReport()
+    public async Task WindowsHostTerminal_ReadInput_SkipsQueuedMouseRecordBeforeKey()
     {
         if (!OperatingSystem.IsWindows())
             return;
@@ -26,36 +30,21 @@ public sealed class PtyConsoleWindowsInputTests
         try
         {
             using var terminal = new WindowsHostTerminal();
-            WriteConsoleBytes("\u001b[?1000h\u001b[?1006h"u8);
-            try
-            {
-                // Queue a real native mouse record before ReadInput starts. The old ReadConsoleInput
-                // fallback discarded it; ReadFile must encode it using the negotiated SGR mouse mode.
-                InjectMousePress();
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                var bytes = new byte[64];
-                var read = terminal.ReadInput(bytes, timeout.Token);
-                await Assert.That(Encoding.UTF8.GetString(bytes, 0, read)).IsEqualTo("\u001b[<0;5;6M");
-            }
-            finally
-            {
-                WriteConsoleBytes("\u001b[?1000l\u001b[?1006l"u8);
-            }
+            // A native mouse record queued ahead of a key must neither block nor corrupt the key read. The
+            // former ReadConsoleInput fallback consumed such records and decoded keys with its own struct
+            // layout. WriteConsoleInput records bypass conhost's mouse-mode encoding, so an injected record
+            // cannot reproduce a terminal's SGR report; TuiDemo's smoke mode covers that end to end.
+            InjectMousePress();
+            WindowsConsoleInputInjector.InjectUnicodeKeyDown('k');
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var bytes = new byte[64];
+            var read = terminal.ReadInput(bytes, timeout.Token);
+            await Assert.That(Encoding.UTF8.GetString(bytes, 0, read)).IsEqualTo("k");
         }
         finally
         {
             if (allocatedConsole)
                 ConsoleWindowsInterop.FreeConsole();
-        }
-
-        static unsafe void WriteConsoleBytes(ReadOnlySpan<byte> bytes)
-        {
-            fixed (byte* pointer = bytes)
-            {
-                if (!ConsoleWindowsInterop.WriteFile(ConsoleWindowsInterop.GetStdHandle(ConsoleWindowsInterop.StdOutputHandle),
-                    pointer, (uint)bytes.Length, out _, IntPtr.Zero))
-                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-            }
         }
 
         static unsafe void InjectMousePress()
@@ -146,8 +135,10 @@ public sealed class PtyConsoleWindowsInputTests
             using var terminal = new WindowsHostTerminal();
             WindowsConsoleInputInjector.InjectUnicodeKeyDown('Z');
 
+            // Bound the read: a wrongly laid-out record yields no VT bytes and would block ReadFile forever.
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             Span<byte> buffer = stackalloc byte[8];
-            var read = terminal.ReadInput(buffer);
+            var read = terminal.ReadInput(buffer, timeout.Token);
             var first = buffer[0];
             await Assert.That(read).IsEqualTo(1);
             await Assert.That(first).IsEqualTo((byte)'Z');

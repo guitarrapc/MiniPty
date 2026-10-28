@@ -41,11 +41,17 @@ internal static partial class ConsoleWindowsInterop
         public short Y;
     }
 
+    /// <summary>
+    /// <c>KEY_EVENT_RECORD</c>. Records cross P/Invoke as raw <see cref="InputRecord"/> pointers, so the managed
+    /// in-memory layout must equal the native one: <c>BOOL bKeyDown</c> is declared as a 4-byte <see cref="int"/>.
+    /// A <c>[MarshalAs(Bool)] bool</c> would occupy 1 byte in memory and shift every following field by 2 bytes,
+    /// while <c>Marshal.OffsetOf</c> would still report the native offsets.
+    /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct KeyEventRecord
     {
-        [MarshalAs(UnmanagedType.Bool)]
-        public bool KeyDown;
+        /// <summary>Native <c>BOOL</c>; nonzero for key down.</summary>
+        public int KeyDown;
 
         public ushort RepeatCount;
         public ushort VirtualKeyCode;

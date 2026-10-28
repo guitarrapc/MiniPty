@@ -11,7 +11,7 @@ internal static class WindowsConsoleInputInjector
             EventType = ConsoleWindowsInterop.KeyEvent,
             KeyEvent = new ConsoleWindowsInterop.KeyEventRecord
             {
-                KeyDown = true,
+                KeyDown = 1,
                 RepeatCount = 1,
                 UnicodeChar = (ushort)ch,
             },
