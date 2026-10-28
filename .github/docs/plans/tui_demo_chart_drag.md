@@ -40,7 +40,7 @@ On the Charts tab, drag the border between the plot and the bottom panels up or 
 - Implemented as planned. The split is `ChartsLayout` in the TUI's state; `ChartsGeometry` clamps it, so the renderer, hit testing, and the smoke share one calculation, and the default split at 72 × 22 equals the earlier fixed layout.
 - Local runs: Windows JIT 5/5 and NativeAOT 2/2; Linux (WSL) JIT 5/5, four concurrent runs 4/4, NativeAOT 2/2 (container), and the full test suite. macOS is covered by CI only.
 
-## Open reports from the same review
+## Reports from the same review
 
-- **A dialog remnant over the log after closing Details.** Reported on the dashboard. The renderer alone always repaints every covered cell. Through ConPTY at 120 × 40, where the not-yet-full log leaves the covered rows blank, a fragment of the dialog's bottom border stayed once in 21 runs; a targeted close-then-scroll race did not reproduce it. Cause not established.
-- **IME composition shown slightly below the filter box.** The terminal cursor is where the smoke expects it (row 4, after the text's display width) through the direct PTY and the nested host; the composition itself is drawn by the terminal's IME. Needs the user's terminal to investigate.
+- **The top of the log blank after closing Details** (fixed). Seen in VS Code's terminal, about 86 rows tall. The renderer kept 64 log entries, but scrolling had left one per row on screen, so on a log taller than 64 rows the redraw blanked the rows it no longer had. The store now grows with the log height; a renderer test at 100 × 90 and a run through VS Code's ConPTY and xterm.js cover it ([lesson](../specs/console.md#tui-sample-validation-lessons-2026-10-28)).
+- **IME composition shown slightly below the filter box** (terminal-side, left as is). Only VS Code shows it, about 0.7 rows low; Windows Terminal places it on the box. xterm.js has the cursor in the filter row, and no output reaches the terminal while composing, so the sample cannot move the overlay.

@@ -170,6 +170,7 @@ internal sealed partial class DemoRenderer
 
         var g = new DemoGeometry(view.Width, view.Height);
         // The log follows the clock on every page, so returning to the dashboard shows a continuous history.
+        KeepLogLines(g.LogLines);
         var added = CollectLog(view.Frame);
         var resized = !_drawn || view.Width != _previous.Width || view.Height != _previous.Height;
         var clear = !_drawn || view.Compact != _previous.Compact || (view.Compact && resized);

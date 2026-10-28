@@ -139,6 +139,26 @@ public sealed class TuiDemoRendererTests
     }
 
     [Test]
+    public async Task TallLog_RedrawRepaintsEveryLineScrollingBroughtIn()
+    {
+        // 75 log rows: more than the renderer kept at first. Ticks scroll entries in one by one; closing the dialog
+        // then redraws the log from the kept entries, which must cover every row the scrolls filled.
+        var view = Initial with { Width = 100, Height = 90 };
+        var (renderer, screen, parser, output) = Start(view);
+        for (var frame = 1; frame <= 1500; frame++)
+            Draw(renderer, parser, output, view with { Frame = frame });
+        view = view with { Frame = 1500 };
+        var g = new DemoGeometry(100, 90);
+        var before = string.Join('\n', RowsOf(screen, DemoLayout.LogTop - 1, g.LogLines));
+        await Assert.That(before.StartsWith("│ 0", StringComparison.Ordinal)).IsTrue();
+
+        Draw(renderer, parser, output, view with { Dialog = true });
+        Draw(renderer, parser, output, view);
+
+        await Assert.That(string.Join('\n', RowsOf(screen, DemoLayout.LogTop - 1, g.LogLines))).IsEqualTo(before);
+    }
+
+    [Test]
     public async Task UnchangedView_ProducesNoOutput()
     {
         var (renderer, _, parser, output) = Start(Initial);

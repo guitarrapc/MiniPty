@@ -9,10 +9,12 @@ internal sealed partial class DemoRenderer
     private const string DialogStyle = "\u001b[0;97;44m";
     private const string Eighths = "▏▎▍▌▋▊▉";
 
-    /// <summary>Log entries kept for redraws: more than the tallest log shows.</summary>
-    private const int LogCapacity = 64;
-
-    private readonly DemoLogEntry[] _log = new DemoLogEntry[LogCapacity];
+    /// <summary>
+    /// Log entries kept for redraws. Scrolls bring in one row per entry, so a redraw can repaint every row only while
+    /// at least as many entries as the log has rows are kept; <see cref="KeepLogLines"/> grows the store for a taller
+    /// log.
+    /// </summary>
+    private DemoLogEntry[] _log = new DemoLogEntry[64];
     private int _logCount;
     private int _logNext;
     private long _loggedFrame = -1;
@@ -193,6 +195,21 @@ internal sealed partial class DemoRenderer
 
     private System.Text.StringBuilder DialogLine(int row, int left) => MoveTo(row, left).Append(DialogStyle).Append("│ ");
 
+    /// <summary>
+    /// Grows the store, oldest entry first, to keep at least <paramref name="lines"/> entries. It allocates only when
+    /// the terminal is taller than it has been, never on a tick.
+    /// </summary>
+    private void KeepLogLines(int lines)
+    {
+        if (lines <= _log.Length)
+            return;
+        var log = new DemoLogEntry[Math.Max(lines, _log.Length * 2)];
+        for (var i = 0; i < _logCount; i++)
+            log[i] = LogEntryAt(i);
+        _log = log;
+        _logNext = _logCount;
+    }
+
     private int CollectLog(long frame)
     {
         if (frame <= _loggedFrame)
@@ -206,18 +223,18 @@ internal sealed partial class DemoRenderer
                 if (!DemoJobs.TryGetEvent(job, f, out var entry))
                     continue;
                 _log[_logNext] = entry;
-                _logNext = (_logNext + 1) % LogCapacity;
-                _logCount = Math.Min(_logCount + 1, LogCapacity);
+                _logNext = (_logNext + 1) % _log.Length;
+                _logCount = Math.Min(_logCount + 1, _log.Length);
                 added++;
             }
         }
         _loggedFrame = frame;
-        return Math.Min(added, LogCapacity);
+        return Math.Min(added, _log.Length);
     }
 
     /// <summary>The <paramref name="index"/>-th kept entry, oldest first.</summary>
     private DemoLogEntry LogEntryAt(int index) =>
-        _log[(_logNext - _logCount + index + 2 * LogCapacity) % LogCapacity];
+        _log[(_logNext - _logCount + index + 2 * _log.Length) % _log.Length];
 
     private static string JobGlyph(int job, long frame)
     {

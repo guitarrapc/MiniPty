@@ -37,7 +37,7 @@ The animation clock advances in the same 20 ms input poll loop that watches the 
 
 `DemoRenderer` remembers the displayed state and overwrites only what changed. Identical states emit nothing, and a reusable character buffer batches each update before writing to the terminal.
 
-- **Dashboard:** a tick rewrites the spinner glyphs that changed, the job rows, and the elapsed time. A new log line scrolls the log region with DECSTBM and SU and writes only the new line, instead of redrawing the panel. Selection rewrites the old and new job rows and the status line.
+- **Dashboard:** a tick rewrites the spinner glyphs that changed, the job rows, and the elapsed time. A new log line scrolls the log region with DECSTBM and SU and writes only the new line, instead of redrawing the panel. The renderer keeps at least as many entries as the log has rows, growing with a taller terminal, so a redraw repaints every line the scrolls brought in. Selection rewrites the old and new job rows and the status line.
 - **Files:** moving the cursor rewrites the old and new rows and the Details panel; scrolling, folding, or filtering rewrites the tree's rows, and a keystroke also rewrites the filter box. It does not use a scroll region, because DECSTBM scrolls whole rows and would move the Details panel beside the tree. Names and previews are padded by display width, so wide characters keep the size column and the border aligned.
 - **Charts:** the plot changes nearly every cell each frame, so the renderer keeps the displayed braille canvas and writes only the span of each row that differs. Bars and sparklines are small and are rewritten on each tick. A dragged border redraws the page in place; the canvas buffers are sized for the tallest plot at the current size, so dragging does not allocate.
 - Mouse coordinates update their own field on every page.
@@ -77,7 +77,7 @@ The existing emulator in `samples/TerminalEmulator` interprets the output for th
 - Resizing to 100 × 30 and back stretches the layout in place; the chart uses the extra cells; the bottom bar fills its row without writing its last cell.
 - The filter box shows the cursor after wide text, filters the tree, says when nothing matches, and restores the help and the bottom bar.
 - A new log entry scrolls the previous one up through the scroll region.
-- The dialog closes, and tabs switch and switch back, without clearing and leave the screen as it was.
+- The dialog closes, and tabs switch and switch back, without clearing and leave the screen as it was, including a 75-row log filled by scrolling.
 - A Files cursor move rewrites only its two rows and the details; scrolling keeps the cursor visible and the wide-character row aligned.
 - A chart tick writes braille and only the changed cells; a dragged split moves the borders and scales the bars and sparklines without clearing, clamps to the size, and highlights the dragged border.
 - Shorter text leaves no stale suffix, and compact-layout transitions restore the screen.
