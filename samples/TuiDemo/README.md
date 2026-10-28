@@ -16,7 +16,7 @@ The screen looks like a typical TUI application, after the familiar ratatui/tui-
   - A Log panel whose new lines enter at the bottom and scroll the older ones up.
   - A modal Details dialog with a shadow.
 - **2 Files:** a simulated repository tree (fixed data, not the file system) with guides, folder markers, colored names, and right-aligned sizes, including `日本語メモ.txt` and `café.md`, under a filter box. A Details panel shows the selected item's name, type, size, and path, and a preview: a folder's children or a file's sample lines.
-- **3 Charts:** two scrolling signals plotted with braille dots on a y axis, five animated bars in eighth blocks, and three sparklines with their current values.
+- **3 Charts:** two scrolling signals plotted with braille dots on a y axis, five animated bars in eighth blocks, and three sparklines with their current values. Drag the border between the plot and the bottom panels, or between the bar chart and the Load panel, to resize them.
 
 Terminals differ in how they draw these (24-bit color, braille and block glyphs, wide characters, scroll regions, mouse reporting), so the same screen in Windows Terminal, conhost, VS Code, or the GUI and web terminal samples shows those differences side by side. The WinUI and Avalonia terminal samples take the program to run as arguments, so they can host the TUI directly as `TuiDemo --child`.
 
@@ -24,11 +24,12 @@ Terminals differ in how they draw these (24-bit color, braille and block glyphs,
 - Dashboard: click a job row, use the mouse wheel, or Up/Down (J/K) to select a job. Enter or `[ Details ]` opens the dialog for the selected job, and the animation stops while it is open; Enter or `[ Close ]` closes it.
 - Files: Up/Down, PgUp/PgDn, Home/End, and the wheel move; Enter or a click on the selected folder folds it; Right unfolds and Left folds or goes to the parent folder.
 - Files filter: `/` or a click on the box starts typing, and the terminal cursor appears in it. The tree shows the items whose names contain the text (ignoring case) with their folders, open. Backspace deletes, Ctrl+U clears, Up/Down still move, and Enter or a click elsewhere stops typing and keeps the filter. Japanese and other wide characters work as typed.
+- Charts borders: press on either horizontal border (the plot's bottom or the bottom panels' top) or on the vertical border between the bar chart and the Load panel, move, and release. The border is highlighted while it moves; the plot gets more or fewer dot rows, the bars more eighths and wider slots, and the sparklines more or less history. The bottom panels keep at least 7 rows, the plot 3, the bar chart 30 columns, and the sparklines 8 cells. The split stays when you switch tabs and is clamped again when the terminal shrinks.
 - Space, P, or `[ Pause ]` stops the animation on every page; the screen then stops changing. Releasing a button does not activate it again.
 - Q or Ctrl+C quits. While the filter takes text, Q and digits are letters, so only Ctrl+C quits; the bottom bar says which applies. Esc is not used: without a timeout it cannot be told apart from the start of a key sequence.
 - Resize the terminal and the layout follows. Below 72 columns or 22 rows a compact message replaces the controls; hidden controls cannot be clicked.
 
-Application mouse input requires a terminal that supports VT mouse reporting. While reporting is active, terminal text selection often uses Shift+drag (depending on the terminal). Clicking a row selects the application's item; copying text is a frontend feature. On orderly exit the application disables mouse reporting, resets the scroll region, and restores the original screen and cursor.
+Application mouse input requires a terminal that supports VT mouse reporting. The TUI requests button-event tracking (DECSET 1002, which also reports presses and releases) with SGR coordinates (1006), so a held button's motion reaches it for dragging. While reporting is active, terminal text selection often uses Shift+drag (depending on the terminal). Clicking a row selects the application's item; copying text is a frontend feature. On orderly exit the application disables mouse reporting, resets the scroll region, and restores the original screen and cursor.
 
 ## Animation and partial updates
 
@@ -38,7 +39,7 @@ The animation clock advances in the same 20 ms input poll loop that watches the 
 
 - **Dashboard:** a tick rewrites the spinner glyphs that changed, the job rows, and the elapsed time. A new log line scrolls the log region with DECSTBM and SU and writes only the new line, instead of redrawing the panel. Selection rewrites the old and new job rows and the status line.
 - **Files:** moving the cursor rewrites the old and new rows and the Details panel; scrolling, folding, or filtering rewrites the tree's rows, and a keystroke also rewrites the filter box. It does not use a scroll region, because DECSTBM scrolls whole rows and would move the Details panel beside the tree. Names and previews are padded by display width, so wide characters keep the size column and the border aligned.
-- **Charts:** the plot changes nearly every cell each frame, so the renderer keeps the displayed braille canvas and writes only the span of each row that differs. Bars and sparklines are small and are rewritten on each tick.
+- **Charts:** the plot changes nearly every cell each frame, so the renderer keeps the displayed braille canvas and writes only the span of each row that differs. Bars and sparklines are small and are rewritten on each tick. A dragged border redraws the page in place; the canvas buffers are sized for the tallest plot at the current size, so dragging does not allocate.
 - Mouse coordinates update their own field on every page.
 
 Positions follow the terminal size: fixed-size parts (spinners, buttons, the Details panel, the bar chart, the dialog) keep their size, the rest takes the remaining width and height, and the renderer, hit testing, and the smoke compute the same `DemoGeometry`. Every page paints every cell of the page area, so switching tabs, resizing, and closing the dialog rewrite cells in place without clearing. The screen is cleared only on first draw, when switching between the full and compact layout, or when resizing the compact layout (the message may have wrapped). The bottom bar's color is filled with EL rather than by writing the screen's last cell, which some terminals answer by scrolling. Shorter labels explicitly erase their old suffixes. Clearing and rebuilding the entire screen on every tick would expose a blank screen between writes and cause flicker.
@@ -61,7 +62,7 @@ The smoke mode needs no interactive terminal. It first drives the TUI inside a r
 - The dialog opening and closing by key and by button, with the covered panels restored.
 - Files: switching by key; Up/Down, End, Home, PgDn, PgUp; folding by Enter, Right, Left, and a click; wheel; and the wide-character row's size column lining up with its neighbors'.
 - The filter box: typing `日本` (sent as UTF-8), the shown cursor after the wide text, a miss with `q` that does not quit, Backspace, Ctrl+U, an ASCII filter, Enter keeping the filter and hiding the cursor, and a click on the box.
-- Charts: switching by Tab; the braille plot and a sparkline changing on their own and freezing while paused; returning by Shift+Tab and by clicking the dashboard's tab, with each page's state kept.
+- Charts: switching by Tab; the braille plot and a sparkline changing on their own and freezing while paused; dragging the horizontal border up and the vertical border right with motion reports, highlighted while moving and kept across a tab switch; returning by Shift+Tab and by clicking the dashboard's tab, with each page's state kept.
 - Growth to 100 × 30 filling the dashboard and the chart, shrink to the compact layout and recovery, restored screen/cursor/mouse modes, final drained output, and exit code zero.
 
 On Windows the nested pass carries the typed `日本` as win32-input-mode key events (`ESC [ … ; 26085 ; … _`), because the inner ConPTY's `ESC [ ? 9001 h` reaches the host's console. It therefore does not check MiniPty.Console's UTF-8 input code page; the console-input tests do.
@@ -78,7 +79,7 @@ The existing emulator in `samples/TerminalEmulator` interprets the output for th
 - A new log entry scrolls the previous one up through the scroll region.
 - The dialog closes, and tabs switch and switch back, without clearing and leave the screen as it was.
 - A Files cursor move rewrites only its two rows and the details; scrolling keeps the cursor visible and the wide-character row aligned.
-- A chart tick writes braille and only the changed cells.
+- A chart tick writes braille and only the changed cells; a dragged split moves the borders and scales the bars and sparklines without clearing, clamps to the size, and highlights the dragged border.
 - Shorter text leaves no stale suffix, and compact-layout transitions restore the screen.
 
 It also checks the simulated jobs and the tree's visible rows, folding, and filtering, and `TuiDemoInputTests` the CSI, SS3, `~`, modified, Tab, and Shift+Tab key forms and the text that printable characters carry.

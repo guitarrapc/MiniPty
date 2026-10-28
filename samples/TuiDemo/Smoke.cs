@@ -184,13 +184,40 @@ internal static class Smoke
             // Charts by Tab: the braille plot and a sparkline move on their own and freeze while paused.
             await SendAsync("\t");
             await ExpectAsync("┌ Signals sine mix ", alternate: true);
-            await ChangesAsync(() => Slice(4, 7, g.PlotColumns), "braille plot");
-            await ChangesAsync(() => Slice(g.ChartsTop, 43, g.SparkLength), "cpu sparkline");
+            var charts = g.Charts(default);
+            await ChangesAsync(() => Slice(4, 7, charts.PlotColumns), "braille plot");
+            await ChangesAsync(() => Slice(charts.Top, charts.LoadLeft + 6, charts.SparkLength), "cpu sparkline");
             await SendAsync(" ");
             await ExpectAsync("Paused: yes", alternate: true);
-            await ExpectFrozenAsync(() => Slice(4, 7, g.PlotColumns), () => Slice(g.ChartsTop, 43, g.SparkLength));
+            await ExpectFrozenAsync(() => Slice(4, 7, charts.PlotColumns), () => Slice(charts.Top, charts.LoadLeft + 6, charts.SparkLength));
             await SendAsync(" ");
             await ExpectAsync("Paused: no", alternate: true);
+
+            // Drag the horizontal border up three rows with button-event motion reports; it is highlighted while
+            // it moves, and the release ends the drag.
+            await MouseAsync(0, 10, charts.Top);
+            await MouseMoveAsync(10, charts.Top - 1);
+            await MouseMoveAsync(10, charts.Top - 3);
+            var taller = g.Charts(charts.Layout with { BottomRows = charts.BottomRows + 3 });
+            await WaitUntilAsync(() => Slice(taller.Top - 1, 0, 13) == "┌ Requests/s " && Highlighted(taller.Top - 1, 0),
+                "the bottom panels' top border to follow the drag, highlighted");
+            await WaitUntilAsync(() => Slice(taller.PlotBottom - 1, 0, 7) == "└─────┴", "the plot's border to sit above it");
+            await MouseAsync(0, 10, taller.Top, release: true);
+            await WaitUntilAsync(() => !Highlighted(taller.Top - 1, 0), "the highlight to end on release");
+            // Then the vertical border ten columns right, from the gap between the panels.
+            await MouseAsync(0, taller.Gap, taller.Top + 2);
+            await MouseMoveAsync(taller.Gap + 10, taller.Top + 2);
+            var wider = g.Charts(taller.Layout with { BarWidth = taller.BarWidth + 10 });
+            await WaitUntilAsync(() => Slice(wider.Top - 1, wider.BarWidth - 1, 1) == "┐" && Slice(wider.Top - 1, wider.LoadLeft - 1, 1) == "┌"
+                && Highlighted(wider.Top + 1, wider.BarWidth - 1), "the vertical border to follow the drag, highlighted");
+            await MouseAsync(0, wider.Gap, taller.Top + 2, release: true);
+            await ChangesAsync(() => Slice(wider.Top, wider.LoadLeft + 6, wider.SparkLength), "the shorter sparkline");
+            // The split survives a tab switch.
+            await SendAsync("1");
+            await ExpectAsync("Spinners", alternate: true);
+            await SendAsync("3");
+            await WaitUntilAsync(() => Slice(wider.Top - 1, 0, 13) == "┌ Requests/s " && Slice(wider.Top - 1, wider.BarWidth - 1, 1) == "┐",
+                "the dragged split to survive a tab switch");
 
             // Back by Shift+Tab, and to the dashboard by clicking its tab; each page kept its state.
             await SendAsync("\u001b[Z");
@@ -209,9 +236,10 @@ internal static class Smoke
                 && Slice(large.BottomRow - 1, 1, 14) == "Q/Ctrl+C: quit", "the dashboard to fill 100 × 30");
             await SendAsync("3");
             await ExpectAsync("┌ Signals sine mix ", alternate: true);
-            await WaitUntilAsync(() => Slice(4, large.Width - 1, 1) == "│" && Slice(large.ChartsTop - 1, 0, 1) == "┌",
+            var largeCharts = large.Charts(wider.Layout);
+            await WaitUntilAsync(() => Slice(4, large.Width - 1, 1) == "│" && Slice(largeCharts.Top - 1, 0, 1) == "┌",
                 "the chart to fill 100 × 30");
-            await ChangesAsync(() => Slice(4, 7, large.PlotColumns), "the wider braille plot");
+            await ChangesAsync(() => Slice(4, 7, largeCharts.PlotColumns), "the wider braille plot");
             await SendAsync("1");
             await ExpectAsync("Spinners", alternate: true);
             Resize(40, 10);
@@ -232,7 +260,7 @@ internal static class Smoke
                 if (status.ExitCode != 0 || !screen.CursorVisible || screen.Mouse != MouseTracking.None || screen.MouseSgr)
                     throw new InvalidOperationException($"Exit={status.ExitCode}, cursor visible={screen.CursorVisible}, mouse={screen.Mouse}/{screen.MouseSgr}.");
             }
-            Console.WriteLine($"PASS ({(throughHost ? "console host + nested PTY, Ctrl+C" : "direct PTY, Q")}): Unicode, colors, animated spinners/progress/log, pause, keys, mouse click/wheel, dialog, tabs, file tree scroll/fold/wide names, filter box with Japanese input, braille chart/sparklines, stretched layout, resize, screen/cursor/mouse restoration, exit=0 (spinner seen: {spinner})");
+            Console.WriteLine($"PASS ({(throughHost ? "console host + nested PTY, Ctrl+C" : "direct PTY, Q")}): Unicode, colors, animated spinners/progress/log, pause, keys, mouse click/wheel, dialog, tabs, file tree scroll/fold/wide names, filter box with Japanese input, braille chart/sparklines, dragged chart borders, stretched layout, resize, screen/cursor/mouse restoration, exit=0 (spinner seen: {spinner})");
         }
         finally
         {
@@ -282,6 +310,26 @@ internal static class Smoke
                 }
                 return text.ToString();
             }
+        }
+
+        /// <summary>Whether a 0-based cell has a non-default foreground, as the dragged border does.</summary>
+        bool Highlighted(int row, int column)
+        {
+            lock (gate)
+                return screen.ViewLine(row).Cells[column].Attributes.Foreground.Kind != ColorKind.Default;
+        }
+
+        /// <summary>Motion with the left button held, as button-event tracking (DECSET 1002) reports it.</summary>
+        async Task MouseMoveAsync(int column, int row)
+        {
+            string report;
+            lock (gate)
+            {
+                report = MouseReport.Encode(screen.Mouse, screen.MouseSgr, 0, row - 1, column - 1,
+                    release: false, motion: true, shift: false, alt: false, ctrl: false)
+                    ?? throw new InvalidOperationException("The TUI did not request button-event mouse tracking.");
+            }
+            await session.WriteInputAsync(Encoding.UTF8.GetBytes(report), timeout.Token);
         }
 
         bool CursorVisible()

@@ -29,7 +29,8 @@ internal static partial class DemoTui
         {
             Console.TreatControlCAsInput = true;
             using var input = new DemoInput();
-            Console.Write("\u001b[?1049h\u001b[?25l\u001b[?1000h\u001b[?1006h");
+            // 1002 (button-event tracking) reports presses, releases, and motion while a button is held, for dragging.
+            Console.Write("\u001b[?1049h\u001b[?25l\u001b[?1002h\u001b[?1006h");
             var renderer = new DemoRenderer(Console.Out);
             var state = new State { Files = FileBrowser.Initial };
             var ticksPerFrame = Stopwatch.Frequency * DemoJobs.FrameMilliseconds / 1000;
@@ -62,7 +63,7 @@ internal static partial class DemoTui
         finally
         {
             // Also reset the scroll region in case the TUI stopped between a log scroll and its reset.
-            Console.Write("\u001b[r\u001b[?1000l\u001b[?1006l\u001b[0m\u001b[?25h\u001b[?1049l");
+            Console.Write("\u001b[r\u001b[?1002l\u001b[?1000l\u001b[?1006l\u001b[0m\u001b[?25h\u001b[?1049l");
             Console.Out.Flush();
             Console.TreatControlCAsInput = savedControlC;
             if (OperatingSystem.IsWindows())
@@ -72,7 +73,7 @@ internal static partial class DemoTui
         return 0;
     }
 
-    /// <summary>What the user changed: the page, each page's selection, pause, the dashboard's dialog, and the filter.</summary>
+    /// <summary>What the user changed: the page, each page's selection, pause, the dialog, the filter, and the Charts split.</summary>
     private struct State
     {
         internal int Page;
@@ -82,11 +83,13 @@ internal static partial class DemoTui
         internal int MouseColumn;
         internal int MouseRow;
         internal FileBrowser Files;
+        internal ChartsLayout Charts;
+        internal DemoDrag Dragging;
 
         private readonly bool Typing => Page == DemoLayout.FilesPage && Files.Editing && !Dialog;
 
         internal readonly DemoView View(int width, int height, long frame) =>
-            new(width, height, Selected, Paused, Dialog, MouseColumn, MouseRow, frame, Page, Files);
+            new(width, height, Selected, Paused, Dialog, MouseColumn, MouseRow, frame, Page, Files, Charts, Dragging);
 
         /// <summary>Q quits except while the filter box takes text, where it is a letter; Ctrl+C always quits.</summary>
         internal readonly bool Quits(DemoEvent key) => key.Command == DemoCommand.Quit && !(Typing && key.Character != '\0');
@@ -103,12 +106,23 @@ internal static partial class DemoTui
         {
             var g = new DemoGeometry(width, height);
             var rows = g.FileRows;
+            var full = width >= DemoLayout.MinWidth && height >= DemoLayout.MinHeight;
             if (key.Command == DemoCommand.Mouse)
             {
                 MouseColumn = key.Column;
                 MouseRow = key.Row;
-                if (width >= DemoLayout.MinWidth && height >= DemoLayout.MinHeight && key.Column <= width && key.Row <= height)
+                if (full && key.Column <= width && key.Row <= height)
                     Click(key, g);
+                return;
+            }
+            if (key.Command is DemoCommand.Drag or DemoCommand.Release)
+            {
+                MouseColumn = key.Column;
+                MouseRow = key.Row;
+                if (key.Command == DemoCommand.Release || !full || Page != DemoLayout.ChartsPage)
+                    Dragging = DemoDrag.None;
+                else if (Dragging != DemoDrag.None)
+                    MoveSplit(key, g);
                 return;
             }
             if (Typing)
@@ -201,6 +215,19 @@ internal static partial class DemoTui
             }
         }
 
+        /// <summary>
+        /// Moves the dragged Charts border to the pointer: the bottom panels' top border to its row, or the gap between
+        /// the bar chart and the Load panel to its column. The geometry clamps the split to the current size.
+        /// </summary>
+        private void MoveSplit(DemoEvent key, DemoGeometry g)
+        {
+            var current = g.Charts(Charts);
+            var wanted = Dragging == DemoDrag.Rows
+                ? current.Layout with { BottomRows = g.PageBottom - key.Row + 1 }
+                : current.Layout with { BarWidth = key.Column - 1 };
+            Charts = g.Charts(wanted).Layout;
+        }
+
         /// <summary>Hit testing for a press or wheel report; the dialog is modal and only its Close button reacts.</summary>
         private void Click(DemoEvent key, DemoGeometry g)
         {
@@ -225,6 +252,20 @@ internal static partial class DemoTui
             }
 
             var wheel = key.Button is 64 or 65 ? (key.Button == 64 ? -1 : 1) : 0;
+            if (Page == DemoLayout.ChartsPage)
+            {
+                // A press on a border starts a drag: either horizontal border row, or the vertical border, the gap,
+                // or the Load panel's left border on the bottom panels' rows. Motion moves it until the release.
+                var c = g.Charts(Charts);
+                Charts = c.Layout;
+                if (wheel != 0)
+                    return;
+                if (key.Row == c.PlotBottom || key.Row == c.Top)
+                    Dragging = DemoDrag.Rows;
+                else if (key.Row > c.Top && key.Row <= c.PageBottom && key.Column >= c.BarWidth && key.Column <= c.LoadLeft)
+                    Dragging = DemoDrag.Columns;
+                return;
+            }
             if (Page == DemoLayout.FilesPage)
             {
                 var inTree = key.Column >= DemoLayout.FileLeft && key.Column <= g.FileRight;

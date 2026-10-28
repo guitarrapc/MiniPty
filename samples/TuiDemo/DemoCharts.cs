@@ -47,9 +47,9 @@ internal static class DemoCharts
         }
     }
 
-    /// <summary>Bar height in eighths of a cell, out of the four rows' 32.</summary>
-    internal static int BarEighths(int bar, long frame) =>
-        (int)Math.Round((0.55 + 0.4 * Math.Sin(frame / 9.0 + bar * 1.3)) * 32);
+    /// <summary>Bar height in eighths of a cell, out of <paramref name="rows"/> rows of eight.</summary>
+    internal static int BarEighths(int bar, long frame, int rows) =>
+        (int)Math.Round((0.55 + 0.4 * Math.Sin(frame / 9.0 + bar * 1.3)) * rows * 8);
 
     /// <summary>Sparkline level 0–7 of series <paramref name="spark"/> at time <paramref name="t"/>.</summary>
     internal static int SparkLevel(int spark, long t) => Math.Clamp((int)(Load(spark, t) * 8), 0, 7);

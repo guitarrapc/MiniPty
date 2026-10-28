@@ -21,7 +21,12 @@ internal enum DemoCommand
     /// <summary>Switch to the page in <see cref="DemoEvent.Column"/> (0-based).</summary>
     Page,
     Quit,
+    /// <summary>A left-button press or a wheel step at <see cref="DemoEvent.Column"/>, <see cref="DemoEvent.Row"/>.</summary>
     Mouse,
+    /// <summary>Motion with the left button held (button-event tracking, DECSET 1002).</summary>
+    Drag,
+    /// <summary>The left button was released.</summary>
+    Release,
 }
 
 /// <summary>
@@ -138,6 +143,11 @@ internal struct DemoInputParser
                 // Release, motion, modifier-clicks, and invalid/zero coordinates must not activate controls.
                 if (_digits && _field == 2 && value == 'M' && _column > 0 && _number > 0 && _button is 0 or 64 or 65)
                     return new(DemoCommand.Mouse, _column, _number, _button);
+                // Left-button motion (32) and the left release ('m'); other motion and buttons stay ignored.
+                if (_digits && _field == 2 && value == 'M' && _column > 0 && _number > 0 && _button == 32)
+                    return new(DemoCommand.Drag, _column, _number, _button);
+                if (_digits && _field == 2 && value == 'm' && _column > 0 && _number > 0 && _button == 0)
+                    return new(DemoCommand.Release, _column, _number, _button);
                 return default;
             case 5:
                 // CSI parameters: keep the first number (the key in "ESC [ 5 ~"), skip modifiers after ';'.
@@ -227,6 +237,10 @@ internal sealed partial class DemoInput : IDisposable
             else if (record.Type == 2 && record.Mouse.Flags == 4 && (record.Mouse.Modifiers & 0x1f) == 0)
                 input = new(DemoCommand.Mouse, record.Mouse.Position.X + 1, record.Mouse.Position.Y + 1,
                     (short)(record.Mouse.Buttons >> 16) > 0 ? 64 : 65);
+            else if (record.Type == 2 && record.Mouse.Flags == 1 && record.Mouse.Buttons == 1)
+                input = new(DemoCommand.Drag, record.Mouse.Position.X + 1, record.Mouse.Position.Y + 1, 32);
+            else if (record.Type == 2 && record.Mouse.Flags == 0 && record.Mouse.Buttons == 0)
+                input = new(DemoCommand.Release, record.Mouse.Position.X + 1, record.Mouse.Position.Y + 1);
             else if (record.Type == 1 && record.Key.Down != 0 && record.Key.Character == '\t' && (record.Key.Modifiers & ShiftPressed) != 0)
                 input = new(DemoCommand.PrevTab);
             else if (record.Type == 1 && record.Key.Down != 0)

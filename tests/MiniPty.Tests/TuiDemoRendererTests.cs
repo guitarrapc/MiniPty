@@ -412,18 +412,18 @@ public sealed class TuiDemoRendererTests
     {
         var view = new DemoView(100, 30, 0, false, false, 0, 0, 0, DemoLayout.ChartsPage);
         var (_, screen, _, _) = Start(view);
-        var g = new DemoGeometry(100, 30);
+        var c = new DemoGeometry(100, 30).Charts(default);
 
-        await Assert.That(g.PlotColumns).IsEqualTo(88);
-        await Assert.That(g.PlotRows).IsEqualTo(16);
+        await Assert.That(c.PlotColumns).IsEqualTo(88);
+        await Assert.That(c.PlotRows).IsEqualTo(16);
         await Assert.That(screen.ViewLine(3).Cells[99].Text).IsEqualTo("│");
-        await Assert.That(screen.ViewLine(3 + g.PlotRows).ToText().StartsWith("└─────┴", StringComparison.Ordinal)).IsTrue();
-        await Assert.That(screen.ViewLine(g.ChartsTop - 1).ToText().StartsWith("┌ Requests/s ", StringComparison.Ordinal)).IsTrue();
-        await Assert.That(CountBraille(screen, 3, 3 + g.PlotRows)).IsGreaterThan(CountBrailleAt72());
+        await Assert.That(screen.ViewLine(c.PlotBottom - 1).ToText().StartsWith("└─────┴", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(c.Top - 1).ToText().StartsWith("┌ Requests/s ", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(CountBraille(screen, 3, 3 + c.PlotRows)).IsGreaterThan(CountBrailleAt72());
         // A 50-cell sparkline, then its percent and the border at the right edge.
-        await Assert.That(Cells(screen.ViewLine(g.ChartsTop), 43, g.SparkLength).Trim().Length).IsEqualTo(50);
-        await Assert.That(screen.ViewLine(g.ChartsTop).Cells[97].Text).IsEqualTo("%");
-        await Assert.That(screen.ViewLine(g.ChartsTop).Cells[99].Text).IsEqualTo("│");
+        await Assert.That(Cells(screen.ViewLine(c.Top), c.LoadLeft + 6, c.SparkLength).Trim().Length).IsEqualTo(50);
+        await Assert.That(screen.ViewLine(c.Top).Cells[97].Text).IsEqualTo("%");
+        await Assert.That(screen.ViewLine(c.Top).Cells[99].Text).IsEqualTo("│");
         await Assert.That(screen.ViewLine(29).ToText().StartsWith(" Q/Ctrl+C: quit", StringComparison.Ordinal)).IsTrue();
 
         static int CountBrailleAt72()
@@ -431,6 +431,70 @@ public sealed class TuiDemoRendererTests
             var (_, small, _, _) = Start(Initial with { Page = DemoLayout.ChartsPage });
             return CountBraille(small, 3, 11);
         }
+    }
+
+    [Test]
+    public async Task ChartsSplit_MovesTheBordersAndScalesTheChartsInPlace()
+    {
+        var view = Initial with { Page = DemoLayout.ChartsPage, Frame = 40 };
+        var (renderer, screen, parser, output) = Start(view);
+
+        var split = Draw(renderer, parser, output, view with { Charts = new ChartsLayout(10, 45) });
+        var c = new DemoGeometry(72, 22).Charts(new ChartsLayout(10, 45));
+
+        await Assert.That(split.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
+        await Assert.That((c.PlotRows, c.BarRows, c.BarSlot, c.SparkLength)).IsEqualTo((5, 7, 8, 12));
+        await Assert.That(screen.ViewLine(c.PlotBottom - 1).ToText()).IsEqualTo("└─────┴" + new string('─', 64) + "┘");
+        await Assert.That(screen.ViewLine(c.Top - 1).ToText().StartsWith("┌ Requests/s ", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(c.Top - 1).Cells[44].Text).IsEqualTo("┐");
+        await Assert.That(screen.ViewLine(c.Top - 1).Cells[46].Text).IsEqualTo("┌");
+        await Assert.That(screen.ViewLine(c.Top - 1).Cells[71].Text).IsEqualTo("┐");
+        // Five 5-cell bars over seven rows, labels in 8-cell slots, and a 12-cell sparkline before the percent.
+        // Rows are 1-based; ViewLine is 0-based. The last bar row sits above the labels and the bottom border.
+        var lastBarRow = screen.ViewLine(c.Top + c.BarRows - 1);
+        await Assert.That(Cells(lastBarRow, 3, 5)).IsEqualTo("█████");
+        await Assert.That(lastBarRow.ToText().StartsWith("│  █████   █████   █████   █████   █████", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(lastBarRow.Cells[44].Text).IsEqualTo("│");
+        await Assert.That(screen.ViewLine(c.PageBottom - 2).ToText().StartsWith("│  GET     POST    PUT     PATCH   DEL", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(Cells(screen.ViewLine(c.Top), c.LoadLeft + 6, c.SparkLength).Trim().Length).IsEqualTo(12);
+        await Assert.That(screen.ViewLine(c.Top).Cells[71].Text).IsEqualTo("│");
+        await Assert.That(screen.ViewLine(c.PageBottom - 1).ToText()).IsEqualTo("└" + new string('─', 43) + "┘ └" + new string('─', 24) + "┘");
+
+        // A tick on the new split still writes only the animated cells.
+        var tick = Draw(renderer, parser, output, view with { Charts = new ChartsLayout(10, 45), Frame = 41 });
+        await Assert.That(tick.Contains("Requests", StringComparison.Ordinal)).IsFalse();
+        await Assert.That(tick.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
+    }
+
+    [Test]
+    public async Task ChartsSplit_ClampsToTheSizeAndHighlightsTheDraggedBorder()
+    {
+        var g = new DemoGeometry(72, 22);
+        await Assert.That(g.Charts(new ChartsLayout(100, 100)).Layout).IsEqualTo(new ChartsLayout(12, 49));
+        await Assert.That(g.Charts(new ChartsLayout(1, 1)).Layout).IsEqualTo(new ChartsLayout(7, 30));
+        await Assert.That(g.Charts(default).Layout).IsEqualTo(new ChartsLayout(7, 35));
+        // A split that fit a larger terminal is clamped again when the terminal shrinks.
+        var large = new DemoGeometry(120, 40).Charts(new ChartsLayout(25, 90));
+        await Assert.That(large.Layout).IsEqualTo(new ChartsLayout(25, 90));
+        await Assert.That(g.Charts(large.Layout).Layout).IsEqualTo(new ChartsLayout(12, 49));
+
+        var view = Initial with { Page = DemoLayout.ChartsPage };
+        var (renderer, screen, parser, output) = Start(view);
+        var c = g.Charts(default);
+        await Assert.That(screen.ViewLine(c.Top - 1).Cells[0].Attributes.Foreground.Kind).IsEqualTo(ColorKind.Default);
+
+        Draw(renderer, parser, output, view with { Dragging = DemoDrag.Rows });
+        await Assert.That(screen.ViewLine(c.Top - 1).Cells[0].Attributes.Foreground.Kind).IsNotEqualTo(ColorKind.Default);
+        await Assert.That(screen.ViewLine(c.PlotBottom - 1).Cells[10].Attributes.Foreground.Kind).IsNotEqualTo(ColorKind.Default);
+        await Assert.That(screen.ViewLine(c.Top).Cells[c.BarWidth - 1].Attributes.Foreground.Kind).IsEqualTo(ColorKind.Default);
+
+        Draw(renderer, parser, output, view with { Dragging = DemoDrag.Columns });
+        await Assert.That(screen.ViewLine(c.Top - 1).Cells[0].Attributes.Foreground.Kind).IsEqualTo(ColorKind.Default);
+        await Assert.That(screen.ViewLine(c.Top).Cells[c.BarWidth - 1].Attributes.Foreground.Kind).IsNotEqualTo(ColorKind.Default);
+        await Assert.That(screen.ViewLine(c.Top + 2).Cells[c.LoadLeft - 1].Attributes.Foreground.Kind).IsNotEqualTo(ColorKind.Default);
+
+        Draw(renderer, parser, output, view);
+        await Assert.That(screen.ViewLine(c.Top).Cells[c.BarWidth - 1].Attributes.Foreground.Kind).IsEqualTo(ColorKind.Default);
     }
 
     private static string[] RowsOf(ScreenBuffer screen, int first, int count)

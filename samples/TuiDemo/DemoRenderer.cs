@@ -3,9 +3,67 @@ using TerminalEmulator;
 
 internal readonly record struct DemoView(
     int Width, int Height, int Selected, bool Paused, bool Dialog, int MouseColumn, int MouseRow, long Frame,
-    int Page = DemoLayout.DashboardPage, FileBrowser Files = default)
+    int Page = DemoLayout.DashboardPage, FileBrowser Files = default, ChartsLayout Charts = default,
+    DemoDrag Dragging = DemoDrag.None)
 {
     internal bool Compact => Width < DemoLayout.MinWidth || Height < DemoLayout.MinHeight;
+}
+
+/// <summary>Which Charts border a left-button drag is moving.</summary>
+internal enum DemoDrag : byte { None, Rows, Columns }
+
+/// <summary>
+/// The Charts split the user dragged: the bottom panels' height and the bar chart's width. Zero means the default;
+/// <see cref="ChartsGeometry"/> clamps both to the current size.
+/// </summary>
+internal readonly record struct ChartsLayout(int BottomRows, int BarWidth);
+
+/// <summary>
+/// Charts positions for a size and a split. The bottom panels keep at least 7 rows (their three sparklines need them)
+/// and the plot at least 3 dot rows; the bar chart keeps at least 30 columns and the sparklines at least 8 cells.
+/// With the default split at 72 × 22 every value equals the original fixed layout.
+/// </summary>
+internal readonly struct ChartsGeometry
+{
+    internal const int DefaultBottomRows = 7;
+    internal const int DefaultBarWidth = 35;
+    private const int MinPlotRows = 3;
+    private const int MinBarWidth = 30;
+    private const int MinSparkLength = 8;
+
+    internal ChartsGeometry(DemoGeometry g, ChartsLayout layout)
+    {
+        Width = g.Width;
+        PageBottom = g.PageBottom;
+        var pageRows = g.Height - 5;
+        BottomRows = Math.Clamp(layout.BottomRows == 0 ? DefaultBottomRows : layout.BottomRows,
+            DefaultBottomRows, pageRows - MinPlotRows - 2);
+        BarWidth = Math.Clamp(layout.BarWidth == 0 ? DefaultBarWidth : layout.BarWidth,
+            MinBarWidth, g.Width - 15 - MinSparkLength);
+        PlotRows = pageRows - BottomRows - 2;
+        MaxPlotRows = pageRows - DefaultBottomRows - 2;
+    }
+
+    internal int Width { get; }
+    internal int PageBottom { get; }
+    internal int BottomRows { get; }
+    internal int BarWidth { get; }
+    internal int PlotRows { get; }
+    /// <summary>The plot's rows with the smallest bottom panels, for buffers that must not grow while dragging.</summary>
+    internal int MaxPlotRows { get; }
+    internal int PlotColumns => Width - 12;
+    /// <summary>The plot panel's bottom border row.</summary>
+    internal int PlotBottom => 4 + PlotRows;
+    /// <summary>The bottom panels' top border row.</summary>
+    internal int Top => PlotBottom + 1;
+    internal int BarRows => BottomRows - 3;
+    internal int BarSlot => (BarWidth - 5) / 5;
+    /// <summary>The column between the bar chart and the Load panel.</summary>
+    internal int Gap => BarWidth + 1;
+    internal int LoadLeft => BarWidth + 2;
+    internal int SparkLength => Width - BarWidth - 15;
+
+    internal ChartsLayout Layout => new(BottomRows, BarWidth);
 }
 
 /// <summary>Cell positions (1-based) that do not depend on the terminal size; see <see cref="DemoGeometry"/> for the rest.</summary>
@@ -68,10 +126,7 @@ internal readonly record struct DemoGeometry(int Width, int Height)
     internal int DetailsColumn => Width - 30;
     internal int PreviewLines => PageBottom - 10;
 
-    internal int PlotColumns => Width - 12;
-    internal int PlotRows => Height - 14;
-    internal int ChartsTop => Height - 9;
-    internal int SparkLength => Width - 50;
+    internal ChartsGeometry Charts(ChartsLayout layout) => new(this, layout);
 }
 
 /// <summary>
@@ -97,7 +152,7 @@ internal sealed partial class DemoRenderer
     [
         " Click/Wheel/Up/Down: select  Enter: details  Space: pause",
         " Up/Down/PgUp/PgDn/Home/End: move  Enter/Left/Right: fold  /: filter",
-        " Space: pause",
+        " Space: pause  Drag a border: resize the charts",
     ];
 
     private readonly TextWriter _output;
@@ -118,7 +173,9 @@ internal sealed partial class DemoRenderer
         var added = CollectLog(view.Frame);
         var resized = !_drawn || view.Width != _previous.Width || view.Height != _previous.Height;
         var clear = !_drawn || view.Compact != _previous.Compact || (view.Compact && resized);
-        var redraw = clear || resized || view.Page != _previous.Page || (_previous.Dialog && !view.Dialog);
+        // A dragged Charts split moves borders across the page, so it redraws the page in place like a resize.
+        var chartsMoved = view.Page == DemoLayout.ChartsPage && (view.Charts != _previous.Charts || view.Dragging != _previous.Dragging);
+        var redraw = clear || resized || chartsMoved || view.Page != _previous.Page || (_previous.Dialog && !view.Dialog);
         var mouseMoved = view.MouseColumn != _previous.MouseColumn || view.MouseRow != _previous.MouseRow;
         _frame.Clear();
         if (clear)
