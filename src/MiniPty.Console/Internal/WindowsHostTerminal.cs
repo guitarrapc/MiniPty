@@ -128,13 +128,8 @@ internal sealed class WindowsHostTerminal : IHostTerminal
 
     private unsafe int ReadInputCore(Span<byte> buffer)
     {
-        while (ConsoleWindowsInterop.PeekConsoleInput(_stdin, null, 0, out var pending) && pending > 0)
-        {
-            var encoded = TryReadConsoleInput(buffer);
-            if (encoded > 0)
-                return encoded;
-        }
-
+        // Let the console encode the entire input stream according to its negotiated VT modes. Mixing
+        // ReadConsoleInput with ReadFile can discard queued mouse records or consume part of a VT report.
         fixed (byte* ptr = buffer)
         {
             if (!ConsoleWindowsInterop.ReadFile(_stdin, ptr, (uint)buffer.Length, out var read, IntPtr.Zero))
@@ -148,20 +143,5 @@ internal sealed class WindowsHostTerminal : IHostTerminal
 
             return read > 0 ? (int)read : 0;
         }
-    }
-
-    private unsafe int TryReadConsoleInput(Span<byte> buffer)
-    {
-        ConsoleWindowsInterop.InputRecord record;
-        if (!ConsoleWindowsInterop.ReadConsoleInput(_stdin, &record, 1, out var read) || read == 0)
-            return 0;
-
-        if (record.EventType == ConsoleWindowsInterop.WindowBufferSizeEvent)
-            return 0;
-
-        if (record.EventType != ConsoleWindowsInterop.KeyEvent)
-            return 0;
-
-        return WindowsConsoleInputEncoder.EncodeKeyEvent(record.KeyEvent, buffer);
     }
 }

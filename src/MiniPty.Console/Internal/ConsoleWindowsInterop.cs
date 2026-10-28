@@ -20,6 +20,7 @@ internal static partial class ConsoleWindowsInterop
     internal const uint EnableVirtualTerminalProcessing = 0x0004;
 
     internal const ushort KeyEvent = 0x0001;
+    internal const ushort MouseEvent = 0x0002;
     internal const ushort WindowBufferSizeEvent = 0x0004;
 
     internal const ushort VkUp = 0x26;
@@ -48,6 +49,7 @@ internal static partial class ConsoleWindowsInterop
 
         public ushort RepeatCount;
         public ushort VirtualKeyCode;
+        public ushort VirtualScanCode;
         public ushort UnicodeChar;
         public uint ControlKeyState;
     }
@@ -56,6 +58,15 @@ internal static partial class ConsoleWindowsInterop
     internal struct WindowBufferSizeRecord
     {
         public Coord Size;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MouseEventRecord
+    {
+        public Coord MousePosition;
+        public uint ButtonState;
+        public uint ControlKeyState;
+        public uint EventFlags;
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 20)]
@@ -69,6 +80,9 @@ internal static partial class ConsoleWindowsInterop
 
         [FieldOffset(4)]
         public WindowBufferSizeRecord WindowBufferSizeEvent;
+
+        [FieldOffset(4)]
+        public MouseEventRecord MouseEvent;
     }
 
     [StructLayout(LayoutKind.Sequential)]

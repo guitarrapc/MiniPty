@@ -24,7 +24,9 @@ On VT-aware hosts (Windows Terminal, modern conhost):
 
 Physical keyboard input arrives as UTF-8 byte sequences (including escape sequences for arrows and function keys).
 
-`ReadConsoleInput` / `PeekConsoleInput` are used where the implementation must inspect the console input queue (for example before blocking reads in non-VT paths and in tests). `WaitForSingleObject` on the console input handle does **not** signal key events.
+The forwarding loop consistently uses `ReadFile`. A `ReadConsoleInput` fallback could discard queued mouse events or take only part of a VT report before the next byte read, causing intermittent lost clicks. Let the console encode its negotiated mouse protocol, rather than interpreting native mouse records in the host. `ReadConsoleInput` / `PeekConsoleInput` remain useful for tests and for a TUI that consumes native input itself, as in [TuiDemo](../../../samples/TuiDemo).
+
+`WaitForSingleObject` on the console input handle does **not** signal key events. The dedicated input thread blocks in `ReadFile`; cancellation interrupts that read.
 
 ## Thread Constraint
 
@@ -51,6 +53,10 @@ Microsoft does not document a per-thread rule for VT console input. Empirically,
 
 Undecorated names are not exported and fail at runtime under NativeAOT publish.
 
+`KEY_EVENT_RECORD` includes `wVirtualScanCode` between `wVirtualKeyCode` and its Unicode character. The character is at byte offset 10, the control-key state at offset 12, and the record occupies 16 bytes. A test injecting the same incorrectly declared structure as its reader can conceal a layout defect.
+
 ## Testing Notes
 
 Inject-based Windows tests can pass while physical keyboard input still fails. Validate interactive attach with a real TTY (for example `samples/SingleFiles/ConsoleAttach.cs`) after changing this path.
+
+The TUI smoke mode drives both the child and a nested console host through real PTYs and checks colored drawing cells, mouse clicks/releases/wheel input, hit testing after resize, and screen/cursor/mouse-mode cleanup. A focused native-input regression queues a mouse press before a host read; this covers the discarded-record path. These automated checks do not establish physical-keyboard/mouse behavior in every terminal application.

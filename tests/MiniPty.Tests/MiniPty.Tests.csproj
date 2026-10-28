@@ -27,6 +27,8 @@
   -->
   <ItemGroup>
     <Compile Include="..\..\samples\TerminalEmulator\*.cs" Link="TerminalEmulator\%(Filename)%(Extension)" />
+    <Compile Include="..\..\samples\TuiDemo\DemoInput.cs" Link="TuiDemo\DemoInput.cs" />
+    <Compile Include="..\..\samples\TuiDemo\DemoRenderer.cs" Link="TuiDemo\DemoRenderer.cs" />
   </ItemGroup>
 
   <!--

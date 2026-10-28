@@ -10,6 +10,72 @@ public sealed class PtyConsoleWindowsInputTests
     private const string EchoMarker = "pty-console-echo-Q";
 
     [Test]
+    [NotInParallel]
+    public async Task WindowsHostTerminal_ReadInput_PreservesQueuedMouseReport()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        var allocatedConsole = false;
+        if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
+        {
+            if (!ConsoleWindowsInterop.AllocConsole())
+                return;
+            allocatedConsole = true;
+        }
+
+        try
+        {
+            using var terminal = new WindowsHostTerminal();
+            WriteConsoleBytes("\u001b[?1000h\u001b[?1006h"u8);
+            try
+            {
+                // Queue a real native mouse record before ReadInput starts. The old ReadConsoleInput
+                // fallback discarded it; ReadFile must encode it using the negotiated SGR mouse mode.
+                InjectMousePress();
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var bytes = new byte[64];
+                var read = terminal.ReadInput(bytes, timeout.Token);
+                await Assert.That(Encoding.UTF8.GetString(bytes, 0, read)).IsEqualTo("\u001b[<0;5;6M");
+            }
+            finally
+            {
+                WriteConsoleBytes("\u001b[?1000l\u001b[?1006l"u8);
+            }
+        }
+        finally
+        {
+            if (allocatedConsole)
+                ConsoleWindowsInterop.FreeConsole();
+        }
+
+        static unsafe void WriteConsoleBytes(ReadOnlySpan<byte> bytes)
+        {
+            fixed (byte* pointer = bytes)
+            {
+                if (!ConsoleWindowsInterop.WriteFile(ConsoleWindowsInterop.GetStdHandle(ConsoleWindowsInterop.StdOutputHandle),
+                    pointer, (uint)bytes.Length, out _, IntPtr.Zero))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+            }
+        }
+
+        static unsafe void InjectMousePress()
+        {
+            var record = new ConsoleWindowsInterop.InputRecord
+            {
+                EventType = ConsoleWindowsInterop.MouseEvent,
+                MouseEvent = new ConsoleWindowsInterop.MouseEventRecord
+                {
+                    MousePosition = new ConsoleWindowsInterop.Coord { X = 4, Y = 5 },
+                    ButtonState = 1,
+                },
+            };
+            if (!ConsoleWindowsInterop.WriteConsoleInput(ConsoleWindowsInterop.GetStdHandle(ConsoleWindowsInterop.StdInputHandle),
+                &record, 1, out _))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+        }
+    }
+
+    [Test]
     public async Task Attach_ForwardsInjectedConsoleInput_OnWindows()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))

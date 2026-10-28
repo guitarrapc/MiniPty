@@ -6,6 +6,16 @@ namespace MiniPty.Tests;
 public sealed class WindowsConsoleInputEncoderTests
 {
     [Test]
+    public async Task KeyEventRecord_MatchesNativeWindowsLayout()
+    {
+        // KEY_EVENT_RECORD contains a scan code between the virtual key and Unicode character. Omitting it
+        // reads physical keys' scan codes as text, even though tests that inject the same wrong layout pass.
+        await Assert.That(System.Runtime.InteropServices.Marshal.SizeOf<ConsoleWindowsInterop.KeyEventRecord>()).IsEqualTo(16);
+        await Assert.That(System.Runtime.InteropServices.Marshal.OffsetOf<ConsoleWindowsInterop.KeyEventRecord>(nameof(ConsoleWindowsInterop.KeyEventRecord.UnicodeChar)).ToInt32()).IsEqualTo(10);
+        await Assert.That(System.Runtime.InteropServices.Marshal.OffsetOf<ConsoleWindowsInterop.KeyEventRecord>(nameof(ConsoleWindowsInterop.KeyEventRecord.ControlKeyState)).ToInt32()).IsEqualTo(12);
+    }
+
+    [Test]
     public async Task EncodeKeyEvent_KeyUp_ReturnsZero()
     {
         var record = new ConsoleWindowsInterop.KeyEventRecord

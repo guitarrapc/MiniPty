@@ -205,7 +205,7 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 
 - Benchmark allocation comparison must use the benchmark class default `SimpleJob` only; adding `--job short` runs a second job and the compare script prefers `ShortRun`, which reports higher allocations on spawn-heavy benchmarks without any code change.
 - CI test hosts are usually non-TTY; `Attach` guard tests rely on `Console.IsInputRedirected` / `IsOutputRedirected`, while duplicate-attach and resize smoke tests skip when redirected.
-- On Windows, `WaitForSingleObject` on the console input handle does not signal key events; host input polling must use `PeekConsoleInput` before `ReadConsoleInput`.
+- On Windows, `WaitForSingleObject` on the console input handle does not signal key events. The dedicated input thread blocks in VT `ReadFile`; `CancelIoEx` interrupts that read during detach. Do not add a native-record polling fallback that consumes part of the VT stream.
 - On Windows Terminal and other VT-aware hosts, physical keyboard input is delivered as UTF-8 bytes via `ReadFile` after enabling `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin. Microsoft does not document a per-thread console input rule; failures came from splitting `SetConsoleMode` and `ReadFile` across threads. `AttachThreadInput` does not fix VT input in that split. Inject tests (`WriteConsoleInput` / `WriteFile`) can pass while real keyboard input still fails — manual TTY smoke is required on Windows.
 - An embedder-thread `PumpInputOnce` loop worked as an interim fix but was rejected as the permanent API because it was asymmetric with Unix and burdened every host. The shipped design uses an internal background pump on all platforms. Also rejected: `AttachThreadInput` with split setup/read; VT-free `ReadConsoleInput`-only (legacy hosts); overlapped `CONIN$` reopen (unnecessary after the dedicated-thread fix).
 - Manual validation (2026-06-30): Windows Terminal and Bash (WSL/Linux) with `ConsoleAttach` passed after moving host terminal setup and VT `ReadFile` onto one dedicated input thread.
@@ -217,9 +217,20 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 - With `InheritCursor`, the order of output pump and `Attach` decides whether the session starts. Measured the same day with host stdout's VT processing turned off first (as in a console whose shell never enabled it): when the pump wrote ConPTY's cursor query 300 ms before `Attach`, nothing answered and the child was still waiting 8 s later; attaching first, the child ran and exited. Pump-first without a delay also worked, but only because `Attach` won the race.
 - Optional `IPtyConsoleInputObserver` uses a null check on the input pump hot path; when unset, forwarding matches direct `PtySession.Input.Write` allocation behavior (verified by `PtyConsoleInputForwardBenchmarks`).
 
+### TUI sample validation lessons (2026-10-28)
+
+- [TuiDemo](../../../samples/TuiDemo) exercises an actual full-screen child both directly and through an attached console host inside an outer PTY. Running a TUI is use case 3; terminal emulation and TUI screen replay remain frontend responsibilities.
+- A Windows host copying UTF-8 PTY bytes to a console with a legacy code page can corrupt Japanese text. The sample sets host input/output encodings to UTF-8 before attach and restores them after detach; terminal mode restoration alone does not configure these encodings.
+- Under nested Windows ConPTY, arrow input can reach a .NET TUI as literal VT characters rather than native arrow key events. The sample child handles both representations. `Console.ReadKey` also discards native mouse events, so the mouse-enabled Windows child reads `INPUT_RECORD` data itself, including native mouse coordinates, and decodes SGR reports incrementally.
+- The Windows host forwarding loop uses `ReadFile` consistently with VT input enabled. A `ReadConsoleInput` fallback could consume queued mouse records without forwarding them, or consume a portion of a report before `ReadFile` resumed. Reading through the console's VT path preserves the negotiated protocol without adding a host-side mouse parser. The native `KEY_EVENT_RECORD` declaration must include `wVirtualScanCode` before the Unicode character (offset 10); injected tests using the same incorrect declaration can mask a layout error.
+- The colored TUI sample checks diagram hit testing, box highlighting, button press/release behavior, wheel selection, ignored clicks outside controls/in compact layout, and mouse-mode cleanup. Color-cell artwork requires only ANSI colors; terminal text selection remains frontend behavior (often Shift+drag while mouse reporting is active).
+- TUI partial rendering belongs to the application: repeated `ESC[2J` followed by many small writes exposes blank frames and causes flicker. The sample caches displayed state, batches updates in a reusable character buffer, and overwrites only affected controls. Its fixed layout needs only a size-label update during normal resize; full clears are limited to initial/layout rebuilds and compact resize. Tests check emitted output before ConPTY, because ConPTY can introduce its own repaint operations.
+- Assert the interpreted screen, not raw status strings: ConPTY may send only changed cells. Smoke checks cover Unicode, color, keys, resize, alternate-screen/cursor restoration, final output drain, and normal exit; they do not replace physical-keyboard testing or certify all terminal extensions.
+
 ## Related Documents
 
 - [spec.md](../spec.md) — four use cases and package map
+- [TuiDemo](../../../samples/TuiDemo) — self-contained interactive TUI and headless PTY/console-host validation
 - [core_session.md](core_session.md) — `PtySession`, embedder patterns
 - [lifecycle.md](lifecycle.md) — output exclusivity, concurrent operations
 - [capture.md](capture.md) — use case 2 (one-shot); not used for interactive attach
