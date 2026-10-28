@@ -49,15 +49,21 @@ internal static partial class DemoTui
                 state.Fit(width, height);
                 renderer.Draw(state.View(width, height, animationTicks / ticksPerFrame));
 
-                if (!input.TryRead(out var key))
+                // Apply every queued event before the next draw: a burst of drag motion reports, wheel steps, or key
+                // repeats then costs one frame, not one per event, so the screen keeps up instead of replaying them.
+                var read = false;
+                var quit = false;
+                while (!quit && input.TryRead(out var key))
                 {
-                    Thread.Sleep(20); // Poll size and the clock even when the user is not typing; no tasks or timers.
-                    continue;
+                    read = true;
+                    quit = state.Quits(key);
+                    if (!quit)
+                        state.Apply(key, width, height);
                 }
-
-                if (state.Quits(key))
+                if (quit)
                     break;
-                state.Apply(key, width, height);
+                if (!read)
+                    Thread.Sleep(20); // Poll size and the clock even when the user is not typing; no tasks or timers.
             }
         }
         finally

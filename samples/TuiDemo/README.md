@@ -33,7 +33,7 @@ Application mouse input requires a terminal that supports VT mouse reporting. Th
 
 ## Animation and partial updates
 
-The animation clock advances in the same 20 ms input poll loop that watches the size; there are no timers or tasks. One frame is 100 ms, and a job's state is a pure function of the frame, so the renderer and the tests compute the same screen. Pausing or opening the dialog stops the clock.
+The animation clock advances in the same 20 ms input poll loop that watches the size; there are no timers or tasks. One frame is 100 ms, and a job's state is a pure function of the frame, so the renderer and the tests compute the same screen. Pausing or opening the dialog stops the clock. Each pass applies every queued input event before drawing once, so a burst of drag motion reports, wheel steps, or key repeats costs one frame instead of one per event.
 
 `DemoRenderer` remembers the displayed state and overwrites only what changed. Identical states emit nothing, and a reusable character buffer batches each update before writing to the terminal.
 
