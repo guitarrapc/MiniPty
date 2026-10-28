@@ -52,7 +52,7 @@ The session runs on the out-of-band ConPTY: this project references `Microsoft.W
 
 When the program exits with code 0 (`exit` in the shell) the window closes, as Windows Terminal does by default. Any other exit code prints `[process exited with code N]` in the terminal and the window stays until a key is pressed, so the reason can be read.
 
-A status line below the grid shows who hosts the PTY: `MiniPty 1.4.0 hosting ConPTY 1.25 (OpenConsole) · pid 12345 · 182×46 · C:\WINDOWS\system32\cmd.exe · running` (`ConPTY` alone on the in-box implementation, `conhost fallback` when `conpty.dll` was found without its host), updated on resize and on exit. It sits outside the emulator because ConPTY clears the screen when the shell starts, so a banner written into the grid would not survive.
+A status line below the grid shows who hosts the PTY: `MiniPty 1.4.1 hosting ConPTY 1.25 (OpenConsole) · pid 12345 · 182×46 · C:\WINDOWS\system32\cmd.exe · running` (`ConPTY` alone on the in-box implementation, `conhost fallback` when `conpty.dll` was found without its host), updated on resize and on exit. It sits outside the emulator because ConPTY clears the screen when the shell starts, so a banner written into the grid would not survive.
 
 ## Code-only WinUI 3 pitfalls
 
