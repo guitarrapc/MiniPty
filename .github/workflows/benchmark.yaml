@@ -114,7 +114,12 @@ jobs:
           git fetch origin "${GITHUB_REF_NAME}"
           git rebase FETCH_HEAD
 
-          sed -E -i 's|(https://github\.com/[^/]+/[^/]+/actions/runs/)[0-9]+|\1${{ github.run_id }}|g' README.md
+          # Only the "latest benchmark run" link moves; the run the README's tables quote stays until they are rewritten.
+          sed -E -i '/latest benchmark run/ s|(https://github\.com/[^/]+/[^/]+/actions/runs/)[0-9]+|\1${{ github.run_id }}|g' README.md
+          if git diff --quiet -- README.md; then
+            echo "README.md has no latest benchmark run link to update."
+            exit 0
+          fi
 
           git add README.md
           git commit -m 'docs: update benchmark report link' -m "updated in run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${{ job.check_run_id }}"
