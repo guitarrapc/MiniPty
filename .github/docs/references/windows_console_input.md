@@ -42,9 +42,15 @@ Microsoft does not document a per-thread rule for VT console input. Empirically,
 
 ## Dispose
 
-`Dispose` cancels the input loop with `CancelIoEx` on stdin, joins the input thread, then restores saved console modes and the input code page.
+`Dispose` cancels the input loop, joins the input thread, then removes any leftover wake sentinel and restores saved console modes and the input code page.
 
-Known issue: conhost keeps a `ReadFile` cancelled by `CancelIoEx` registered, and that orphaned read consumes the next queued input record without returning it to anyone (reproduced 3/3; exactly one record is lost). After detach, the first key typed into the next attach, or into the embedder's own `Console.ReadKey`, is dropped. Waking the blocked read with an input record instead of cancelling it left no orphaned read.
+The blocked `ReadFile` is woken by writing a sentinel key record (key down, no virtual key, private-use `U+E000`) with `WriteConsoleInput`; the woken read returns 0 instead of forwarding the sentinel bytes. `CancelIoEx` is only a fallback when the write fails. Lessons (2026-10-28, conhost on Windows 11 26200):
+
+- conhost keeps a `ReadFile` cancelled by `CancelIoEx` registered. The orphaned read consumes exactly one later input record without returning it to anyone, so the first key after detach, typed into the next attach or the embedder's own `Console.ReadKey`, was lost (reproduced in every re-attach of a 10-iteration loop). A read woken by a record leaves nothing behind.
+- A read state (idle, pending, wake requested) is published with `Interlocked` before cancellation is checked, so a canceller either wakes the pending read or the reader sees cancellation and skips `ReadFile`; one sentinel is written per pending read. The token registration is disposed before the state is read, which waits for a running callback, so a sentinel is never written after its read has cleaned up.
+- A sentinel stays queued when its read returned before consuming it. The reader removes it, and `Dispose` removes one only when no read is pending; removal reads the peeked records and writes the others back, so input arriving during those calls can be reordered.
+- conhost zeroed the scan code of an injected record, so the sentinel is identified by key-down, virtual key 0, and `U+E000`.
+- The old implementation also issued `ReadFile` when the token was already cancelled and consumed a queued key; the pending-state check now skips the read.
 
 ## NativeAOT Interop
 
@@ -64,7 +70,7 @@ Inject-based Windows tests can pass while physical keyboard input still fails. V
 
 Console-input tests return early when the test host cannot obtain a console (for example when `AllocConsole` fails because one is already attached), so a green `dotnet test` does not prove they ran. Run them on a real console as well, for example by starting the test executable with `Start-Process -WindowStyle Hidden` and `--report-trx`. Lessons from making them pass together in one process (2026-10-28, Windows 11 26200):
 
-- The tests share one console input queue, so they run `NotInParallel`, and each resets the queue first (`WindowsConsoleInputInjector.ResetInputQueue`): a throwaway key absorbs the orphaned read left by an earlier test's detach (see Dispose), then the queue is flushed.
+- The tests share one console input queue, so they run `NotInParallel`, and each flushes the queue first (`WindowsConsoleInputInjector.ResetInputQueue`). The reset deliberately does not absorb an orphaned read, so a detach that left one behind also fails the next test, besides the dedicated cancelled-read and re-attach regressions (which fail against the `CancelIoEx` implementation).
 - `WriteFile` on the console input handle fails with `ERROR_INVALID_HANDLE` on conhost, so raw UTF-8 bytes cannot be injected. Inject Unicode key events and start from a legacy input code page to check UTF-8 encoding.
 - A child reading with cooked-mode `Console.In.Read` waits for Enter; use `Console.ReadKey` and inject only after the child prints a ready marker.
 - Match child output after removing VT sequences: ConPTY emitted `ESC[?9001l ESC[?1004l` between an echoed key and the marker written right after it.

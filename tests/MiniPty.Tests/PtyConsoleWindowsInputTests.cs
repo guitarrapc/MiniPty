@@ -8,8 +8,9 @@ namespace MiniPty.Tests;
 /// <summary>
 /// Host console input tests. They share one process-wide console input queue (the attached console or one
 /// allocated per test), so they run one at a time: a concurrent read would consume another test's records.
-/// Each test also resets the queue first, because a read cancelled by an earlier test's detach stays registered
-/// in conhost and would swallow the next injected key.
+/// Each test starts from an empty queue. The reset does not absorb an orphaned console read, so a host terminal
+/// that left one behind on detach (conhost keeps a <c>CancelIoEx</c>-cancelled read registered and it swallows the
+/// next record) fails the test that follows as well as the dedicated regression tests.
 /// </summary>
 /// <remarks>
 /// Without a console (redirected test host where <c>AllocConsole</c> fails) these tests return early, so a green
@@ -119,6 +120,69 @@ public sealed class PtyConsoleWindowsInputTests
     }
 
     [Test]
+    public async Task WindowsHostTerminal_CancelledBlockedRead_DoesNotSwallowNextKey()
+    {
+        if (!TryAcquireConsole(out var allocatedConsole))
+            return;
+
+        try
+        {
+            using (var terminal = new WindowsHostTerminal())
+            {
+                using var cancel = new CancellationTokenSource();
+                var reader = new Thread(() => terminal.ReadInput(new byte[16], cancel.Token));
+                reader.Start();
+                await Task.Delay(300); // let the read block in ReadFile
+                cancel.Cancel();
+                await Assert.That(reader.Join(TimeSpan.FromSeconds(5))).IsTrue();
+            }
+
+            // The wake sentinel must not stay queued, and no orphaned read may consume the next key.
+            await Assert.That(PendingInputEvents()).IsEqualTo(0u);
+            using (var terminal = new WindowsHostTerminal())
+            {
+                WindowsConsoleInputInjector.InjectUnicodeKeyDown('r');
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var bytes = new byte[8];
+                var read = terminal.ReadInput(bytes, timeout.Token);
+                await Assert.That(Encoding.UTF8.GetString(bytes, 0, read)).IsEqualTo("r");
+            }
+        }
+        finally
+        {
+            ReleaseConsole(allocatedConsole);
+        }
+    }
+
+    [Test]
+    public async Task WindowsHostTerminal_ReadInput_AlreadyCancelled_ReturnsZeroAndLeavesQueuedKey()
+    {
+        if (!TryAcquireConsole(out var allocatedConsole))
+            return;
+
+        try
+        {
+            using var terminal = new WindowsHostTerminal();
+            WindowsConsoleInputInjector.InjectUnicodeKeyDown('k');
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+
+            // No ReadFile is issued, so the queued key stays for the next read and no sentinel is left behind.
+            await Assert.That(terminal.ReadInput(new byte[8], cancelled.Token)).IsEqualTo(0);
+            await Assert.That(PendingInputEvents()).IsEqualTo(1u);
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var bytes = new byte[8];
+            var read = terminal.ReadInput(bytes, timeout.Token);
+            await Assert.That(Encoding.UTF8.GetString(bytes, 0, read)).IsEqualTo("k");
+        }
+        finally
+        {
+            ReleaseConsole(allocatedConsole);
+        }
+    }
+
+    [Test]
     public Task Attach_ForwardsInjectedConsoleInput_OnWindows() =>
         AssertAttachForwardsKeyAsync('Q');
 
@@ -126,12 +190,16 @@ public sealed class PtyConsoleWindowsInputTests
     public Task Attach_ForwardsInjectedNonAsciiInput_OnWindows() =>
         AssertAttachForwardsKeyAsync('日');
 
+    [Test]
+    public Task Attach_ReattachAfterDetach_ForwardsFirstKey_OnWindows() =>
+        AssertAttachForwardsKeyAsync('R', detachOnceFirst: true);
+
     /// <summary>
     /// Attaches the host console to a child that reports readiness, reads one key, and echoes it back. The key is
     /// injected only after the child is ready; <c>Console.ReadKey</c> returns without Enter, unlike a cooked-mode
     /// <c>Console.In.Read</c>, which would wait for a whole line.
     /// </summary>
-    private static async Task AssertAttachForwardsKeyAsync(char key)
+    private static async Task AssertAttachForwardsKeyAsync(char key, bool detachOnceFirst = false)
     {
         if (!TryAcquireConsole(out var allocatedConsole))
             return;
@@ -143,6 +211,14 @@ public sealed class PtyConsoleWindowsInputTests
             var outputLock = new object();
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             var pumpTask = PumpOutputAsync(session, output, outputLock, cts.Token);
+
+            if (detachOnceFirst)
+            {
+                // Detach while the input thread is blocked in ReadFile; the first key of the next attach must
+                // still arrive. Cancelling that read with CancelIoEx left an orphaned read that swallowed it.
+                using (PtyConsoleInput.Attach(session))
+                    await Task.Delay(300, cts.Token);
+            }
 
             using (PtyConsoleInput.Attach(session))
             {
@@ -188,6 +264,12 @@ public sealed class PtyConsoleWindowsInputTests
         WindowsConsoleInputInjector.ResetInputQueue();
         return true;
     }
+
+    private static uint PendingInputEvents() =>
+        ConsoleWindowsInterop.GetNumberOfConsoleInputEvents(
+            ConsoleWindowsInterop.GetStdHandle(ConsoleWindowsInterop.StdInputHandle), out var count)
+            ? count
+            : throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
 
     private static void ReleaseConsole(bool allocated)
     {

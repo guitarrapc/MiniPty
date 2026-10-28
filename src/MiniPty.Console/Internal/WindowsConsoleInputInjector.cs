@@ -27,13 +27,12 @@ internal static class WindowsConsoleInputInjector
     }
 
     /// <summary>
-    /// Leaves the console input queue empty with no orphaned read. After a blocked <c>ReadFile</c> is cancelled
-    /// with <c>CancelIoEx</c>, conhost keeps that read registered and it silently consumes the next queued
-    /// record. A throwaway key that yields a byte completes such a read; if none exists, the flush removes it.
+    /// Empties the console input queue. It deliberately does not absorb an orphaned read (a <c>ReadFile</c>
+    /// cancelled with <c>CancelIoEx</c> stays registered in conhost and swallows the next record): the host
+    /// terminal must never leave one behind, and a test that follows would fail if it did.
     /// </summary>
     internal static void ResetInputQueue()
     {
-        InjectUnicodeKeyDown('x');
         if (!ConsoleWindowsInterop.FlushConsoleInputBuffer(
                 ConsoleWindowsInterop.GetStdHandle(ConsoleWindowsInterop.StdInputHandle)))
             throw new InvalidOperationException("FlushConsoleInputBuffer failed.");

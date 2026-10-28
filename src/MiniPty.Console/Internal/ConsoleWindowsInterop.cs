@@ -136,6 +136,10 @@ internal static partial class ConsoleWindowsInterop
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetNumberOfConsoleInputEvents(IntPtr hConsoleInput, out uint lpNumberOfEvents);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool GetConsoleScreenBufferInfo(
         IntPtr hConsoleOutput,
         out ConsoleScreenBufferInfo lpConsoleScreenBufferInfo);
