@@ -52,7 +52,13 @@ Your application carries the following besides the MiniPty assembly. The package
 
 ## Performance
 
-Measured on GitHub Actions hosted runners with .NET 10: Windows Server 2025 and Ubuntu 24.04 with 4 vCPUs, macOS 26 on a virtual Apple M1 with 3 vCPUs. The numbers below are from [run 40610430082](https://github.com/guitarrapc/MiniPty/actions/runs/40610430082) on 2026-10-28.
+The numbers below are from [run 40706187008](https://github.com/guitarrapc/MiniPty/actions/runs/40706187008) on 2026-10-28, on GitHub Actions hosted runners with .NET 10:
+
+- Linux: Ubuntu 24.04 on an AMD EPYC 7763, 2 cores / 4 threads
+- macOS: macOS 26 on a virtual Apple M1, 3 cores
+- Windows: Windows Server 2025 on an AMD EPYC 9V74, 2 cores / 4 threads
+
+Hosted runners get a different CPU from run to run, and the order of the libraries can change with it: on Linux, MiniPty's 1 MiB floods ran 10% ahead of Porta.Pty on a Xeon 8370C runner and 26% behind on this one. Compare the libraries within one run only.
 
 The keystroke and throughput benchmarks keep one child running with raw input, as a shell or an editor runs, so they measure the PTY path and not process startup. [Porta.Pty](https://www.nuget.org/packages/Porta.Pty) 2.2.3 runs the same child for comparison, in its default mode.
 
@@ -60,10 +66,10 @@ The keystroke and throughput benchmarks keep one child running with raw input, a
 
 | OS | MiniPty P50 / P95 | Porta.Pty P50 / P95 | Allocated per keystroke (MiniPty / Porta.Pty) |
 |----|-------------------|---------------------|-----------------------------------------------|
-| Linux | 98 / 131 µs | 105 / 136 µs | 0 B / 680 B |
-| macOS | 98 / 528 µs | 86 / 242 µs | 0 B / 680 B |
-| Windows, [out-of-band ConPTY](#out-of-band-conpty-for-windows) | 122 / 179 µs | 107 / 133 µs | 0 B / 216 B |
-| Windows, in-box ConPTY | 12.7 / 22.7 ms | 9.7 / 22.6 ms | 0 B / 160 B |
+| Linux | 98 / 129 µs | 112 / 136 µs | 0 B / 680 B |
+| macOS | 33 / 39 µs | 36 / 45 µs | 0 B / 680 B |
+| Windows, [out-of-band ConPTY](#out-of-band-conpty-for-windows) | 200 / 226 µs | 190 / 218 µs | 0 B / 216 B |
+| Windows, in-box ConPTY | 11.2 / 20.6 ms | 14.6 / 20.7 ms | 0 B / 0 B |
 
 On Windows the in-box ConPTY repaints on its own frame schedule, which sets the round trip for any library; the out-of-band ConPTY removes that wait.
 
@@ -71,20 +77,20 @@ On Windows the in-box ConPTY repaints on its own frame schedule, which sets the 
 
 | OS | MiniPty | Porta.Pty | Allocated per 1 MiB (MiniPty / Porta.Pty) |
 |----|---------|-----------|-------------------------------------------|
-| Linux | 255 MiB/s | 231 MiB/s | 0 B / 78 KiB |
-| macOS | 51 MiB/s | 53 MiB/s | 0 B / 481 KiB |
-| Windows, out-of-band ConPTY | 7.5 MiB/s | 7.4 MiB/s | 12 B / 864 KiB |
-| Windows, in-box ConPTY | 5.8 MiB/s | 5.9 MiB/s | 0 B / 107 B |
+| Linux | 139 MiB/s | 188 MiB/s | 0 B / 72 KiB |
+| macOS | 55 MiB/s | 53 MiB/s | 0 B / 481 KiB |
+| Windows, out-of-band ConPTY | 4.7 MiB/s | 4.9 MiB/s | 0 B / 864 KiB |
+| Windows, in-box ConPTY | 3.5 MiB/s | 3.7 MiB/s | 0 B / 172 B |
 
-ConPTY renders the child's output and sends its own VT stream, so on Windows this is the speed of ConPTY's renderer, not of a byte pipe.
+ConPTY renders the child's output and sends its own VT stream, so on Windows this is the speed of ConPTY's renderer, not of a byte pipe, and every library runs at about the same rate.
 
 **Session start**: one session from `Pty.Start` to exit, through the OS shell (`cmd.exe /c` on Windows, `sh -c` elsewhere), so the time is mostly process creation.
 
 | OS | `exit 0` | `echo`, output read | Allocated |
 |----|----------|---------------------|-----------|
-| Linux | 1.4 ms | 1.4 ms | 1.2 – 1.7 KB |
-| macOS | 9.3 ms | 9.0 ms | 1.2 – 1.7 KB |
-| Windows | 14.2 ms | 15.8 ms | 1.3 – 1.8 KB |
+| Linux | 2.3 ms | 2.4 ms | 1.2 – 1.7 KB |
+| macOS | 6.6 ms | 8.5 ms | 1.2 – 1.7 KB |
+| Windows | 17.2 ms | 21.7 ms | 1.3 – 1.8 KB |
 
 The full reports of the [latest benchmark run](https://github.com/guitarrapc/MiniPty/actions/runs/40706187008) include every benchmark, Porta.Pty's `UseAsyncIo` mode, and 64 KiB floods. Run them locally with `dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter "*PtyLatencyBenchmarks*"`.
 
