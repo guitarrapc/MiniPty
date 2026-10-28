@@ -86,7 +86,7 @@ ConPTY renders the child's output and sends its own VT stream, so on Windows thi
 | macOS | 9.3 ms | 9.0 ms | 1.2 – 1.7 KB |
 | Windows | 14.2 ms | 15.8 ms | 1.3 – 1.8 KB |
 
-The full reports of the [latest benchmark run](https://github.com/guitarrapc/MiniPty/actions/runs/40610430082) include every benchmark, Porta.Pty's `UseAsyncIo` mode, and 64 KiB floods. Run them locally with `dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter "*PtyLatencyBenchmarks*"`.
+The full reports of the [latest benchmark run](https://github.com/guitarrapc/MiniPty/actions/runs/40706187008) include every benchmark, Porta.Pty's `UseAsyncIo` mode, and 64 KiB floods. Run them locally with `dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter "*PtyLatencyBenchmarks*"`.
 
 
 ## Quick start
