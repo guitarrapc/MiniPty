@@ -61,7 +61,7 @@ internal static class Smoke
             await ExpectAsync("Selected: 2/3   Paused: no", alternate: true);
             await session.WriteInputAsync(" "u8.ToArray(), timeout.Token);
             await ExpectAsync("Selected: 2/3   Paused: yes", alternate: true);
-            await ExpectFrozenAsync();
+            await ExpectFrozenAsync(() => Cell(3, 2), () => Slice(3, 58, 4));
             await session.WriteInputAsync(" "u8.ToArray(), timeout.Token);
             await ExpectAsync("Paused: no", alternate: true);
             await ChangesAsync(() => Cell(3, 2), "braille spinner after resume");
@@ -107,6 +107,60 @@ internal static class Smoke
             await WaitUntilAsync(() => Slice(5, 23, 1) == "│" && Slice(9, 23, 1) == "└",
                 "the panels under the dialog to be restored");
 
+            // Files: switch by key, then move, scroll, and fold with the keys terminals encode differently.
+            await SendAsync("2");
+            await ExpectAsync("┌ Files ", alternate: true);
+            await WaitUntilAsync(() => !ScreenContains("Spinners"), "the dashboard to be replaced");
+            await ExpectAsync("Item: 1/20 ", alternate: true);
+            await SendAsync("\u001b[B\u001b[B");
+            await ExpectAsync("Item: 3/20 ", alternate: true);
+            await SendAsync("\u001b[F");
+            await ExpectAsync("Item: 20/20 ", alternate: true);
+            await ExpectAsync("└─ global.json", alternate: true);
+            // 日本語メモ.txt is 14 cells wide; its size must still end in the same column as its neighbors'.
+            await WaitUntilAsync(() => Slice(14, 32, 6) == "  412B" && Slice(15, 32, 6) == "   96B",
+                "the wide-character row's size column to line up");
+            await SendAsync("\u001b[H");
+            await ExpectAsync("Item: 1/20 ", alternate: true);
+            await SendAsync("\u001b[6~");
+            await ExpectAsync("Item: 16/20 ", alternate: true);
+            await SendAsync("\u001b[5~");
+            await ExpectAsync("Item: 1/20 ", alternate: true);
+            await SendAsync("\u001b[B\r");
+            await ExpectAsync("Item: 2/22 ", alternate: true);
+            await ExpectAsync("├─ + workflows/", alternate: true);
+            await SendAsync("\u001b[D");
+            await ExpectAsync("Item: 2/20 ", alternate: true);
+            await SendAsync("\u001b[C");
+            await ExpectAsync("Item: 2/22 ", alternate: true);
+            await MouseAsync(0, 10, DemoLayout.FirstFileRow + 1); // A click on the selected folder folds it.
+            await ExpectAsync("Item: 2/20 ", alternate: true);
+            await MouseAsync(0, 10, DemoLayout.FirstFileRow + 1, release: true);
+            await MouseAsync(0, 10, DemoLayout.FirstFileRow);
+            await ExpectAsync("Item: 1/20 ", alternate: true);
+            await MouseAsync(0, 10, DemoLayout.FirstFileRow, release: true);
+            await MouseAsync(65, 10, DemoLayout.FirstFileRow + 2);
+            await ExpectAsync("Item: 2/20 ", alternate: true);
+
+            // Charts by Tab: the braille plot and a sparkline move on their own and freeze while paused.
+            await SendAsync("\t");
+            await ExpectAsync("┌ Signals sine mix ", alternate: true);
+            await ChangesAsync(() => Slice(4, 7, 60), "braille plot");
+            await ChangesAsync(() => Slice(13, 43, 22), "cpu sparkline");
+            await SendAsync(" ");
+            await ExpectAsync("Paused: yes", alternate: true);
+            await ExpectFrozenAsync(() => Slice(4, 7, 60), () => Slice(13, 43, 22));
+            await SendAsync(" ");
+            await ExpectAsync("Paused: no", alternate: true);
+
+            // Back by Shift+Tab, and to the dashboard by clicking its tab; each page kept its state.
+            await SendAsync("\u001b[Z");
+            await ExpectAsync("Item: 2/20 ", alternate: true);
+            await MouseAsync(0, DemoLayout.TabLeft[DemoLayout.DashboardPage] + 2, DemoLayout.TabRow);
+            await ExpectAsync("Spinners", alternate: true);
+            await ExpectAsync("Selected: 2/3", alternate: true);
+            await MouseAsync(0, DemoLayout.TabLeft[DemoLayout.DashboardPage] + 2, DemoLayout.TabRow, release: true);
+
             Resize(100, 30);
             await ExpectAsync("Size: 100 x 30", alternate: true);
             await ExpectAsync("Unicode: 日本語 / café", alternate: true);
@@ -129,7 +183,7 @@ internal static class Smoke
                 if (status.ExitCode != 0 || !screen.CursorVisible || screen.Mouse != MouseTracking.None || screen.MouseSgr)
                     throw new InvalidOperationException($"Exit={status.ExitCode}, cursor visible={screen.CursorVisible}, mouse={screen.Mouse}/{screen.MouseSgr}.");
             }
-            Console.WriteLine($"PASS ({(throughHost ? "console host + nested PTY, Ctrl+C" : "direct PTY, Q")}): Unicode, colors, animated spinners/progress/log, pause, keys, mouse click/wheel, dialog, resize, screen/cursor/mouse restoration, exit=0 (spinner seen: {spinner})");
+            Console.WriteLine($"PASS ({(throughHost ? "console host + nested PTY, Ctrl+C" : "direct PTY, Q")}): Unicode, colors, animated spinners/progress/log, pause, keys, mouse click/wheel, dialog, tabs, file tree scroll/fold/wide names, braille chart/sparklines, resize, screen/cursor/mouse restoration, exit=0 (spinner seen: {spinner})");
         }
         finally
         {
@@ -208,16 +262,18 @@ internal static class Smoke
         }
 
         /// <summary>While paused the TUI must emit nothing that changes the animated cells.</summary>
-        async Task ExpectFrozenAsync()
+        async Task ExpectFrozenAsync(Func<string> first, Func<string> second)
         {
             // Let output written before the pause took effect reach the screen first.
             await Task.Delay(300, timeout.Token);
-            var spinnerBefore = Cell(3, 2);
-            var percentBefore = Slice(3, 58, 4);
+            var firstBefore = first();
+            var secondBefore = second();
             await Task.Delay(600, timeout.Token);
-            if (Cell(3, 2) != spinnerBefore || Slice(3, 58, 4) != percentBefore)
+            if (first() != firstBefore || second() != secondBefore)
                 throw new InvalidOperationException("The animation kept running while paused.");
         }
+
+        Task SendAsync(string text) => session.WriteInputAsync(Encoding.UTF8.GetBytes(text), timeout.Token).AsTask();
 
         async Task MouseAsync(int button, int column, int row, bool release = false)
         {

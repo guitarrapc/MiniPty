@@ -34,6 +34,45 @@ public sealed class TuiDemoInputTests
     }
 
     [Test]
+    public async Task NavigationKeys_DecodeCsiSs3AndModifiedForms()
+    {
+        // Terminals send the same key in different forms: CSI or SS3 finals, "~" codes, and modifier parameters.
+        var input = "\u001b[C\u001b[D\u001bOH\u001bOF\u001b[H\u001b[F\u001b[1~\u001b[4~\u001b[7~\u001b[8~\u001b[5~\u001b[6~"
+            + "\u001b[1;5A\u001b[1;2B\u001b[5;5~\u001b[Z\t123\u001b[<0;9;4M\u001b[2~\u001b[99999999~q";
+        var expected = new[]
+        {
+            DemoCommand.Right, DemoCommand.Left, DemoCommand.Home, DemoCommand.End, DemoCommand.Home, DemoCommand.End,
+            DemoCommand.Home, DemoCommand.End, DemoCommand.Home, DemoCommand.End, DemoCommand.PageUp, DemoCommand.PageDown,
+            DemoCommand.Up, DemoCommand.Down, DemoCommand.PageUp, DemoCommand.PrevTab, DemoCommand.NextTab,
+            DemoCommand.Page, DemoCommand.Page, DemoCommand.Page, DemoCommand.Mouse, DemoCommand.Quit,
+        };
+        var parser = new DemoInputParser();
+        var events = new List<DemoEvent>();
+        foreach (var character in input)
+        {
+            var decoded = parser.Feed(character);
+            if (decoded.Command != DemoCommand.None)
+                events.Add(decoded);
+        }
+
+        await Assert.That(string.Join(", ", events.Select(e => e.Command))).IsEqualTo(string.Join(", ", expected));
+        await Assert.That(events[17].Column).IsEqualTo(0);
+        await Assert.That(events[19].Column).IsEqualTo(2);
+        await Assert.That(events[20]).IsEqualTo(new DemoEvent(DemoCommand.Mouse, 9, 4, 0));
+    }
+
+    [Test]
+    public async Task ConsoleKeys_MapNavigationAndShiftTab()
+    {
+        var parser = new DemoInputParser();
+        await Assert.That(parser.Feed(new ConsoleKeyInfo('\0', ConsoleKey.LeftArrow, false, false, false)).Command).IsEqualTo(DemoCommand.Left);
+        await Assert.That(parser.Feed(new ConsoleKeyInfo('\0', ConsoleKey.PageDown, false, false, false)).Command).IsEqualTo(DemoCommand.PageDown);
+        await Assert.That(parser.Feed(new ConsoleKeyInfo('\0', ConsoleKey.End, false, false, false)).Command).IsEqualTo(DemoCommand.End);
+        await Assert.That(parser.Feed(new ConsoleKeyInfo('\t', ConsoleKey.Tab, false, false, false)).Command).IsEqualTo(DemoCommand.NextTab);
+        await Assert.That(parser.Feed(new ConsoleKeyInfo('\t', ConsoleKey.Tab, shift: true, alt: false, control: false)).Command).IsEqualTo(DemoCommand.PrevTab);
+    }
+
+    [Test]
     public async Task MouseWheelAndArrows_KeepTheirMeaningBetweenReports()
     {
         var parser = new DemoInputParser();

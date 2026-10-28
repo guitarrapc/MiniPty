@@ -8,19 +8,22 @@ Run from an interactive terminal:
 dotnet run --project samples/TuiDemo -c Release
 ```
 
-The screen is a small job dashboard that looks like a typical TUI application, built from ANSI colors and Unicode characters without image protocols or a TUI framework:
+The screen looks like a typical TUI application, after the familiar ratatui/tui-rs demos, and is built from ANSI colors and Unicode characters without image protocols or a TUI framework. A header bar holds the title, three tabs, and the size; the row under it shows Unicode text and a 24-bit color gradient on every page.
 
-- A header bar with the elapsed time and size, and a row with Unicode text and a 24-bit color gradient.
-- A Spinners panel with five styles (braille, ASCII, quadrant blocks, dots, a rising bar).
-- A Jobs panel: three simulated jobs loop through queued, running, done, and failed, each with a spinner or ✓/✗, a progress bar drawn in eighths of a cell, its percent, and a colored state.
-- A Log panel whose new lines enter at the bottom and scroll the older ones up.
-- A modal Details dialog with a shadow.
+- **1 Dashboard:**
+  - A Spinners panel with five styles (braille, ASCII, quadrant blocks, dots, a rising bar).
+  - A Jobs panel with the elapsed time: three simulated jobs loop through queued, running, done, and failed, each with a spinner or ✓/✗, a progress bar drawn in eighths of a cell, its percent, and a colored state.
+  - A Log panel whose new lines enter at the bottom and scroll the older ones up.
+  - A modal Details dialog with a shadow.
+- **2 Files:** a simulated repository tree (fixed data, not the file system) with guides, folder markers, colored names, and right-aligned sizes, including `日本語メモ.txt` and `café.md`. A Details panel shows the selected item's name, type, size, and path, and a preview: a folder's children or a file's sample lines.
+- **3 Charts:** two scrolling signals plotted with braille dots on a y axis, five animated bars in eighth blocks, and three sparklines with their current values.
 
-Terminals differ in how they draw these (24-bit color, braille and block glyphs, scroll regions, mouse reporting), so the same screen in Windows Terminal, conhost, VS Code, or the GUI and web terminal samples shows those differences side by side. The WinUI and Avalonia terminal samples take the program to run as arguments, so they can host the TUI directly as `TuiDemo --child`.
+Terminals differ in how they draw these (24-bit color, braille and block glyphs, wide characters, scroll regions, mouse reporting), so the same screen in Windows Terminal, conhost, VS Code, or the GUI and web terminal samples shows those differences side by side. The WinUI and Avalonia terminal samples take the program to run as arguments, so they can host the TUI directly as `TuiDemo --child`.
 
-- Click a job row, use the mouse wheel, or Up/Down (J/K) to select a job.
-- Space, P, or `[ Pause ]` stops the animation; the screen then stops changing. Releasing a button does not activate it again.
-- Enter or `[ Details ]` opens the dialog for the selected job, and the animation stops while it is open; Enter or `[ Close ]` closes it. Q or Ctrl+C quits.
+- 1–3, Tab and Shift+Tab, or a click on the header switch tabs; each page keeps its state.
+- Dashboard: click a job row, use the mouse wheel, or Up/Down (J/K) to select a job. Enter or `[ Details ]` opens the dialog for the selected job, and the animation stops while it is open; Enter or `[ Close ]` closes it.
+- Files: Up/Down, PgUp/PgDn, Home/End, and the wheel move; Enter or a click on the selected folder folds it; Right unfolds and Left folds or goes to the parent folder.
+- Space, P, or `[ Pause ]` stops the animation on every page; the screen then stops changing. Releasing a button does not activate it again. Q or Ctrl+C quits.
 - Resize the terminal to see the size update. Below 72 columns or 22 rows a compact message replaces the controls; hidden controls cannot be clicked.
 
 Application mouse input requires a terminal that supports VT mouse reporting. While reporting is active, terminal text selection often uses Shift+drag (depending on the terminal). Clicking a row selects the application's item; copying text is a frontend feature. On orderly exit the application disables mouse reporting, resets the scroll region, and restores the original screen and cursor.
@@ -29,9 +32,16 @@ Application mouse input requires a terminal that supports VT mouse reporting. Wh
 
 The animation clock advances in the same 20 ms input poll loop that watches the size; there are no timers or tasks. One frame is 100 ms, and a job's state is a pure function of the frame, so the renderer and the tests compute the same screen. Pausing or opening the dialog stops the clock.
 
-`DemoRenderer` remembers the displayed state and overwrites only what changed. An animation tick rewrites the spinner glyphs that changed, the job rows, and the elapsed time. A new log line scrolls the log region with DECSTBM and SU and writes only the new line, instead of redrawing the panel. Selection rewrites the old and new job rows and the status line; mouse coordinates update their own field. Identical states emit nothing. A reusable character buffer batches each update before writing to the terminal.
+`DemoRenderer` remembers the displayed state and overwrites only what changed. Identical states emit nothing, and a reusable character buffer batches each update before writing to the terminal.
 
-The layout has fixed cell positions. Resizing while it fits only updates the size label. The screen is cleared on first draw, when switching between the dashboard and compact layout, or when resizing the compact layout (the message may have wrapped). Closing the dialog rewrites every cell in place without clearing. Shorter labels explicitly erase their old suffixes. Clearing and rebuilding the entire screen on every tick would expose a blank screen between writes and cause flicker.
+- **Dashboard:** a tick rewrites the spinner glyphs that changed, the job rows, and the elapsed time. A new log line scrolls the log region with DECSTBM and SU and writes only the new line, instead of redrawing the panel. Selection rewrites the old and new job rows and the status line.
+- **Files:** moving the cursor rewrites the old and new rows and the Details panel; scrolling or folding rewrites the tree's rows. It does not use a scroll region, because DECSTBM scrolls whole rows and would move the Details panel beside the tree. Names and previews are padded by display width, so wide characters keep the size column and the border aligned.
+- **Charts:** the plot changes nearly every cell each frame, so the renderer keeps the displayed braille canvas and writes only the span of each row that differs. Bars and sparklines are small and are rewritten on each tick.
+- Mouse coordinates update their own field on every page.
+
+The layout has fixed cell positions, and every page paints every cell of the page area. Switching tabs and closing the dialog therefore rewrite cells in place without clearing. Resizing while the layout fits only updates the size label. The screen is cleared only on first draw, when switching between the full and compact layout, or when resizing the compact layout (the message may have wrapped). Shorter labels explicitly erase their old suffixes. Clearing and rebuilding the entire screen on every tick would expose a blank screen between writes and cause flicker.
+
+Glyphs are limited to box drawing, eighth blocks, braille, and ASCII; folders use `+` and `-` rather than ▸ and ▾, which are East Asian Ambiguous and drawn wide by some terminals. Missing braille or block glyphs in some fonts are part of what the comparison shows.
 
 This is TUI rendering policy. MiniPty transports the cursor-addressing and overwrite sequences as ordinary output bytes; it requires no partial-rendering API. On Windows ConPTY may further transform the stream into its own repaint operations. These checks validate emitted updates and resulting cells rather than promising tear-free rendering in every frontend.
 
@@ -47,13 +57,24 @@ The smoke mode needs no interactive terminal. It first drives the TUI inside a r
 - That a spinner, a job's percent, and the log change on their own, and that pausing freezes them.
 - Key and click selection with row highlighting, button press/release behavior, wheel selection, and clicks outside controls and in compact mode.
 - The dialog opening and closing by key and by button, with the covered panels restored.
+- Files: switching by key; Up/Down, End, Home, PgDn, PgUp; folding by Enter, Right, Left, and a click; wheel; and the wide-character row's size column lining up with its neighbors'.
+- Charts: switching by Tab; the braille plot and a sparkline changing on their own and freezing while paused; returning by Shift+Tab and by clicking the dashboard's tab, with each page's state kept.
 - Growth/shrink/recovery, restored screen/cursor/mouse modes, final drained output, and exit code zero.
 
 Animated cells are checked by waiting until they change, not at fixed frames: the point is that a steady stream of small writes keeps reaching the screen through each path, and a slow CI runner must not fail it. The first pass quits with Q, the second with Ctrl+C. CI runs the smoke under NativeAOT on Linux, Windows, and macOS (x64 and arm64).
 
 The existing emulator in `samples/TerminalEmulator` interprets the output for these assertions. Comparing raw strings is insufficient on Windows: ConPTY can send only changed cells rather than repeating a complete status line. This emulator is only used by smoke mode; interactive mode forwards bytes directly.
 
-`TuiDemoRendererTests` also checks output before the PTY: animation ticks, selection, pause, and normal resizing do not clear the screen or redraw static text; a new log entry scrolls the previous one up through the scroll region; the dialog closes without clearing and leaves the panels as they were; no-op draws emit nothing; shorter text leaves no stale suffix; and compact-layout transitions restore the screen. It also checks the simulated jobs' states and log events.
+`TuiDemoRendererTests` also checks output before the PTY:
+
+- Animation ticks, selection, pause, folding, and normal resizing do not clear the screen or redraw static text, and no-op draws emit nothing.
+- A new log entry scrolls the previous one up through the scroll region.
+- The dialog closes, and tabs switch and switch back, without clearing and leave the screen as it was.
+- A Files cursor move rewrites only its two rows and the details; scrolling keeps the cursor visible and the wide-character row aligned.
+- A chart tick writes braille and only the changed cells.
+- Shorter text leaves no stale suffix, and compact-layout transitions restore the screen.
+
+It also checks the simulated jobs, the tree's visible rows and folding, and `TuiDemoInputTests` the CSI, SS3, `~`, modified, Tab, and Shift+Tab key forms.
 
 Publish and run the same checks with NativeAOT (substitute your platform's RID):
 

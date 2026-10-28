@@ -29,7 +29,9 @@
     <Compile Include="..\..\samples\TerminalEmulator\*.cs" Link="TerminalEmulator\%(Filename)%(Extension)" />
     <Compile Include="..\..\samples\TuiDemo\DemoInput.cs" Link="TuiDemo\DemoInput.cs" />
     <Compile Include="..\..\samples\TuiDemo\DemoJobs.cs" Link="TuiDemo\DemoJobs.cs" />
-    <Compile Include="..\..\samples\TuiDemo\DemoRenderer.cs" Link="TuiDemo\DemoRenderer.cs" />
+    <Compile Include="..\..\samples\TuiDemo\DemoFiles.cs" Link="TuiDemo\DemoFiles.cs" />
+    <Compile Include="..\..\samples\TuiDemo\DemoCharts.cs" Link="TuiDemo\DemoCharts.cs" />
+    <Compile Include="..\..\samples\TuiDemo\DemoRenderer*.cs" Link="TuiDemo\%(Filename)%(Extension)" />
   </ItemGroup>
 
   <!--

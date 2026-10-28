@@ -1,13 +1,33 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
-internal enum DemoCommand { None, Up, Down, Details, Pause, Quit, Mouse }
+internal enum DemoCommand
+{
+    None,
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Details,
+    Pause,
+    NextTab,
+    PrevTab,
+    /// <summary>Switch to the page in <see cref="DemoEvent.Column"/> (0-based).</summary>
+    Page,
+    Quit,
+    Mouse,
+}
 
 internal readonly record struct DemoEvent(DemoCommand Command, int Column = 0, int Row = 0, int Button = 0);
 
 /// <summary>
-/// A bounded, incremental decoder for the few VT input sequences this demo uses. It accepts split SGR
-/// mouse reports and native console keys without allocating per event. Other terminal protocols are ignored.
+/// A bounded, incremental decoder for the few VT input sequences this demo uses. It accepts split SGR mouse reports,
+/// CSI and SS3 cursor keys (including modified forms such as <c>ESC [ 1 ; 5 A</c> and <c>ESC [ 5 ~</c>), and native
+/// console keys without allocating per event. Other terminal protocols are ignored.
 /// </summary>
 internal struct DemoInputParser
 {
@@ -20,8 +40,18 @@ internal struct DemoInputParser
 
     internal DemoEvent Feed(ConsoleKeyInfo key)
     {
-        if (key.Key == ConsoleKey.UpArrow) return new(DemoCommand.Up);
-        if (key.Key == ConsoleKey.DownArrow) return new(DemoCommand.Down);
+        switch (key.Key)
+        {
+            case ConsoleKey.UpArrow: return new(DemoCommand.Up);
+            case ConsoleKey.DownArrow: return new(DemoCommand.Down);
+            case ConsoleKey.LeftArrow: return new(DemoCommand.Left);
+            case ConsoleKey.RightArrow: return new(DemoCommand.Right);
+            case ConsoleKey.PageUp: return new(DemoCommand.PageUp);
+            case ConsoleKey.PageDown: return new(DemoCommand.PageDown);
+            case ConsoleKey.Home: return new(DemoCommand.Home);
+            case ConsoleKey.End: return new(DemoCommand.End);
+            case ConsoleKey.Tab: return new((key.Modifiers & ConsoleModifiers.Shift) != 0 ? DemoCommand.PrevTab : DemoCommand.NextTab);
+        }
         // .NET's Unix key parser can represent an isolated ESC+[ / ESC+O fragment as Alt+[ / Alt+O.
         // Reconstruct the prefix so a split mouse/arrow report still reaches our incremental decoder.
         if ((key.Modifiers & ConsoleModifiers.Alt) != 0 && key.KeyChar is '[' or 'O')
@@ -51,6 +81,8 @@ internal struct DemoInputParser
                     'j' or 'J' => new(DemoCommand.Down),
                     '\r' or '\n' => new(DemoCommand.Details),
                     ' ' or 'p' or 'P' => new(DemoCommand.Pause),
+                    '\t' => new(DemoCommand.NextTab),
+                    >= '1' and <= '3' => new(DemoCommand.Page, value - '1'),
                     _ => default,
                 };
             case 1:
@@ -65,9 +97,16 @@ internal struct DemoInputParser
                     _digits = false;
                     return default;
                 }
+                if (value is >= '0' and <= '9')
+                {
+                    _state = 5;
+                    _number = value - '0';
+                    _field = 0;
+                    return default;
+                }
                 if (value is < '@' or > '~')
                     _state = 4;
-                return value switch { 'A' => new(DemoCommand.Up), 'B' => new(DemoCommand.Down), _ => default };
+                return Final(value, 0);
             case 3:
                 if (value is >= '0' and <= '9')
                 {
@@ -91,13 +130,51 @@ internal struct DemoInputParser
                 if (_digits && _field == 2 && value == 'M' && _column > 0 && _number > 0 && _button is 0 or 64 or 65)
                     return new(DemoCommand.Mouse, _column, _number, _button);
                 return default;
+            case 5:
+                // CSI parameters: keep the first number (the key in "ESC [ 5 ~"), skip modifiers after ';'.
+                if (value is >= '0' and <= '9')
+                {
+                    if (_field == 0)
+                        _number = _number * 10 + value - '0';
+                    if (_number > 65535)
+                        _state = 4;
+                    return default;
+                }
+                if (value == ';')
+                {
+                    _field = 1;
+                    return default;
+                }
+                _state = value is >= '@' and <= '~' ? 0 : 4;
+                return _state == 0 ? Final(value, _number) : default;
             default:
                 if (value is >= '@' and <= '~')
                     _state = 0;
                 return default;
         }
     }
+
+    private static DemoEvent Final(char value, int number) => new(value switch
+    {
+        'A' => DemoCommand.Up,
+        'B' => DemoCommand.Down,
+        'C' => DemoCommand.Right,
+        'D' => DemoCommand.Left,
+        'H' => DemoCommand.Home,
+        'F' => DemoCommand.End,
+        'Z' => DemoCommand.PrevTab,
+        '~' => number switch
+        {
+            1 or 7 => DemoCommand.Home,
+            4 or 8 => DemoCommand.End,
+            5 => DemoCommand.PageUp,
+            6 => DemoCommand.PageDown,
+            _ => DemoCommand.None,
+        },
+        _ => DemoCommand.None,
+    });
 }
+
 
 /// <summary>
 /// Windows console mouse input is native INPUT_RECORD data, which Console.ReadKey discards. Read those
@@ -109,6 +186,7 @@ internal sealed partial class DemoInput : IDisposable
     private const uint EnableVirtualTerminalInput = 0x0200;
     private const uint EnableMouseInput = 0x0010;
     private const uint EnableExtendedFlags = 0x0080;
+    private const uint ShiftPressed = 0x0010;
     private const uint DisableInputModes = 0x0001 | 0x0002 | 0x0004 | 0x0040; // Processed, line, echo, Quick Edit.
     private readonly nint _handle;
     private readonly uint _savedMode;
@@ -140,9 +218,22 @@ internal sealed partial class DemoInput : IDisposable
             else if (record.Type == 2 && record.Mouse.Flags == 4 && (record.Mouse.Modifiers & 0x1f) == 0)
                 input = new(DemoCommand.Mouse, record.Mouse.Position.X + 1, record.Mouse.Position.Y + 1,
                     (short)(record.Mouse.Buttons >> 16) > 0 ? 64 : 65);
+            else if (record.Type == 1 && record.Key.Down != 0 && record.Key.Character == '\t' && (record.Key.Modifiers & ShiftPressed) != 0)
+                input = new(DemoCommand.PrevTab);
             else if (record.Type == 1 && record.Key.Down != 0)
                 input = record.Key.Character != 0 ? _parser.Feed((char)record.Key.Character)
-                    : new(record.Key.VirtualKey switch { 0x26 => DemoCommand.Up, 0x28 => DemoCommand.Down, _ => DemoCommand.None });
+                    : new(record.Key.VirtualKey switch
+                    {
+                        0x26 => DemoCommand.Up,
+                        0x28 => DemoCommand.Down,
+                        0x25 => DemoCommand.Left,
+                        0x27 => DemoCommand.Right,
+                        0x21 => DemoCommand.PageUp,
+                        0x22 => DemoCommand.PageDown,
+                        0x24 => DemoCommand.Home,
+                        0x23 => DemoCommand.End,
+                        _ => DemoCommand.None,
+                    });
             return true;
         }
 
