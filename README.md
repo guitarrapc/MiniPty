@@ -316,6 +316,7 @@ See the [VS Code extension sample instructions](samples/VsCodeExtension) for com
 | [Session.cs](samples/SingleFiles/Session.cs) | `Pty.Start`, background `Output` reads, `WriteInputAsync` / `SendEof`, `CompleteAsync`, `Resize` |
 | [Interactive.cs](samples/SingleFiles/Interactive.cs) | `ReadOutputAsync` persistent loop, marker-driven writes, mid-session `Resize`, natural child exit |
 | [ConsoleAttach.cs](samples/SingleFiles/ConsoleAttach.cs) | **MiniPty.Console** host attach: keyboard → PTY, `ReadOutputAsync` → host display (requires interactive TTY) |
+| [TuiDemo](samples/TuiDemo) | Dependency-free full-screen TUI through **MiniPty.Console**: colored diagram/block art, mouse selection/buttons/wheel, keys, Unicode, resize, and a headless `--smoke` mode (NativeAOT compatible) |
 | [Observe.cs](samples/SingleFiles/Observe.cs) | `PtyCapture.RunAsync`, per-read chunk timelines, stdin via `PtyCaptureOptions.Completion` |
 | [WebTerminal.cs](samples/SingleFiles/WebTerminal.cs) | **MiniPty.Terminal** xterm.js in the browser: WebSocket bridge, ACK flow control, resize, exit banner, Ctrl+V paste and Ctrl+C copy of a selection |
 | [WebTerminalScale.cs](samples/SingleFiles/WebTerminalScale.cs) | **MiniPty.Terminal** in an ASP.NET Core host serving many sessions: a dashboard of what each session costs the host (threads, memory, handles), and a `bench` mode that measures it with keystroke echo latency, and a flood's WebSocket frames per 32 KiB and host CPU per MiB |
@@ -338,6 +339,7 @@ dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs   # then open the 
 dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench --sessions 16,64,256
 dotnet run --project samples/WinUiTerminal   # Windows only
 dotnet run --project samples/AvaloniaTerminal   # Windows, Linux, macOS
+dotnet run --project samples/TuiDemo -c Release   # interactive TUI; add -- --smoke for automated checks
 ```
 
 NativeAOT publish (same flags as CI):

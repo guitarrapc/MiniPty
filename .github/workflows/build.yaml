@@ -87,6 +87,17 @@ jobs:
             fi
           done
 
+      - name: Publish and smoke-test the TUI sample (NativeAOT)
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/minipty-tui-aot"
+          dotnet publish samples/TuiDemo -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
+          exe="$out/TuiDemo"
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            exe="$out/TuiDemo.exe"
+          fi
+          "$exe" --smoke
+
       # The WinUI host sample is JIT-only (the Windows App SDK is its dependency, not MiniPty's) and runs here
       # in smoke mode: it spawns a shell on the UI thread, shows its output, and exits 0 once the output arrived.
       - name: Build and smoke-test the WinUI sample
