@@ -1,67 +1,71 @@
-# Avalonia terminal sample
+# Avalonia terminal
 
-A code-only Avalonia desktop app (no `.axaml` file; `Main`, the `Application`, the window, and the terminal control are all C#) that runs a shell in a MiniPty session and drives **every** MiniPty call from the UI thread, on Windows, Linux, and macOS. It is the same terminal emulator as the [WinUI sample](../WinUiTerminal): the VT parser, screen buffer, key encoding, mouse reporting, and selection live in [`samples/TerminalEmulator`](../TerminalEmulator) and are compiled into both; this project adds the Avalonia drawing and input layer.
+A cross-platform terminal window built on Avalonia, for Windows, Linux, and macOS. MiniPty runs the shell; the sample adds the terminal emulator and the drawing. The same MiniPty code runs on every OS, and every call is made on the UI thread: no `Task.Run`, no dispatcher marshaling.
 
 ```bash
-dotnet run --project samples/AvaloniaTerminal                 # the user's shell ($SHELL, or cmd.exe on Windows)
-dotnet run --project samples/AvaloniaTerminal -- pwsh         # any program and arguments
-dotnet run --project samples/AvaloniaTerminal -- matrix --duration 0 --mode movie
+dotnet run --project samples/AvaloniaTerminal              # the user's shell ($SHELL, or cmd.exe on Windows)
+dotnet run --project samples/AvaloniaTerminal -- pwsh      # any program and its arguments
 ```
 
-Avalonia is a dependency of this sample, not of MiniPty. NativeAOT is disabled here; the sample is about the UI threading model, not publishing. On Linux it needs a display (an X11 or Wayland session, WSLg, or `xvfb-run` on a headless machine).
+On Linux it needs a display: an X11 or Wayland session, WSLg, or `xvfb-run` on a headless machine.
 
-## What the terminal supports
+## How the window uses MiniPty
 
-The same as the WinUI sample, because the emulator is the same code: see [its table](../WinUiTerminal/README.md#what-the-terminal-supports) for the sequences, modes, and reports. Text is drawn with `DrawingContext.DrawText` and `FormattedText`, one call per run of same-attribute ASCII and one per cell otherwise, so wide characters stay on the grid and glyphs the chosen font lacks come from the platform's fallback fonts. The font is the first installed of Cascadia Mono, Consolas, Menlo, SF Mono, DejaVu Sans Mono, Noto Sans Mono, Liberation Mono. On Linux the fallback fonts are whatever fontconfig knows, so East Asian text needs a CJK font on the machine (for example `fonts-noto-cjk`); without one those cells show as boxes.
+All MiniPty calls are in [TerminalWindow.cs](TerminalWindow.cs). The pattern is the same as the [WinUI sample](../WinUiTerminal/README.md#how-the-window-uses-minipty): start, read on the UI thread, write input, resize, dispose.
 
-## Keys and mouse
+```csharp
+// Window loaded: one PtyStartInfo for every OS.
+var session = Pty.Start(new PtyStartInfo
+{
+    FileName = OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe"
+                                           : Environment.GetEnvironmentVariable("SHELL") ?? "/bin/sh",
+    Size = new PtySize(columns, rows),
+    Environment = new Dictionary<string, string?> { ["COLORTERM"] = "truecolor" },
+    ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory(),   // Windows: out-of-band ConPTY; null elsewhere, and ignored
+});
 
-| Action | Binding |
-|---|---|
-| Select | left drag; double-click selects a word |
-| Copy | Ctrl+Shift+C, Ctrl+Insert, right-click with a selection, Ctrl+C with a selection |
-| Paste | Ctrl+Shift+V, Shift+Insert, Ctrl+V, right-click with no selection (line breaks become CR; wrapped in `ESC[200~` … `ESC[201~` when the program asked for bracketed paste) |
-| Interrupt | Ctrl+C with no selection sends `^C`; other Ctrl+letter chords send their control characters |
-| Keys | arrows, Home/End, Insert/Delete, PgUp/PgDn, F1–F12 with xterm modifier encoding; Tab/Shift+Tab; Backspace sends DEL (Ctrl+Backspace sends BS); Alt+key sends ESC+key |
-| Mouse to the program | when a program enables mouse tracking, clicks, drags, and the wheel are reported to it; hold Shift to select locally instead |
-| Wheel and trackpad | scrolls the scrollback (arrow keys in a full-screen program); fractional trackpad deltas are carried between events, so scrolling follows the distance moved |
+var pump = PumpOutputAsync(session);
+var exit = session.WaitForExitAsync();
+await Task.WhenAll(exit, pump);
 
-Printable text arrives through Avalonia's `TextInput` event and control keys through `KeyDown`. The control gives Avalonia an input method client, which is what turns the platform input method on for it: Japanese, Chinese, and Korean input compose with the candidate window at the cursor, the composition is drawn underlined there, and only the committed text is sent. Dead keys compose the same way.
+async Task PumpOutputAsync(PtySession session)
+{
+    await foreach (var chunk in session.ReadOutputAsync())
+        terminal.Feed(chunk.Data.Span);   // parsed in place, on the UI thread
+}
 
-On macOS:
+await session.WriteInputAsync(text);           // KeyDown and TextInput, paste, mouse reports, terminal replies
+session.Resize(new PtySize(columns, rows));    // the control's grid size changed
+await session.DisposeAsync();                  // window closed
+```
 
-- Cmd works like Ctrl for the clipboard shortcuts.
-- Option types the characters the keyboard layout puts on it (Option+E is a dead key, Option+L is `@` on a German layout), as Terminal.app and iTerm2 do by default, so Option+letter is not Meta. Press Esc and then the key for a Meta chord. Option still modifies keys that type nothing (arrows, Backspace, Enter, function keys) with xterm encoding.
+What differs by OS is only what MiniPty does underneath:
 
-## What it demonstrates about MiniPty
-
-All on the UI thread and without `Task.Run`, exactly as in the WinUI sample:
-
-| Host event | MiniPty call | Why it is safe |
+| OS | `Pty.Start` creates | `DisposeAsync` on a running child |
 |---|---|---|
-| Window loaded | `Pty.Start`, then `await foreach (var chunk in session.ReadOutputAsync())` feeding the parser | `MoveNextAsync` never blocks; each chunk arrives on the UI thread and is parsed in place |
-| Key, paste, mouse report, terminal reply | `await session.WriteInputAsync(text)` | Completes at once when the PTY takes the bytes, otherwise in the background |
-| Window resized | `session.Resize(new PtySize(cols, rows))` | Dimensions are clamped to the platform limit, and a resize after child exit is a no-op |
-| Child exits | `await session.WaitForExitAsync()` | Completes from the exit watcher, and the wait holds no thread |
-| Window closed | `await session.DisposeAsync()` | Ends the child if needed and does not block the UI thread. On Unix it hangs the shell up first, but closing the last window also ends the app, and the shell's grace ends with it |
+| Windows | a ConPTY session (out-of-band when `conpty.dll` is beside the app) | terminates it |
+| Linux | a `forkpty` child | hangs it up (`SIGHUP`, so the shell can save its history), then kills it if it is still running a second later |
+| macOS | a child started through `posix_spawn` and `minipty_spawn_helper` | same as Linux |
 
-Nothing in the window is platform-specific: the same `Pty.Start` runs a ConPTY on Windows, a `forkpty` child on Linux, and a `posix_spawn` child on macOS. The child gets `COLORTERM=truecolor`, which is how programs decide to use 24-bit color. On Windows the session runs on the out-of-band ConPTY: the project references `Microsoft.Windows.Console.ConPTY`, MiniPty's build targets stage `OpenConsole.exe` beside `conpty.dll`, and `PtyStartInfo.ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()` opts in (null, and so ignored, on the other platforms). That host forwards graphics, terminal queries, and mouse tracking, which the in-box `conhost.exe` withholds from some programs (it forwards mouse tracking only for a program that reads VT input); the status line says which one is in use.
+Points to get right:
 
-When the program exits with code 0 (`exit` in the shell) the window closes. Any other exit code prints `[process exited with code N]` in the terminal and the window stays until a key is pressed, so the reason can be read.
+- **Read from the start, with one reader**, and use each chunk before the next iteration (copy it to keep it).
+- **Reference the out-of-band ConPTY on Windows only.** The project adds the package under a condition, so Linux and macOS builds stay free of it:
 
-A status line below the grid shows who hosts the PTY: `MiniPty 1.4.1 hosting PTY (forkpty) · pid 26284 · 118×35 · /bin/bash · running`, updated on resize and on exit.
+  ```xml
+  <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003"
+                    Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
+  ```
 
-## Code-only Avalonia
+  MiniPty's build targets copy `OpenConsole.exe` beside `conpty.dll`. Without them the session uses the in-box ConPTY, which withholds graphics, some terminal queries, and mouse tracking from some programs ([details](../../README.md#out-of-band-conpty-for-windows)).
+- **Expect a closing window.** Catch `ObjectDisposedException` and `IOException` from `WriteInputAsync`, mark the run as closing before `DisposeAsync`, and treat disposal exceptions as expected only then ([TerminalRun.cs](../TerminalEmulator/TerminalRun.cs)).
 
-`App.Initialize` does what `App.axaml` would: it adds `FluentTheme` to `Styles` and asks for the dark variant. `Program.Main` is the template's `AppBuilder.Configure<App>().UsePlatformDetect().StartWithClassicDesktopLifetime(args)`, and the window is created in `OnFrameworkInitializationCompleted`. The terminal control is a plain `Control` with `Focusable = true` that overrides `Render`, `OnKeyDown`, `OnTextInput`, the pointer events, and the focus events; `InvalidateVisual()` after each parsed chunk schedules the repaint, and the screen buffer's synchronized-output mode (`?2026`) holds repaints until the program ends its frame.
+## What the sample adds on top
 
-## Checks
+MiniPty moves bytes and does not interpret them. The VT parser, screen buffer, key and mouse encoding, selection, and paste handling are in [samples/TerminalEmulator](../TerminalEmulator), shared with the WinUI sample. [TerminalControl.cs](TerminalControl.cs) draws the grid with `DrawingContext.DrawText` and maps Avalonia's key, text-input, and pointer events onto it. It also gives Avalonia an input method client, which turns on the platform IME for Japanese, Chinese, and Korean input.
 
-`--smoke` runs `sh -c 'echo <marker>'` (`cmd /c echo` on Windows) and exits 0 once the marker is on screen; `--dump <file>` writes the status line and then the visible screen as text when the program exits; `--screenshot <file.png>` renders the window (grid and status line) to a PNG at the same moment, through Avalonia's own renderer, so the drawing can be checked without a desktop to look at. The emulator core is covered by `TerminalEmulatorTests` in the test project on every platform.
+## Notes
 
-```bash
-dotnet run --project samples/AvaloniaTerminal -- --smoke
-dotnet run --project samples/AvaloniaTerminal -- --dump out.txt sh -c 'echo あいう漢字'
-dotnet run --project samples/AvaloniaTerminal -- --screenshot out.png sh -c 'printf "\e[1;31mred \e[0;4mline\e[0m\n"'
-xvfb-run -a dotnet run --project samples/AvaloniaTerminal -- --smoke   # headless Linux
-```
+- Avalonia and the ConPTY package are dependencies of this sample, not of MiniPty. NativeAOT is off: the sample is about the UI threading model.
+- East Asian text on Linux needs a CJK font that fontconfig can find (for example `fonts-noto-cjk`).
+- `--smoke` runs a one-line command and exits 0 once its output is on screen; CI runs it on every OS, under `xvfb-run` on Linux. `--screenshot <file.png>` renders the window to a PNG when the program exits, for checking the drawing without a desktop.

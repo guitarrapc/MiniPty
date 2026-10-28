@@ -1,68 +1,78 @@
-# WinUI 3 terminal sample
+# WinUI 3 terminal
 
-A code-only WinUI 3 desktop app (no XAML file; `Main`, the `Application`, the window, and the terminal control are all C#) that runs a shell in a MiniPty session and drives **every** MiniPty call from the UI thread. It is a small but real terminal emulator: a VT parser and screen buffer behind a Win2D-drawn grid, so full-screen programs such as `matrix`, editors, and colored CLI output render as they would in Windows Terminal.
+A terminal window for Windows built on WinUI 3. MiniPty runs the shell; the sample adds the terminal emulator and the drawing. It shows that a GUI host can call every MiniPty API on the UI thread: no `Task.Run`, no dispatcher marshaling, and nothing that blocks the window.
 
 ```bash
 dotnet run --project samples/WinUiTerminal              # cmd.exe
-dotnet run --project samples/WinUiTerminal -- pwsh      # any program and arguments
-dotnet run --project samples/WinUiTerminal -- matrix --duration 0 --mode movie
+dotnet run --project samples/WinUiTerminal -- pwsh      # any program and its arguments
 ```
 
-Windows only; the same emulator runs on Windows, Linux, and macOS as the Avalonia app in [samples/AvaloniaTerminal](../AvaloniaTerminal). The Windows App SDK and Win2D are dependencies of this sample, not of MiniPty. NativeAOT is disabled here; the sample is about the UI threading model, not publishing.
+## How the window uses MiniPty
 
-## What the terminal supports
+All MiniPty calls are in [TerminalWindow.cs](TerminalWindow.cs). Condensed:
 
-| Area | Supported |
-|---|---|
-| Text | UTF-8 with sequences split across chunks, East Asian wide characters (two cells), combining marks, DEC line-drawing charset |
-| Colors and styles | 16 ANSI colors (Campbell scheme), 256-color palette, 24-bit color (`38;2` and `38:2::` forms), bold (bright), dim, italic, underline (`4:n` styles drawn plain), inverse, hidden, strikethrough |
-| Cursor and editing | CUU/CUD/CUF/CUB, CUP/HVP, CHA, VPA, CNL/CPL, CHT/CBT, ED/EL, ICH/DCH/ECH, IL/DL, SU/SD, REP, DECSTBM scroll region, DECSC/DECRC, tab stops (HTS/TBC) |
-| Modes | DECCKM application cursor keys, DECOM, DECAWM with deferred wrap, insert mode, DECTCEM cursor visibility, alternate screen (47/1047/1049), bracketed paste (2004), focus events (1004), synchronized output (2026), mouse tracking (9/1000/1002/1003) with SGR encoding (1006) |
-| Reports | DSR cursor position and status, DA1/DA2; window title from OSC 0/2 |
-| Scrollback | 5,000 lines on the main screen; the mouse wheel and a precision touchpad scroll it (touchpad deltas smaller than a notch are carried between events), any input or output snaps back to the bottom; in a full-screen program the wheel sends arrow keys |
+```csharp
+// Window loaded: start the shell at the size of the grid that fits the control.
+var session = Pty.Start(new PtyStartInfo
+{
+    FileName = shell,
+    Size = new PtySize(columns, rows),
+    Environment = new Dictionary<string, string?> { ["COLORTERM"] = "truecolor" },  // programs then use 24-bit color
+    ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory(),                          // see "Out-of-band ConPTY" below
+});
 
-Not a goal: a scrollbar, cursor shapes and blinking, double-width lines, Sixel or Kitty graphics, Win32 input mode (`9001`), reflow on resize (the PTY repaints instead), or an IME candidate window placed at the cursor.
+var pump = PumpOutputAsync(session);
+var exit = session.WaitForExitAsync();
+await Task.WhenAll(exit, pump);   // the exit code, after the last output has been drawn
 
-## Keys and mouse
+async Task PumpOutputAsync(PtySession session)
+{
+    await foreach (var chunk in session.ReadOutputAsync())
+        terminal.Feed(chunk.Data.Span);   // parsed in place on the UI thread
+}
 
-| Action | Binding |
-|---|---|
-| Select | left drag; double-click selects a word |
-| Copy | Ctrl+Shift+C, Ctrl+Insert, right-click with a selection, Ctrl+C with a selection |
-| Paste | Ctrl+Shift+V, Shift+Insert, Ctrl+V, right-click with no selection (line breaks become CR; wrapped in `ESC[200~` … `ESC[201~` when the program asked for bracketed paste) |
-| Interrupt | Ctrl+C with no selection sends `^C`; other Ctrl+letter chords send their control characters |
-| Keys | arrows, Home/End, Insert/Delete, PgUp/PgDn, F1–F12 with xterm modifier encoding; Tab/Shift+Tab; Backspace sends DEL (Ctrl+Backspace sends BS); Alt+key sends ESC+key |
-| Mouse to the program | when a program enables mouse tracking, clicks, drags, and the wheel are reported to it; hold Shift to select locally instead |
+// Key, paste, mouse report, or a reply to a terminal query
+await session.WriteInputAsync(text);
 
-## What it demonstrates about MiniPty
+// Grid size changed
+session.Resize(new PtySize(columns, rows));
 
-All on the UI thread and without `Task.Run`:
+// Window closed
+await session.DisposeAsync();
+```
 
-| Host event | MiniPty call | Why it is safe |
+| Host event | MiniPty call | Why it is safe on the UI thread |
 |---|---|---|
-| Window loaded | `Pty.Start`, then `await foreach (var chunk in session.ReadOutputAsync())` feeding the parser | `MoveNextAsync` never blocks; each chunk arrives on the UI thread and is parsed in place |
-| Key, paste, mouse report, terminal reply | `await session.WriteInputAsync(text)` | Completes at once when ConPTY takes the bytes, otherwise in the background |
-| Window resized | `session.Resize(new PtySize(cols, rows))` | Dimensions are clamped to the platform limit, and a resize after child exit is a no-op |
-| Child exits | `await session.WaitForExitAsync()` | Completes from the exit watcher, and the wait holds no thread |
-| Window closed | `await session.DisposeAsync()` | Ends the child if needed and does not block the UI thread |
+| Window loaded | `Pty.Start`, then `await foreach` over `ReadOutputAsync` | `MoveNextAsync` never blocks, and each chunk arrives on the UI thread, so the parser needs no lock |
+| Key, paste, mouse report, terminal reply | `await session.WriteInputAsync(text)` | Completes at once when ConPTY takes the bytes, otherwise later without holding the thread |
+| Grid resized | `session.Resize(new PtySize(cols, rows))` | Clamped to the platform limit; a no-op after the child exits |
+| Child exits | `await session.WaitForExitAsync()` | Completes from the exit watcher and holds no thread |
+| Window closed | `await session.DisposeAsync()` | Ends the child if it is still running, without blocking |
 
-The child gets `COLORTERM=truecolor`, which is how programs decide to use 24-bit color.
+Points to get right:
 
-The session runs on the out-of-band ConPTY: this project references `Microsoft.Windows.Console.ConPTY`, MiniPty's build targets stage `OpenConsole.exe` beside `conpty.dll`, and `PtyStartInfo.ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()` opts in. That host forwards graphics, terminal queries, and mouse tracking, which the in-box `conhost.exe` withholds from some programs (it forwards mouse tracking only for a program that reads VT input), and `Clear()` empties its buffer. Delete `conpty.dll` from the output directory to run on the in-box ConPTY instead; the status line says which one is in use.
+- **Read from the start, with one reader.** Start the output loop right after `Pty.Start`. A PTY that nobody reads fills up and stalls the child.
+- **Use a chunk before the next iteration.** `chunk.Data` is valid until the loop asks for the next chunk. Parse it in place, or copy it to keep it.
+- **Expect a closing window.** A key can still be in flight when the window closes, so `WriteInputAsync` catches `ObjectDisposedException` (session disposed) and `IOException` (the child closed its input). Mark the run as closing before `DisposeAsync`, and treat `ObjectDisposedException` from the pump and the exit wait as expected only then ([TerminalRun.cs](../TerminalEmulator/TerminalRun.cs)).
+- **Show the status outside the grid.** ConPTY clears the screen when the shell starts, so a banner written into the terminal would be erased. The sample puts the PTY host, PID, size, and state in a status line below the grid.
 
-When the program exits with code 0 (`exit` in the shell) the window closes, as Windows Terminal does by default. Any other exit code prints `[process exited with code N]` in the terminal and the window stays until a key is pressed, so the reason can be read.
+## Out-of-band ConPTY
 
-A status line below the grid shows who hosts the PTY: `MiniPty 1.4.1 hosting ConPTY 1.25 (OpenConsole) · pid 12345 · 182×46 · C:\WINDOWS\system32\cmd.exe · running` (`ConPTY` alone on the in-box implementation, `conhost fallback` when `conpty.dll` was found without its host), updated on resize and on exit. It sits outside the emulator because ConPTY clears the screen when the shell starts, so a banner written into the grid would not survive.
+A terminal emulator on Windows should run on the ConPTY that Windows Terminal ships rather than the in-box one. The in-box ConPTY withholds graphics, some terminal queries, and mouse tracking from some programs (it forwards mouse tracking only to a program that reads VT input). The project opts in with one package:
 
-## Code-only WinUI 3 pitfalls
-
-Three details crash the process with `0xC000027B` before any window appears. Two are in `Program.cs`: the `Application` must implement `IXamlMetadataProvider` (delegating to `XamlControlsXamlMetaDataProvider`), and `XamlControlsResources` must be merged in `OnLaunched`, not in the constructor. The third is in the project file: `EnableMsixTooling` must be `true`, or `dotnet publish` leaves out the project's PRI file and `new XamlControlsResources()` cannot find `Microsoft.UI.Xaml/Themes/themeresources.xaml` in the published app (`dotnet build` output is unaffected).
-
-## Checks
-
-`--smoke` runs `cmd /c echo <marker>` and exits 0 once the marker is on screen; `--dump <file>` writes the status line and then the visible screen as text when the program exits. The emulator core lives in [`samples/TerminalEmulator`](../TerminalEmulator), shared with the Avalonia sample and covered by `TerminalEmulatorTests` in the test project, which compiles those sources directly.
-
-```bash
-dotnet run --project samples/WinUiTerminal -- --smoke
-dotnet run --project samples/WinUiTerminal -- --dump out.txt cmd /c "echo あいう漢字"
+```xml
+<PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" />
 ```
+
+MiniPty's build targets copy `OpenConsole.exe` beside `conpty.dll`, and `PtyStartInfo.ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()` selects it. When `conpty.dll` is missing, `TryLoadFromApplicationDirectory` returns null and the session runs on the in-box ConPTY; the status line says which one is in use. See [Out-of-band ConPTY for Windows](../../README.md#out-of-band-conpty-for-windows).
+
+## What the sample adds on top
+
+MiniPty moves bytes and does not interpret them. The VT parser, screen buffer, key and mouse encoding, selection, and paste handling are in [samples/TerminalEmulator](../TerminalEmulator), shared with the [Avalonia sample](../AvaloniaTerminal). They cover what full-screen programs need: 256 and 24-bit color, the alternate screen, scroll regions, mouse tracking, bracketed paste, and synchronized output. [TerminalControl.cs](TerminalControl.cs) draws the grid with Win2D and turns WinUI input events into the text passed to `WriteInputAsync`.
+
+## Notes
+
+- Windows only. The same emulator runs on Windows, Linux, and macOS in [samples/AvaloniaTerminal](../AvaloniaTerminal).
+- The Windows App SDK, Win2D, and the ConPTY package are dependencies of this sample, not of MiniPty. NativeAOT is off: the sample is about the UI threading model.
+- The app has no XAML file. A code-only WinUI 3 app needs three things that `App.xaml` normally provides; [Program.cs](Program.cs) and [WinUiTerminal.csproj](WinUiTerminal.csproj) comment each one.
+- `--smoke` runs a one-line command and exits 0 once its output is on screen; CI runs it.
