@@ -645,7 +645,19 @@ public sealed class PtyBaselineTests
 
     private static PtyStartInfo Cmd(string command) => new() { FileName = ComSpec, Arguments = ["/c", command] };
 
-    internal static PtyStartInfo MissingProgram() => new() { FileName = "minipty-baseline-no-such-program" };
+    /// <summary>
+    /// A program found on no <c>PATH</c> entry. On Unix the lookup runs on a fixed <c>PATH</c>: like <c>execvp</c>, the
+    /// search reports <c>EACCES</c> instead of <c>ENOENT</c> when any entry cannot be searched, and an inherited
+    /// <c>PATH</c> may hold one (WSL appends the Windows <c>PATH</c>, including directories in the SYSTEM profile that
+    /// a user cannot read). Windows keeps the inherited <c>PATH</c>.
+    /// </summary>
+    internal static PtyStartInfo MissingProgram() => new()
+    {
+        FileName = "minipty-baseline-no-such-program",
+        Environment = OperatingSystem.IsWindows()
+            ? null
+            : new Dictionary<string, string?> { ["PATH"] = "/usr/bin:/bin" },
+    };
 
     private static PtyStartInfo InMissingDirectory()
     {

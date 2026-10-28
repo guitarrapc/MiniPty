@@ -10,7 +10,7 @@ internal sealed class WindowsHostTerminal : IHostTerminal
     private const int ReadWakeRequested = 2;
 
     /// <summary>Private-use character carried by the sentinel record that wakes a blocked read.</summary>
-    private const char WakeChar = '';
+    private const char WakeChar = '\uE000';
 
     private readonly IntPtr _stdin;
     private readonly IntPtr _stdout;
@@ -116,6 +116,11 @@ internal sealed class WindowsHostTerminal : IHostTerminal
             return 0;
 
         ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // Already cancelled: leave the queue untouched. Registering would run the callback inline and write a
+        // sentinel that then has to be removed again.
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
 
         // Publish the pending read before checking cancellation: a concurrent canceller either observes it and
         // wakes the read, or cancelled first and the check below skips ReadFile.
