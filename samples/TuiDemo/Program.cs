@@ -53,17 +53,15 @@ internal static class DemoHost
     {
         // PTY output is UTF-8. Windows console byte writes otherwise decode it using the host's legacy
         // code page, which can corrupt Japanese text even though the PTY transport preserved every byte.
-        var inputEncoding = Console.InputEncoding;
+        // Input needs nothing here: MiniPty.Console reads the host console as UTF-8 while attached.
         var outputEncoding = Console.OutputEncoding;
         try
         {
-            Console.InputEncoding = Encoding.UTF8;
             Console.OutputEncoding = Encoding.UTF8;
             return await RunAttachedAsync();
         }
         finally
         {
-            Console.InputEncoding = inputEncoding;
             Console.OutputEncoding = outputEncoding;
         }
     }

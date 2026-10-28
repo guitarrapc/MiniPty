@@ -23,7 +23,9 @@ On VT-aware hosts (Windows Terminal, modern conhost):
 4. Read raw bytes with `ReadFile` on the process stdin handle.
 5. Forward bytes to `PtySession.Input` without decoding.
 
-Keyboard input arrives as byte sequences in the console **input code page** (including escape sequences for arrows and function keys). It is UTF-8 only because step 3 sets it: under the default 932 code page, `ReadFile` returned `日` as Shift-JIS `93 FA`, and under 437 `é` as `82`.
+Keyboard input arrives as byte sequences in the console **input code page** (including escape sequences for arrows and function keys). It is UTF-8 only because step 3 sets it: under the default 932 code page, `ReadFile` returned `日` as Shift-JIS `93 FA`, and under 437 `é` as `82` (in a conhost window and inside a ConPTY session alike).
+
+Once a ConPTY child's `ESC [ ? 9001 h` has reached the host console through the embedder's output copy, the console switches the host's VT input to win32-input-mode: `ReadFile` returns each key event as `ESC [ Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`, with the character as a decimal code point (`日` as `26085`), and the inner ConPTY decodes it. No code page is involved then, so the input code page matters for input before that sequence arrives and for host consoles that ignore the mode. Observed 2026-10-28 with TuiDemo's nested smoke: it passed with the code page setting disabled, and the host's forwarded bytes were `ESC[0;0;26085;1;0;1_…`. The inbox ConPTY sends `?9001h` at startup and `?9001l` at exit.
 
 The forwarding loop consistently uses `ReadFile`. A `ReadConsoleInput` fallback could discard queued mouse events or take only part of a VT report before the next byte read, causing intermittent lost clicks. Let the console encode its negotiated mouse protocol, rather than interpreting native mouse records in the host. `ReadConsoleInput` / `PeekConsoleInput` remain useful for tests and for a TUI that consumes native input itself, as in [TuiDemo](../../../samples/TuiDemo).
 

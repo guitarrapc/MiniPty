@@ -9,28 +9,31 @@ internal sealed partial class DemoRenderer
     private const string DialogStyle = "\u001b[0;97;44m";
     private const string Eighths = "▏▎▍▌▋▊▉";
 
-    private readonly DemoLogEntry[] _log = new DemoLogEntry[DemoLayout.LogLines];
+    /// <summary>Log entries kept for redraws: more than the tallest log shows.</summary>
+    private const int LogCapacity = 64;
+
+    private readonly DemoLogEntry[] _log = new DemoLogEntry[LogCapacity];
     private int _logCount;
     private int _logNext;
     private long _loggedFrame = -1;
 
-    private void DrawDashboard(DemoView view)
+    private void DrawDashboard(DemoView view, DemoGeometry g)
     {
-        DrawPanels();
+        DrawPanels(g);
         DrawElapsed(view.Frame);
         for (var i = 0; i < DemoSpinners.Count; i++)
             DrawSpinner(i, view.Frame);
         for (var i = 0; i < DemoJobs.Count; i++)
-            DrawJob(i, view);
-        DrawButtons(view);
-        for (var k = 0; k < DemoLayout.LogLines; k++)
-        {
-            var blanks = DemoLayout.LogLines - _logCount;
-            DrawLogLine(DemoLayout.LogTop + k, k < blanks ? default : LogEntryAt(k - blanks), blank: k < blanks);
-        }
+            DrawJob(i, view, g);
+        DrawButtons(view, g);
+        // The newest entries fill the bottom; a taller log shows more of them.
+        var shown = Math.Min(_logCount, g.LogLines);
+        var blanks = g.LogLines - shown;
+        for (var k = 0; k < g.LogLines; k++)
+            DrawLogLine(DemoLayout.LogTop + k, k < blanks ? default : LogEntryAt(_logCount - shown + k - blanks), blank: k < blanks, g);
     }
 
-    private void DrawDashboardChanges(DemoView view, int added)
+    private void DrawDashboardChanges(DemoView view, DemoGeometry g, int added)
     {
         var frame = view.Frame;
         var before = _previous.Frame;
@@ -45,12 +48,12 @@ internal sealed partial class DemoRenderer
         {
             var selectionMoved = view.Selected != _previous.Selected && (i == view.Selected || i == _previous.Selected);
             if (selectionMoved || DemoJobs.Get(i, frame) != DemoJobs.Get(i, before) || JobGlyph(i, frame) != JobGlyph(i, before))
-                DrawJob(i, view);
+                DrawJob(i, view, g);
         }
         if (view.Paused != _previous.Paused)
-            DrawButtons(view);
+            DrawButtons(view, g);
         if (added > 0)
-            ScrollLog(added);
+            ScrollLog(Math.Min(added, g.LogLines), g);
     }
 
     /// <summary>The elapsed time sits in the Jobs panel's top border (row 3, columns 32–38).</summary>
@@ -62,10 +65,13 @@ internal sealed partial class DemoRenderer
         AppendTwoDigits((int)(seconds % 60)).Append(' ');
     }
 
-    /// <summary>Static frames of rows 3–19. Every cell is written, so a redraw also erases a closed dialog's shadow.</summary>
-    private void DrawPanels()
+    /// <summary>
+    /// Static frames of rows 3 to H−3. Every cell is written, so a redraw also erases a closed dialog's shadow and
+    /// whatever a previous size left. The Jobs panel and the log stretch to the right edge; the log to the page bottom.
+    /// </summary>
+    private void DrawPanels(DemoGeometry g)
     {
-        MoveTo(3, 1).Append("\u001b[0m┌ Spinners ").Append('─', 10).Append("┐ ┌ Jobs ─").Append(' ', 7).Append('─', 33).Append('┐');
+        MoveTo(3, 1).Append("\u001b[0m┌ Spinners ").Append('─', 10).Append("┐ ┌ Jobs ─").Append(' ', 7).Append('─', g.Width - 39).Append('┐');
         for (var i = 0; i < DemoSpinners.Count; i++)
         {
             var label = DemoSpinners.Label(i);
@@ -74,10 +80,10 @@ internal sealed partial class DemoRenderer
         MoveTo(9, 1).Append('│').Append(' ', 20).Append("│ ");
         MoveTo(10, 1).Append('└').Append('─', 20).Append("┘ ");
         foreach (var row in (ReadOnlySpan<int>)[7, 9])
-            MoveTo(row, 24).Append('│').Append(' ', 47).Append('│');
-        MoveTo(10, 24).Append('└').Append('─', 47).Append('┘');
-        MoveTo(11, 1).Append("┌ Log ").Append('─', 65).Append('┐');
-        MoveTo(19, 1).Append('└').Append('─', 70).Append('┘');
+            MoveTo(row, 24).Append('│').Append(' ', g.Width - 25).Append('│');
+        MoveTo(10, 24).Append('└').Append('─', g.Width - 25).Append('┘');
+        MoveTo(11, 1).Append("┌ Log ").Append('─', g.Width - 7).Append('┐');
+        MoveTo(g.PageBottom, 1).Append('└').Append('─', g.Width - 2).Append('┘');
     }
 
     private void DrawSpinner(int spinner, long frame)
@@ -86,8 +92,8 @@ internal sealed partial class DemoRenderer
         MoveTo(4 + spinner, 3).Append(DemoSpinners.Color(spinner)).Append(glyph).Append(' ', 3 - glyph.Length).Append("\u001b[0m");
     }
 
-    /// <summary>Columns 24–72: marker, glyph, name, 22-cell bar in eighths, percent, state.</summary>
-    private void DrawJob(int job, DemoView view)
+    /// <summary>Columns 24 to the right edge: marker, glyph, name, a bar in eighths as wide as the rest, percent, state.</summary>
+    private void DrawJob(int job, DemoView view, DemoGeometry g)
     {
         var state = DemoJobs.Get(job, view.Frame);
         var color = StateColor(state.Status);
@@ -95,36 +101,37 @@ internal sealed partial class DemoRenderer
         MoveTo(DemoLayout.FirstJobRow + job, 24).Append("\u001b[0m│").Append(job == view.Selected ? "\u001b[100m>" : " ");
         _frame.Append(color).Append(JobGlyph(job, view.Frame)).Append("\u001b[39m ").Append(name).Append(' ', 8 - name.Length);
 
-        var eighths = state.Progress * 22 * 8 / 100;
+        var cells = g.BarCells;
+        var eighths = state.Progress * cells * 8 / 100;
         var full = eighths / 8;
         var partial = eighths % 8;
         _frame.Append(color).Append('█', full);
         if (partial > 0)
             _frame.Append(Eighths[partial - 1]);
-        _frame.Append("\u001b[90m").Append('.', 22 - full - (partial > 0 ? 1 : 0)).Append("\u001b[39m ");
+        _frame.Append("\u001b[90m").Append('.', cells - full - (partial > 0 ? 1 : 0)).Append("\u001b[39m ");
 
         _frame.Append(' ', 3 - Digits(state.Progress)).Append(state.Progress).Append("% ");
         _frame.Append(color).Append(StateText(state.Status)).Append("\u001b[39m \u001b[0m│");
     }
 
-    private void DrawButtons(DemoView view)
+    private void DrawButtons(DemoView view, DemoGeometry g)
     {
         MoveTo(DemoLayout.ButtonRow, 24).Append("\u001b[0m│ \u001b[30;42m").Append(view.Paused ? "[ Resume ]" : "[ Pause  ]");
-        _frame.Append("\u001b[0m  \u001b[30;46m[ Details ]\u001b[0m").Append(' ', 23).Append('│');
+        _frame.Append("\u001b[0m  \u001b[30;46m[ Details ]\u001b[0m").Append(' ', g.Width - 49).Append('│');
     }
 
     /// <summary>Scrolls the log region up and writes only the new lines at its bottom.</summary>
-    private void ScrollLog(int added)
+    private void ScrollLog(int added, DemoGeometry g)
     {
         // DECSTBM homes the cursor; SU moves the region's lines, borders included, without touching other rows.
-        _frame.Append("\u001b[0m\u001b[").Append(DemoLayout.LogTop).Append(';').Append(DemoLayout.LogBottom).Append('r');
+        _frame.Append("\u001b[0m\u001b[").Append(DemoLayout.LogTop).Append(';').Append(g.LogBottom).Append('r');
         _frame.Append("\u001b[").Append(added).Append('S');
         for (var j = 0; j < added; j++)
-            DrawLogLine(DemoLayout.LogBottom - added + 1 + j, LogEntryAt(_logCount - added + j), blank: false);
+            DrawLogLine(g.LogBottom - added + 1 + j, LogEntryAt(_logCount - added + j), blank: false, g);
         _frame.Append("\u001b[r");
     }
 
-    private void DrawLogLine(int row, in DemoLogEntry entry, bool blank)
+    private void DrawLogLine(int row, in DemoLogEntry entry, bool blank, DemoGeometry g)
     {
         MoveTo(row, 1).Append("\u001b[0m│ ");
         var width = 0;
@@ -157,30 +164,34 @@ internal sealed partial class DemoRenderer
                     break;
             }
         }
-        _frame.Append(' ', 68 - width).Append(" │");
+        _frame.Append(' ', g.Width - 4 - width).Append(" │");
     }
 
-    /// <summary>A modal box with a shadow over rows 6–14, for the selected job. The clock is stopped while it shows.</summary>
-    private void DrawDialog(DemoView view)
+    /// <summary>
+    /// A modal box with a shadow over rows 6–14, centered horizontally, for the selected job. The clock is stopped
+    /// while it shows.
+    /// </summary>
+    private void DrawDialog(DemoView view, DemoGeometry g)
     {
+        var left = g.DialogLeft;
         var state = DemoJobs.Get(view.Selected, view.Frame);
         var name = DemoJobs.Name(view.Selected);
-        MoveTo(6, 15).Append(DialogStyle).Append("┌ ").Append(name).Append(' ').Append('─', 38 - name.Length).Append('┐');
-        DialogLine(7).Append("State:    ").Append(StateText(state.Status)).Append(' ', 22).Append('│');
-        DialogLine(8).Append("Progress: ").Append(state.Progress).Append('%').Append(' ', 28 - Digits(state.Progress)).Append('│');
-        DialogLine(9).Append("Run:      #").Append(state.Run).Append(' ', 28 - Digits(state.Run)).Append('│');
-        DialogLine(10).Append("The clock stops while this is open.").Append(' ', 4).Append('│');
-        DialogLine(11).Append(' ', 39).Append('│');
-        MoveTo(DemoLayout.CloseRow, 15).Append(DialogStyle).Append('│').Append(' ', 15)
+        MoveTo(6, left).Append(DialogStyle).Append("┌ ").Append(name).Append(' ').Append('─', 38 - name.Length).Append('┐');
+        DialogLine(7, left).Append("State:    ").Append(StateText(state.Status)).Append(' ', 22).Append('│');
+        DialogLine(8, left).Append("Progress: ").Append(state.Progress).Append('%').Append(' ', 28 - Digits(state.Progress)).Append('│');
+        DialogLine(9, left).Append("Run:      #").Append(state.Run).Append(' ', 28 - Digits(state.Run)).Append('│');
+        DialogLine(10, left).Append("The clock stops while this is open.").Append(' ', 4).Append('│');
+        DialogLine(11, left).Append(' ', 39).Append('│');
+        MoveTo(DemoLayout.CloseRow, left).Append(DialogStyle).Append('│').Append(' ', 15)
             .Append("\u001b[30;47m[ Close ]").Append(DialogStyle).Append(' ', 16).Append('│');
-        MoveTo(13, 15).Append(DialogStyle).Append('└').Append('─', 40).Append('┘');
+        MoveTo(13, left).Append(DialogStyle).Append('└').Append('─', 40).Append('┘');
         _frame.Append("\u001b[0;100m");
         for (var row = 7; row <= 13; row++)
-            MoveTo(row, 57).Append(' ');
-        MoveTo(14, 16).Append(' ', 42).Append("\u001b[0m");
+            MoveTo(row, left + 42).Append(' ');
+        MoveTo(14, left + 1).Append(' ', 42).Append("\u001b[0m");
     }
 
-    private System.Text.StringBuilder DialogLine(int row) => MoveTo(row, 15).Append(DialogStyle).Append("│ ");
+    private System.Text.StringBuilder DialogLine(int row, int left) => MoveTo(row, left).Append(DialogStyle).Append("│ ");
 
     private int CollectLog(long frame)
     {
@@ -195,18 +206,18 @@ internal sealed partial class DemoRenderer
                 if (!DemoJobs.TryGetEvent(job, f, out var entry))
                     continue;
                 _log[_logNext] = entry;
-                _logNext = (_logNext + 1) % DemoLayout.LogLines;
-                _logCount = Math.Min(_logCount + 1, DemoLayout.LogLines);
+                _logNext = (_logNext + 1) % LogCapacity;
+                _logCount = Math.Min(_logCount + 1, LogCapacity);
                 added++;
             }
         }
         _loggedFrame = frame;
-        return Math.Min(added, DemoLayout.LogLines);
+        return Math.Min(added, LogCapacity);
     }
 
     /// <summary>The <paramref name="index"/>-th kept entry, oldest first.</summary>
     private DemoLogEntry LogEntryAt(int index) =>
-        _log[(_logNext - _logCount + index + 2 * DemoLayout.LogLines) % DemoLayout.LogLines];
+        _log[(_logNext - _logCount + index + 2 * LogCapacity) % LogCapacity];
 
     private static string JobGlyph(int job, long frame)
     {

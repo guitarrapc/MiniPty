@@ -14,6 +14,8 @@ internal enum DemoCommand
     End,
     Details,
     Pause,
+    Backspace,
+    ClearText,
     NextTab,
     PrevTab,
     /// <summary>Switch to the page in <see cref="DemoEvent.Column"/> (0-based).</summary>
@@ -22,7 +24,11 @@ internal enum DemoCommand
     Mouse,
 }
 
-internal readonly record struct DemoEvent(DemoCommand Command, int Column = 0, int Row = 0, int Button = 0);
+/// <summary>
+/// A decoded input. <paramref name="Character"/> is set for every printable character, shortcut or not, so a text box
+/// can take "q" or "1" while the rest of the screen reads them as commands.
+/// </summary>
+internal readonly record struct DemoEvent(DemoCommand Command, int Column = 0, int Row = 0, int Button = 0, char Character = '\0');
 
 /// <summary>
 /// A bounded, incremental decoder for the few VT input sequences this demo uses. It accepts split SGR mouse reports,
@@ -74,16 +80,19 @@ internal struct DemoInputParser
         switch (_state)
         {
             case 0:
+                var character = value >= ' ' && value != '\u007f' ? value : '\0';
                 return value switch
                 {
-                    'q' or 'Q' => new(DemoCommand.Quit),
-                    'k' or 'K' => new(DemoCommand.Up),
-                    'j' or 'J' => new(DemoCommand.Down),
+                    'q' or 'Q' => new(DemoCommand.Quit, Character: character),
+                    'k' or 'K' => new(DemoCommand.Up, Character: character),
+                    'j' or 'J' => new(DemoCommand.Down, Character: character),
                     '\r' or '\n' => new(DemoCommand.Details),
-                    ' ' or 'p' or 'P' => new(DemoCommand.Pause),
+                    ' ' or 'p' or 'P' => new(DemoCommand.Pause, Character: character),
                     '\t' => new(DemoCommand.NextTab),
-                    >= '1' and <= '3' => new(DemoCommand.Page, value - '1'),
-                    _ => default,
+                    '\b' or '\u007f' => new(DemoCommand.Backspace),
+                    '\u0015' => new(DemoCommand.ClearText),
+                    >= '1' and <= '3' => new(DemoCommand.Page, value - '1', Character: character),
+                    _ => new(DemoCommand.None, Character: character),
                 };
             case 1:
                 _state = value is '[' or 'O' ? 2 : 0;

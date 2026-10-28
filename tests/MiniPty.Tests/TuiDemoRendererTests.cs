@@ -4,12 +4,14 @@ using TerminalEmulator;
 namespace MiniPty.Tests;
 
 /// <summary>
-/// Checks the TuiDemo dashboard's emitted output before any PTY: what it draws, and that ticks and interactions
-/// overwrite only the cells that changed. ConPTY may add its own repaint operations, so the smoke covers the PTY.
+/// Checks the TuiDemo screen's emitted output before any PTY: what it draws, and that ticks and interactions overwrite
+/// only the cells that changed. ConPTY may add its own repaint operations, so the smoke covers the PTY. Most tests use
+/// the minimum 72 × 22, where the stretching layout equals the original fixed one; one test checks a larger size.
 /// </summary>
 public sealed class TuiDemoRendererTests
 {
-    private static readonly DemoView Initial = new(80, 24, 0, false, false, 0, 0, 0);
+    private static readonly DemoView Initial = new(72, 22, 0, false, false, 0, 0, 0);
+    private static readonly int Rows = new DemoGeometry(72, 22).FileRows;
 
     [Test]
     public async Task InitialFrame_DrawsColoredDashboard()
@@ -17,7 +19,7 @@ public sealed class TuiDemoRendererTests
         var (_, screen, _, _) = Start(Initial);
 
         await Assert.That(screen.ViewLine(0).ToText().Contains("MiniPty TUI demo", StringComparison.Ordinal)).IsTrue();
-        await Assert.That(screen.ViewLine(0).ToText().Contains("Size: 80 x 24", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(0).ToText().Contains("Size: 72 x 22", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(0).Cells[0].Attributes.Background.Kind).IsNotEqualTo(ColorKind.Default);
         await Assert.That(screen.ViewLine(1).ToText().StartsWith("Unicode: 日本語 / café", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(1).Cells[32].Attributes.Background.Kind).IsEqualTo(ColorKind.Rgb);
@@ -34,6 +36,19 @@ public sealed class TuiDemoRendererTests
         await Assert.That(screen.ViewLine(7).ToText().Contains("[ Pause  ]  [ Details ]", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(17).ToText().Contains("00:00  Build   started (run #1)", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(19).ToText()).IsEqualTo("Selected: 1/3   Paused: no      Mouse: 0,0");
+        await Assert.That(screen.ViewLine(20).ToText().StartsWith(" Click/Wheel/Up/Down: select", StringComparison.Ordinal)).IsTrue();
+    }
+
+    [Test]
+    public async Task BottomBar_ShowsQuitKeysAndFillsTheRowWithoutWritingItsLastCell()
+    {
+        var (_, screen, _, _) = Start(Initial);
+
+        await Assert.That(screen.ViewLine(21).ToText()).IsEqualTo(" Q/Ctrl+C: quit  1-3/Tab: switch tabs  Shift+drag: select text");
+        // The color reaches the right edge through EL; the last cell of the screen is never written.
+        await Assert.That(screen.ViewLine(21).Cells[71].Text).IsNull();
+        await Assert.That(screen.ViewLine(21).Cells[71].Attributes.Background).IsEqualTo(screen.ViewLine(21).Cells[0].Attributes.Background);
+        await Assert.That(screen.ViewLine(21).Cells[71].Attributes.Background.Kind).IsNotEqualTo(ColorKind.Default);
     }
 
     [Test]
@@ -144,18 +159,32 @@ public sealed class TuiDemoRendererTests
     }
 
     [Test]
-    public async Task NormalResize_OnlyUpdatesSizeLabelAndErasesTrailingDigits()
+    public async Task Resize_StretchesTheLayoutInPlaceWithoutClearing()
     {
-        var view = Initial with { Width = 100, Height = 30 };
-        var (renderer, screen, parser, output) = Start(view, 100, 30);
+        var (renderer, screen, parser, output) = Start(Initial);
 
-        screen.Resize(80, 24);
-        var update = Draw(renderer, parser, output, view with { Width = 80, Height = 24 });
+        screen.Resize(100, 30);
+        var grow = Draw(renderer, parser, output, Initial with { Width = 100, Height = 30 });
+        await Assert.That(grow.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
+        await Assert.That(screen.ViewLine(0).ToText().TrimEnd().EndsWith("Size: 100 x 30", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(1).Cells[99].Attributes.Background.Kind).IsEqualTo(ColorKind.Rgb);
+        // A 50-cell progress bar ends the job row at the new right edge.
+        await Assert.That(screen.ViewLine(3).Cells[99].Text).IsEqualTo("│");
+        await Assert.That(Cells(screen.ViewLine(3), 35, 50)).IsEqualTo(new string('.', 50));
+        await Assert.That(Cells(screen.ViewLine(3), 86, 4)).IsEqualTo("  0%");
+        // The log takes the extra rows: lines 12–26, its bottom border on row 27.
+        await Assert.That(screen.ViewLine(25).ToText().Contains("00:00  Build   started (run #1)", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(26).ToText().StartsWith("└", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(26).Cells[99].Text).IsEqualTo("┘");
+        await Assert.That(screen.ViewLine(27).ToText().StartsWith("Selected: 1/3", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(29).ToText().StartsWith(" Q/Ctrl+C: quit", StringComparison.Ordinal)).IsTrue();
 
-        await Assert.That(update.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
-        await Assert.That(update.Contains("MiniPty TUI demo", StringComparison.Ordinal)).IsFalse();
-        await Assert.That(screen.ViewLine(0).ToText().Contains("Size: 80 x 24  ", StringComparison.Ordinal)).IsTrue();
-        await Assert.That(screen.ViewLine(0).ToText().Contains("MiniPty TUI demo", StringComparison.Ordinal)).IsTrue();
+        screen.Resize(72, 22);
+        var shrink = Draw(renderer, parser, output, Initial);
+        await Assert.That(shrink.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
+        await Assert.That(screen.ViewLine(3).Cells[71].Text).IsEqualTo("│");
+        await Assert.That(screen.ViewLine(18).ToText().StartsWith("└", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(19).ToText().StartsWith("Selected: 1/3", StringComparison.Ordinal)).IsTrue();
     }
 
     [Test]
@@ -170,7 +199,7 @@ public sealed class TuiDemoRendererTests
         await Assert.That(screen.ViewLine(1).ToText()).IsEqualTo("Mouse: 50,7");
         await Assert.That(screen.ViewLine(5).ToText()).IsEqualTo(string.Empty);
 
-        screen.Resize(80, 24);
+        screen.Resize(72, 22);
         Draw(renderer, parser, output, view);
         await Assert.That(screen.ViewLine(0).ToText().Contains("MiniPty TUI demo", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(19).ToText().StartsWith("Selected: 3/3   Paused: yes", StringComparison.Ordinal)).IsTrue();
@@ -196,7 +225,7 @@ public sealed class TuiDemoRendererTests
     {
         var dashboard = Initial with { Files = FileBrowser.Initial };
         var (renderer, screen, parser, output) = Start(dashboard);
-        var before = Rows(screen, 0, 21);
+        var before = RowsOf(screen, 0, 22);
 
         var files = Draw(renderer, parser, output, dashboard with { Page = DemoLayout.FilesPage });
         await Assert.That(files.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
@@ -212,7 +241,7 @@ public sealed class TuiDemoRendererTests
         await Assert.That(screen.ViewLine(2).ToText().StartsWith("┌ Signals sine mix ", StringComparison.Ordinal)).IsTrue();
 
         Draw(renderer, parser, output, dashboard);
-        var after = Rows(screen, 0, 21);
+        var after = RowsOf(screen, 0, 22);
         for (var row = 0; row < before.Length; row++)
             await Assert.That(after[row]).IsEqualTo(before[row]);
     }
@@ -223,13 +252,14 @@ public sealed class TuiDemoRendererTests
         var view = Initial with { Page = DemoLayout.FilesPage, Files = FileBrowser.Initial };
         var (renderer, screen, parser, output) = Start(view);
 
-        var update = Draw(renderer, parser, output, view with { Files = DemoFiles.Move(view.Files, 1) });
+        var update = Draw(renderer, parser, output, view with { Files = DemoFiles.Move(view.Files, 1, Rows) });
 
         await Assert.That(update.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
         await Assert.That(update.Contains("PtySession", StringComparison.Ordinal)).IsFalse();
         await Assert.That(update.Contains("┌ Files", StringComparison.Ordinal)).IsFalse();
-        await Assert.That(screen.ViewLine(3).Cells[5].Attributes.Background.Kind).IsEqualTo(ColorKind.Default);
-        await Assert.That(screen.ViewLine(4).Cells[5].Attributes.Background.Kind).IsNotEqualTo(ColorKind.Default);
+        await Assert.That(update.Contains("press / to filter", StringComparison.Ordinal)).IsFalse();
+        await Assert.That(screen.ViewLine(4).Cells[5].Attributes.Background.Kind).IsEqualTo(ColorKind.Default);
+        await Assert.That(screen.ViewLine(5).Cells[5].Attributes.Background.Kind).IsNotEqualTo(ColorKind.Default);
         await Assert.That(screen.ViewLine(3).ToText().Contains("Name: .github/ ", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(4).ToText().Contains("Type: folder, 2 items", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(19).ToText().StartsWith("Item: 2/20 ", StringComparison.Ordinal)).IsTrue();
@@ -241,12 +271,12 @@ public sealed class TuiDemoRendererTests
         var view = Initial with { Page = DemoLayout.FilesPage, Files = FileBrowser.Initial };
         var (renderer, screen, parser, output) = Start(view);
 
-        var end = DemoFiles.Move(view.Files, DemoFiles.Count);
+        var end = DemoFiles.Move(view.Files, DemoFiles.Count, Rows);
         var update = Draw(renderer, parser, output, view with { Files = end });
 
-        await Assert.That(end).IsEqualTo(new FileBrowser(19, 5, DemoFiles.InitiallyExpanded));
+        await Assert.That(end).IsEqualTo(new FileBrowser(19, 20 - Rows, DemoFiles.InitiallyExpanded));
         await Assert.That(update.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
-        await Assert.That(screen.ViewLine(3).ToText().Contains("DemoFiles.cs", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(4).ToText().Contains("DemoJobs.cs", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(17).ToText().Contains("global.json", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(17).Cells[5].Attributes.Background.Kind).IsNotEqualTo(ColorKind.Default);
         // 日本語メモ.txt takes 14 cells, 10 for its five wide characters, yet its size ends in the same column as the others.
@@ -260,40 +290,97 @@ public sealed class TuiDemoRendererTests
     [Test]
     public async Task FilesFold_ShowsAndHidesChildrenWithoutClearing()
     {
-        var view = Initial with { Page = DemoLayout.FilesPage, Files = DemoFiles.Move(FileBrowser.Initial, 1) };
+        var view = Initial with { Page = DemoLayout.FilesPage, Files = DemoFiles.Move(FileBrowser.Initial, 1, Rows) };
         var (renderer, screen, parser, output) = Start(view);
 
-        var open = Draw(renderer, parser, output, view with { Files = DemoFiles.Toggle(view.Files) });
+        var open = Draw(renderer, parser, output, view with { Files = DemoFiles.Toggle(view.Files, Rows) });
         await Assert.That(open.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
-        await Assert.That(screen.ViewLine(4).ToText().Contains("├─ - .github/", StringComparison.Ordinal)).IsTrue();
-        await Assert.That(screen.ViewLine(5).ToText().Contains("│  ├─ + workflows/", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(5).ToText().Contains("├─ - .github/", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(6).ToText().Contains("│  ├─ + workflows/", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(19).ToText().StartsWith("Item: 2/22 ", StringComparison.Ordinal)).IsTrue();
 
         Draw(renderer, parser, output, view);
-        await Assert.That(screen.ViewLine(5).ToText().Contains("├─ - samples/", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(6).ToText().Contains("├─ - samples/", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(19).ToText().StartsWith("Item: 2/20 ", StringComparison.Ordinal)).IsTrue();
     }
 
     [Test]
-    public async Task FileTree_VisibleRowsFollowFolding()
+    public async Task FilterBox_TakesTextShowsTheCursorAndFiltersTheTree()
+    {
+        var view = Initial with { Page = DemoLayout.FilesPage, Files = FileBrowser.Initial };
+        var (renderer, screen, parser, output) = Start(view);
+        await Assert.That(screen.ViewLine(3).ToText().Contains("/ press / to filter", StringComparison.Ordinal)).IsTrue();
+        // The TUI hides the cursor at startup; the renderer shows it only while the box takes text.
+        await Assert.That(output.ToString().Contains("\u001b[?25h", StringComparison.Ordinal)).IsFalse();
+
+        var typing = view with { Files = view.Files with { Editing = true } };
+        var start = Draw(renderer, parser, output, typing);
+        await Assert.That(start.Contains("\u001b[?25h", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(start.Contains("├─", StringComparison.Ordinal)).IsFalse();
+        await Assert.That((screen.CursorVisible, screen.CursorRow, screen.CursorColumn)).IsEqualTo((true, 3, 4));
+        await Assert.That(screen.ViewLine(20).ToText().StartsWith(" Type to filter  Backspace: delete", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(21).ToText().StartsWith(" Ctrl+C: quit  Enter: stop typing", StringComparison.Ordinal)).IsTrue();
+
+        // Wide characters move the cursor two cells each; the tree keeps the match and its folder.
+        var japanese = typing with { Files = DemoFiles.WithFilter(typing.Files, "日本", Rows) };
+        var update = Draw(renderer, parser, output, japanese);
+        await Assert.That(update.Contains("\u001b[2J", StringComparison.Ordinal)).IsFalse();
+        await Assert.That(screen.ViewLine(3).ToText().StartsWith("│ / 日本 ", StringComparison.Ordinal)).IsTrue();
+        await Assert.That((screen.CursorRow, screen.CursorColumn)).IsEqualTo((3, 8));
+        await Assert.That(screen.ViewLine(4).ToText().Contains("- MiniPty/", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(5).ToText().Contains("├─ 日本語メモ.txt", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(6).ToText().StartsWith("│      ", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(19).ToText().StartsWith("Item: 1/2 ", StringComparison.Ordinal)).IsTrue();
+
+        var miss = japanese with { Files = DemoFiles.WithFilter(japanese.Files, "日本q", Rows) };
+        Draw(renderer, parser, output, miss);
+        await Assert.That(screen.ViewLine(3).ToText().Contains("No item matches the filter.", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(Contains(screen, "MiniPty/")).IsFalse();
+        await Assert.That(screen.ViewLine(19).ToText().StartsWith("Item: 0/0 ", StringComparison.Ordinal)).IsTrue();
+
+        // Enter keeps the filter, hides the cursor, and restores the help and the bottom bar.
+        var done = Draw(renderer, parser, output, miss with { Files = miss.Files with { Editing = false } });
+        await Assert.That(done.Contains("\u001b[?25l", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.CursorVisible).IsFalse();
+        await Assert.That(screen.ViewLine(3).ToText().StartsWith("│ / 日本q ", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(21).ToText().StartsWith(" Q/Ctrl+C: quit", StringComparison.Ordinal)).IsTrue();
+    }
+
+    [Test]
+    public async Task FileTree_VisibleRowsFollowFoldingAndFilter()
     {
         var visible = new int[DemoFiles.Count];
-        await Assert.That(DemoFiles.Visible(DemoFiles.InitiallyExpanded, visible)).IsEqualTo(20);
-        await Assert.That(DemoFiles.Visible(0, visible)).IsEqualTo(1);
+        await Assert.That(DemoFiles.Visible(DemoFiles.InitiallyExpanded, null, visible)).IsEqualTo(20);
+        await Assert.That(DemoFiles.Visible(0, null, visible)).IsEqualTo(1);
         await Assert.That(DemoFiles.Prefix(9)).IsEqualTo("│  │  ├─ ");
         await Assert.That(DemoFiles.Prefix(12)).IsEqualTo("│     ├─ ");
         await Assert.That(DemoFiles.Prefix(28)).IsEqualTo("└─ ");
         await Assert.That(DemoFiles.NameWidth(25)).IsEqualTo(14);
 
+        // A filter shows matches with their ancestors, open even when folded, and ignores case.
+        await Assert.That(DemoFiles.Visible(0, "demo", visible)).IsEqualTo(6);
+        await Assert.That(string.Join(",", visible.AsSpan(0, 6).ToArray())).IsEqualTo("0,7,11,12,13,14");
+        await Assert.That(DemoFiles.Visible(0, "日本", visible)).IsEqualTo(2);
+        await Assert.That(DemoFiles.Visible(0, "zzz", visible)).IsEqualTo(0);
+
         // Left on a file goes to its folder; Left again folds it; a click on the selected folder unfolds it.
-        var onFile = DemoFiles.Move(FileBrowser.Initial, 5);
-        var onFolder = DemoFiles.Collapse(onFile);
+        var onFile = DemoFiles.Move(FileBrowser.Initial, 5, Rows);
+        var onFolder = DemoFiles.Collapse(onFile, Rows);
         await Assert.That(onFolder.Cursor).IsEqualTo(4);
-        var folded = DemoFiles.Collapse(onFolder);
+        var folded = DemoFiles.Collapse(onFolder, Rows);
         await Assert.That(DemoFiles.IsExpanded(folded.Expanded, 11)).IsFalse();
-        await Assert.That(DemoFiles.Click(folded, 4)).IsEqualTo(onFolder);
-        await Assert.That(DemoFiles.Click(folded, 14).Cursor).IsEqualTo(14);
-        await Assert.That(DemoFiles.Click(folded, 16)).IsEqualTo(folded);
+        await Assert.That(DemoFiles.Click(folded, 4, Rows)).IsEqualTo(onFolder);
+        await Assert.That(DemoFiles.Click(folded, Rows - 1, Rows).Cursor).IsEqualTo(Rows - 1);
+        await Assert.That(DemoFiles.Click(folded, Rows, Rows)).IsEqualTo(folded);
+
+        // Filtering clamps the cursor, folding does nothing while it is active, and an empty list moves nowhere.
+        var filtered = DemoFiles.WithFilter(DemoFiles.Move(FileBrowser.Initial, 19, Rows), "demo", Rows);
+        await Assert.That((filtered.Cursor, filtered.Top)).IsEqualTo((5, 0));
+        await Assert.That(DemoFiles.Toggle(filtered with { Cursor = 2 }, Rows)).IsEqualTo(filtered with { Cursor = 2 });
+        var empty = DemoFiles.WithFilter(filtered, "zzz", Rows);
+        await Assert.That((empty.Cursor, empty.Top)).IsEqualTo((0, 0));
+        await Assert.That(DemoFiles.Move(empty, 3, Rows)).IsEqualTo(empty);
+        await Assert.That(DemoFiles.Collapse(empty, Rows)).IsEqualTo(empty);
     }
 
     [Test]
@@ -302,9 +389,9 @@ public sealed class TuiDemoRendererTests
         var view = Initial with { Page = DemoLayout.ChartsPage };
         var (renderer, screen, parser, output) = Start(view);
         var initialBytes = Encoding.UTF8.GetByteCount(output.ToString());
-        var before = Rows(screen, 3, 8);
+        var before = RowsOf(screen, 3, 8);
 
-        await Assert.That(CountBraille(screen)).IsGreaterThan(60);
+        await Assert.That(CountBraille(screen, 3, 11)).IsGreaterThan(60);
         await Assert.That(screen.ViewLine(17).ToText().Contains("GET   POST  PUT   PATCH DEL", StringComparison.Ordinal)).IsTrue();
         await Assert.That(screen.ViewLine(13).ToText().Contains("cpu ", StringComparison.Ordinal)).IsTrue();
 
@@ -313,14 +400,40 @@ public sealed class TuiDemoRendererTests
         await Assert.That(update.Contains("Signals", StringComparison.Ordinal)).IsFalse();
         await Assert.That(update.Contains("Requests", StringComparison.Ordinal)).IsFalse();
         await Assert.That(Encoding.UTF8.GetByteCount(update)).IsLessThan(initialBytes);
-        await Assert.That(Rows(screen, 3, 8).SequenceEqual(before)).IsFalse();
+        await Assert.That(RowsOf(screen, 3, 8).SequenceEqual(before)).IsFalse();
         await Assert.That(screen.ViewLine(19).ToText().StartsWith("Frame: 1   Paused: no ", StringComparison.Ordinal)).IsTrue();
 
         // A paused clock means an unchanged view: nothing is written.
         await Assert.That(Draw(renderer, parser, output, view with { Frame = 1 })).IsEqualTo(string.Empty);
     }
 
-    private static string[] Rows(ScreenBuffer screen, int first, int count)
+    [Test]
+    public async Task ChartsOnALargerTerminal_UseTheExtraCellsForThePlot()
+    {
+        var view = new DemoView(100, 30, 0, false, false, 0, 0, 0, DemoLayout.ChartsPage);
+        var (_, screen, _, _) = Start(view);
+        var g = new DemoGeometry(100, 30);
+
+        await Assert.That(g.PlotColumns).IsEqualTo(88);
+        await Assert.That(g.PlotRows).IsEqualTo(16);
+        await Assert.That(screen.ViewLine(3).Cells[99].Text).IsEqualTo("│");
+        await Assert.That(screen.ViewLine(3 + g.PlotRows).ToText().StartsWith("└─────┴", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(screen.ViewLine(g.ChartsTop - 1).ToText().StartsWith("┌ Requests/s ", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(CountBraille(screen, 3, 3 + g.PlotRows)).IsGreaterThan(CountBrailleAt72());
+        // A 50-cell sparkline, then its percent and the border at the right edge.
+        await Assert.That(Cells(screen.ViewLine(g.ChartsTop), 43, g.SparkLength).Trim().Length).IsEqualTo(50);
+        await Assert.That(screen.ViewLine(g.ChartsTop).Cells[97].Text).IsEqualTo("%");
+        await Assert.That(screen.ViewLine(g.ChartsTop).Cells[99].Text).IsEqualTo("│");
+        await Assert.That(screen.ViewLine(29).ToText().StartsWith(" Q/Ctrl+C: quit", StringComparison.Ordinal)).IsTrue();
+
+        static int CountBrailleAt72()
+        {
+            var (_, small, _, _) = Start(Initial with { Page = DemoLayout.ChartsPage });
+            return CountBraille(small, 3, 11);
+        }
+    }
+
+    private static string[] RowsOf(ScreenBuffer screen, int first, int count)
     {
         var rows = new string[count];
         for (var i = 0; i < count; i++)
@@ -350,10 +463,10 @@ public sealed class TuiDemoRendererTests
         return text.ToString();
     }
 
-    private static int CountBraille(ScreenBuffer screen)
+    private static int CountBraille(ScreenBuffer screen, int firstRow, int endRow)
     {
         var count = 0;
-        for (var row = 3; row < 11; row++)
+        for (var row = firstRow; row < endRow; row++)
         {
             foreach (var cell in screen.ViewLine(row).Cells)
             {
@@ -364,11 +477,11 @@ public sealed class TuiDemoRendererTests
         return count;
     }
 
-    private static (DemoRenderer Renderer, ScreenBuffer Screen, VtParser Parser, StringWriter Output) Start(DemoView view, int columns = 80, int rows = 24)
+    private static (DemoRenderer Renderer, ScreenBuffer Screen, VtParser Parser, StringWriter Output) Start(DemoView view)
     {
         var output = new StringWriter();
         var renderer = new DemoRenderer(output);
-        var screen = new ScreenBuffer(columns, rows);
+        var screen = new ScreenBuffer(view.Width, view.Height);
         var parser = new VtParser(screen);
         renderer.Draw(view);
         parser.Feed(Encoding.UTF8.GetBytes(output.ToString()));

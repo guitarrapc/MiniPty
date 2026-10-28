@@ -45,6 +45,7 @@ internal static partial class DemoTui
                 // The renderer emits nothing for an unchanged view, so drawing every poll costs only a comparison.
                 var width = Console.WindowWidth;
                 var height = Console.WindowHeight;
+                state.Fit(width, height);
                 renderer.Draw(state.View(width, height, animationTicks / ticksPerFrame));
 
                 if (!input.TryRead(out var key))
@@ -53,7 +54,7 @@ internal static partial class DemoTui
                     continue;
                 }
 
-                if (key.Command == DemoCommand.Quit)
+                if (state.Quits(key))
                     break;
                 state.Apply(key, width, height);
             }
@@ -71,7 +72,7 @@ internal static partial class DemoTui
         return 0;
     }
 
-    /// <summary>What the user changed: the page, each page's selection, pause, and the dashboard's dialog.</summary>
+    /// <summary>What the user changed: the page, each page's selection, pause, the dashboard's dialog, and the filter.</summary>
     private struct State
     {
         internal int Page;
@@ -82,13 +83,46 @@ internal static partial class DemoTui
         internal int MouseRow;
         internal FileBrowser Files;
 
+        private readonly bool Typing => Page == DemoLayout.FilesPage && Files.Editing && !Dialog;
+
         internal readonly DemoView View(int width, int height, long frame) =>
             new(width, height, Selected, Paused, Dialog, MouseColumn, MouseRow, frame, Page, Files);
+
+        /// <summary>Q quits except while the filter box takes text, where it is a letter; Ctrl+C always quits.</summary>
+        internal readonly bool Quits(DemoEvent key) => key.Command == DemoCommand.Quit && !(Typing && key.Character != '\0');
+
+        /// <summary>After a resize, keeps the Files cursor on a shown row of the new number of tree rows.</summary>
+        internal void Fit(int width, int height)
+        {
+            if (width >= DemoLayout.MinWidth && height >= DemoLayout.MinHeight)
+                Files = DemoFiles.Fit(Files, new DemoGeometry(width, height).FileRows);
+        }
 
         /// <summary>Keys act on the shown page; while the dialog is open only Enter, the Close button, and Q react.</summary>
         internal void Apply(DemoEvent key, int width, int height)
         {
+            var g = new DemoGeometry(width, height);
+            var rows = g.FileRows;
+            if (key.Command == DemoCommand.Mouse)
+            {
+                MouseColumn = key.Column;
+                MouseRow = key.Row;
+                if (width >= DemoLayout.MinWidth && height >= DemoLayout.MinHeight && key.Column <= width && key.Row <= height)
+                    Click(key, g);
+                return;
+            }
+            if (Typing)
+            {
+                Type(key, rows);
+                return;
+            }
+
             var files = Page == DemoLayout.FilesPage && !Dialog;
+            if (files && key.Character == '/')
+            {
+                Files = Files with { Editing = true };
+                return;
+            }
             switch (key.Command)
             {
                 case DemoCommand.Page when !Dialog:
@@ -107,48 +141,72 @@ internal static partial class DemoTui
                     Dialog = !Dialog;
                     break;
                 case DemoCommand.Details when files:
-                    Files = DemoFiles.Toggle(Files);
+                    Files = DemoFiles.Toggle(Files, rows);
                     break;
                 case DemoCommand.Up or DemoCommand.Down when !Dialog:
                     var delta = key.Command == DemoCommand.Up ? -1 : 1;
                     if (Page == DemoLayout.DashboardPage)
                         Selected = (Selected + delta + DemoJobs.Count) % DemoJobs.Count;
                     else if (files)
-                        Files = DemoFiles.Move(Files, delta);
+                        Files = DemoFiles.Move(Files, delta, rows);
                     break;
                 case DemoCommand.PageUp when files:
-                    Files = DemoFiles.Move(Files, -DemoFiles.Rows);
+                    Files = DemoFiles.Move(Files, -rows, rows);
                     break;
                 case DemoCommand.PageDown when files:
-                    Files = DemoFiles.Move(Files, DemoFiles.Rows);
+                    Files = DemoFiles.Move(Files, rows, rows);
                     break;
                 case DemoCommand.Home when files:
-                    Files = DemoFiles.Move(Files, -DemoFiles.Count);
+                    Files = DemoFiles.Move(Files, -DemoFiles.Count, rows);
                     break;
                 case DemoCommand.End when files:
-                    Files = DemoFiles.Move(Files, DemoFiles.Count);
+                    Files = DemoFiles.Move(Files, DemoFiles.Count, rows);
                     break;
                 case DemoCommand.Left when files:
-                    Files = DemoFiles.Collapse(Files);
+                    Files = DemoFiles.Collapse(Files, rows);
                     break;
                 case DemoCommand.Right when files:
-                    Files = DemoFiles.Expand(Files);
+                    Files = DemoFiles.Expand(Files, rows);
                     break;
-                case DemoCommand.Mouse:
-                    MouseColumn = key.Column;
-                    MouseRow = key.Row;
-                    if (width >= DemoLayout.MinWidth && height >= DemoLayout.MinHeight && key.Column <= width && key.Row <= height)
-                        Click(key);
+            }
+        }
+
+        /// <summary>
+        /// The filter box takes printable characters, including shortcut letters and digits; Backspace deletes one
+        /// character (both halves of a surrogate pair), Ctrl+U clears, Up/Down still move, and Enter stops typing.
+        /// </summary>
+        private void Type(DemoEvent key, int rows)
+        {
+            var filter = Files.Filter ?? string.Empty;
+            if (key.Character != '\0')
+            {
+                Files = DemoFiles.WithFilter(Files, filter + key.Character, rows);
+                return;
+            }
+            switch (key.Command)
+            {
+                case DemoCommand.Backspace when filter.Length > 0:
+                    var cut = filter.Length >= 2 && char.IsLowSurrogate(filter[^1]) ? 2 : 1;
+                    Files = DemoFiles.WithFilter(Files, filter[..^cut], rows);
+                    break;
+                case DemoCommand.ClearText:
+                    Files = DemoFiles.WithFilter(Files, string.Empty, rows);
+                    break;
+                case DemoCommand.Up or DemoCommand.Down:
+                    Files = DemoFiles.Move(Files, key.Command == DemoCommand.Up ? -1 : 1, rows);
+                    break;
+                case DemoCommand.Details:
+                    Files = Files with { Editing = false };
                     break;
             }
         }
 
         /// <summary>Hit testing for a press or wheel report; the dialog is modal and only its Close button reacts.</summary>
-        private void Click(DemoEvent key)
+        private void Click(DemoEvent key, DemoGeometry g)
         {
             if (Dialog)
             {
-                if (key.Button == 0 && key.Row == DemoLayout.CloseRow && key.Column is >= DemoLayout.CloseLeft and <= DemoLayout.CloseRight)
+                if (key.Button == 0 && key.Row == DemoLayout.CloseRow && key.Column >= g.CloseLeft && key.Column <= g.CloseRight)
                     Dialog = false;
                 return;
             }
@@ -158,7 +216,10 @@ internal static partial class DemoTui
                 for (var page = 0; page < DemoLayout.PageCount; page++)
                 {
                     if (key.Column >= DemoLayout.TabLeft[page] && key.Column <= DemoLayout.TabRight[page])
+                    {
                         Page = page;
+                        Files = Files with { Editing = false };
+                    }
                 }
                 return;
             }
@@ -166,10 +227,18 @@ internal static partial class DemoTui
             var wheel = key.Button is 64 or 65 ? (key.Button == 64 ? -1 : 1) : 0;
             if (Page == DemoLayout.FilesPage)
             {
+                var inTree = key.Column >= DemoLayout.FileLeft && key.Column <= g.FileRight;
                 if (wheel != 0)
-                    Files = DemoFiles.Move(Files, wheel);
-                else if (key.Column is >= DemoLayout.FileLeft and <= DemoLayout.FileRight)
-                    Files = DemoFiles.Click(Files, key.Row - DemoLayout.FirstFileRow);
+                    Files = DemoFiles.Move(Files, wheel, g.FileRows);
+                else if (inTree && key.Row == DemoLayout.FilterRow)
+                    Files = Files with { Editing = true };
+                else
+                {
+                    // A click anywhere else stops typing; a click on a row also selects or folds it.
+                    Files = Files with { Editing = false };
+                    if (inTree)
+                        Files = DemoFiles.Click(Files, key.Row - DemoLayout.FirstFileRow, g.FileRows);
+                }
                 return;
             }
             if (Page != DemoLayout.DashboardPage)
@@ -182,7 +251,7 @@ internal static partial class DemoTui
             }
 
             var job = key.Row - DemoLayout.FirstJobRow;
-            if (job is >= 0 and < DemoJobs.Count && key.Column is >= DemoLayout.JobLeft and <= DemoLayout.JobRight)
+            if (job is >= 0 and < DemoJobs.Count && key.Column >= DemoLayout.JobLeft && key.Column <= g.JobRight)
                 Selected = job;
             else if (key.Row == DemoLayout.ButtonRow && key.Column is >= DemoLayout.PauseLeft and <= DemoLayout.PauseRight)
                 Paused = !Paused;

@@ -8,7 +8,7 @@ internal readonly record struct DemoView(
     internal bool Compact => Width < DemoLayout.MinWidth || Height < DemoLayout.MinHeight;
 }
 
-/// <summary>Cell positions (1-based) of the fixed 72 × 22 layout, shared by the renderer and the TUI's hit testing.</summary>
+/// <summary>Cell positions (1-based) that do not depend on the terminal size; see <see cref="DemoGeometry"/> for the rest.</summary>
 internal static class DemoLayout
 {
     internal const int MinWidth = 72;
@@ -20,53 +20,91 @@ internal static class DemoLayout
     internal const int TabRow = 1;
     internal const int FirstJobRow = 4;
     internal const int JobLeft = 25;
-    internal const int JobRight = 71;
     internal const int ButtonRow = 8;
     internal const int PauseLeft = 26;
     internal const int PauseRight = 35;
     internal const int DetailsLeft = 38;
     internal const int DetailsRight = 48;
     internal const int LogTop = 12;
-    internal const int LogBottom = 18;
-    internal const int LogLines = LogBottom - LogTop + 1;
-    internal const int StatusRow = 20;
     internal const int CloseRow = 12;
-    internal const int CloseLeft = 31;
-    internal const int CloseRight = 39;
-    internal const int FirstFileRow = 4;
+    internal const int FilterRow = 4;
+    internal const int FilterLeft = 5;
+    internal const int FirstFileRow = 5;
     internal const int FileLeft = 2;
-    internal const int FileRight = 39;
 
     internal static ReadOnlySpan<int> TabLeft => [20, 33, 42];
     internal static ReadOnlySpan<int> TabRight => [32, 41, 51];
 }
 
 /// <summary>
-/// Keeps the last displayed state and overwrites only cells that changed. The layout has fixed cell positions: each
-/// page paints every cell of rows 3–19, so switching pages, like closing the dialog, rewrites cells in place without
-/// clearing; an animation tick or a navigation step rewrites only what it changed (see each page's file); and normal
-/// resizing within the minimum size only changes the size label. The screen is cleared only on first draw, on a
-/// switch between the full and compact layout, and on compact resize (the message may have wrapped). A reusable
-/// character buffer batches each update into one write. This belongs to the TUI, not to PTY transport.
+/// The size-dependent part of the layout for a terminal of at least 72 × 22, shared by the renderer, the TUI's hit
+/// testing, and the smoke. Fixed-size parts (spinners, buttons, the Details panel, the bar chart, the dialog) keep
+/// their size; progress bars, the log, the tree, the chart, and the sparklines take the rest. At 72 × 22 every value
+/// equals the original fixed layout.
+/// </summary>
+internal readonly record struct DemoGeometry(int Width, int Height)
+{
+    /// <summary>The page area's last row, where its panels' bottom borders are.</summary>
+    internal int PageBottom => Height - 3;
+    internal int StatusRow => Height - 2;
+    internal int HelpRow => Height - 1;
+    internal int BottomRow => Height;
+    internal int SizeColumn => Width - 17;
+    internal int GradientCells => Width - 32;
+
+    internal int JobRight => Width - 1;
+    internal int BarCells => Width - 50;
+    internal int LogBottom => Height - 4;
+    internal int LogLines => LogBottom - DemoLayout.LogTop + 1;
+    internal int DialogLeft => (Width - 42) / 2;
+    internal int CloseLeft => DialogLeft + 16;
+    internal int CloseRight => DialogLeft + 24;
+
+    /// <summary>The tree panel spans columns 1 to this; the Details panel the last 31 columns.</summary>
+    internal int TreeWidth => Width - 32;
+    internal int FileRight => TreeWidth - 1;
+    internal int FileRows => PageBottom - DemoLayout.FirstFileRow;
+    internal int FilterCells => TreeWidth - 6;
+    internal int DetailsColumn => Width - 30;
+    internal int PreviewLines => PageBottom - 10;
+
+    internal int PlotColumns => Width - 12;
+    internal int PlotRows => Height - 14;
+    internal int ChartsTop => Height - 9;
+    internal int SparkLength => Width - 50;
+}
+
+/// <summary>
+/// Keeps the last displayed state and overwrites only cells that changed. Each page paints every cell of rows
+/// 3 to H−3, so switching pages, resizing, and closing the dialog rewrite cells in place without clearing; an
+/// animation tick, a navigation step, or a keystroke rewrites only what it changed (see each page's file). The screen
+/// is cleared only on first draw, on a switch between the full and compact layout, and on compact resize (the message
+/// may have wrapped). A reusable character buffer batches each update into one write. This belongs to the TUI, not to
+/// PTY transport.
 /// </summary>
 internal sealed partial class DemoRenderer
 {
     private const string HeaderStyle = "\u001b[0;1;97;44m";
     private const string ActiveTabStyle = "\u001b[0;1;30;47m";
-    private const string Hint = "1-3/Tab: switch tabs | Text selection: Shift+drag (terminal-dependent)";
+    private const string HelpStyle = "\u001b[0;30;47m";
+    private const string BottomStyle = "\u001b[0;97;44m";
+    private const string Bottom = " \u001b[1mQ/Ctrl+C: quit\u001b[22m  1-3/Tab: switch tabs  Shift+drag: select text";
+    private const string BottomTyping = " \u001b[1mCtrl+C: quit\u001b[22m  Enter: stop typing  (Q and digits go to the filter)";
+    private const string FilesTypingHelp = " Type to filter  Backspace: delete  Ctrl+U: clear  Enter: done";
 
     private static readonly string[] TabLabels = [" 1 Dashboard ", " 2 Files ", " 3 Charts "];
     private static readonly string[] Helps =
     [
-        " Click/Wheel/Up/Down: select  Enter: details  Space: pause  Q: quit",
-        " Up/Down/PgUp/PgDn/Home/End: move  Enter/Left/Right: open/close  Q: quit",
-        " Space: pause  Q: quit",
+        " Click/Wheel/Up/Down: select  Enter: details  Space: pause",
+        " Up/Down/PgUp/PgDn/Home/End: move  Enter/Left/Right: fold  /: filter",
+        " Space: pause",
     ];
 
     private readonly TextWriter _output;
     private readonly StringBuilder _frame = new(8192);
     private DemoView _previous;
     private bool _drawn;
+    private bool _cursorShown;
 
     internal DemoRenderer(TextWriter output) => _output = output;
 
@@ -75,11 +113,12 @@ internal sealed partial class DemoRenderer
         if (_drawn && view == _previous)
             return;
 
+        var g = new DemoGeometry(view.Width, view.Height);
         // The log follows the clock on every page, so returning to the dashboard shows a continuous history.
         var added = CollectLog(view.Frame);
         var resized = !_drawn || view.Width != _previous.Width || view.Height != _previous.Height;
         var clear = !_drawn || view.Compact != _previous.Compact || (view.Compact && resized);
-        var redraw = clear || view.Page != _previous.Page || (_previous.Dialog && !view.Dialog);
+        var redraw = clear || resized || view.Page != _previous.Page || (_previous.Dialog && !view.Dialog);
         var mouseMoved = view.MouseColumn != _previous.MouseColumn || view.MouseRow != _previous.MouseRow;
         _frame.Clear();
         if (clear)
@@ -94,53 +133,51 @@ internal sealed partial class DemoRenderer
         }
         else if (redraw)
         {
-            DrawHeader(view);
-            DrawColorRow();
+            DrawHeader(view, g);
+            DrawColorRow(g);
             switch (view.Page)
             {
                 case DemoLayout.DashboardPage:
-                    DrawDashboard(view);
+                    DrawDashboard(view, g);
                     break;
                 case DemoLayout.FilesPage:
-                    DrawFiles(view);
+                    DrawFiles(view, g);
                     break;
                 default:
-                    DrawCharts(view);
+                    DrawCharts(view, g);
                     break;
             }
-            DrawStatus(view);
-            DrawMouse(DemoLayout.StatusRow, 33, view);
-            var help = Helps[view.Page];
-            MoveTo(21, 1).Append("\u001b[0;30;47m").Append(help).Append(' ', DemoLayout.MinWidth - help.Length).Append("\u001b[0m");
-            MoveTo(22, 1).Append(Hint).Append("\u001b[K");
+            DrawStatus(view, g);
+            DrawMouse(g.StatusRow, 33, view);
+            DrawHelp(view, g);
+            DrawBottomBar(view, g);
             if (view.Page == DemoLayout.DashboardPage && view.Dialog)
-                DrawDialog(view);
+                DrawDialog(view, g);
         }
         else
         {
-            if (resized)
-                DrawSize(view);
             switch (view.Page)
             {
                 case DemoLayout.DashboardPage:
                     // The TUI stops the clock while the dialog is open; nothing under it changes.
                     if (!view.Dialog)
-                        DrawDashboardChanges(view, added);
+                        DrawDashboardChanges(view, g, added);
                     else if (!_previous.Dialog)
-                        DrawDialog(view);
+                        DrawDialog(view, g);
                     break;
                 case DemoLayout.FilesPage:
-                    DrawFilesChanges(view);
+                    DrawFilesChanges(view, g);
                     break;
                 default:
-                    DrawChartsChanges(view);
+                    DrawChartsChanges(view, g);
                     break;
             }
             if (StatusChanged(view))
-                DrawStatus(view);
+                DrawStatus(view, g);
             if (mouseMoved)
-                DrawMouse(DemoLayout.StatusRow, 33, view);
+                DrawMouse(g.StatusRow, 33, view);
         }
+        PlaceCursor(view, g);
 
         if (_frame.Length > 0)
         {
@@ -152,34 +189,64 @@ internal sealed partial class DemoRenderer
         _drawn = true;
     }
 
-    private void DrawHeader(DemoView view)
+    /// <summary>
+    /// The terminal cursor is hidden everywhere except in the filter box while it takes text. Any write moves the
+    /// cursor, so each frame that writes something while typing ends by putting it back after the text.
+    /// </summary>
+    private void PlaceCursor(DemoView view, DemoGeometry g)
     {
-        MoveTo(1, 1).Append(HeaderStyle).Append(' ', DemoLayout.MinWidth);
+        var show = !view.Compact && view.Page == DemoLayout.FilesPage && view.Files.Editing;
+        if (show && (_frame.Length > 0 || !_cursorShown))
+        {
+            MoveTo(DemoLayout.FilterRow, FilterCursorColumn(view, g));
+            if (!_cursorShown)
+                _frame.Append("\u001b[?25h");
+        }
+        else if (!show && _cursorShown)
+        {
+            _frame.Append("\u001b[?25l");
+        }
+        _cursorShown = show;
+    }
+
+    private void DrawHeader(DemoView view, DemoGeometry g)
+    {
+        MoveTo(1, 1).Append(HeaderStyle).Append(' ', g.Width);
         MoveTo(1, 2).Append("MiniPty TUI demo");
         for (var page = 0; page < DemoLayout.PageCount; page++)
             MoveTo(1, DemoLayout.TabLeft[page]).Append(page == view.Page ? ActiveTabStyle : HeaderStyle).Append(TabLabels[page]);
-        DrawSize(view);
-    }
-
-    private void DrawSize(DemoView view)
-    {
-        MoveTo(1, 55).Append(HeaderStyle).Append("Size: ").Append(view.Width).Append(" x ").Append(view.Height);
+        MoveTo(1, g.SizeColumn).Append(HeaderStyle).Append("Size: ").Append(view.Width).Append(" x ").Append(view.Height);
         // Pad to the end of the bar so a shorter size erases the old digits.
         var written = 9 + Digits(view.Width) + Digits(view.Height);
         _frame.Append(' ', Math.Max(0, 18 - written)).Append("\u001b[0m");
     }
 
     /// <summary>Unicode text and a 24-bit gradient; how a frontend reduces 24-bit color is part of the comparison.</summary>
-    private void DrawColorRow()
+    private void DrawColorRow(DemoGeometry g)
     {
         MoveTo(2, 1).Append("\u001b[0mUnicode: 日本語 / café   24-bit ");
-        for (var i = 0; i < 40; i++)
+        var cells = g.GradientCells;
+        for (var i = 0; i < cells; i++)
         {
-            var (r, g, b) = Hue(i * 299 / 39);
-            _frame.Append("\u001b[48;2;").Append(r).Append(';').Append(g).Append(';').Append(b).Append("m ");
+            var (r, gr, b) = Hue(i * 299 / (cells - 1));
+            _frame.Append("\u001b[48;2;").Append(r).Append(';').Append(gr).Append(';').Append(b).Append("m ");
         }
         _frame.Append("\u001b[0m");
     }
+
+    private void DrawHelp(DemoView view, DemoGeometry g)
+    {
+        var help = view.Page == DemoLayout.FilesPage && view.Files.Editing ? FilesTypingHelp : Helps[view.Page];
+        MoveTo(g.HelpRow, 1).Append(HelpStyle).Append(help).Append(' ', g.Width - help.Length).Append("\u001b[0m");
+    }
+
+    /// <summary>
+    /// The last row. Its color is filled with EL instead of writing the last cell of the screen, which some terminals
+    /// treat as a line feed and scroll the whole screen up.
+    /// </summary>
+    private void DrawBottomBar(DemoView view, DemoGeometry g) =>
+        MoveTo(g.BottomRow, 1).Append(BottomStyle)
+            .Append(view.Page == DemoLayout.FilesPage && view.Files.Editing ? BottomTyping : Bottom).Append("\u001b[K\u001b[0m");
 
     private bool StatusChanged(DemoView view) => view.Page switch
     {
@@ -189,9 +256,9 @@ internal sealed partial class DemoRenderer
     };
 
     /// <summary>Columns 1–32 of the status row; padding erases a longer status left by another page.</summary>
-    private void DrawStatus(DemoView view)
+    private void DrawStatus(DemoView view, DemoGeometry g)
     {
-        MoveTo(DemoLayout.StatusRow, 1).Append("\u001b[0m");
+        MoveTo(g.StatusRow, 1).Append("\u001b[0m");
         int written;
         switch (view.Page)
         {
@@ -201,9 +268,10 @@ internal sealed partial class DemoRenderer
                 break;
             case DemoLayout.FilesPage:
                 Span<int> visible = stackalloc int[DemoFiles.Count];
-                var count = DemoFiles.Visible(view.Files.Expanded, visible);
-                _frame.Append("Item: ").Append(view.Files.Cursor + 1).Append('/').Append(count);
-                written = 7 + Digits(view.Files.Cursor + 1) + Digits(count);
+                var count = DemoFiles.Visible(view.Files, visible);
+                var item = count == 0 ? 0 : view.Files.Cursor + 1;
+                _frame.Append("Item: ").Append(item).Append('/').Append(count);
+                written = 7 + Digits(item) + Digits(count);
                 break;
             default:
                 _frame.Append("Frame: ").Append(view.Frame).Append("   Paused: ").Append(view.Paused ? "yes" : "no ");

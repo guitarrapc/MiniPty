@@ -8,14 +8,14 @@ Run from an interactive terminal:
 dotnet run --project samples/TuiDemo -c Release
 ```
 
-The screen looks like a typical TUI application, after the familiar ratatui/tui-rs demos, and is built from ANSI colors and Unicode characters without image protocols or a TUI framework. A header bar holds the title, three tabs, and the size; the row under it shows Unicode text and a 24-bit color gradient on every page.
+The screen looks like a typical TUI application, after the familiar ratatui/tui-rs demos, and is built from ANSI colors and Unicode characters without image protocols or a TUI framework. It fills the terminal: 72 × 22 is the minimum, and a larger terminal widens the progress bars, the tree, the chart, and the sparklines and adds log lines, tree rows, and chart height. A header bar holds the title, three tabs, and the size; the row under it shows Unicode text and a 24-bit color gradient on every page; a bar on the last row shows how to quit.
 
 - **1 Dashboard:**
   - A Spinners panel with five styles (braille, ASCII, quadrant blocks, dots, a rising bar).
   - A Jobs panel with the elapsed time: three simulated jobs loop through queued, running, done, and failed, each with a spinner or ✓/✗, a progress bar drawn in eighths of a cell, its percent, and a colored state.
   - A Log panel whose new lines enter at the bottom and scroll the older ones up.
   - A modal Details dialog with a shadow.
-- **2 Files:** a simulated repository tree (fixed data, not the file system) with guides, folder markers, colored names, and right-aligned sizes, including `日本語メモ.txt` and `café.md`. A Details panel shows the selected item's name, type, size, and path, and a preview: a folder's children or a file's sample lines.
+- **2 Files:** a simulated repository tree (fixed data, not the file system) with guides, folder markers, colored names, and right-aligned sizes, including `日本語メモ.txt` and `café.md`, under a filter box. A Details panel shows the selected item's name, type, size, and path, and a preview: a folder's children or a file's sample lines.
 - **3 Charts:** two scrolling signals plotted with braille dots on a y axis, five animated bars in eighth blocks, and three sparklines with their current values.
 
 Terminals differ in how they draw these (24-bit color, braille and block glyphs, wide characters, scroll regions, mouse reporting), so the same screen in Windows Terminal, conhost, VS Code, or the GUI and web terminal samples shows those differences side by side. The WinUI and Avalonia terminal samples take the program to run as arguments, so they can host the TUI directly as `TuiDemo --child`.
@@ -23,8 +23,10 @@ Terminals differ in how they draw these (24-bit color, braille and block glyphs,
 - 1–3, Tab and Shift+Tab, or a click on the header switch tabs; each page keeps its state.
 - Dashboard: click a job row, use the mouse wheel, or Up/Down (J/K) to select a job. Enter or `[ Details ]` opens the dialog for the selected job, and the animation stops while it is open; Enter or `[ Close ]` closes it.
 - Files: Up/Down, PgUp/PgDn, Home/End, and the wheel move; Enter or a click on the selected folder folds it; Right unfolds and Left folds or goes to the parent folder.
-- Space, P, or `[ Pause ]` stops the animation on every page; the screen then stops changing. Releasing a button does not activate it again. Q or Ctrl+C quits.
-- Resize the terminal to see the size update. Below 72 columns or 22 rows a compact message replaces the controls; hidden controls cannot be clicked.
+- Files filter: `/` or a click on the box starts typing, and the terminal cursor appears in it. The tree shows the items whose names contain the text (ignoring case) with their folders, open. Backspace deletes, Ctrl+U clears, Up/Down still move, and Enter or a click elsewhere stops typing and keeps the filter. Japanese and other wide characters work as typed.
+- Space, P, or `[ Pause ]` stops the animation on every page; the screen then stops changing. Releasing a button does not activate it again.
+- Q or Ctrl+C quits. While the filter takes text, Q and digits are letters, so only Ctrl+C quits; the bottom bar says which applies. Esc is not used: without a timeout it cannot be told apart from the start of a key sequence.
+- Resize the terminal and the layout follows. Below 72 columns or 22 rows a compact message replaces the controls; hidden controls cannot be clicked.
 
 Application mouse input requires a terminal that supports VT mouse reporting. While reporting is active, terminal text selection often uses Shift+drag (depending on the terminal). Clicking a row selects the application's item; copying text is a frontend feature. On orderly exit the application disables mouse reporting, resets the scroll region, and restores the original screen and cursor.
 
@@ -35,11 +37,11 @@ The animation clock advances in the same 20 ms input poll loop that watches the 
 `DemoRenderer` remembers the displayed state and overwrites only what changed. Identical states emit nothing, and a reusable character buffer batches each update before writing to the terminal.
 
 - **Dashboard:** a tick rewrites the spinner glyphs that changed, the job rows, and the elapsed time. A new log line scrolls the log region with DECSTBM and SU and writes only the new line, instead of redrawing the panel. Selection rewrites the old and new job rows and the status line.
-- **Files:** moving the cursor rewrites the old and new rows and the Details panel; scrolling or folding rewrites the tree's rows. It does not use a scroll region, because DECSTBM scrolls whole rows and would move the Details panel beside the tree. Names and previews are padded by display width, so wide characters keep the size column and the border aligned.
+- **Files:** moving the cursor rewrites the old and new rows and the Details panel; scrolling, folding, or filtering rewrites the tree's rows, and a keystroke also rewrites the filter box. It does not use a scroll region, because DECSTBM scrolls whole rows and would move the Details panel beside the tree. Names and previews are padded by display width, so wide characters keep the size column and the border aligned.
 - **Charts:** the plot changes nearly every cell each frame, so the renderer keeps the displayed braille canvas and writes only the span of each row that differs. Bars and sparklines are small and are rewritten on each tick.
 - Mouse coordinates update their own field on every page.
 
-The layout has fixed cell positions, and every page paints every cell of the page area. Switching tabs and closing the dialog therefore rewrite cells in place without clearing. Resizing while the layout fits only updates the size label. The screen is cleared only on first draw, when switching between the full and compact layout, or when resizing the compact layout (the message may have wrapped). Shorter labels explicitly erase their old suffixes. Clearing and rebuilding the entire screen on every tick would expose a blank screen between writes and cause flicker.
+Positions follow the terminal size: fixed-size parts (spinners, buttons, the Details panel, the bar chart, the dialog) keep their size, the rest takes the remaining width and height, and the renderer, hit testing, and the smoke compute the same `DemoGeometry`. Every page paints every cell of the page area, so switching tabs, resizing, and closing the dialog rewrite cells in place without clearing. The screen is cleared only on first draw, when switching between the full and compact layout, or when resizing the compact layout (the message may have wrapped). The bottom bar's color is filled with EL rather than by writing the screen's last cell, which some terminals answer by scrolling. Shorter labels explicitly erase their old suffixes. Clearing and rebuilding the entire screen on every tick would expose a blank screen between writes and cause flicker.
 
 Glyphs are limited to box drawing, eighth blocks, braille, and ASCII; folders use `+` and `-` rather than ▸ and ▾, which are East Asian Ambiguous and drawn wide by some terminals. Missing braille or block glyphs in some fonts are part of what the comparison shows.
 
@@ -53,13 +55,16 @@ dotnet run --project samples/TuiDemo -c Release -- --smoke
 
 The smoke mode needs no interactive terminal. It first drives the TUI inside a real PTY, then drives the complete host inside an outer PTY. The second pass also exercises `PtyConsoleInput.Attach`, inherited-cursor replies, keyboard/mouse forwarding, and host-to-child size synchronization. Both passes check:
 
-- Rendered Unicode text, the colored header, and the color gradient.
+- Rendered Unicode text, the colored header, the color gradient, the bottom bar, and the panels reaching the right edge and the page bottom.
 - That a spinner, a job's percent, and the log change on their own, and that pausing freezes them.
 - Key and click selection with row highlighting, button press/release behavior, wheel selection, and clicks outside controls and in compact mode.
 - The dialog opening and closing by key and by button, with the covered panels restored.
 - Files: switching by key; Up/Down, End, Home, PgDn, PgUp; folding by Enter, Right, Left, and a click; wheel; and the wide-character row's size column lining up with its neighbors'.
+- The filter box: typing `日本` (sent as UTF-8), the shown cursor after the wide text, a miss with `q` that does not quit, Backspace, Ctrl+U, an ASCII filter, Enter keeping the filter and hiding the cursor, and a click on the box.
 - Charts: switching by Tab; the braille plot and a sparkline changing on their own and freezing while paused; returning by Shift+Tab and by clicking the dashboard's tab, with each page's state kept.
-- Growth/shrink/recovery, restored screen/cursor/mouse modes, final drained output, and exit code zero.
+- Growth to 100 × 30 filling the dashboard and the chart, shrink to the compact layout and recovery, restored screen/cursor/mouse modes, final drained output, and exit code zero.
+
+On Windows the nested pass carries the typed `日本` as win32-input-mode key events (`ESC [ … ; 26085 ; … _`), because the inner ConPTY's `ESC [ ? 9001 h` reaches the host's console. It therefore does not check MiniPty.Console's UTF-8 input code page; the console-input tests do.
 
 Animated cells are checked by waiting until they change, not at fixed frames: the point is that a steady stream of small writes keeps reaching the screen through each path, and a slow CI runner must not fail it. The first pass quits with Q, the second with Ctrl+C. CI runs the smoke under NativeAOT on Linux, Windows, and macOS (x64 and arm64).
 
@@ -67,14 +72,16 @@ The existing emulator in `samples/TerminalEmulator` interprets the output for th
 
 `TuiDemoRendererTests` also checks output before the PTY:
 
-- Animation ticks, selection, pause, folding, and normal resizing do not clear the screen or redraw static text, and no-op draws emit nothing.
+- Animation ticks, selection, pause, folding, and filtering do not clear the screen or redraw static text, and no-op draws emit nothing.
+- Resizing to 100 × 30 and back stretches the layout in place; the chart uses the extra cells; the bottom bar fills its row without writing its last cell.
+- The filter box shows the cursor after wide text, filters the tree, says when nothing matches, and restores the help and the bottom bar.
 - A new log entry scrolls the previous one up through the scroll region.
 - The dialog closes, and tabs switch and switch back, without clearing and leave the screen as it was.
 - A Files cursor move rewrites only its two rows and the details; scrolling keeps the cursor visible and the wide-character row aligned.
 - A chart tick writes braille and only the changed cells.
 - Shorter text leaves no stale suffix, and compact-layout transitions restore the screen.
 
-It also checks the simulated jobs, the tree's visible rows and folding, and `TuiDemoInputTests` the CSI, SS3, `~`, modified, Tab, and Shift+Tab key forms.
+It also checks the simulated jobs and the tree's visible rows, folding, and filtering, and `TuiDemoInputTests` the CSI, SS3, `~`, modified, Tab, and Shift+Tab key forms and the text that printable characters carry.
 
 Publish and run the same checks with NativeAOT (substitute your platform's RID):
 
@@ -90,7 +97,8 @@ Running interactive TUI programs is an intended PTY use case. MiniPty's scope ex
 
 - Forward raw output continuously with one reader. Do not call `PtyOutput.ToDisplayText` before displaying a TUI: stripping cursor/erase/mode sequences destroys its screen behavior. Do not wait for process exit before reading output.
 - Forward keys and terminal replies, and synchronize the actual frontend size. `MiniPty.Console` does this for an interactive host; GUI/browser hosts supply their own input and resize handling. `TERM` must describe the frontend's capabilities on Unix.
-- Windows console byte I/O must use UTF-8. This host sets `Console.InputEncoding` and `Console.OutputEncoding` before attaching, and restores them after detaching. Otherwise a legacy host code page can corrupt Japanese output even when the PTY transports the bytes correctly.
+- Windows console byte I/O must use UTF-8. MiniPty.Console reads the host console as UTF-8 while attached; this host sets `Console.OutputEncoding` before attaching and restores it after detaching, because output is the embedder's to write. Otherwise a legacy host code page can corrupt Japanese output even when the PTY transports the bytes correctly.
+- A text box in a TUI cannot rely on shortcut keys: the same event must carry both the command and its character, and Esc needs a timeout to be told apart from the start of a key sequence, so this sample ends typing with Enter instead.
 - Windows `Console.ReadKey` discards native mouse events. This child reads native `INPUT_RECORD` data with mouse/VT input enabled and Quick Edit disabled, and also incrementally decodes SGR mouse and arrow reports. On Unix it feeds terminal characters/keys to the same decoder. Input normalization and hit testing belong to the TUI/frontend.
 - On Unix, an isolated two-character `ESC [` fragment can be represented as Alt+`[` by [.NET's key parser](https://github.com/dotnet/runtime/blob/v10.0.0/src/libraries/System.Console/src/System/IO/KeyParser.cs). The decoder reconstructs that prefix so a split mouse report is not lost.
 - The Windows host forwards input through `ReadFile` with VT input enabled. Mixing `ReadConsoleInput` into that host forwarding loop could discard queued mouse records or consume only part of a VT report. The child can use native records because it owns the application input, rather than transporting it to another process.

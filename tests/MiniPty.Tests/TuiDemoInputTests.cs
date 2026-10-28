@@ -62,6 +62,29 @@ public sealed class TuiDemoInputTests
     }
 
     [Test]
+    public async Task PrintableCharacters_CarryTheirTextAlongsideShortcuts()
+    {
+        // A text box takes "q", "j", "1", and Space as text, while the rest of the screen reads them as commands.
+        var parser = new DemoInputParser();
+        await Assert.That(parser.Feed('q')).IsEqualTo(new DemoEvent(DemoCommand.Quit, Character: 'q'));
+        await Assert.That(parser.Feed('j')).IsEqualTo(new DemoEvent(DemoCommand.Down, Character: 'j'));
+        await Assert.That(parser.Feed('1')).IsEqualTo(new DemoEvent(DemoCommand.Page, 0, Character: '1'));
+        await Assert.That(parser.Feed(' ')).IsEqualTo(new DemoEvent(DemoCommand.Pause, Character: ' '));
+        await Assert.That(parser.Feed('/')).IsEqualTo(new DemoEvent(DemoCommand.None, Character: '/'));
+        await Assert.That(parser.Feed('日')).IsEqualTo(new DemoEvent(DemoCommand.None, Character: '日'));
+        // Control characters carry no text: Ctrl+C always quits, Enter, Backspace (BS or DEL), and Ctrl+U edit.
+        await Assert.That(parser.Feed('\u0003')).IsEqualTo(new DemoEvent(DemoCommand.Quit));
+        await Assert.That(parser.Feed('\r')).IsEqualTo(new DemoEvent(DemoCommand.Details));
+        await Assert.That(parser.Feed('\b')).IsEqualTo(new DemoEvent(DemoCommand.Backspace));
+        await Assert.That(parser.Feed('\u007f')).IsEqualTo(new DemoEvent(DemoCommand.Backspace));
+        await Assert.That(parser.Feed('\u0015')).IsEqualTo(new DemoEvent(DemoCommand.ClearText));
+        // Characters inside an escape sequence are not text.
+        foreach (var character in "\u001b[<0;9;4")
+            await Assert.That(parser.Feed(character).Character).IsEqualTo('\0');
+        await Assert.That(parser.Feed('M')).IsEqualTo(new DemoEvent(DemoCommand.Mouse, 9, 4, 0));
+    }
+
+    [Test]
     public async Task ConsoleKeys_MapNavigationAndShiftTab()
     {
         var parser = new DemoInputParser();

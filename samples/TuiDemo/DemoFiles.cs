@@ -1,9 +1,14 @@
 using TerminalEmulator;
 
-/// <summary>The Files page's navigation state: cursor and first shown row in the visible list, and the folded folders.</summary>
-internal readonly record struct FileBrowser(int Cursor, int Top, uint Expanded)
+/// <summary>
+/// The Files page's state: cursor and first shown row in the visible list, the unfolded folders, the filter text, and
+/// whether the filter box is taking text.
+/// </summary>
+internal readonly record struct FileBrowser(int Cursor, int Top, uint Expanded, string Filter = "", bool Editing = false)
 {
     internal static FileBrowser Initial => new(0, 0, DemoFiles.InitiallyExpanded);
+
+    internal bool Filtering => !string.IsNullOrEmpty(Filter);
 }
 
 internal enum FileKind : byte { Folder, CSharp, Markdown, Text, Yaml, Json }
@@ -11,12 +16,12 @@ internal enum FileKind : byte { Folder, CSharp, Markdown, Text, Yaml, Json }
 /// <summary>
 /// A simulated repository tree for the Files page. It is fixed data rather than the file system, so every terminal and
 /// every smoke run shows the same rows. Nodes are kept in preorder with their depth; folding hides a folder's deeper
-/// descendants, so the visible list is one pass over the array. Guides, parents, and widths are computed once.
+/// descendants, so the visible list is one pass over the array. A filter instead shows the nodes whose names contain
+/// it, with their ancestors, regardless of folding. Guides, parents, and widths are computed once. Navigation takes the
+/// number of tree rows the layout shows, which grows with the terminal's height.
 /// </summary>
 internal static class DemoFiles
 {
-    /// <summary>Tree rows shown at once (rows 4–18).</summary>
-    internal const int Rows = 15;
 
     private readonly record struct Node(string Name, int Depth, FileKind Kind, string Size);
 
@@ -125,9 +130,27 @@ internal static class DemoFiles
     internal static bool IsExpanded(uint expanded, int node) => (expanded & 1u << node) != 0;
 
     /// <summary>Writes the visible nodes, in order, into <paramref name="nodes"/> and returns how many there are.</summary>
-    internal static int Visible(uint expanded, Span<int> nodes)
+    internal static int Visible(uint expanded, string? filter, Span<int> nodes)
     {
         var count = 0;
+        if (!string.IsNullOrEmpty(filter))
+        {
+            Span<bool> keep = stackalloc bool[Nodes.Length];
+            for (var i = 0; i < Nodes.Length; i++)
+            {
+                if (!Nodes[i].Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                for (var node = i; node >= 0 && !keep[node]; node = Parents[node])
+                    keep[node] = true;
+            }
+            for (var i = 0; i < Nodes.Length; i++)
+            {
+                if (keep[i])
+                    nodes[count++] = i;
+            }
+            return count;
+        }
+
         var hiddenBelow = int.MaxValue;
         for (var i = 0; i < Nodes.Length; i++)
         {
@@ -142,60 +165,72 @@ internal static class DemoFiles
         return count;
     }
 
-    internal static FileBrowser Move(FileBrowser state, int delta)
+    internal static int Visible(FileBrowser state, Span<int> nodes) => Visible(state.Expanded, state.Filter, nodes);
+
+    internal static FileBrowser Move(FileBrowser state, int delta, int rows)
     {
         Span<int> visible = stackalloc int[Nodes.Length];
-        var count = Visible(state.Expanded, visible);
-        return Scrolled(state with { Cursor = Math.Clamp(state.Cursor + delta, 0, count - 1) }, count);
+        var count = Visible(state, visible);
+        return Scrolled(state with { Cursor = state.Cursor + delta }, count, rows);
     }
 
+    /// <summary>Keeps the cursor on a visible row after the list or the number of rows changed.</summary>
+    internal static FileBrowser Fit(FileBrowser state, int rows) => Move(state, 0, rows);
+
+    /// <summary>Replaces the filter; the cursor stays at its index, clamped to the new list.</summary>
+    internal static FileBrowser WithFilter(FileBrowser state, string filter, int rows) =>
+        Fit(state with { Filter = filter }, rows);
+
     /// <summary>Folds or unfolds the folder under the cursor. The cursor stays on it, above the rows that change.</summary>
-    internal static FileBrowser Toggle(FileBrowser state)
+    internal static FileBrowser Toggle(FileBrowser state, int rows)
     {
         Span<int> visible = stackalloc int[Nodes.Length];
-        Visible(state.Expanded, visible);
-        var node = visible[state.Cursor];
-        if (!IsFolder(node))
+        var count = Visible(state, visible);
+        // A filter shows every match's folders open, so folding would change nothing on screen.
+        if (state.Filtering || count == 0 || !IsFolder(visible[state.Cursor]))
             return state;
-        var expanded = state.Expanded ^ 1u << node;
-        return Scrolled(state with { Expanded = expanded }, Visible(expanded, visible));
+        var expanded = state.Expanded ^ 1u << visible[state.Cursor];
+        return Scrolled(state with { Expanded = expanded }, Visible(expanded, null, visible), rows);
     }
 
     /// <summary>Right: unfolds a folded folder.</summary>
-    internal static FileBrowser Expand(FileBrowser state)
+    internal static FileBrowser Expand(FileBrowser state, int rows)
     {
         Span<int> visible = stackalloc int[Nodes.Length];
-        Visible(state.Expanded, visible);
+        if (Visible(state, visible) == 0)
+            return state;
         var node = visible[state.Cursor];
-        return IsFolder(node) && !IsExpanded(state.Expanded, node) ? Toggle(state) : state;
+        return IsFolder(node) && !IsExpanded(state.Expanded, node) ? Toggle(state, rows) : state;
     }
 
     /// <summary>Left: folds an unfolded folder, or moves to the parent folder.</summary>
-    internal static FileBrowser Collapse(FileBrowser state)
+    internal static FileBrowser Collapse(FileBrowser state, int rows)
     {
         Span<int> visible = stackalloc int[Nodes.Length];
-        var count = Visible(state.Expanded, visible);
+        var count = Visible(state, visible);
+        if (count == 0)
+            return state;
         var node = visible[state.Cursor];
-        if (IsFolder(node) && IsExpanded(state.Expanded, node))
-            return Toggle(state);
+        if (!state.Filtering && IsFolder(node) && IsExpanded(state.Expanded, node))
+            return Toggle(state, rows);
         var parent = Parents[node];
         for (var i = state.Cursor - 1; i >= 0 && parent >= 0; i--)
         {
             if (visible[i] == parent)
-                return Scrolled(state with { Cursor = i }, count);
+                return Scrolled(state with { Cursor = i }, count, rows);
         }
         return state;
     }
 
     /// <summary>A click on a shown row selects it; a click on the selected folder folds it.</summary>
-    internal static FileBrowser Click(FileBrowser state, int row)
+    internal static FileBrowser Click(FileBrowser state, int row, int rows)
     {
         Span<int> visible = stackalloc int[Nodes.Length];
-        var count = Visible(state.Expanded, visible);
+        var count = Visible(state, visible);
         var index = state.Top + row;
-        if (row < 0 || row >= Rows || index >= count)
+        if (row < 0 || row >= rows || index >= count)
             return state;
-        return index == state.Cursor ? Toggle(state) : state with { Cursor = index };
+        return index == state.Cursor ? Toggle(state, rows) : state with { Cursor = index };
     }
 
     /// <summary>Display width in terminal cells; wide characters such as Japanese take two.</summary>
@@ -207,14 +242,17 @@ internal static class DemoFiles
         return width;
     }
 
-    private static FileBrowser Scrolled(FileBrowser state, int count)
+    private static FileBrowser Scrolled(FileBrowser state, int count, int rows)
     {
+        if (count == 0)
+            return state with { Cursor = 0, Top = 0 };
+        var cursor = Math.Clamp(state.Cursor, 0, count - 1);
         var top = state.Top;
-        if (state.Cursor < top)
-            top = state.Cursor;
-        else if (state.Cursor >= top + Rows)
-            top = state.Cursor - Rows + 1;
-        return state with { Top = Math.Clamp(top, 0, Math.Max(0, count - Rows)) };
+        if (cursor < top)
+            top = cursor;
+        else if (cursor >= top + rows)
+            top = cursor - rows + 1;
+        return state with { Cursor = cursor, Top = Math.Clamp(top, 0, Math.Max(0, count - rows)) };
     }
 
     private static bool IsLastChild(int node)
