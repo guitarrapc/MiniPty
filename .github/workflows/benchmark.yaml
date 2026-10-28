@@ -79,7 +79,7 @@ jobs:
           done
 
           for file in $(find BenchmarkDotNet.Artifacts/results -name "*.md" | sort); do
-            title=$(basename "$file" .md | sed 's/-report-default//g')
+            title=$(basename "$file" .md | sed 's/-report-github//g')
             content=$(sed -n 's/^[[:space:]]*//; /^|/p' "$file")
             echo "## $title" >> "$GITHUB_STEP_SUMMARY"
             echo "$content" >> "$GITHUB_STEP_SUMMARY"
@@ -87,7 +87,7 @@ jobs:
           done
 
   update-readme:
-    name: update README benchmark link
+    name: update README benchmark tables
     needs: [benchmark]
     if: ${{ inputs.benchmark == '*' }}
     permissions:
@@ -105,7 +105,15 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - name: Update README.md benchmark report link
+      - uses: guitarrapc/actions/.github/actions/setup-dotnet@c2e938426ab4b9ff4c08cedb0ad240181211f25a # v1.3.3
+        with:
+          dotnet-version: 10.0.x
+      - name: Download benchmark reports
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: BenchmarkDotNet.Artifacts-*
+          path: ${{ runner.temp }}/benchmark
+      - name: Update README.md benchmark tables
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
@@ -114,16 +122,18 @@ jobs:
           git fetch origin "${GITHUB_REF_NAME}"
           git rebase FETCH_HEAD
 
-          # Only the "latest benchmark run" link moves; the run the README's tables quote stays until they are rewritten.
-          sed -E -i '/latest benchmark run/ s|(https://github\.com/[^/]+/[^/]+/actions/runs/)[0-9]+|\1${{ github.run_id }}|g' README.md
+          # The tables, the runners' CPUs, and the run link all come from this run's reports, so every number in the
+          # README can be found as written behind its link.
+          dotnet run scripts/UpdateReadmeBenchmarks.cs -- --artifacts "${RUNNER_TEMP}/benchmark" --run-url "${RUN_URL}"
           if git diff --quiet -- README.md; then
-            echo "README.md has no latest benchmark run link to update."
+            echo "README.md benchmark tables are up to date."
             exit 0
           fi
 
           git add README.md
-          git commit -m 'docs: update benchmark report link' -m "updated in run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${{ job.check_run_id }}"
+          git commit -m 'docs: update benchmark tables' -m "updated in run ${RUN_URL}/job/${{ job.check_run_id }}"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
