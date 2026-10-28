@@ -48,6 +48,8 @@ flowchart TB
 
 **MiniPty.Capture**, **MiniPty.Console**, and **MiniPty.Terminal** are optional add-ons. All depend on core only; Console does not read PTY output; Terminal owns its session's output exclusively.
 
+MiniPty.Capture and MiniPty.Terminal use MiniPty's internals but declare MiniPty with a lower bound only. That is deliberate: the packages are released and updated together, so no exact version pin is needed.
+
 ## Implemented Scope
 
 | Goal | Specification |
