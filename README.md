@@ -16,7 +16,7 @@ I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries d
 
 - NativeAOT ready: no winpty, and no helper process running beside a session ([what ships per platform](#native-files))
 - Cross-platform: Windows, Linux, and macOS (FreeBSD: [experimental](#platforms))
-- Scales to thousands of sessions: an idle session holds no thread and no output buffer (I/O completions on Windows, one epoll/kqueue loop on Unix)
+- Scales to thousands of sessions: an idle session holds no thread and no output buffer (one I/O completion port loop on Windows, one epoll/kqueue loop on Unix)
 - Idle sessions cost nothing: an idle session holds no thread and no output buffer ([how each OS reads output](#backends))
 - Bounded memory with backpressure: output goes into a 16 KiB buffer per session, and a slow consumer pauses the child instead of growing memory
 - Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call
@@ -245,7 +245,7 @@ Each OS has its own backend behind the same API. None of them uses winpty, and n
 
 ### Windows: ConPTY
 
-MiniPty calls Win32 ConPTY (`CreatePseudoConsole`) directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. Output is read through I/O completions on the runtime's thread pool, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty-for-windows).
+MiniPty calls Win32 ConPTY (`CreatePseudoConsole`) directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. One background loop waits on an I/O completion port of MiniPty's own and reads every session's output, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty-for-windows).
 
 ### Linux: `forkpty`
 

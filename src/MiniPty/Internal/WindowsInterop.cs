@@ -48,6 +48,39 @@ internal static partial class WindowsInterop
         IntPtr lpNumberOfBytesWritten,
         NativeOverlapped* lpOverlapped);
 
+    /// <summary>
+    /// Creates a completion port (<paramref name="fileHandle"/> <c>INVALID_HANDLE_VALUE</c>, no port), or associates a
+    /// handle the caller has pinned with <paramref name="existingCompletionPort"/>. Returns the port, or zero on failure.
+    /// </summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial IntPtr CreateIoCompletionPort(
+        IntPtr fileHandle,
+        IntPtr existingCompletionPort,
+        nuint completionKey,
+        uint numberOfConcurrentThreads);
+
+    /// <summary>
+    /// Dequeues one completion. Returns <see langword="false"/> with a non-null <paramref name="lpOverlapped"/> for an I/O
+    /// that failed (its error in the last error), and with a null one when the wait itself failed or timed out.
+    /// </summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool GetQueuedCompletionStatus(
+        IntPtr completionPort,
+        uint* lpNumberOfBytesTransferred,
+        nuint* lpCompletionKey,
+        NativeOverlapped** lpOverlapped,
+        uint dwMilliseconds);
+
+    /// <summary>Queues a completion packet that no I/O produced, to wake a thread waiting on the port.</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool PostQueuedCompletionStatus(
+        IntPtr completionPort,
+        uint dwNumberOfBytesTransferred,
+        nuint dwCompletionKey,
+        NativeOverlapped* lpOverlapped);
+
     [LibraryImport("kernel32.dll")]
     internal static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 

@@ -9,8 +9,8 @@ namespace MiniPty.Internal;
 /// <para>
 /// Not <see cref="System.Buffers.ArrayPool{T}.Shared"/>, which caches arrays per thread: an array returned on a thread
 /// other than the next renter's stays in the returning thread's cache, and the next rent allocates. A ring is taken
-/// when output arrives and given back by whichever party lets go of it last: the output driver (an I/O completion on a pool
-/// worker on Windows, the I/O loop on Unix), a consumer, or a disposing thread. One lock-guarded stack has no thread affinity,
+/// when output arrives and given back by whichever party lets go of it last: the output driver (the I/O loop on Windows and on
+/// Unix), a consumer reading inline, or a disposing thread. One lock-guarded stack has no thread affinity,
 /// so a buffer returned anywhere serves the next session.
 /// </para>
 /// <para>

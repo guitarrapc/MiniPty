@@ -5,9 +5,9 @@ using MiniPty.Internal;
 namespace MiniPty.Tests;
 
 /// <summary>
-/// The Windows output driver that holds no thread (<see cref="WindowsOutputDriver"/>), driven over a plain named pipe
-/// whose writer the test controls, so each test decides when output arrives, stops, or floods. ConPTY sessions cover the
-/// same driver end to end in the rest of the suite.
+/// The Windows output driver (<see cref="WindowsOutputDriver"/>), which reads every session on one loop thread and lets a
+/// consumer read on its own, driven over a plain named pipe whose writer the test controls, so each test decides when
+/// output arrives, stops, or floods. ConPTY sessions cover the same driver end to end in the rest of the suite.
 /// </summary>
 public sealed class PtyWindowsOutputDriverTests
 {
@@ -314,6 +314,82 @@ public sealed class PtyWindowsOutputDriverTests
         }
     }
 
+    /// <summary>
+    /// A write that a waiting consumer reads costs the thread pool one work item, the consumer's continuation: the
+    /// completion of the driver's zero-byte read runs on MiniPty's loop. Bound to the runtime's completion port, the
+    /// completion was a pool work item of its own, which the runtime's I/O poller thread handed to a worker, so each
+    /// keystroke and each of ConPTY's writes cost two.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public async Task AWriteCostsThePoolOnlyTheConsumersContinuation()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        const int Writes = 200;
+        var backend = new PipeBackend();
+        await using var session = new PtySession(backend);
+        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+
+        // The first write also starts the pool's threads; it is not counted.
+        backend.Write("x"u8);
+        await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+
+        var rounds = Task.Run(async () =>
+        {
+            var before = ThreadPool.CompletedWorkItemCount;
+            for (var i = 0; i < Writes; i++)
+            {
+                // The consumer waits first, so the write completes the driver's zero-byte read.
+                var next = enumerator.MoveNextAsync();
+                backend.Write("x"u8);
+                if (!await next)
+                    throw new EndOfStreamException();
+            }
+
+            return ThreadPool.CompletedWorkItemCount - before;
+        });
+
+        var handOffs = await rounds.WaitAsync(Timeout);
+        await Assert.That(handOffs).IsLessThan(Writes * 3L / 2).Because($"{handOffs} thread-pool work items for {Writes} writes");
+    }
+
+    /// <summary>
+    /// Output stays whole and in order while the loop parks on a full ring and resumes many times, across two
+    /// enumerations: the first stops partway, and the second pauses every few chunks long enough for the ring to fill.
+    /// </summary>
+    [Test]
+    public async Task OutputStaysInOrderAcrossParksAndEnumerations()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var expected = Pattern(2 * 1024 * 1024);
+        var backend = new PipeBackend(pipeBufferSize: 64 * 1024);
+        await using var session = new PtySession(backend);
+        var writer = backend.WriteOnThread(expected, closeAfter: true, sliceSize: 4096);
+
+        var received = new List<byte>(expected.Length);
+        await using (var first = session.ReadOutputAsync().GetAsyncEnumerator())
+        {
+            while (received.Count < 256 * 1024 && await first.MoveNextAsync().AsTask().WaitAsync(Timeout))
+                received.AddRange(first.Current.Data.Span);
+        }
+
+        var chunks = 0;
+        await foreach (var chunk in session.ReadOutputAsync())
+        {
+            received.AddRange(chunk.Data.Span);
+            if (++chunks % 16 == 0)
+                await Task.Delay(20);
+        }
+
+        writer.Join();
+        await Assert.That(received.ToArray().AsSpan().SequenceEqual(expected)).IsTrue();
+    }
+
     /// <summary>Windows sessions read through I/O completions on the overlapped output pipe.</summary>
     [Test]
     public async Task SessionsReadThroughIoCompletions()
@@ -418,15 +494,18 @@ public sealed class PtyWindowsOutputDriverTests
             }
         }
 
-        /// <summary>Writes <paramref name="bytes"/> on a thread of its own, which blocks while the pipe is full.</summary>
-        public Thread WriteOnThread(byte[] bytes, bool closeAfter)
+        /// <summary>
+        /// Writes <paramref name="bytes"/> on a thread of its own in writes of <paramref name="sliceSize"/>, blocking while
+        /// the pipe is full.
+        /// </summary>
+        public Thread WriteOnThread(byte[] bytes, bool closeAfter, int sliceSize = 1000)
         {
             var thread = new Thread(() =>
             {
                 try
                 {
-                    for (var offset = 0; offset < bytes.Length; offset += 1000)
-                        _writeStream.Write(bytes, offset, Math.Min(1000, bytes.Length - offset));
+                    for (var offset = 0; offset < bytes.Length; offset += sliceSize)
+                        _writeStream.Write(bytes, offset, Math.Min(sliceSize, bytes.Length - offset));
                 }
                 catch (IOException)
                 {

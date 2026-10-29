@@ -2,7 +2,7 @@
 
 Goal: MiniPty's output floods should not fall behind Porta.Pty on CI's hosted runners, which have 2 cores and 4 threads, without giving up what MiniPty is built on: no thread held per session, no allocation per chunk, and reads that keep pace with the child while the consumer is busy.
 
-**Status:** open (2026-10-29). The cause is measured. Phase 0 is in the benchmarks and reproduces CI's ranking locally. Phase 1 (Unix) is implemented and meets its gates on Linux locally; on macOS locally its tests pass and its `AllCpus` flood rose, though MiniPty still trails Porta.Pty there, as before (Phase 1). Both wait for a CI run: the build workflow's tests on macOS, and a full benchmark run. Phase 2 (Windows) is next.
+**Status:** open (2026-10-29). The cause is measured. Phase 0 is in the benchmarks and reproduces CI's ranking locally. Phase 1 (Unix) is implemented and meets its gates on Linux locally; on macOS locally its tests pass and its `AllCpus` flood rose, though MiniPty still trails Porta.Pty there, as before (Phase 1). Both wait for a CI run: the build workflow's tests on macOS, and a full benchmark run. Phase 2 (Windows) is implemented: keystrokes and work items meet their gates locally, and floods on the out-of-band ConPTY lead Porta.Pty on 2 CPUs while on the in-box one they still trail it by about 5%, as before (Phase 2). Phase 3 (CI) is next.
 
 ## Finding
 
@@ -186,12 +186,48 @@ What this phase learned:
 - The same model on the ConPTY output pipe: the consumer takes what the pipe holds when the ring is empty (`PeekNamedPipe`, then a read that completes at once without a completion packet). A zero-byte read is posted only when the consumer is about to wait or is busy with room in the ring.
 - The earlier lesson still holds: never leave a read posted into the ring for a consumer that keeps up, because canceling it costs a completion per write ([platform_support.md](../specs/platform_support.md)).
 - A keystroke takes 2 work items in MiniPty and in Porta.Pty, yet MiniPty's is 25–60 μs slower on `TwoCpus` on the out-of-band ConPTY (Phase 0). Find which hand-off waits there before deciding whether the read model above covers it.
+- **Where a keystroke goes (2026-10-29).** Stamps in the driver and the reader, on the out-of-band ConPTY, with the pool idle between keystrokes as BenchmarkDotNet leaves it: of 88 μs from the write to the consumer, MiniPty's own steps take about 6 μs (the step's read 2.8 μs, the hand-off to the consumer 3.0 μs). The other 71 μs run from the write until the completion's step starts: ConPTY, the kernel, and the completion's way to a thread.
+- That way is the gap. A 1-byte write on a bare named pipe, idle 2 ms between writes, median until the reader has it, over two rounds:
+
+  | Reader | 2 CPUs | All CPUs |
+  |---|---|---|
+  | Zero-byte read bound to the .NET pool (`ThreadPoolBoundHandle`), as the driver waits | 23–25 μs | 29–33 μs |
+  | Zero-byte read on a completion port of its own, waited on by a dedicated thread | 11 μs | 12–14 μs |
+  | A thread blocked in `ReadFile` on a synchronous pipe, as Porta.Pty's default mode waits | 10–11 μs | 13–15 μs |
+
+  The runtime's I/O poller thread hands each completion to a worker thread, a second wake. A dedicated thread is as quick as a blocked reader. So the read model above does not cover keystrokes. A completion port of MiniPty's own, waited on by one thread for every session as the Unix loop is, would take that hop out of every keystroke, and the completion's work item out of every flood write (about 8,100 to about 4,100 per MiB before any inline read).
 - Phase 1's pieces carry over: `IPtyOutputDriver.TryReadInline` and `HandReadingBack`, the pump's producer gate, and the reader's disposal check on every turn. So do its lessons: nothing the consumer does before a wait may take a lock the driver takes per read, a consumer that stops reading inline must not hold the child up or leave output for the post-exit drain to close on, and runs are judged by work items and CPU over several rounds.
 - **Closed when:**
   - Work items per 1 MiB fall from about 8,100 to 4,100 or fewer on both ConPTYs.
   - The `TwoCpus` floods are within the spread between runs of Porta.Pty's default mode, over at least three runs.
   - The `TwoCpus` out-of-band keystroke P50 is within the spread between runs of Porta.Pty's.
   - The `AllCpus` keystrokes and all allocations are unchanged.
+
+**Built (2026-10-29).** Every session's output pipe is bound to a completion port of MiniPty's own, and one background thread waits on it and runs every driver's steps ([WindowsOutputDriver.cs](../../../src/MiniPty/Internal/WindowsOutputDriver.cs)). The steps are the same as before: a zero-byte wait, reads that complete at once, a park on a full ring, 16 reads per step. Other threads' wakes and cancels are queued for the thread, which serves them between steps, so no completion can arrive while the step that posted its read runs. The consumer does not read the pipe itself (below). A pooled driver keeps its overlapped structure in native memory, so a session no longer pays 40 B for a `ThreadPoolBoundHandle`.
+
+Results, the final two rounds alternating with `main`, 1 MiB flood and keystrokes on the machine above:
+
+| | MiniPty | MiniPty before, same rounds | Porta.Pty |
+|---|---|---|---|
+| Work items per 1 MiB | 4,105–4,153 | 8,127–8,276 | 4,090–4,106 |
+| `TwoCpus` out-of-band keystroke P50 | 81.3, 86.0 μs | 147.9, 144.4 μs | 77.1–90.7 μs |
+| `AllCpus` out-of-band keystroke P50 | 100.3, 60.2 μs | 64.6, 64.0 μs | 63.9–77.7 μs |
+| `TwoCpus` in-box flood | 7.2, 7.3 MiB/s | 7.3, 7.4 MiB/s | 7.7–7.8 MiB/s |
+| `TwoCpus` out-of-band flood | 11.3, 11.5 MiB/s | 12.7, 11.6 MiB/s | 10.8–11.1 MiB/s |
+| `AllCpus` Process CPU, in-box / out-of-band | 165–181 / 124–138 ms | 230–233 / 170–172 ms | 125–135 / 104–114 ms |
+| `TwoCpus` Process CPU, out-of-band | 106–108 ms | 86–94 ms | 89–92 ms |
+
+- Three earlier rounds, with inline reads still in, gave the same keystrokes: `TwoCpus` out-of-band P50 82–104 μs against 138–155 μs before and Porta.Pty's 92–100 μs, and `AllCpus` 61–76 μs. The one `AllCpus` round at 100.3 μs stands alone among the five.
+- Allocations: 0 B per keystroke in every round. A few flood cases showed 8–48 B, before and after alike, which is a thread-pool thread added mid-run ([platform_support.md](../specs/platform_support.md)).
+- The in-box flood on 2 CPUs trails Porta.Pty by about 5%, as it did before. Porta.Pty's default mode holds a thread per session blocked in `ReadFile`, so one wake carries each ConPTY write to its consumer. MiniPty needs two, the loop's and the consumer's continuation's, since no consumer code runs on the loop. That is the gate this phase does not meet, and closing it without a thread per session would need a consumer that reads ahead of ConPTY, which a consumer faster than ConPTY never is.
+
+What this phase learned:
+
+| Tried | Result | Why |
+|---|---|---|
+| Phase 1's inline reads on Windows: the consumer posts the zero-byte read itself, and a step that publishes for it posts none | `TwoCpus` floods 6–16% behind Porta.Pty and behind `main` in three rounds; CPU higher | ConPTY renders more slowly than a consumer reads, so the consumer found the pipe empty after nearly every write (about 4,000 waits per MiB). Its zero-byte read, posted only once it came back, caught ConPTY's next write later than one the loop posts right after it publishes. Without inline reads the loop alone held `main`'s throughput at less CPU, so Windows keeps the driver's default. On Unix the child writes faster than the consumer reads, the opposite case. |
+| A test counting work items per chunk of a flood over a plain pipe | 0.90–0.91 per chunk with the loop, 0.91–0.94 with `main` | With 64 KiB waiting in the pipe, both designs pay one consumer continuation per 4 KiB chunk, and `main`'s completions came one per 16 reads. The loop takes out the completion's work item per wait, which small writes show: 200 writes read one at a time cost 200 work items with the loop and exactly 400 with `main`. |
+| Count where a keystroke's time goes before choosing a fix | MiniPty's own steps were about 6 μs of 88 | The plan's read model would have changed those 6 μs. The time was in the completion's way to a thread, which only a thread of MiniPty's own on its own port shortens. |
 
 ### Phase 3: Confirm on CI and record
 
