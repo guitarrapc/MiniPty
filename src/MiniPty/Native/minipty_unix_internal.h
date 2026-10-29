@@ -60,6 +60,19 @@ int minipty_watch_modify(int watch_fd, int fd, uint64_t token, int interest);
 int minipty_watch_renew(int watch_fd, int fd, uint64_t token, int interest);
 void minipty_watch_remove(int watch_fd, int fd);
 int minipty_watch_wait(int watch_fd, int wake_read, uint64_t *tokens, int *reports, int capacity, int timeout_ms);
+int minipty_watch_wait_arm(
+    int watch_fd,
+    int wake_read,
+    const int *arm_fds,
+    const uint64_t *arm_tokens,
+    const int *arm_interests,
+    int arm_count,
+    uint64_t *tokens,
+    int *reports,
+    int capacity,
+    int timeout_ms);
+int minipty_master_wait_open(int master);
+int minipty_master_wait(int wait_fd, int timeout_ms);
 int minipty_pidfd_open(int pid);
 int minipty_signal_child(int pidfd, int pid, int sig);
 int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_signal);

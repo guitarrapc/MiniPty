@@ -45,6 +45,16 @@ internal static partial class UnixInterop
     [LibraryImport("minipty_unix", SetLastError = true)]
     internal static partial int minipty_set_nonblocking(int fd);
 
+    // A consumer's own wait for a master's output (minipty_unix_exit.c; kqueue platforms only).
+
+    /// <summary>Opens a kqueue with <paramref name="master"/>'s read filter, for <see cref="minipty_master_wait"/>; -1 on failure.</summary>
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_master_wait_open(int master);
+
+    /// <summary>Waits on <paramref name="waitFd"/> up to <paramref name="timeoutMs"/>: 1 when the master reported, 0 on timeout, -1 on failure.</summary>
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_master_wait(int waitFd, int timeoutMs);
+
     // Child signaling (minipty_unix_exit.c).
 
     /// <summary>

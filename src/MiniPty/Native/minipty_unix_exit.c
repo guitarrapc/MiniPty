@@ -71,6 +71,8 @@
  */
 
 #define MINIPTY_CHILD_WATCH_MAX_EVENTS 16
+/* Arms one wait applies before it blocks (minipty_watch_wait_arm): two kqueue changes each, within the event array's size. */
+#define MINIPTY_WATCH_ARM_MAX 8
 #define MINIPTY_CHILD_WATCH_WAKE_TOKEN UINT64_MAX
 /* A pid token's upper half is a pidfd, never -1, so this never meets one. */
 #define MINIPTY_CHILD_WATCH_OUTPUT_TOKEN (UINT64_MAX - 1)
@@ -494,13 +496,37 @@ void minipty_watch_remove(int watch_fd, int fd)
 
 int minipty_watch_wait(int watch_fd, int wake_read, uint64_t *tokens, int *reports, int capacity, int timeout_ms)
 {
+    return minipty_watch_wait_arm(watch_fd, wake_read, NULL, NULL, NULL, 0, tokens, reports, capacity, timeout_ms);
+}
+
+/*
+ * minipty_watch_wait with the arms the caller's pass accumulated applied first (minipty_watch_modify for each, in order).
+ * With kqueue they go in the changelist of the same kevent call as the wait, so a pass that arms one master costs one
+ * system call instead of two; a master that became ready while its filter was disabled is reported by this wait, since
+ * enabling a filter re-evaluates it. A change the kernel refuses comes back as an error report for its token, so the
+ * caller looks at that session, whose read then finds the descriptor's state. With epoll each arm is its own call, as
+ * before. At most MINIPTY_WATCH_ARM_MAX arms per call; more fail with EINVAL.
+ */
+int minipty_watch_wait_arm(
+    int watch_fd,
+    int wake_read,
+    const int *arm_fds,
+    const uint64_t *arm_tokens,
+    const int *arm_interests,
+    int arm_count,
+    uint64_t *tokens,
+    int *reports,
+    int capacity,
+    int timeout_ms)
+{
 #if defined(MINIPTY_CHILD_WATCH_EPOLL) || defined(MINIPTY_CHILD_WATCH_KQUEUE)
     int max_events = capacity < MINIPTY_CHILD_WATCH_MAX_EVENTS ? capacity : MINIPTY_CHILD_WATCH_MAX_EVENTS;
     int count = 0;
     int ready;
     int i;
 
-    if (tokens == NULL || reports == NULL || max_events <= 0) {
+    if (tokens == NULL || reports == NULL || max_events <= 0 || arm_count < 0 || arm_count > MINIPTY_WATCH_ARM_MAX
+        || (arm_count > 0 && (arm_fds == NULL || arm_tokens == NULL || arm_interests == NULL))) {
         errno = EINVAL;
         return -1;
     }
@@ -508,6 +534,9 @@ int minipty_watch_wait(int watch_fd, int wake_read, uint64_t *tokens, int *repor
 #if defined(MINIPTY_CHILD_WATCH_EPOLL)
     {
         struct epoll_event events[MINIPTY_CHILD_WATCH_MAX_EVENTS];
+
+        for (i = 0; i < arm_count; i++)
+            minipty_watch_modify(watch_fd, arm_fds[i], arm_tokens[i], arm_interests[i]);
 
         ready = epoll_wait(watch_fd, events, max_events, timeout_ms);
         if (ready < 0)
@@ -553,8 +582,10 @@ int minipty_watch_wait(int watch_fd, int wake_read, uint64_t *tokens, int *repor
 #else
     {
         struct kevent events[MINIPTY_CHILD_WATCH_MAX_EVENTS];
+        struct kevent changes[MINIPTY_WATCH_ARM_MAX * 2];
         struct timespec timeout;
         struct timespec *timeout_ptr = NULL;
+        int change_count = 0;
 
         if (timeout_ms >= 0) {
             timeout.tv_sec = timeout_ms / 1000;
@@ -562,7 +593,19 @@ int minipty_watch_wait(int watch_fd, int wake_read, uint64_t *tokens, int *repor
             timeout_ptr = &timeout;
         }
 
-        ready = kevent(watch_fd, NULL, 0, events, max_events, timeout_ptr);
+        /* The same two filters minipty_watch_kqueue_apply sets, without EV_RECEIPT: a refused change is reported as an
+         * EV_ERROR event for its token below, and the wait goes on. */
+        for (i = 0; i < arm_count; i++) {
+            void *udata = (void *)(uintptr_t)arm_tokens[i];
+
+            EV_SET(&changes[change_count++], (uintptr_t)arm_fds[i], EVFILT_READ,
+                EV_ADD | EV_DISPATCH | ((arm_interests[i] & MINIPTY_WATCH_READ) ? EV_ENABLE : EV_DISABLE), 0, 0, udata);
+            EV_SET(&changes[change_count++], (uintptr_t)arm_fds[i], EVFILT_WRITE,
+                EV_ADD | EV_DISPATCH | ((arm_interests[i] & MINIPTY_WATCH_WRITE) ? EV_ENABLE : EV_DISABLE), 0, 0, udata);
+        }
+
+        /* The changes are applied before the wait blocks, so an interrupted wait has still applied them. */
+        ready = kevent(watch_fd, changes, change_count, events, max_events, timeout_ptr);
         if (ready < 0)
             return errno == EINTR ? 0 : -1;
 
@@ -773,4 +816,65 @@ int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_
         minipty_set_exit(1, 1, exit_code, term_signal);
 
     return 1;
+}
+
+/*
+ * A consumer's own wait for a master's output, on its own thread (UnixPtyBackendInstance.TryReadInline on macOS). A
+ * macOS master holds 1 KiB, so a consumer that reads a flood finds the master empty after almost every read, before
+ * the child has refilled it; waiting here, woken by the child's next write, costs no wake of the loop and no hand-off
+ * back to the consumer, which is what a blocking read on a thread of the session's own has. The wait is a kqueue of the
+ * session's own with the master's EVFILT_READ, level-triggered, kept for the session and closed with the master. poll
+ * was measured 2.5 ms per MiB slower here, since each call builds and drops a registration. The loop's kqueue cannot
+ * serve: two threads waiting on one kqueue get each other's events.
+ *
+ * minipty_master_wait returns 1 when the master reported (output, or EV_EOF, which the caller's read tells apart), 0 on
+ * the timeout or an interruption, and -1 on failure. Without kqueue both fail with ENOTSUP.
+ */
+int minipty_master_wait_open(int master)
+{
+#if defined(MINIPTY_CHILD_WATCH_KQUEUE)
+    struct kevent change;
+    int saved_errno;
+    int kq;
+
+    kq = kqueue();
+    if (kq < 0)
+        return -1;
+
+    EV_SET(&change, (uintptr_t)master, EVFILT_READ, EV_ADD, 0, 0, NULL);
+    if (kevent(kq, &change, 1, NULL, 0, NULL) != 0) {
+        saved_errno = errno;
+        close(kq);
+        errno = saved_errno;
+        return -1;
+    }
+
+    return kq;
+#else
+    (void)master;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+int minipty_master_wait(int wait_fd, int timeout_ms)
+{
+#if defined(MINIPTY_CHILD_WATCH_KQUEUE)
+    struct kevent event;
+    struct timespec timeout;
+    int ready;
+
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+    ready = kevent(wait_fd, NULL, 0, &event, 1, &timeout);
+    if (ready < 0)
+        return errno == EINTR ? 0 : -1;
+
+    return ready;
+#else
+    (void)wait_fd;
+    (void)timeout_ms;
+    errno = ENOTSUP;
+    return -1;
+#endif
 }

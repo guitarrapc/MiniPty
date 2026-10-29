@@ -2,7 +2,7 @@
 
 Goal: on macOS, MiniPty's 1 MiB flood should reach Porta.Pty's default mode, on an 8-core desktop and on CI's `macos-26` runner (Apple M1 virtual machine, 3 vCPUs), without giving up what MiniPty is built on: no thread held per idle session, no allocation per chunk, and reads that keep pace with the child while the consumer is busy.
 
-**Status:** proposed (2026-10-30). The cause is measured outside .NET with a C probe ([scripts/pty-read-path-probe.c](../../../scripts/pty-read-path-probe.c)). Nothing is implemented yet. This is the open work that [plan_flood_throughput.md](plan_flood_throughput.md) carries over from its macOS results ([macOS on CI](plan_flood_throughput.md#macos-on-ci)).
+**Status:** implemented locally (2026-10-30), waiting for CI. The cause was measured outside .NET with a C probe ([scripts/pty-read-path-probe.c](../../../scripts/pty-read-path-probe.c)), and Phases 1 and 2 are built and measured on the M2 ([Results](#results)). Phase 3 (CI) is next. This is the open work that [plan_flood_throughput.md](plan_flood_throughput.md) carries over from its macOS results ([macOS on CI](plan_flood_throughput.md#macos-on-ci)).
 
 ## Where MiniPty stands
 
@@ -86,7 +86,7 @@ The earlier plan's inline reads on macOS (reverted) had the consumer read on its
 
 ## Decision
 
-On macOS the consumer's thread reads the master and, when the master is empty, waits for it there: a kernel wait on the master with a short timeout, woken by the child's next write, and only when that times out does it arm the loop and park, as today. A short retry of the read before the wait, yielding between tries, is a separate knob measured on CI: it doubles throughput on an idle desktop and halves it on a saturated core, so it starts at 0 and is raised only where the paired CI rounds show it pays. The loop keeps reading ahead while the consumer is busy with its chunk or gone, through the same millisecond check as on Linux, so a UI consumer that takes a frame per chunk still has the loop fill the ring for it.
+On macOS the consumer's thread reads the master and, when the master is empty, waits for it there: a kernel wait on the master with a short timeout, woken by the child's next write, and only when that times out does it arm the loop and park, as today. No retry of the read before the wait: in C it doubled an idle desktop's throughput, in .NET it lost everywhere ([Results](#results)). The loop keeps reading ahead while the consumer is busy with its chunk or gone, through the same millisecond check as on Linux, so a UI consumer that takes a frame per chunk still has the loop fill the ring for it.
 
 The kernel wait is a kqueue of the session's own, created on the first such wait and closed with the master: `poll` was measured slower, and the loop's kqueue cannot be waited on by two threads. It is one more descriptor per session that a plain `ReadOutputAsync` consumer reads, none for sessions read by sinks, captures or the bridges.
 
@@ -112,11 +112,11 @@ The loop's own reads also get cheaper, which every path that stays on it keeps: 
 
 ### Phase 2: The consumer waits on the master (macOS)
 
-- `TryReadInline` on macOS reads under the producer's turn as Linux does. When it reads nothing and the consumer may wait on its thread, it waits on the session's kqueue with a timeout of about a millisecond, then reads again under the turn. Only a wait that times out leaves the turn, arms the loop and parks, as today. The retry before the wait (`Thread.Yield` between tries, a bound in microseconds) is built behind a constant that starts at 0.
+- `TryReadInline` on macOS reads under the producer's turn as Linux does. When it reads nothing and the consumer may wait on its thread, it waits on the session's kqueue with a timeout of about a millisecond, then reads again under the turn. Only a wait that times out leaves the turn, arms the loop and parks, as today. No retry before the wait ([Results](#results)).
 - The inline-reader listing and the millisecond check stay: a consumer busy in its own code for that long has the loop read for it, and the master is unarmed on the loop while the consumer reads inline, as on Linux.
 - End of output and hang-up seen by the consumer's wait (`EV_EOF`, or a read of 0) are left to the loop: the consumer arms and parks, and the loop's pass ends output, so the kqueue's stale `EV_EOF` cannot spin the consumer.
 - Disposal, cancellation and the enumeration's end while the consumer waits are bounded by the timeout; the close of the master drops its registration from the session's kqueue.
-- The bounds (wait timeout, retry microseconds) are constants measured in Phase 3. The gates below must be met with the kernel wait alone (`inline_kq`: 218 MiB/s idle, 93–107 under load in the probe); the retry is raised above 0 only if the paired CI rounds and the M2 both improve with it.
+- The wait's timeout is a constant (1 ms, about the loop's own check of inline readers), to be confirmed on CI in Phase 3.
 - **Tests:** a flood through `ReadOutputAsync` makes fewer than 50 work items and fewer than 50 loop passes per MiB (the loop's pass counter exists for tests); a consumer that stops reading mid-flood has the loop take over within a few milliseconds and the child is not stalled; end of output and hang-up seen during the consumer's wait end the enumeration; disposal and cancellation during the wait return within the timeout; a consumer with a synchronization context never retries or waits in the kernel; output order across consumer and loop reads; the session's kqueue is closed with the master.
 - **Closed when:**
   - On the M2, the `AllCpus` 1 MiB and 64 KiB floods are at least Porta.Pty's default mode's in the same run (the probe puts the floor at 218–374 MiB/s against its 192).
@@ -131,10 +131,36 @@ The loop's own reads also get cheaper, which every path that stays on it keeps: 
 - Tune the two bounds on CI, then the README's tables update themselves on a full run.
 - Move the finding and lessons into [platform_support.md](../specs/platform_support.md) (the 1,024-byte master, the probe) and [core_session.md](../specs/core_session.md) (where a consumer reads and waits, per platform), and close this plan with the earlier one's Phase 3.
 
+## Results
+
+Measured 2026-10-30 on the Apple M2 (8 cores), macOS 27.0.1, with a harness outside BenchmarkDotNet that drives the benchmarks' serve child (`--serve 1048576`) the way the benchmarks do, through one `ReadOutputAsync` enumeration or Porta.Pty's `ReaderStream`: 200 floods of 1 MiB after 30 of warmup (100 under load), medians, two rounds each, the versions run alternately. Work items are thread-pool work items per flood, and passes are the loop's.
+
+| Idle, 1 MiB flood | ms | MiB/s | p90 ms | Process CPU | Work items | Loop passes |
+|---|---|---|---|---|---|---|
+| Before (`c0ec5f0`) | 9.3–10.5 | 96–107 | 11.8–12.1 | 33–39 ms | 824–863 | 1,020–1,022 |
+| Phase 1 alone | 9.8–10.6 | 95–102 | 12.1–12.3 | 36 ms | 665–798 | 1,025 |
+| Phases 1 and 2 | 3.6–3.9 | 257–280 | 4.7–4.9 | 3.5–3.6 ms | 0 | 3 |
+| Porta.Pty, default | 5.9 | 167–169 | 8.6–9.0 | 20–22 ms | 1,026 | – |
+| Porta.Pty, `UseAsyncIo` | 6.9–7.0 | 143–145 | 9.3–10.0 | 19 ms | 687 | – |
+
+| Under load, 1 MiB flood | 6 busy loops: MiB/s (p90 ms, floods over 30 ms) | 7 busy loops: MiB/s (p90 ms, floods over 30 ms) |
+|---|---|---|
+| Before | 62–64 (23.4–23.9, 5–6%) | 35–36 (58–65, **45–46%**) |
+| Phases 1 and 2 | 76–77 (16.0–16.1, 0–3%) | 84–109 (11.6–25.8, 2–4%) |
+| Porta.Pty, default | 80–84 (16.7–17.4, 1–2%) | 55–80 (24.8–31.5, 6–12%) |
+
+- **Phase 1 alone changed nothing measurable**, as the probe predicted: the re-arm's cost hides behind the hand-off. It is kept because it is a quarter of what remains once the hand-off is gone, and because every path that stays on the loop (sinks, captures, the bridges, the discard after a hang-up) gets it.
+- **Phase 2 meets its M2 gates with room**: 1.5–1.7 times Porta.Pty's default mode, a tenth of the process CPU, no work item per flood, and the loop woken about three times per flood for its millisecond check. Under load it is level with Porta.Pty on two shared cores and ahead on one, and the bimodal slow runs of the version before it, which 7 busy loops reproduce (45% of floods over 30 ms, as CI's 47%), are gone (2–4%).
+- **The retry before the wait is removed, not a knob.** At 10 μs, with `Thread.Yield` and a `FIONREAD` check per try, it took the idle M2 from 250 to 72 MiB/s and the loaded core from 85 to 27 (63–82% of floods over 30 ms, 314–364 loop passes per flood): the retries took the CPU the child needed to refill the master, and the loop's millisecond check then took reading back. The probe's retry had looked better only in C and only idle. The kernel wait alone carries the design.
+- **Keystrokes** (the same harness, 2,000 echoes of one byte, two rounds): P50 12 μs after against 14 before and 11–12 for Porta.Pty's default mode; P95 13–14 μs against 18–20 and 16–17. An echo that arrives within the consumer's wait costs no work item and no loop pass; one that arrives later takes the loop's path as before.
+- **64 KiB floods**: 60.6 MiB/s against Porta.Pty's 62.7 in the same run (1.03 against 1.00 ms per flood), level.
+- **NativeAOT**: the ILC compile of `samples/SingleFiles/Session.cs` for `osx-arm64` succeeds with the change; the link on this Mac fails with `ld: library 'ssl' not found` before and after alike (the Homebrew .NET's NativeAOT pack asks for OpenSSL), so the publish itself is left to CI.
+- Tests: the whole suite passes on macOS (727), and `PtyUnixLoopTests` and `PtyKqueueWatchTests` five runs each, with two new tests, one that a flood's consumer waits for the master on its own thread with few loop passes, and one that a consumer on a thread with a scheduling context never waits in the kernel.
+
 ## Risks
 
 - **A pool thread waits in the kernel for up to the timeout.** During a flood it is the consumer's own thread, busy anyway; after a flood's last chunk it waits one timeout, then parks. Many sessions flooding at once each hold a pool thread while they flood, as they hold it to consume. The timeout bounds every wait, and the pool's injection covers the rest. Document it in core_session.md.
-- **Retrying on a loaded 3-vCPU runner.** On one shared core the probe's yielding reader was the slowest of all, with a p90 four times the blocking reader's. The retry starts at 0 and the kernel wait carries the gates alone; the retry is raised only on paired CI evidence.
+- **Retrying on a loaded 3-vCPU runner.** Measured and removed ([Results](#results)): in .NET the retry lost even on the idle M2.
 - **One more descriptor per plain consumer.** Created lazily, closed with the master; counts toward the process's descriptor limit alongside the master. macOS caps terminals at 511 per machine anyway ([platform_support.md](../specs/platform_support.md)).
 - **Two producers on one ring.** Unchanged from the Linux design: the consumer and the loop take turns through the pump's gate, and the loop drops a report of output alone while the consumer holds the turn.
 - **Deferring arms to the wait.** An arm deferred behind other sessions' service in the same pass delays that session's readiness by the pass, as the re-arm at the end of its own service does today. A renewal after a stale hang-up stays an immediate call.
