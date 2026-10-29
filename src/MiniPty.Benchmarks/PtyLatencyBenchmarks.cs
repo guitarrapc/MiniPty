@@ -45,8 +45,15 @@ namespace MiniPty.Benchmarks;
 /// matched them one for one, for every library, which one depending on when its run happened. That is the cost of
 /// starting a process, not of a running session.
 /// </para>
+/// <para>
+/// Every case runs on the whole machine and, on Linux and Windows, on two logical CPUs (<see cref="SteadyStateJobs"/>).
+/// It reports the thread-pool work items of a keystroke (<c>Completed Work Items</c>, from one extra keystroke after the measured
+/// ones). It has no CPU-time column: BenchmarkDotNet forces a full collection around every iteration, and with one
+/// keystroke per iteration that would be most of the figure (<see cref="ProcessCpuDiagnoser"/>).
+/// </para>
 /// </remarks>
 [MemoryDiagnoser]
+[ThreadingDiagnoser]
 [Outliers(OutlierMode.DontRemove)]
 [Config(typeof(Config))]
 public class PtyLatencyBenchmarks
@@ -104,7 +111,7 @@ public class PtyLatencyBenchmarks
     {
         public Config()
         {
-            AddJob(Job.Default
+            SteadyStateJobs.Add(this, Job.Default
                 .WithRuntime(CoreRuntime.Core10_0)
                 .WithLaunchCount(1)
                 .WithWarmupCount(20)

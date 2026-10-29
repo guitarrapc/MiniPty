@@ -1166,7 +1166,7 @@ internal static class WindowsPtyBackend
 
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
-        /// <summary>Reads output through I/O completions on the overlapped output pipe, holding no thread.</summary>
+        /// <summary>Reads output on the completion-port loop that every session shares, holding no thread of its own.</summary>
         public void StartOutput(PtyOutputPump pump) => WindowsOutputDriver.Run(pump, _outputReadHandle);
 
         public void Dispose()
@@ -1331,7 +1331,7 @@ internal static class WindowsPtyBackend
     /// <summary>
     /// Creates the ConPTY pipes. MiniPty's end of each is the server end of a named pipe opened overlapped (see
     /// <see cref="CreateOverlappedPipe"/>): input waits without blocking a thread while ConPTY is not taking it, and
-    /// output is read through I/O completions.
+    /// output is read through I/O completions on MiniPty's loop.
     /// </summary>
     /// <remarks>
     /// Every handle is non-inheritable. ConPTY duplicates its ends into its host process itself, and the child is

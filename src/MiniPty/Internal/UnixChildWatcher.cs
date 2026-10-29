@@ -22,8 +22,10 @@ internal static partial class UnixPtyBackend
     /// <remarks>
     /// <para>
     /// <b>I/O loop.</b> Each session's non-blocking master is registered on the same epoll (Linux) or kqueue (macOS,
-    /// FreeBSD) that reports the children's exits, level-triggered, with the interest its state needs: output while its
-    /// ring has room, input while some is queued (<see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). kqueue keeps the
+    /// FreeBSD) that reports the children's exits, with the interest its state needs: output while its ring has room,
+    /// input while some is queued (<see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). A registration reports once and is
+    /// armed again after each pass, and a consumer that reads the master on its own thread arms it only when it is about to
+    /// wait, so a flood that the consumer keeps up with wakes this thread about once per wait. kqueue keeps the
     /// two interests as two filters of the master, and the native wait joins their events into one report per master, as
     /// epoll gives. A master's token names its slot and the slot's
     /// generation, so a report that arrives after the session's registration was removed never reaches the session that
@@ -105,6 +107,15 @@ internal static partial class UnixPtyBackend
         private static long s_nextCoalesceTick;
         private const int CoalesceTickMs = 1;
         private static readonly long s_coalesceTickTicks = Stopwatch.Frequency * CoalesceTickMs / 1000;
+        // Sessions whose consumer has read the master on its own thread lately, linked through NextInlineReader. While any
+        // is listed, this thread wakes about every InlineReaderCheckMs and takes reading back from a consumer that has not
+        // read for that long (UnixPtyBackendInstance.CheckInlineReader). Guarded by s_lock.
+        private static UnixPtyBackendInstance? s_inlineReaders;
+        private const int InlineReaderCheckMs = 1;
+        // Whether the wait in progress has no timeout, so a newly listed session must wake it. Written by this thread.
+        private static bool s_waitsWithoutTimeout;
+        // Sessions this pass takes reading back from, served outside s_lock. This thread only.
+        private static readonly List<UnixPtyBackendInstance> s_takeovers = [];
 
         /// <summary>Passes this thread has made through its loop, for tests that check it does not spin.</summary>
         internal static long Passes => Volatile.Read(ref s_passes);
@@ -238,13 +249,17 @@ internal static partial class UnixPtyBackend
             }
         }
 
-        /// <summary>Sets what a registered master reports. On this thread only.</summary>
+        /// <summary>
+        /// Sets what a registered master reports, and arms its registration for one report. On this thread, or on the
+        /// thread of a consumer that holds a reference on the master. A consumer's call may race this thread's, or the
+        /// master's removal; the session makes either harmless (<see cref="UnixPtyBackendInstance.ArmForConsumer"/>).
+        /// </summary>
         internal static void SetInterest(int master, int slot, int generation, int interest) =>
             _ = minipty_watch_modify(s_watchFd, master, MasterToken(slot, generation), interest);
 
         /// <summary>
         /// Registers a master again with the same interest, which clears an end of file kqueue keeps reporting after the
-        /// slave opened again (see <see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). On this thread only.
+        /// slave opened again (see <see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). Called as <see cref="SetInterest"/> is.
         /// </summary>
         internal static void RenewInterest(int master, int slot, int generation, int interest) =>
             _ = minipty_watch_renew(s_watchFd, master, MasterToken(slot, generation), interest);
@@ -322,6 +337,76 @@ internal static partial class UnixPtyBackend
                 s_serviceTail = session;
                 WakeLocked();
             }
+        }
+
+        /// <summary>
+        /// Lists <paramref name="session"/>, whose consumer has started reading its master inline, so that this thread
+        /// takes reading back if the consumer stops reading for longer than <see cref="InlineReaderCheckMs"/>. Cheap, never
+        /// blocks; a listed session stays listed a while after its consumer last read, so a flood lists it about once.
+        /// </summary>
+        internal static void WatchInlineReader(UnixPtyBackendInstance session)
+        {
+            lock (s_lock)
+            {
+                if (session.InlineReaderListed)
+                    return;
+
+                session.InlineReaderListed = true;
+                session.NextInlineReader = s_inlineReaders;
+                s_inlineReaders = session;
+                // A wait without a timeout would not look at the consumer until something else woke this thread.
+                if (s_waitsWithoutTimeout)
+                    WakeLocked();
+            }
+        }
+
+        /// <summary>
+        /// Takes reading back from each listed consumer that has not read inline for <see cref="InlineReaderCheckMs"/>,
+        /// and unlists sessions whose consumer has not read inline for a while. Runs on every pass.
+        /// </summary>
+        private static void ServeInlineReaders()
+        {
+            lock (s_lock)
+            {
+                if (s_inlineReaders is null)
+                    return;
+
+                var now = Stopwatch.GetTimestamp();
+                UnixPtyBackendInstance? previous = null;
+                var session = s_inlineReaders;
+                while (session is not null)
+                {
+                    var next = session.NextInlineReader;
+                    var check = session.CheckInlineReader(now);
+                    if (check == UnixPtyBackendInstance.InlineReaderUnlist)
+                    {
+                        if (previous is null)
+                            s_inlineReaders = next;
+                        else
+                            previous.NextInlineReader = next;
+
+                        session.NextInlineReader = null;
+                        session.InlineReaderListed = false;
+                    }
+                    else
+                    {
+                        if (check == UnixPtyBackendInstance.InlineReaderTakeOver)
+                            s_takeovers.Add(session);
+
+                        previous = session;
+                    }
+
+                    session = next;
+                }
+            }
+
+            if (s_takeovers.Count == 0)
+                return;
+
+            foreach (var session in s_takeovers)
+                session.TakeOverReading();
+
+            s_takeovers.Clear();
         }
 
         private static ulong MasterToken(int slot, int generation) =>
@@ -492,6 +577,7 @@ internal static partial class UnixPtyBackend
                 PollFallbackChildren(polledSnapshot);
                 ServeHangups();
                 ServeCoalesceTick();
+                ServeInlineReaders();
             }
         }
 
@@ -561,6 +647,9 @@ internal static partial class UnixPtyBackend
                 timeout = PollIntervalMs;
             }
 
+            if (s_inlineReaders is not null && (timeout == Timeout.Infinite || timeout > InlineReaderCheckMs))
+                timeout = InlineReaderCheckMs;
+
             if (!s_coalesceTicking)
                 return timeout;
 
@@ -609,12 +698,19 @@ internal static partial class UnixPtyBackend
         {
             int timeout;
             lock (s_lock)
+            {
                 timeout = WaitTimeoutLocked();
+                s_waitsWithoutTimeout = timeout == Timeout.Infinite;
+            }
 
             int count;
             fixed (ulong* tokenPtr = tokens)
             fixed (int* reportPtr = reports)
                 count = minipty_watch_wait(s_watchFd, s_wakeRead, tokenPtr, reportPtr, tokens.Length, timeout);
+
+            // A session listed from now on is looked at by the pass this wait ends in. Written without the lock: one listed
+            // meanwhile at most wakes the next wait at once.
+            Volatile.Write(ref s_waitsWithoutTimeout, false);
 
             if (count >= 0)
                 return count;

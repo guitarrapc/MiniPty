@@ -34,7 +34,7 @@ flowchart TB
 | `Pty.Start` | Public entry | Null and OS support checks; Windows vs Unix backend selection; returns `PtySession`. Does not wait for exit. |
 | `WindowsPtyBackend` / `UnixPtyBackend` | Internal | ConPTY or Unix PTY spawn, handle ownership, platform EOF and resize. |
 | `IPtyBackend` | Internal contract | Thin runtime boundary: input stream, the start of the session's output driver, process id, exit notification (task, internal waiter, listener), kill, transport close. Not a launch or plugin abstraction. |
-| `IPtyOutputDriver` | Internal contract | How reads are waited for: it hands what it reads to the session's output pump, which decides everything about the ring, its consumers, and end of output. `WindowsOutputDriver` (I/O completions) on Windows; on Unix the backend itself, served by the exit watcher's loop. |
+| `IPtyOutputDriver` | Internal contract | How reads are waited for: it hands what it reads to the session's output pump, which decides everything about the ring, its consumers, and end of output. `WindowsOutputDriver` (one completion-port loop for every session) on Windows; on Unix the backend itself, served by the exit watcher's loop. |
 | `PtySession` | Public session | Live PTY lifecycle only: output consumers, stdin writes, `SendEof`, resize, `WaitForExitAsync`, `CompleteAsync`, kill, dispose. Does not decide how the child was spawned. |
 
 Normalization stays localized: `PtyStartInfo.ClampedSize` for dimensions, `PtyEnvironment` for child environment materialization, backends for platform launch preparation.

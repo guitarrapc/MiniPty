@@ -1,6 +1,7 @@
 ﻿using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Environments;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Reports;
 using BenchmarkDotNet.Running;
@@ -34,10 +35,16 @@ namespace MiniPty.Benchmarks;
 /// An operation is one pooled async round trip (<see cref="BenchmarkServeSession.RoundTripAsync"/>), so the allocation
 /// column shows each library's own cost per flood rather than the harness's async state.
 /// </para>
+/// <para>
+/// Every case runs on the whole machine and, on Linux and Windows, on two logical CPUs (<see cref="SteadyStateJobs"/>).
+/// It reports what a flood costs besides its time: thread-pool work items per operation (<c>Completed Work Items</c>), lock contentions,
+/// and the benchmark process's CPU time per operation (<c>Process CPU</c>, <see cref="ProcessCpuDiagnoser"/>). A
+/// library that hands each chunk to another thread shows it there even where spare CPUs hide it from the time.
+/// </para>
 /// </remarks>
 [MemoryDiagnoser]
+[ThreadingDiagnoser]
 [Config(typeof(Config))]
-[SimpleJob(RuntimeMoniker.Net10_0, warmupCount: 3, iterationCount: 10, launchCount: 1)]
 public class PtyThroughputBenchmarks
 {
     private BenchmarkServeSession? serve;
@@ -97,7 +104,16 @@ public class PtyThroughputBenchmarks
 
     private sealed class Config : ManualConfig
     {
-        public Config() => AddColumn(new ThroughputColumn());
+        public Config()
+        {
+            SteadyStateJobs.Add(this, Job.Default
+                .WithRuntime(CoreRuntime.Core10_0)
+                .WithLaunchCount(1)
+                .WithWarmupCount(3)
+                .WithIterationCount(10));
+            AddDiagnoser(new ProcessCpuDiagnoser());
+            AddColumn(new ThroughputColumn());
+        }
     }
 
     /// <summary>Payload bytes per second of mean operation time, in MiB/s.</summary>

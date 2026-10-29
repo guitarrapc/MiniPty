@@ -121,6 +121,10 @@ static class BenchmarkTables
     // The ConPty parameter's values in table order: Unix has one, Windows runs the out-of-band and the in-box ConPTY.
     private static readonly string[] ConPtyOrder = ["none", "out-of-band", "in-box"];
 
+    // The steady-state benchmarks run each case on the whole runner and again on two of its CPUs (SteadyStateJobs in
+    // src/MiniPty.Benchmarks); the tables quote the whole runner.
+    private static readonly (string Column, string Value) WholeRunner = ("Job", "AllCpus");
+
     public static List<(string Name, List<string> Lines)> Build(Options options)
     {
         var runtimes = new SortedSet<string>(StringComparer.Ordinal);
@@ -140,8 +144,8 @@ static class BenchmarkTables
             var report = Report.Load(ReportPath(results, "PtyLatencyBenchmarks", ".csv"));
             foreach (var conPty in ConPtyValues(report))
             {
-                var mini = report.Get("MiniPty", ("ConPty", conPty));
-                var porta = report.Get("PortaPty", ("ConPty", conPty));
+                var mini = report.Get("MiniPty", WholeRunner, ("ConPty", conPty));
+                var porta = report.Get("PortaPty", WholeRunner, ("ConPty", conPty));
                 latency.Add([
                     runner.Name,
                     conPty,
@@ -154,8 +158,8 @@ static class BenchmarkTables
             report = Report.Load(ReportPath(results, "PtyThroughputBenchmarks", ".csv"));
             foreach (var conPty in ConPtyValues(report))
             {
-                var mini = report.Get("MiniPty", ("ConPty", conPty), ("PayloadBytes", "1048576"));
-                var porta = report.Get("PortaPty", ("ConPty", conPty), ("PayloadBytes", "1048576"));
+                var mini = report.Get("MiniPty", WholeRunner, ("ConPty", conPty), ("PayloadBytes", "1048576"));
+                var porta = report.Get("PortaPty", WholeRunner, ("ConPty", conPty), ("PayloadBytes", "1048576"));
                 throughput.Add([
                     runner.Name,
                     conPty,

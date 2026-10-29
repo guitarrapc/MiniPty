@@ -16,7 +16,7 @@ namespace MiniPty.Internal;
 /// the drain wait reports end of output.
 /// </para>
 /// <para>
-/// Delivery runs on I/O completions on Windows and on the loop shared by every session on Unix, so a sink must cost the
+/// Delivery runs on the loop shared by every session, on Windows as on Unix, so a sink must cost the
 /// same on any thread: no pool with per-thread caches, no growth that copies what
 /// was already written, and no result built until the caller asks for it on its own thread.
 /// </para>

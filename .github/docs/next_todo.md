@@ -8,10 +8,6 @@ The one-second hang-up grace before the kill (`UnixPtyBackend.DisposeHangupGrace
 
 Windows exit watchers each wait on up to 63 children with `WaitForMultipleObjects`, so a host adds a thread per 63 sessions. Thread-pool waits or another mechanism can remove that once it matters.
 
-### Windows output completions on a starved pool
-
-Windows output completions need a thread-pool worker, as Kestrel's sockets do, so a starved pool delays output there; Unix reads on its own loop regardless. A dedicated completion port with one MiniPty thread is the fallback if that proves to matter.
-
 ### Environment baseline for multi-tenant hosts
 
 `Environment` is an overlay on the host's environment, so a web server's secrets (connection strings, cloud credentials) reach every shell unless each key is removed. A minimal-base option needs its own design, because Windows children fail to start without variables such as `SystemRoot`.

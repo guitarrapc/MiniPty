@@ -302,12 +302,16 @@ int minipty_child_watch_wake(int watch_fd, int wake_write)
 
 /*
  * Session I/O on the watcher: a session's PTY master registered with the interest its state needs, so the one watcher
- * thread reads every session's output and writes every session's queued input. Level-triggered, keyed by a token the
- * caller chooses, whose top bit is set so that it never meets a child's report, the wake, or a hung-up master's.
+ * thread reads every session's output and writes every session's queued input. Keyed by a token the caller chooses,
+ * whose top bit is set so that it never meets a child's report, the wake, or a hung-up master's.
  *
- * epoll: interest 0 arms the registration for one report (EPOLLONESHOT). A master whose every slave closed reports
- * hang-up whatever the interest, and a level-triggered report would repeat on every wait while the caller cannot read
- * (its ring is full). Setting the interest again re-arms it.
+ * Each registration reports once and then stays silent until the caller sets its interest again (EPOLLONESHOT,
+ * EV_DISPATCH). Readiness is checked when the interest is set, so output that arrived while it was off is reported at
+ * once. A session's consumer reads the master on its own thread while output keeps coming, and arms the registration
+ * only when it is about to wait, so the watcher is woken for output nobody is about to read rather than for every read.
+ * Setting the interest may come from that consumer's thread while the watcher waits; both kernels allow that.
+ *
+ * epoll: a master whose every slave closed reports hang-up whatever the interest, so interest 0 still reports that once.
  *
  * kqueue (macOS, FreeBSD): read and write interest are two registrations of the master, EVFILT_READ and EVFILT_WRITE,
  * each enabled or disabled with the interest. A disabled filter reports nothing, end of file included, so interest 0 is
@@ -332,7 +336,7 @@ static uint32_t minipty_watch_epoll_events(int interest)
     if (interest & MINIPTY_WATCH_WRITE)
         events |= EPOLLOUT;
 
-    return events == 0 ? EPOLLONESHOT : events;
+    return events | EPOLLONESHOT;
 }
 #elif defined(MINIPTY_CHILD_WATCH_KQUEUE)
 /*
@@ -362,11 +366,12 @@ static int minipty_watch_kqueue_apply(int watch_fd, int fd, uint64_t token, int 
         EV_SET(&changes[count++], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE | EV_RECEIPT, 0, 0, NULL);
     }
 
+    /* EV_DISPATCH disables a filter once it reports, as EPOLLONESHOT does; the next apply enables it again. */
     first_add = count;
     EV_SET(&changes[count++], (uintptr_t)fd, EVFILT_READ,
-        EV_ADD | EV_RECEIPT | ((interest & MINIPTY_WATCH_READ) ? EV_ENABLE : EV_DISABLE), 0, 0, udata);
+        EV_ADD | EV_RECEIPT | EV_DISPATCH | ((interest & MINIPTY_WATCH_READ) ? EV_ENABLE : EV_DISABLE), 0, 0, udata);
     EV_SET(&changes[count++], (uintptr_t)fd, EVFILT_WRITE,
-        EV_ADD | EV_RECEIPT | ((interest & MINIPTY_WATCH_WRITE) ? EV_ENABLE : EV_DISABLE), 0, 0, udata);
+        EV_ADD | EV_RECEIPT | EV_DISPATCH | ((interest & MINIPTY_WATCH_WRITE) ? EV_ENABLE : EV_DISABLE), 0, 0, udata);
 
     do {
         done = kevent(watch_fd, changes, count, receipts, count, &no_wait);
