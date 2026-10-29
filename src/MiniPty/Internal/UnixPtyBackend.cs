@@ -33,6 +33,15 @@ internal static partial class UnixPtyBackend
     /// <summary>Passes the watcher's loop has made, for tests that check it does not spin.</summary>
     internal static long LoopPassesForTests => ChildWatcher.Passes;
 
+    /// <summary>
+    /// Times a session's consumer started reading its master inline and joined the loop's list of inline readers, for
+    /// tests of where a consumer reads.
+    /// </summary>
+    internal static long InlineReaderListingsForTests => ChildWatcher.InlineReaderListings;
+
+    /// <summary>Waits consumers made on their own thread for a master's output (macOS), for tests of where a consumer waits.</summary>
+    internal static long ConsumerWaitsForTests => Volatile.Read(ref UnixPtyBackendInstance.ConsumerWaits);
+
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
         var size = startInfo.ClampedSize;
@@ -274,6 +283,22 @@ internal static partial class UnixPtyBackend
         // A session whose consumer has not read inline for this long leaves the loop's list, so an idle session does not
         // keep the loop waking.
         private static readonly long s_inlineReaderUnlistTicks = System.Diagnostics.Stopwatch.Frequency / 100;
+        // macOS: how long a consumer that found the master empty waits for it on its own thread before it parks on the loop
+        // (WaitForOutputOnConsumer). During a flood the wait ends within microseconds; after a flood's last chunk it is paid
+        // once. About the loop's own check of inline readers.
+        private const int ConsumerWaitMs = 1;
+        // macOS: the consumer's own kqueue with the master's read filter, opened on its first wait, closed with the master.
+        private int _consumerWait = -1;
+        // macOS: whether the child is streaming output, so a consumer that finds the master empty waits for it on its own
+        // thread (TryReadInline). Set by a read that took the whole 1 KiB the master holds, which says the child was held up
+        // and has more; cleared by a wait that brought nothing. Written by whichever thread read, under the producer's turn,
+        // and by the consumer after its wait.
+        private bool _outputStreams;
+        // What a macOS master holds (xnu's TTYCLSIZE): a read of this many bytes emptied a full master.
+        private const int MacOsMasterCapacity = 1024;
+
+        /// <summary>Waits a consumer made on its own thread for a master's output (macOS), for tests of where it waits.</summary>
+        internal static long ConsumerWaits;
 
         /// <summary>Whether this session is on the watcher's list of inline readers. Guarded by its lock.</summary>
         internal bool InlineReaderListed;
@@ -790,9 +815,25 @@ internal static partial class UnixPtyBackend
         /// </para>
         /// <para>
         /// A consumer that stops reading inline for about a millisecond, busy elsewhere or gone, has the loop read for it
-        /// again (<see cref="CheckInlineReader"/>): the child is not held up, its last output reaches the ring before the
-        /// post-exit drain finds the master quiet and closes it, and on macOS the child's exit, which waits until the master
-        /// has read what it wrote, is not held up either.
+        /// again (<see cref="CheckInlineReader"/>): the child is not held up, and its last output reaches the ring before the
+        /// post-exit drain finds the master quiet and closes it.
+        /// </para>
+        /// <para>
+        /// <b>macOS waits on the master here too.</b> A macOS master holds 1 KiB of output, and the child writes more only
+        /// once it is read, so a consumer that keeps up finds the master empty after almost every read, before the child
+        /// has refilled it. Parking then, as Linux does, made every chunk a wake of the loop and a hand-off back to the
+        /// consumer, which is what cost macOS floods their speed (about 4 ms per MiB on an 8-core M2, and the slow runs on
+        /// CI's 3-vCPU runner). So on macOS a consumer that reads nothing waits for the master on its own thread, on a
+        /// kqueue of the session's own, for up to <see cref="ConsumerWaitMs"/>: the child's next write wakes it, and it
+        /// reads again. Only a wait that times out arms the loop and parks. It waits only while the child streams
+        /// (<see cref="_outputStreams"/>): a read that took the whole kilobyte the master holds says the child was held up
+        /// and has more, and a wait that brings nothing says it has stopped. A flood's reads on the loop fill the master,
+        /// and its reads on this thread, which wake on the first bytes, are often short but their waits pay off; a
+        /// keystroke's echo or a line of a log never fills it, and waiting after those would hold a thread-pool thread
+        /// for a millisecond per event that never comes. A consumer on a thread with a
+        /// scheduling context (a UI thread) never waits here, as it never blocks. See
+        /// the lessons in <c>.github/docs/specs/platform_support.md</c> for the measurements. Windows does not read on the consumer's
+        /// thread (<see cref="WindowsOutputDriver"/>), and FreeBSD reads inline as Linux does, unmeasured.
         /// </para>
         /// </remarks>
         bool IPtyOutputDriver.TryReadInline(PtyOutputPump pump)
@@ -800,18 +841,15 @@ internal static partial class UnixPtyBackend
             if (Volatile.Read(ref _loopPhase) != LoopReading)
                 return false;
 
-            var published = false;
-            if (pump.TryEnterProducer())
+            var published = TryReadInlineOnce(pump);
+            if (!published && OperatingSystem.IsMacOS() && Volatile.Read(ref _outputStreams) && !PtyConsumerYield.HasSchedulingContext())
             {
-                try
-                {
-                    published = ReadInline(pump);
-                }
-                finally
-                {
-                    if (pump.ExitProducer())
-                        ChildWatcher.RequestService(this);
-                }
+                if (WaitForOutputOnConsumer())
+                    published = TryReadInlineOnce(pump);
+
+                // The wait timed out, or reported end of file: the child has stopped, until a full read says otherwise.
+                if (!published)
+                    Volatile.Write(ref _outputStreams, false);
             }
 
             if (published)
@@ -826,6 +864,61 @@ internal static partial class UnixPtyBackend
                 Volatile.Read(ref _consumerReads) == ConsumerReadsLoop ? ConsumerReadsLoop : ConsumerReadsWaiting);
             ArmForConsumer();
             return false;
+        }
+
+        /// <summary>One round of the consumer's reads under the producer's turn; whether any output was published.</summary>
+        private bool TryReadInlineOnce(PtyOutputPump pump)
+        {
+            if (!pump.TryEnterProducer())
+                return false;
+
+            try
+            {
+                return ReadInline(pump);
+            }
+            finally
+            {
+                if (pump.ExitProducer())
+                    ChildWatcher.RequestService(this);
+            }
+        }
+
+        /// <summary>
+        /// Waits on the consumer's thread until the master has output, up to <see cref="ConsumerWaitMs"/>, on a kqueue of
+        /// the session's own that is opened on the first wait and closes with the master (macOS). Returns whether the
+        /// master reported; a report may be end of file, which the read that follows tells apart. The wait holds a
+        /// reference on the master, so a close that races it completes once the wait returns.
+        /// </summary>
+        /// <remarks>
+        /// No retry before the wait: the child refills the master within about 10 μs on an idle machine, but retrying the
+        /// read for that long, yielding between tries, took the M2's floods from 250 to 72 MiB/s and a loaded core's from
+        /// 85 to 27, since the retries took the CPU the child needed to refill (platform_support.md, lessons). The wait alone matched
+        /// or beat a blocking reader on every load.
+        /// </remarks>
+        private bool WaitForOutputOnConsumer()
+        {
+            if (!TryAcquireMaster(out var master))
+                return false;
+
+            try
+            {
+                var wait = _consumerWait;
+                if (wait < 0)
+                {
+                    wait = UnixInterop.minipty_master_wait_open(master);
+                    if (wait < 0)
+                        return false;
+
+                    Volatile.Write(ref _consumerWait, wait);
+                }
+
+                Interlocked.Increment(ref ConsumerWaits);
+                return UnixInterop.minipty_master_wait(wait, ConsumerWaitMs) > 0;
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
         }
 
         /// <summary>
@@ -920,6 +1013,8 @@ internal static partial class UnixPtyBackend
                     pump.OnOutputRead();
                     pump.Publish(read, timestamp);
                     published = true;
+                    if (read >= MacOsMasterCapacity)
+                        _outputStreams = true;
                     // A short read took what the terminal held; another would most likely find nothing.
                     if (read < span.Length)
                         break;
@@ -1176,6 +1271,14 @@ internal static partial class UnixPtyBackend
                     var timestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                     pump.OnOutputRead();
                     pump.Publish(read, timestamp);
+                    if (read >= MacOsMasterCapacity)
+                        _outputStreams = true;
+                    // A macOS master hands out at most the 1 KiB it holds, so a short read emptied it, and a read after it
+                    // would find nothing: one system call per chunk fewer. What the child writes before the next arm is
+                    // reported by the next wait. Linux hands out what it has in 4 KiB reads, and a short read there can
+                    // precede more.
+                    if (read < span.Length && OperatingSystem.IsMacOS())
+                        break;
                 }
             }
             finally
@@ -1213,7 +1316,7 @@ internal static partial class UnixPtyBackend
         /// Arms the master for what the session's state needs, after every pass, since a registration reports once:
         /// output while the ring has room, input while some is queued. While the consumer reads inline, output is left to
         /// it: it arms the master itself before it waits, and arming it here would wake the loop for output the consumer
-        /// is reading. On the loop.
+        /// is reading. On the loop, which applies the arm with its next wait.
         /// </summary>
         private void SetLoopInterest()
         {
@@ -1229,17 +1332,27 @@ internal static partial class UnixPtyBackend
             if (interest == 0 && _loopInterest == 0)
                 return;
 
-            SetInterest(_loopSlot, interest);
+            SetInterestOnLoop(_loopSlot, interest);
         }
 
         /// <summary>
-        /// Sets and arms the master's interest in its registration at <paramref name="slot"/>, from the loop or a consumer
-        /// (<see cref="ArmForConsumer"/>).
+        /// Sets and arms the master's interest in its registration at <paramref name="slot"/>, from a consumer
+        /// (<see cref="ArmForConsumer"/>), at once.
         /// </summary>
         private void SetInterest(int slot, int interest)
         {
             _loopInterest = (byte)interest;
             ChildWatcher.SetInterest(_master, slot, _loopGeneration, interest);
+        }
+
+        /// <summary>
+        /// Sets the master's interest from the loop's pass; the loop's next wait arms it, in one system call with the
+        /// wait on kqueue (<see cref="ChildWatcher.SetInterestOnLoop"/>). On the loop.
+        /// </summary>
+        private void SetInterestOnLoop(int slot, int interest)
+        {
+            _loopInterest = (byte)interest;
+            ChildWatcher.SetInterestOnLoop(_master, slot, _loopGeneration, interest);
         }
 
         /// <summary>End of output on the loop: the master is removed first, so a hung-up master cannot report forever.</summary>
@@ -1423,6 +1536,10 @@ internal static partial class UnixPtyBackend
                 UnixInterop.close(_master);
                 if (_slave >= 0)
                     UnixInterop.close(_slave);
+                // No consumer waits on it: a wait holds a reference, so this is after the last one returned.
+                var wait = Volatile.Read(ref _consumerWait);
+                if (wait >= 0)
+                    UnixInterop.close(wait);
             }
         }
 

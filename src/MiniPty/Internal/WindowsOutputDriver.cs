@@ -45,7 +45,7 @@ namespace MiniPty.Internal;
 /// Porta.Pty's on 2 CPUs. One thread serves every session, as on Unix, and starts with the first.
 /// </para>
 /// <para>
-/// <b>No reads on the consumer's thread.</b> On Unix a consumer that finds its ring empty reads the master itself
+/// <b>No reads on the consumer's thread.</b> On Linux a consumer that finds its ring empty reads the master itself
 /// (<see cref="IPtyOutputDriver.TryReadInline"/>), because a child there writes faster than a consumer reads. ConPTY renders
 /// more slowly than a consumer reads, so a consumer reading the pipe itself found it empty after nearly every write
 /// (about 4,000 waits per MiB, as many as writes), and its zero-byte read, posted only once it came back, caught ConPTY's

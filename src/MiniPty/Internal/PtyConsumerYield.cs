@@ -64,8 +64,11 @@ internal static class PtyConsumerYield
         return HasSchedulingContext();
     }
 
-    /// <summary>The test an awaiter applies when it captures a context to resume on.</summary>
-    private static bool HasSchedulingContext()
+    /// <summary>
+    /// The test an awaiter applies when it captures a context to resume on. Also whether a consumer may wait on its own
+    /// thread for output (<c>UnixPtyBackend</c>): a thread with such a context, a UI thread, must never block.
+    /// </summary>
+    internal static bool HasSchedulingContext()
     {
         var context = SynchronizationContext.Current;
         if (context is not null && context.GetType() != typeof(SynchronizationContext))

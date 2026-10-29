@@ -365,15 +365,16 @@ public sealed class PtyUnixLoopTests
     /// <remarks>
     /// The child writes in 1 MiB writes, so the terminal holds output whenever the consumer comes back, as for the
     /// benchmarks' flood. A child that writes more slowly than the consumer reads makes the consumer wait, rightly, every
-    /// few reads (<c>head | tr</c> took about one hand-off per four reads). Linux only: a macOS master hands out about
-    /// 1 KiB per read, and its writer refills the terminal only after each read, so a consumer there can wait after every
-    /// read.
+    /// few reads (<c>head | tr</c> took about one hand-off per four reads). A macOS master hands out 1 KiB per read, and
+    /// its writer refills the terminal only after each read, so a consumer there finds it empty after almost every read
+    /// and waits for it on its own thread instead of parking; the loop's passes are counted there too, since each park
+    /// would be one.
     /// </remarks>
     [Test]
     [NotInParallel]
     public async Task AFloodTheConsumerKeepsUpWithIsNotHandedOverOncePerRead()
     {
-        if (!OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
             return;
 
         const int Size = 4 * 1024 * 1024;
@@ -381,6 +382,7 @@ public sealed class PtyUnixLoopTests
         var received = 0;
         var chunks = 0;
         var before = ThreadPool.CompletedWorkItemCount;
+        var passesBefore = UnixPtyBackend.LoopPassesForTests;
         await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
         {
             received += chunk.Data.Span.Count((byte)0);
@@ -388,8 +390,11 @@ public sealed class PtyUnixLoopTests
         }
 
         var handOffs = ThreadPool.CompletedWorkItemCount - before;
+        var passes = UnixPtyBackend.LoopPassesForTests - passesBefore;
         await Assert.That(received).IsEqualTo(Size);
         await Assert.That(handOffs).IsLessThan(chunks / 4L).Because($"{handOffs} thread-pool work items for {chunks} chunks");
+        if (OperatingSystem.IsMacOS())
+            await Assert.That(passes).IsLessThan(chunks / 4L).Because($"{passes} loop passes for {chunks} chunks");
     }
 
     /// <summary>
@@ -399,9 +404,11 @@ public sealed class PtyUnixLoopTests
     /// arrives once, in order.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The child turns the terminal's newline translation off (<c>stty -onlcr</c>), so the output is exactly what
     /// <c>seq</c> wrote. With it on, a macOS master read with pauses like this one's gives <c>\r\r\n</c> a few times per
     /// run, without MiniPty too (<c>.github/docs/references/pty_crossplatform.md</c>, Unix line discipline).
+    /// </para>
     /// </remarks>
     [Test]
     public async Task OutputStaysInOrderWhileReadingMovesBetweenTheConsumerAndTheLoop()
@@ -485,6 +492,10 @@ public sealed class PtyUnixLoopTests
     /// <see cref="ObjectDisposedException"/> and ends the child, without waiting for the flood. The consumer's read holds a
     /// reference on the master, so the descriptor stays open, and its number unused, until that read returns.
     /// </summary>
+    /// <remarks>
+    /// On macOS the consumer also waits for the master on its own thread between reads, for up to a millisecond; the
+    /// disposal ends such a read the same way, once that wait returns.
+    /// </remarks>
     [Test]
     public async Task DisposingTheSessionWhileItsConsumerReadsInlineEndsTheRead()
     {
@@ -516,6 +527,94 @@ public sealed class PtyUnixLoopTests
         await Assert.That(ended is ObjectDisposedException).IsTrue().Because(ended?.ToString() ?? "the read ended without an exception");
         // The disposal hangs the child up, and the watcher reaps it.
         await WaitUntilAsync(() => session.HasExited);
+    }
+
+    /// <summary>
+    /// On macOS a consumer reading a flood waits for the master on its own thread when it finds it empty, instead of
+    /// parking on the loop: a macOS master holds 1 KiB and the child refills it only after each read, so a consumer that
+    /// parked there was handed every chunk by the loop, through the thread pool, which made macOS floods about half as
+    /// fast as a blocking reader's. Judged by the waits the consumer made and by the loop's passes, not by timing.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task OnMacOSAConsumerWaitsForTheMasterOnItsOwnThread()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return;
+
+        const int Size = 1024 * 1024;
+        await using var session = Pty.Start(Shell($"dd if=/dev/zero bs={Size} count=1 2>/dev/null"));
+        var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
+        var listingsBefore = UnixPtyBackend.InlineReaderListingsForTests;
+        var passesBefore = UnixPtyBackend.LoopPassesForTests;
+        var received = 0;
+        var chunks = 0;
+        await using (var output = session.ReadOutputAsync().GetAsyncEnumerator())
+        {
+            while (await output.MoveNextAsync().AsTask().WaitAsync(Timeout))
+            {
+                received += output.Current.Data.Span.Count((byte)0);
+                chunks++;
+            }
+        }
+
+        var waits = UnixPtyBackend.ConsumerWaitsForTests - waitsBefore;
+        var passes = UnixPtyBackend.LoopPassesForTests - passesBefore;
+        await Assert.That(received).IsEqualTo(Size);
+        await Assert.That(UnixPtyBackend.InlineReaderListingsForTests - listingsBefore).IsGreaterThanOrEqualTo(1L);
+        await Assert.That(waits).IsGreaterThan(chunks / 2L).Because($"{waits} waits on the consumer's thread for {chunks} chunks");
+        await Assert.That(passes).IsLessThan(chunks / 4L).Because($"{passes} loop passes for {chunks} chunks");
+    }
+
+    /// <summary>
+    /// On macOS a consumer waits for the master on its own thread only after a read that took the whole kilobyte the master
+    /// holds, which says the child was held up and has more. After a short read, a line of output at a time, it parks at
+    /// once: a wait there would hold a thread-pool thread for a millisecond per line, for output that is not coming.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task OnMacOSAConsumerDoesNotWaitAfterAShortRead()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return;
+
+        await using var session = Pty.Start(Shell("for i in 1 2 3 4 5 6 7 8; do echo line$i; sleep 0.01; done"));
+        var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
+        var lines = 0;
+        await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
+            lines += chunk.Data.Span.Count((byte)'\n');
+
+        await Assert.That(lines).IsEqualTo(8);
+        await Assert.That(UnixPtyBackend.ConsumerWaitsForTests - waitsBefore).IsEqualTo(0L);
+    }
+
+    /// <summary>
+    /// A consumer on a thread with a scheduling context, a UI thread, never waits for the master in the kernel on macOS:
+    /// it reads what the master holds and otherwise parks, as on Linux, so the thread is never blocked. Judged by the
+    /// waits consumers made while this one read a flood.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task AConsumerWithASchedulingContextNeverWaitsForTheMasterInTheKernel()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return;
+
+        const int Size = 1024 * 1024;
+        await using var session = Pty.Start(Shell($"dd if=/dev/zero bs={Size} count=1 2>/dev/null"));
+        using var ui = new SingleThreadSynchronizationContext();
+        var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
+        var received = await ui.RunAsync(async () =>
+        {
+            var received = 0;
+            await foreach (var chunk in session.ReadOutputAsync())
+                received += chunk.Data.Span.Count((byte)0);
+
+            return received;
+        }).WaitAsync(Timeout);
+
+        await Assert.That(received).IsEqualTo(Size);
+        await Assert.That(UnixPtyBackend.ConsumerWaitsForTests - waitsBefore).IsEqualTo(0L);
     }
 
     [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]

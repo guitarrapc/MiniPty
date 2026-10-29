@@ -24,8 +24,11 @@ internal static partial class UnixPtyBackend
     /// <b>I/O loop.</b> Each session's non-blocking master is registered on the same epoll (Linux) or kqueue (macOS,
     /// FreeBSD) that reports the children's exits, with the interest its state needs: output while its ring has room,
     /// input while some is queued (<see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). A registration reports once and is
-    /// armed again after each pass, and a consumer that reads the master on its own thread arms it only when it is about to
-    /// wait, so a flood that the consumer keeps up with wakes this thread about once per wait. kqueue keeps the
+    /// armed again after each pass, by the pass's next wait in one system call (<see cref="SetInterestOnLoop"/>), and a
+    /// consumer that reads the master on its own thread arms it only when it is about to wait, so a flood that the
+    /// consumer keeps up with wakes this thread about once per wait. On macOS such a consumer also waits for the master on
+    /// its own thread (<c>UnixPtyBackendInstance.TryReadInline</c>), so a flood there wakes this thread only for
+    /// its millisecond check of inline readers. kqueue keeps the
     /// two interests as two filters of the master, and the native wait joins their events into one report per master, as
     /// epoll gives. A master's token names its slot and the slot's
     /// generation, so a report that arrives after the session's registration was removed never reaches the session that
@@ -116,9 +119,22 @@ internal static partial class UnixPtyBackend
         private static bool s_waitsWithoutTimeout;
         // Sessions this pass takes reading back from, served outside s_lock. This thread only.
         private static readonly List<UnixPtyBackendInstance> s_takeovers = [];
+        // Times a session joined s_inlineReaders, for tests of where a consumer reads. Guarded by s_lock.
+        private static long s_inlineReaderListings;
+        // Arms this thread's pass has made and the next wait applies (SetInterestOnLoop), at most one per slot: the slot,
+        // the master, its token and its interest. This thread only. A full set has a further arm applied at once.
+        private const int ArmCapacity = 8;
+        private static readonly int[] s_armSlots = new int[ArmCapacity];
+        private static readonly int[] s_armFds = new int[ArmCapacity];
+        private static readonly ulong[] s_armTokens = new ulong[ArmCapacity];
+        private static readonly int[] s_armInterests = new int[ArmCapacity];
+        private static int s_armCount;
 
         /// <summary>Passes this thread has made through its loop, for tests that check it does not spin.</summary>
         internal static long Passes => Volatile.Read(ref s_passes);
+
+        /// <summary>Times a session joined the list of inline readers, for tests of where a consumer reads.</summary>
+        internal static long InlineReaderListings => Volatile.Read(ref s_inlineReaderListings);
 
         // A plain monitor rather than System.Threading.Lock: polling-only mode sleeps in Monitor.Wait on it.
         private static readonly object s_lock = new();
@@ -258,6 +274,71 @@ internal static partial class UnixPtyBackend
             _ = minipty_watch_modify(s_watchFd, master, MasterToken(slot, generation), interest);
 
         /// <summary>
+        /// <see cref="SetInterest"/> from this thread's pass: with kqueue the arm is kept and applied by the next wait, in
+        /// the same system call (<c>minipty_watch_wait_arm</c>), so a pass that arms a master costs one call instead of
+        /// two; a later arm of the same slot in the pass replaces the earlier one. With epoll it is applied at once, as a
+        /// consumer's is. On this thread only.
+        /// </summary>
+        /// <remarks>
+        /// Deferring is safe because every arm of this thread is followed by its wait before anything else can need it,
+        /// and the kernel reports what became ready while the filter was disabled once it is enabled again. A master
+        /// removed later in the pass (<see cref="DeregisterMaster"/>) drops its pending arm, so a deferred arm can never
+        /// name a descriptor whose number another file took.
+        /// </remarks>
+        internal static void SetInterestOnLoop(int master, int slot, int generation, int interest)
+        {
+            // epoll cannot take a change with its wait, so deferring would only delay the arm to the end of the pass.
+            if (OperatingSystem.IsLinux())
+            {
+                SetInterest(master, slot, generation, interest);
+                return;
+            }
+
+            var count = s_armCount;
+            for (var i = 0; i < count; i++)
+            {
+                if (s_armSlots[i] == slot)
+                {
+                    s_armFds[i] = master;
+                    s_armTokens[i] = MasterToken(slot, generation);
+                    s_armInterests[i] = interest;
+                    return;
+                }
+            }
+
+            if (count == ArmCapacity)
+            {
+                SetInterest(master, slot, generation, interest);
+                return;
+            }
+
+            s_armSlots[count] = slot;
+            s_armFds[count] = master;
+            s_armTokens[count] = MasterToken(slot, generation);
+            s_armInterests[count] = interest;
+            s_armCount = count + 1;
+        }
+
+        /// <summary>Drops a pending arm of <paramref name="slot"/>, whose master is being removed. On this thread only.</summary>
+        private static void DropPendingArm(int slot)
+        {
+            var count = s_armCount;
+            for (var i = 0; i < count; i++)
+            {
+                if (s_armSlots[i] != slot)
+                    continue;
+
+                var last = count - 1;
+                s_armSlots[i] = s_armSlots[last];
+                s_armFds[i] = s_armFds[last];
+                s_armTokens[i] = s_armTokens[last];
+                s_armInterests[i] = s_armInterests[last];
+                s_armCount = last;
+                return;
+            }
+        }
+
+        /// <summary>
         /// Registers a master again with the same interest, which clears an end of file kqueue keeps reporting after the
         /// slave opened again (see <see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). Called as <see cref="SetInterest"/> is.
         /// </summary>
@@ -270,6 +351,7 @@ internal static partial class UnixPtyBackend
         /// </summary>
         internal static void DeregisterMaster(int master, int slot)
         {
+            DropPendingArm(slot);
             minipty_watch_remove(s_watchFd, master);
             lock (s_lock)
             {
@@ -354,6 +436,7 @@ internal static partial class UnixPtyBackend
                 session.InlineReaderListed = true;
                 session.NextInlineReader = s_inlineReaders;
                 s_inlineReaders = session;
+                Volatile.Write(ref s_inlineReaderListings, s_inlineReaderListings + 1);
                 // A wait without a timeout would not look at the consumer until something else woke this thread.
                 if (s_waitsWithoutTimeout)
                     WakeLocked();
@@ -704,9 +787,17 @@ internal static partial class UnixPtyBackend
             }
 
             int count;
+            var arms = s_armCount;
+            s_armCount = 0;
             fixed (ulong* tokenPtr = tokens)
             fixed (int* reportPtr = reports)
-                count = minipty_watch_wait(s_watchFd, s_wakeRead, tokenPtr, reportPtr, tokens.Length, timeout);
+            fixed (int* armFds = s_armFds)
+            fixed (ulong* armTokens = s_armTokens)
+            fixed (int* armInterests = s_armInterests)
+            {
+                count = minipty_watch_wait_arm(
+                    s_watchFd, s_wakeRead, armFds, armTokens, armInterests, arms, tokenPtr, reportPtr, tokens.Length, timeout);
+            }
 
             // A session listed from now on is looked at by the pass this wait ends in. Written without the lock: one listed
             // meanwhile at most wakes the next wait at once.
@@ -810,7 +901,17 @@ internal static partial class UnixPtyBackend
         private static partial int minipty_child_watch_wake(int watchFd, int wakeWrite);
 
         [LibraryImport("minipty_unix", SetLastError = true)]
-        private static unsafe partial int minipty_watch_wait(int watchFd, int wakeRead, ulong* tokens, int* reports, int capacity, int timeoutMs);
+        private static unsafe partial int minipty_watch_wait_arm(
+            int watchFd,
+            int wakeRead,
+            int* armFds,
+            ulong* armTokens,
+            int* armInterests,
+            int armCount,
+            ulong* tokens,
+            int* reports,
+            int capacity,
+            int timeoutMs);
 
         [LibraryImport("minipty_unix", SetLastError = true)]
         private static partial int minipty_watch_add(int watchFd, int fd, ulong token, int interest);
