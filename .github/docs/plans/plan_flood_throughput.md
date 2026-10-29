@@ -2,7 +2,7 @@
 
 Goal: MiniPty's output floods should not fall behind Porta.Pty on CI's hosted runners, which have 2 cores and 4 threads, without giving up what MiniPty is built on: no thread held per session, no allocation per chunk, and reads that keep pace with the child while the consumer is busy.
 
-**Status:** open (2026-10-29). The cause is measured. Phase 0 is in the benchmarks and reproduces CI's ranking locally. Phase 1 (Unix) is implemented and meets its gates on Linux locally; on macOS locally its tests pass and its `AllCpus` flood rose, though MiniPty still trails Porta.Pty there, as before (Phase 1). Both wait for a CI run: the build workflow's tests on macOS, and a full benchmark run. Phase 2 (Windows) is implemented: keystrokes and work items meet their gates locally, and floods on the out-of-band ConPTY lead Porta.Pty on 2 CPUs while on the in-box one they still trail it by about 5%, as before (Phase 2). Phase 3 (CI) is next.
+**Status:** open (2026-10-29). The cause is measured. Phase 0 is in the benchmarks and reproduces CI's ranking locally. Phase 1 (Unix) is implemented. On Linux it meets its gates locally, and on CI its 1 MiB flood rose from a median of 0.72 times Porta.Pty's throughput to 1.03 on `AllCpus`, and from 0.75 to 1.11 on `TwoCpus`. On macOS its inline reads slowed CI's floods, so macOS reads on the loop alone again; there CI cannot tell the result from the code before this phase, and MiniPty still trails Porta.Pty ([macOS on CI](#macos-on-ci)). The build workflow's tests pass on macOS, and a full benchmark run waits for Phase 3. Phase 2 (Windows) is implemented: keystrokes and work items meet their gates locally, and floods on the out-of-band ConPTY lead Porta.Pty on 2 CPUs while on the in-box one they still trail it by about 5%, as before (Phase 2). Phase 3 (CI) is next.
 
 ## Finding
 
@@ -137,7 +137,7 @@ Windows, 1 MiB flood on 2 CPUs (`TwoCpus`):
   - Keystroke P50 and P95 stay within the spread between runs, on both jobs.
   - Allocations stay at 0 B.
 
-**Built (2026-10-29).** A plain `ReadOutputAsync` that finds the ring empty reads the master on its own thread (`IPtyOutputDriver.TryReadInline`). The loop and the consumer take turns as the ring's one producer through a gate in the pump; while the consumer holds it, the loop drops a report of output alone and defers anything else to the consumer's exit from the gate. Masters are registered one report at a time (`EPOLLONESHOT`, `EV_DISPATCH`). The consumer arms the master when it is about to wait, and the loop arms it after its passes unless the consumer reads inline. The pass that hands a consumer output after it waited leaves the master unarmed, since that consumer reads on inline. The loop checks the consumers that read inline about every millisecond, and reads again for one that has not read for that long. Coalescing reads and `Output` read as before.
+**Built (2026-10-29).** On Linux, a plain `ReadOutputAsync` that finds the ring empty reads the master on its own thread (`IPtyOutputDriver.TryReadInline`). macOS did too at first, and reads on the loop alone since CI showed its floods slower that way ([macOS on CI](#macos-on-ci)). The loop and the consumer take turns as the ring's one producer through a gate in the pump; while the consumer holds it, the loop drops a report of output alone and defers anything else to the consumer's exit from the gate. Masters are registered one report at a time (`EPOLLONESHOT`, `EV_DISPATCH`). The consumer arms the master when it is about to wait, and the loop arms it after its passes unless the consumer reads inline. The pass that hands a consumer output after it waited leaves the master unarmed, since that consumer reads on inline. The loop checks the consumers that read inline about every millisecond, and reads again for one that has not read for that long. Coalescing reads and `Output` read as before.
 
 Results on the machine above (WSL, 8 logical CPUs), the gate run's two rounds, 1 MiB flood:
 
@@ -153,7 +153,7 @@ Results on the machine above (WSL, 8 logical CPUs), the gate run's two rounds, 1
 - Keystrokes stayed within the spread between runs: on `AllCpus` MiniPty's P50 was 125–130 μs against `UseAsyncIo`'s 123–124 μs in the same runs, and one work item per keystroke as before. Allocations stayed at 0 B.
 - The machine varied by up to 2× between rounds, because WSL shares its CPUs with the `docker-desktop` distro. Compare within a round, and read the CPU and work-item columns, which held in every round.
 
-Results on macOS, 2026-10-29: Apple M2 (8 cores), macOS 27.0.1, one run each of this phase and of `main` before it. Only `AllCpus` runs there.
+Results on macOS with inline reads, 2026-10-29: Apple M2 (8 cores), macOS 27.0.1, one run each of this phase and of `main` before it. Only `AllCpus` runs there.
 
 | `AllCpus`, 1 MiB flood | MiniPty | Porta.Pty | Porta.Pty, `UseAsyncIo` |
 |---|---|---|---|
@@ -163,9 +163,38 @@ Results on macOS, 2026-10-29: Apple M2 (8 cores), macOS 27.0.1, one run each of 
 | After, work items | 695 | 1,026 | 1,009 |
 
 - The 64 KiB flood rose from 99.2 to 115.1 MiB/s (Porta.Pty 149.5 and 148.2). Keystroke P50 went from 26.2 to 27.0 μs, within the spread (Porta.Pty 13.7 and 19.8 μs in the same runs). Allocations stayed at 0 B.
-- The `AllCpus` gate holds on macOS, but MiniPty trails Porta.Pty's default mode on this machine, before and after. On CI's `macos-26` runner it leads (80.9 against 71.2 MiB/s, run 40726196725), so this gap is outside this plan's goal and is left for after it.
-- Inline reads rarely find output there: 695 work items per 1 MiB, against 15.9–18.5 on Linux `TwoCpus`. A macOS master holds 1 KiB of output and its writer refills it only after each read, so the consumer waits after almost every read and each chunk is a hand-off again. Reading again briefly before waiting had no consistent gain on Linux (below) and has not been tried on macOS.
+- The `AllCpus` gate holds on this machine, but MiniPty trails Porta.Pty's default mode here, before and after. On CI's `macos-26` runner it led before this phase (80.9 against 71.2 MiB/s, run 40726196725), and inline reads cost that lead ([macOS on CI](#macos-on-ci)).
+- Inline reads rarely find output there: 695 work items per 1 MiB, against 15.9–18.5 on Linux `TwoCpus`. A macOS master holds 1 KiB of output and its writer refills it only after each read, so the consumer waits after almost every read and each chunk is a hand-off again. Reading again briefly before waiting had no consistent gain on Linux (below) and has not been tried on macOS. macOS no longer reads inline (below).
 - The tests ran on macOS for the first time: after the two fixes below, the classes covering the loop, kqueue, the post-exit drain and disposal passed five runs each, and the whole suite three runs.
+
+#### macOS on CI
+
+**Inline reads slowed CI's macOS floods (2026-10-29).** CI's `macos-26` runner is an Apple M1 virtual machine with 3 vCPUs. Its runs vary widely, so a run is judged by MiniPty's throughput as a share of Porta.Pty's in the same run, from BenchmarkDotNet's median where the report has one, and versions are compared in runs started together.
+
+| 1 MiB flood | Runs | MiniPty ÷ Porta.Pty | Process CPU, MiniPty ÷ Porta.Pty | Work items per MiB |
+|---|---|---|---|---|
+| Before this phase (642be11, `bench-baseline`, and earlier `main`) | 40706187008, 40726196725, 40866526779, 40869426870, 40870865800 | 1.04, 1.14, 0.84, 1.31, 1.06 (median 1.06) | –, –, 2.08, 1.56, 1.36 | 508–878 |
+| Inline reads (`main`) | 40857645212, 40866546690, 40869446330, 40870845276 | 0.68, 0.94, 0.39, 0.46 (median 0.57) | 1.67, 1.38, 1.10, 1.18 | 684–817 |
+
+- Process CPU did not rise, so the time went to waits, not to work. In three of the four runs the iterations varied by 30–65% of their mean: occasional stalls.
+- A macOS master holds about 1 KiB, and the child can write more only once it is read. The loop reads ahead of the consumer, but not while the consumer reads inline, so the child stalled whenever the consumer's thread fell behind, at worst until the millisecond check took reading back. The 8-core M2 has CPUs to spare and showed a gain instead (above).
+
+**macOS reads on the loop alone again.** `TryReadInline` returns at once on macOS without changing anything, so the loop arms the master after every pass and the session never joins the list of inline readers. Linux keeps inline reads, and so does FreeBSD, unmeasured. Registrations stay one-shot (`EV_DISPATCH`) on macOS, so the loop arms the master with a `kevent` call after every pass, which the level-triggered loop before this phase skipped while the interest was unchanged.
+
+Results on CI, nine rounds, each starting this version and `bench-baseline` together; six of them also started an experiment that made macOS level-triggered again:
+
+| `macos-26`, 1 MiB flood | MiniPty ÷ Porta.Pty, median (range) | Against `bench-baseline` in the same round | MiniPty Process CPU, median |
+|---|---|---|---|
+| macOS on the loop alone | 0.68 (0.30–0.96), 9 runs | Faster in 2 of 9; geometric mean of the ratios 0.79 | 30.1 ms |
+| `bench-baseline` | 0.72 (0.51–1.25), 9 runs | – | 28.7 ms |
+| Experiment: level-triggered kqueue on macOS | 0.77 (0.56–0.90), 6 runs | Faster in 4 of 6; 1.09 | 30.1 ms |
+
+- Over the same rounds this version's median is level with `bench-baseline`'s, and it gained on inline reads, whose geometric mean against `bench-baseline` was 0.52 over three rounds. It lost 7 of 9 rounds, which nine rounds of this runner cannot tell from its spread: `bench-baseline` alone scored 0.51–1.25. The goal of about 1.0 is not met; in these rounds `bench-baseline` itself reached 0.72.
+- Process CPU is unchanged, so the `kevent` per pass costs nothing measurable. The experiment did no better than this version (lessons below), and macOS keeps one-shot registrations.
+- Linux and Windows read as before. Their medians over the nine runs match `main`'s four, for example Linux 1.03 and 1.11 against 1.03 and 1.12 on `AllCpus` and `TwoCpus`.
+- Keystrokes, one round: MiniPty's P50 was 47.4 μs against Porta.Pty's 42.1 μs (1.13), against 1.00 for `bench-baseline` in the same round and 1.29 for inline reads in the README's run. Allocations stayed at 0 B.
+- On the M2, three rounds alternating with `main`: 88–103 MiB/s against 105–122, process CPU 36–42 ms against 25–30 ms, and 1,031–1,037 work items against 690–709. Inline reads saved that much there. Alternating with `bench-baseline` and the experiment, the three were indistinguishable: 80–89 MiB/s, 42–48 ms, 1,003–1,035 work items. Five busy loops on the M2 did not reproduce CI: there inline reads were not slower than `bench-baseline`.
+- **Open: MiniPty's slow runs.** On CI, MiniPty's iterations tend to stay near 18 ms or near 40–60 ms for a whole run, in every version: 47% of them took over 30 ms across these rounds, against 2% of Porta.Pty's default mode in the same processes, whose blocked reader runs the consumer's continuation itself. Porta.Pty's `UseAsyncIo`, which reads on the consumer's thread and waits on a poller thread, had 68%. These slow runs, not where the consumer reads, keep macOS below Porta.Pty on CI. Left for after this plan (Phase 3).
 
 What this phase learned:
 
@@ -180,6 +209,9 @@ What this phase learned:
 | Count loop passes per chunk in a test | Too close to the old figure (0.27 against 0.32) | The millisecond check wakes the loop on its own. Thread-pool work items per chunk tell the designs apart: 0.89–0.97 before, under 0.25 after, for a child that writes in 1 MiB writes. A child that writes slower than the consumer reads makes it wait every few reads. |
 | `PtyKqueueWatchTests` left as they were at the switch to `EV_DISPATCH` | Three of them failed on every run on macOS | They were written for level-triggered filters and waited for a second report without arming again. They now arm before each wait, and a new test checks that a report disarms the registration; it fails without `EV_DISPATCH`. |
 | The order test splitting output on `\r\n` | Failed in every whole-suite run on macOS, and in one of five runs of its class | The terminal's `ONLCR` gave `\r\r\n` a few times per run while the reader paused, reading without MiniPty too. The child now turns it off (`stty -onlcr`); see [Unix line discipline](../references/pty_crossplatform.md#unix-line-discipline). |
+| Inline reads on macOS too | On CI's `macos-26` (3 vCPUs), 0.39–0.94 times Porta.Pty's 1 MiB flood throughput, against 0.84–1.31 before; process CPU no higher | A 1 KiB master needs the loop to read ahead. While the consumer reads inline the loop does not read, so the child stalls whenever the consumer's thread falls behind. An 8-core M2 has CPUs to spare and showed a gain instead. macOS reads on the loop alone again ([macOS on CI](#macos-on-ci)). |
+| Level-triggered kqueue on macOS again, so the loop calls `kevent` only when the interest changes | Faster than the one-shot version in 3 of 6 CI rounds; medians 0.77 (6 runs) and 0.68 (9 runs) | No difference beyond the runner's spread, and none locally. Its two large wins came in rounds where the other version's run stalled in 8 and 10 of its 10 iterations. Registrations stay one-shot on every platform. |
+| Judging macOS CI by three rounds | The experiment beat `bench-baseline` in its first three rounds by 1.41–1.56 times, then lost two of the next three | One run that stalls throughout decides a median. Compare versions started together, over many rounds, and read the per-iteration times in the log. |
 
 ### Phase 2: Windows
 
@@ -268,7 +300,7 @@ What this phase learned:
 ### Phase 3: Confirm on CI and record
 
 - A full benchmark run on CI, whose README tables update themselves.
-- Move this plan's findings and lessons into [platform_support.md](../specs/platform_support.md) and the driver descriptions in [core_session.md](../specs/core_session.md), then remove this plan. Carry the macOS flood gap (Phase 1) over as open work, with its measurements, so a later look starts from them.
+- Move this plan's findings and lessons into [platform_support.md](../specs/platform_support.md) and the driver descriptions in [core_session.md](../specs/core_session.md), then remove this plan. Carry the macOS flood gap and MiniPty's slow runs on CI's macOS runner ([macOS on CI](#macos-on-ci)) over as open work, with their measurements, so a later look starts from them.
 
 ## Risks
 
