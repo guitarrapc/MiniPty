@@ -398,6 +398,11 @@ public sealed class PtyUnixLoopTests
     /// longer than the loop waits before it reads for a consumer, so reading moves between the two many times; every number
     /// arrives once, in order.
     /// </summary>
+    /// <remarks>
+    /// The child turns the terminal's newline translation off (<c>stty -onlcr</c>), so the output is exactly what
+    /// <c>seq</c> wrote. With it on, a macOS master read with pauses like this one's gives <c>\r\r\n</c> a few times per
+    /// run, without MiniPty too (<c>.github/docs/references/pty_crossplatform.md</c>, Unix line discipline).
+    /// </remarks>
     [Test]
     public async Task OutputStaysInOrderWhileReadingMovesBetweenTheConsumerAndTheLoop()
     {
@@ -405,7 +410,7 @@ public sealed class PtyUnixLoopTests
             return;
 
         const int Count = 200_000;
-        await using var session = Pty.Start(Shell($"seq 1 {Count}"));
+        await using var session = Pty.Start(Shell($"stty -onlcr; seq 1 {Count}"));
         var text = new StringBuilder();
         await using (var first = session.ReadOutputAsync().GetAsyncEnumerator())
         {
@@ -423,7 +428,7 @@ public sealed class PtyUnixLoopTests
                 await Task.Delay(3);
         }
 
-        var lines = text.ToString().Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+        var lines = text.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
         var firstWrong = -1;
         for (var i = 0; i < Count && i < lines.Length; i++)
         {

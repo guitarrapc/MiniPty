@@ -15,6 +15,8 @@ namespace MiniPty.Tests;
 /// covered here. Both ends are opened close-on-exec: a child another test starts meanwhile would otherwise keep the slave
 /// open, and closing it would not end output. A child forked in the instant before its exec still holds a copy, so a
 /// hang-up is waited for rather than expected on the first wait.
+/// A registration reports once and then stays silent until it is armed again (<c>EV_DISPATCH</c>), as the loop registers
+/// it, so a test arms it (<c>minipty_watch_modify</c>) before each wait that expects a report after the first.
 /// </remarks>
 public sealed partial class PtyKqueueWatchTests
 {
@@ -44,12 +46,38 @@ public sealed partial class PtyKqueueWatchTests
         await Assert.That(watch.Report()).IsEqualTo(ReportReadable);
         pty.ReadMaster();
 
+        // Both filters armed with nothing to read: the write filter alone reports, and the read filter stays armed.
         await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead | InterestWrite)).IsEqualTo(0);
         await Assert.That(watch.Report()).IsEqualTo(ReportWritable);
 
         pty.WriteSlave("x");
+        await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead | InterestWrite)).IsEqualTo(0);
         await Assert.That(watch.Report(out var reportsForToken)).IsEqualTo(ReportReadable | ReportWritable);
         await Assert.That(reportsForToken).IsEqualTo(1);
+    }
+
+    /// <summary>
+    /// A registration reports once and then stays silent, output still unread included, until it is armed again, as
+    /// <c>EPOLLONESHOT</c> does: the loop is not woken again for output that a consumer reading on its own thread is
+    /// taking. Arming checks readiness then, so output already there is reported by the next wait.
+    /// </summary>
+    [Test]
+    public async Task AReportDisarmsTheRegistrationUntilItIsArmedAgain()
+    {
+        if (!IsKqueue)
+            return;
+
+        using var pty = new PtyPair();
+        using var watch = new Watch();
+        await Assert.That(minipty_watch_add(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
+
+        pty.WriteSlave("unread");
+        await Assert.That(watch.Report()).IsEqualTo(ReportReadable);
+        await Assert.That(watch.Report()).IsEqualTo(0);
+
+        await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
+        await Assert.That(watch.Report()).IsEqualTo(ReportReadable);
+        await Assert.That(pty.ReadMaster()).IsGreaterThan(0);
     }
 
     /// <summary>
@@ -74,7 +102,7 @@ public sealed partial class PtyKqueueWatchTests
         pty.ReadMaster();
 
         pty.CloseSlave();
-        await Assert.That(watch.WaitForHangup()).IsTrue();
+        await Assert.That(watch.WaitForHangup(pty.Master)).IsTrue();
         await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, 0)).IsEqualTo(0);
         await Assert.That(watch.Report()).IsEqualTo(0);
         await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
@@ -83,9 +111,9 @@ public sealed partial class PtyKqueueWatchTests
     }
 
     /// <summary>
-    /// kqueue keeps reporting end of file on a registration after the slave closed and opened again, while reads find
-    /// nothing; the loop renews such a registration when a hang-up report found nothing to read, which clears it and
-    /// keeps reporting output. Without the renewal the loop would spin on that master.
+    /// kqueue keeps reporting end of file on a registration after the slave closed and opened again, once per arm, while
+    /// reads find nothing; the loop renews such a registration when a hang-up report found nothing to read, which clears
+    /// it and keeps reporting output. Without the renewal every pass of the loop would find that master hung up again.
     /// </summary>
     [Test]
     public async Task RenewClearsAnEndOfFileLeftByASlaveOpenedAgain()
@@ -98,13 +126,15 @@ public sealed partial class PtyKqueueWatchTests
         await Assert.That(minipty_watch_add(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
 
         pty.CloseSlave();
-        await Assert.That(watch.WaitForHangup()).IsTrue();
+        await Assert.That(watch.WaitForHangup(pty.Master)).IsTrue();
         await Assert.That(pty.ReadMaster()).IsEqualTo(0);
 
         pty.OpenSlave();
-        // Stale: the report repeats on every wait while a read finds nothing.
+        // Stale: each arm reports the end of file again while a read finds nothing.
+        await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
         await Assert.That(watch.Report() & ReportHangup).IsEqualTo(ReportHangup);
         await Assert.That(pty.ReadMaster()).IsEqualTo(-1);
+        await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
         await Assert.That(watch.Report() & ReportHangup).IsEqualTo(ReportHangup);
 
         await Assert.That(minipty_watch_renew(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
@@ -112,6 +142,8 @@ public sealed partial class PtyKqueueWatchTests
         pty.WriteSlave("after");
         await Assert.That(watch.Report()).IsEqualTo(ReportReadable);
 
+        // Armed with output unread, so a report is due; the removal drops it.
+        await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
         minipty_watch_remove(watch.Fd, pty.Master);
         await Assert.That(watch.Report()).IsEqualTo(0);
     }
@@ -137,12 +169,18 @@ public sealed partial class PtyKqueueWatchTests
         /// <summary>Waits up to 50 ms and returns the report for the test's token, or 0 when there was none.</summary>
         public int Report() => Report(out _);
 
-        /// <summary>Waits up to 2 s for a hang-up report for the test's token.</summary>
-        public bool WaitForHangup()
+        /// <summary>
+        /// Waits up to 2 s for a hang-up report for the test's token, arming <paramref name="master"/>'s read interest
+        /// before each wait, since a report without the hang-up disarms it.
+        /// </summary>
+        public bool WaitForHangup(int master)
         {
             var deadline = Environment.TickCount64 + 2000;
             while (Environment.TickCount64 < deadline)
             {
+                if (minipty_watch_modify(Fd, master, Token, InterestRead) != 0)
+                    throw new IOException($"minipty_watch_modify failed (errno {Marshal.GetLastPInvokeError()})");
+
                 if ((Report() & ReportHangup) != 0)
                     return true;
             }
