@@ -116,9 +116,14 @@ internal static partial class UnixPtyBackend
         private static bool s_waitsWithoutTimeout;
         // Sessions this pass takes reading back from, served outside s_lock. This thread only.
         private static readonly List<UnixPtyBackendInstance> s_takeovers = [];
+        // Times a session joined s_inlineReaders, for the test that a macOS consumer never reads inline. Guarded by s_lock.
+        private static long s_inlineReaderListings;
 
         /// <summary>Passes this thread has made through its loop, for tests that check it does not spin.</summary>
         internal static long Passes => Volatile.Read(ref s_passes);
+
+        /// <summary>Times a session joined the list of inline readers, for tests of where a consumer reads.</summary>
+        internal static long InlineReaderListings => Volatile.Read(ref s_inlineReaderListings);
 
         // A plain monitor rather than System.Threading.Lock: polling-only mode sleeps in Monitor.Wait on it.
         private static readonly object s_lock = new();
@@ -354,6 +359,7 @@ internal static partial class UnixPtyBackend
                 session.InlineReaderListed = true;
                 session.NextInlineReader = s_inlineReaders;
                 s_inlineReaders = session;
+                Volatile.Write(ref s_inlineReaderListings, s_inlineReaderListings + 1);
                 // A wait without a timeout would not look at the consumer until something else woke this thread.
                 if (s_waitsWithoutTimeout)
                     WakeLocked();

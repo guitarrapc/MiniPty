@@ -33,6 +33,12 @@ internal static partial class UnixPtyBackend
     /// <summary>Passes the watcher's loop has made, for tests that check it does not spin.</summary>
     internal static long LoopPassesForTests => ChildWatcher.Passes;
 
+    /// <summary>
+    /// Times a session's consumer started reading its master inline and joined the loop's list of inline readers, for
+    /// tests of where a consumer reads.
+    /// </summary>
+    internal static long InlineReaderListingsForTests => ChildWatcher.InlineReaderListings;
+
     internal static IPtyBackend Start(PtyStartInfo startInfo)
     {
         var size = startInfo.ClampedSize;
@@ -775,9 +781,10 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>
-        /// Reads the master on the consumer's thread while the loop reads this session, and otherwise leaves output to the
-        /// loop: a park on a full ring, disposal, the forced end, the close, end of output and read failures are the loop's
-        /// to handle, so the consumer then waits for the loop's pass to end its wait.
+        /// On Linux (and FreeBSD), reads the master on the consumer's thread while the loop reads this session, and otherwise
+        /// leaves output to the loop: a park on a full ring, disposal, the forced end, the close, end of output and read
+        /// failures are the loop's to handle, so the consumer then waits for the loop's pass to end its wait. On macOS the
+        /// loop alone reads (below).
         /// </summary>
         /// <remarks>
         /// <para>
@@ -790,13 +797,29 @@ internal static partial class UnixPtyBackend
         /// </para>
         /// <para>
         /// A consumer that stops reading inline for about a millisecond, busy elsewhere or gone, has the loop read for it
-        /// again (<see cref="CheckInlineReader"/>): the child is not held up, its last output reaches the ring before the
-        /// post-exit drain finds the master quiet and closes it, and on macOS the child's exit, which waits until the master
-        /// has read what it wrote, is not held up either.
+        /// again (<see cref="CheckInlineReader"/>): the child is not held up, and its last output reaches the ring before the
+        /// post-exit drain finds the master quiet and closes it.
+        /// </para>
+        /// <para>
+        /// <b>Not on macOS.</b> A macOS master holds about 1 KiB of output, and the child can write more only once it is
+        /// read, so the child runs only as fast as the master is read. The loop reads ahead of the consumer: it arms the
+        /// master after every pass and reads what the child writes while the consumer is busy with the previous chunk. While
+        /// a consumer reads inline the loop does not, so the child stalled whenever the consumer's thread fell behind, at
+        /// worst until the millisecond check took reading back. On CI's macOS runner (Apple M1, 3 vCPUs) inline reads took the
+        /// 1 MiB flood from 1.06 times Porta.Pty's throughput to 0.57 (medians over runs), at no more process CPU: the time
+        /// went to waits. On an 8-core M2 they had raised it from 103 to 122 MiB/s, since with CPUs to spare the consumer
+        /// rarely falls behind. Windows does not read on the consumer's thread either (<see cref="WindowsOutputDriver"/>).
+        /// FreeBSD's kqueue backend keeps inline reads, unmeasured, as Linux's.
         /// </para>
         /// </remarks>
         bool IPtyOutputDriver.TryReadInline(PtyOutputPump pump)
         {
+            // macOS: the loop alone reads (remarks). Nothing changes, as when the loop does not read: _consumerReads stays
+            // ConsumerReadsLoop, so the loop arms the master after every pass (SetLoopInterest), and the session never joins
+            // the loop's list of inline readers, whose check would wake the loop every millisecond.
+            if (OperatingSystem.IsMacOS())
+                return false;
+
             if (Volatile.Read(ref _loopPhase) != LoopReading)
                 return false;
 

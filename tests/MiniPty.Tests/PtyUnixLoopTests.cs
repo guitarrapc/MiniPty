@@ -399,9 +399,15 @@ public sealed class PtyUnixLoopTests
     /// arrives once, in order.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// Reading moves between the two on Linux. On macOS the loop alone reads, so there the test checks that the loop's
+    /// reads across two enumerations and the pauses keep every number, in order.
+    /// </para>
+    /// <para>
     /// The child turns the terminal's newline translation off (<c>stty -onlcr</c>), so the output is exactly what
     /// <c>seq</c> wrote. With it on, a macOS master read with pauses like this one's gives <c>\r\r\n</c> a few times per
     /// run, without MiniPty too (<c>.github/docs/references/pty_crossplatform.md</c>, Unix line discipline).
+    /// </para>
     /// </remarks>
     [Test]
     public async Task OutputStaysInOrderWhileReadingMovesBetweenTheConsumerAndTheLoop()
@@ -450,6 +456,10 @@ public sealed class PtyUnixLoopTests
     /// go quiet, finds nothing left unread in it. Without the loop taking over, nobody would read the master during the
     /// pause, and on Linux the drain would close it with the tail in it.
     /// </summary>
+    /// <remarks>
+    /// The consumer reads inline on Linux only. On macOS the loop reads throughout, and the test checks that a consumer
+    /// busy elsewhere loses nothing there either.
+    /// </remarks>
     [Test]
     [NotInParallel]
     public async Task TheLoopReadsForAConsumerThatStopsReadingInline()
@@ -485,6 +495,10 @@ public sealed class PtyUnixLoopTests
     /// <see cref="ObjectDisposedException"/> and ends the child, without waiting for the flood. The consumer's read holds a
     /// reference on the master, so the descriptor stays open, and its number unused, until that read returns.
     /// </summary>
+    /// <remarks>
+    /// The consumer reads inline on Linux only. On macOS the loop alone reads, and the disposal ends the consumer's wait for
+    /// the loop the same way.
+    /// </remarks>
     [Test]
     public async Task DisposingTheSessionWhileItsConsumerReadsInlineEndsTheRead()
     {
@@ -516,6 +530,33 @@ public sealed class PtyUnixLoopTests
         await Assert.That(ended is ObjectDisposedException).IsTrue().Because(ended?.ToString() ?? "the read ended without an exception");
         // The disposal hangs the child up, and the watcher reaps it.
         await WaitUntilAsync(() => session.HasExited);
+    }
+
+    /// <summary>
+    /// On macOS the loop alone reads a session's output, so a consumer reading a flood never reads the master itself: its
+    /// session never joins the loop's list of inline readers, which a consumer joins on its first inline read. A macOS
+    /// master holds about 1 KiB, and the child writes more only once it is read, so the loop has to read ahead of the
+    /// consumer; while a consumer read inline the loop did not, and the child stalled whenever the consumer fell behind.
+    /// Judged by the list, not by timing.
+    /// </summary>
+    [Test]
+    public async Task OnMacOSTheLoopAloneReadsAFlood()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return;
+
+        const int Size = 1024 * 1024;
+        await using var session = Pty.Start(Shell($"dd if=/dev/zero bs={Size} count=1 2>/dev/null"));
+        var before = UnixPtyBackend.InlineReaderListingsForTests;
+        var received = 0;
+        await using (var output = session.ReadOutputAsync().GetAsyncEnumerator())
+        {
+            while (await output.MoveNextAsync().AsTask().WaitAsync(Timeout))
+                received += output.Current.Data.Span.Count((byte)0);
+        }
+
+        await Assert.That(received).IsEqualTo(Size);
+        await Assert.That(UnixPtyBackend.InlineReaderListingsForTests - before).IsEqualTo(0L);
     }
 
     [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
