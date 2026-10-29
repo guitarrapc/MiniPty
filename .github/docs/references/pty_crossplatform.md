@@ -419,7 +419,7 @@ Rules the engines keep:
 - **Faults stay with their session.** A failure in one session's work ends that session's output with the error; the loop goes on.
 - **No lock is shared across sessions while a slow call runs.** node-pty holds a global mutex across `ClosePseudoConsole`.
 - **Memory is bounded per session** by its ring, the pipe or tty buffer, and a persistent session's replay buffer. A slow client throttles its own child, never the loop.
-- **Thread-pool dependence is stated.** On Unix reading goes on while the pool is starved, until rings fill, and only delivery to consumers waits. On Windows completions need a pool worker, as Kestrel's sockets do.
+- **Thread-pool dependence is stated.** On both, output reading goes on while the pool is starved, until rings fill, and only delivery to consumers waits; a one-shot result's sink fills on the loop regardless. With every pool worker blocked, a child writing 8 MiB to `CompleteAsync` exited within about a second on Windows, and never did in 15 s on the runtime's completion port. Windows input the pipe does not take at once is still written by completions on the runtime's port, which need a pool worker, as Kestrel's sockets do.
 
 ### Readiness on a pty master
 

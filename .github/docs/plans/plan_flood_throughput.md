@@ -229,6 +229,41 @@ What this phase learned:
 | A test counting work items per chunk of a flood over a plain pipe | 0.90–0.91 per chunk with the loop, 0.91–0.94 with `main` | With 64 KiB waiting in the pipe, both designs pay one consumer continuation per 4 KiB chunk, and `main`'s completions came one per 16 reads. The loop takes out the completion's work item per wait, which small writes show: 200 writes read one at a time cost 200 work items with the loop and exactly 400 with `main`. |
 | Count where a keystroke's time goes before choosing a fix | MiniPty's own steps were about 6 μs of 88 | The plan's read model would have changed those 6 μs. The time was in the completion's way to a thread, which only a thread of MiniPty's own on its own port shortens. |
 
+**Many sessions on the one loop (2026-10-29).** One thread now reads every session, so what the steady-state benchmarks cannot show was measured with a scratch harness:
+- Setup:
+  - 1–16 sessions of `BenchmarkServeSession`'s child flooded 1 MiB at once, 5 rounds.
+  - A further session's keystrokes were timed during the floods, and during one-shot results (`CompleteAsync` of 4 MiB per session).
+  - The loop thread's CPU was read by its name.
+  - Each case ran in two passes, alternating this phase, the commit before it, and Porta.Pty.
+- Results:
+
+  | Case | MiniPty | Before | Porta.Pty |
+  |---|---|---|---|
+  | All CPUs, 16 out-of-band floods: total MiB/s | 107–110 | 79–88 | 82–87 |
+  | All CPUs, 16 in-box floods: total MiB/s | 78–79 | 64–70 | 68–71 |
+  | All CPUs, 16 out-of-band floods: process CPU per MiB | 40–41 ms | 115–120 ms | 66–69 ms |
+  | All CPUs, 16 out-of-band floods: another session's keystroke P50 / P99 | 0.16–0.17 / 0.29–0.52 ms | 0.17–0.18 / 0.38–0.40 ms | 0.18 / 0.41–0.48 ms |
+  | 2 CPUs, 8–16 out-of-band floods: total MiB/s | 13.9–15.3 | 11.6–13.9 | 15.3–16.7 |
+  | 2 CPUs, 8–16 out-of-band floods: another session's keystroke P50 | 0.32–0.81 ms | 0.21–1.33 ms | 0.17–0.37 ms |
+  | One-shot results, 1–16 sessions, all CPUs: process CPU per MiB written | 15–34 ms | 87–236 ms | |
+  | One-shot results, 8 sessions, 2 CPUs: MiB/s written, in-box / out-of-band | 9.1–9.2 / 13.3–13.8 | 7.3–7.4 / 10.0–10.1 | |
+  | 8 sessions disposed mid-flood: dispose P50 / max | 1.1–1.2 / 3.1–4.4 ms | 1.2–1.3 / 4.3 ms | |
+  | Pool starved, a child writing 8 MiB to `CompleteAsync` | exits in 0.7–1.2 s | still blocked after 15 s | |
+
+- **The loop saturates, and that batches.** It ran 94–100% busy from 8 out-of-band or 16 in-box floods, and moved more than either alternative. A busy loop finds more in the pipe per read, so its work items per MiB fell from about 4,100 to 2,100–3,500, and the loop's CPU per MiB from 31–38 ms to 9 ms.
+- **Another session's keystrokes kept pace on all CPUs**, during floods and during one-shot results alike. The per-step bound of 16 reads (64 KiB) only bites for a one-shot result, whose ring never fills. Keystrokes during 16 such results had the same P99 as before (0.39–0.48 ms against 0.35–0.43 ms).
+- **2 CPUs with 8–16 floods trail Porta.Pty, as before the loop did.** Throughput is 10–20% behind, keystrokes in another session are slower, and process CPU per MiB is higher (out-of-band: 42–60 ms against 28–39 ms). The keystroke times varied between passes, by up to 4×.
+  - The extra CPU is the pool workers, not the loop: the loop stayed 11–23% busy.
+  - Porta.Pty's readers wait inside `ReadFile`, while MiniPty's consumers hand off through the pool, whose idle workers spin before they sleep. That is the same cost as the single-session gap above.
+- **Not pursued: raising the loop thread to `AboveNormal`.** It left throughput unchanged, and keystrokes on 2 CPUs were better in some cases and worse in others.
+- **Gaps against the Unix loop's precautions, still open:**
+  - Fault isolation:
+    - Unix tests that a failure in one session ends only that session (`AFailureInOneSessionEndsOnlyThatSession`, with a failure-injection hook). Windows has no such test.
+    - The Windows loop's last-resort catch, outside a driver's step, drops an exception without ending that session's output.
+  - A `GetQueuedCompletionStatus` failure that returns no packet is taken as a wake with no backoff, so a broken port would spin. Unix backs off for 10 ms.
+  - No pass counter, so no test can show the Windows loop does not spin. Unix has `LoopPassesForTests`.
+  - `SessionsInTwoLoadContextsAllReportExit` returns early on Windows. Each load does get its own port and thread, but only by construction.
+
 ### Phase 3: Confirm on CI and record
 
 - A full benchmark run on CI, whose README tables update themselves.
