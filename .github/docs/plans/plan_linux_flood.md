@@ -2,7 +2,7 @@
 
 Goal: on Linux, MiniPty's output floods should be at least Porta.Pty's default mode on CI's `ubuntu-24.04` runner, on all CPUs and on two, for the 64 KiB flood as well as the 1 MiB one, without giving up what MiniPty is built on: no thread held per idle session, no allocation per chunk, and reads that keep pace with the child while the consumer is busy.
 
-**Status:** implemented (2026-10-30), CI confirmation (Phase 3) pending. The cause is measured on a Linux VM (Apple Container, Ubuntu 24.04, kernel 6.18, 4 vCPUs, arm64) with a throwaway harness and `strace`; a prototype of the three changes below was built and measured there ([Results](#results)), and Phases 1 and 2 are built with their tests ([Implementation](#implementation)). The prototype is the patch `minipty-linux-flood-prototype.patch` from the session that wrote this plan (about 100 lines over `PtyOutputPump.cs`, `UnixPtyBackend.cs`, `UnixInterop.cs` and the native shim, with both waits measured in Phase 2 still in it); it is a measurement, not the implementation, which Phases 1 and 2 build with their tests.
+**Status:** implemented and confirmed on CI for throughput (2026-10-30); the keystroke run on CI and the move of this plan's lessons into the specs are what is left ([Results on CI](#results-on-ci)). The cause is measured on a Linux VM (Apple Container, Ubuntu 24.04, kernel 6.18, 4 vCPUs, arm64) with a throwaway harness and `strace`; a prototype of the three changes below was built and measured there ([Results](#results)), and Phases 1 and 2 are built with their tests ([Implementation](#implementation)). The prototype is the patch `minipty-linux-flood-prototype.patch` from the session that wrote this plan (about 100 lines over `PtyOutputPump.cs`, `UnixPtyBackend.cs`, `UnixInterop.cs` and the native shim, with both waits measured in Phase 2 still in it); it is a measurement, not the implementation, which Phases 1 and 2 build with their tests.
 
 ## Where MiniPty stands
 
@@ -123,6 +123,24 @@ The harness on the implementation: 292–309 μs per 64 KiB flood, 1.3 waits, 0.
 
 Tests: the whole suite passes on macOS (731). On the VM 729 of 731 pass; the two that fail are the container's, and fail on `main` there alike: `DisposeLetsAnInteractiveShellHangUpItsJobs` (an interactive bash under a root shell with no job control) and `HostExitKillsAChildStillInItsHangupGrace`, whose killed child stays a zombie because the container's PID 1 is `sleep infinity` and reaps nothing (3 of 6 runs on `main`, 3 of 6 on the implementation; `kill(pid, 0)` succeeds on a zombie). A container started with `--init` would avoid the second.
 
+## Results on CI
+
+Three runs of `PtyThroughputBenchmarks` on commit `6290522` (the implementation), started together on 2026-10-30: [40949113066](https://github.com/guitarrapc/MiniPty/actions/runs/40949113066), [40949140162](https://github.com/guitarrapc/MiniPty/actions/runs/40949140162), [40949168757](https://github.com/guitarrapc/MiniPty/actions/runs/40949168757). Judged as the runs in [Where MiniPty stands](#where-minipty-stands): MiniPty ÷ Porta.Pty's default mode by MiB/s within a run, over the runs. The first run landed on an Intel Xeon 6973P-C runner whose `TwoCpus` job ran every library at less than half its `AllCpus` speed (MiniPty 90.5 MiB/s against 217.0), so its two-CPU ratios are that runner's, not the change's; the other two were EPYC 9V45 runners as before.
+
+| `ubuntu-24.04` | Before (3 runs) | After (3 runs) | Work items per flood, before → after | Process CPU per flood, before → after |
+|---|---|---|---|---|
+| 64 KiB, `AllCpus` | 0.90, 0.90, 0.92 | **1.04, 0.93, 0.98** (median 0.98) | 5.5–6.3 → 0 | 453–681 → 174–208 μs |
+| 64 KiB, `TwoCpus` | 0.92, 1.04, 0.96 | 0.89 (Xeon), **1.41, 1.39** | 5.0–5.9 → 0 | 424–644 → 188–268 μs |
+| 1 MiB, `AllCpus` | 1.04, 0.97, 1.03 | 1.17, 0.99, 1.00 | 11–29 → 0.00–0.01 | 4.0–5.3 → 2.5–3.1 ms |
+| 1 MiB, `TwoCpus` | 1.11, 1.16, 1.08 | **1.39, 1.38, 1.49** | 15–32 → 0 | 4.1–5.4 → 2.7–3.2 ms |
+
+Against `UseAsyncIo` the 64 KiB flood went from 0.92–0.96 to 0.99–1.03 on all CPUs and from 0.99–1.02 to 1.27–1.30 on two (EPYC runs). Allocations: 0 B in ten of twelve cases, 2 B per 1 MiB flood in two, with 0.004–0.012 work items per flood beside it, which is a thread-pool thread the pool added during the run, as the README's earlier runs saw.
+
+- **The 64 KiB flood is level on all CPUs and well ahead on two, from 10% behind on both.** The all-CPU median of 0.98 misses the gate of 1.0 by the spread between runs (0.93–1.04 against 0.90–0.92 before, with Porta.Pty's own `UseAsyncIo` now level with MiniPty rather than ahead); the structural columns met theirs in every run: no work item per flood and a third of the process CPU. On two CPUs, where CI's runner is a Hyper-V guest's one core, the flood went from behind to 1.4 times Porta.Pty, and the 1 MiB flood from 1.1 to 1.4 at a quarter fewer CPU.
+- **macOS is unchanged within the runner's spread.** 1 MiB at 1.27, 1.20, 1.39 times Porta.Pty against 1.11, 1.43, 1.32 in the three runs before; 64 KiB at 0.98, 1.88, 0.95 against 1.66, 1.35, 2.41, with the same 0.00–0.03 work items per flood and 8–11 ms of process CPU per MiB. The macOS runner varies by 2× between runs ([platform_support.md](../specs/platform_support.md), lessons), so the ratios within a run are what the two sets share.
+- **Windows code is untouched**, and its ratios stay in their earlier bands: level with Porta.Pty in-box on all CPUs (0.97–1.03), 0.86–0.91 out-of-band on all CPUs, and behind on two CPUs in most cases, as [next_todo.md](../next_todo.md#open) records.
+- **Not yet run on CI:** `PtyLatencyBenchmarks`, the keystroke gate. The consumer's wait never starts on a two-byte echo (`AConsumerDoesNotWaitAfterAShortRead`), so no change is expected; a run closes the gate.
+
 ## Phases
 
 ### Phase 0: Measure before changing (done)
@@ -145,7 +163,7 @@ Tests: the whole suite passes on macOS (731). On the VM 729 of 731 pass; the two
 
 ### Phase 3: Confirm on CI, tune, record
 
-- Three paired runs of `PtyThroughputBenchmarks` and `PtyLatencyBenchmarks` on `main` and the branch, started together, judged by MiniPty ÷ Porta.Pty within a run over the runs, as the earlier plans did.
+- Three paired runs of `PtyThroughputBenchmarks` and `PtyLatencyBenchmarks` on `main` and the branch, started together, judged by MiniPty ÷ Porta.Pty within a run over the runs, as the earlier plans did. Throughput: done, three unpaired runs against the three of `7ee5ce9` ([Results on CI](#results-on-ci)); latency: pending.
 - **Gates on `ubuntu-24.04`:** the 64 KiB flood's median ratio to Porta.Pty's default mode at least 1.0 on `AllCpus` (from 0.90–0.92) and on `TwoCpus` (from 0.92–1.04); the 1 MiB ratios no lower than today's (1.03 and 1.11); work items per 64 KiB flood under 1 (from 5–6); process CPU per flood no more than `UseAsyncIo`'s; keystroke P50 and P95 within the spread; allocations 0 B. macOS and Windows figures unchanged.
 - Then move the finding and the lessons into [platform_support.md](../specs/platform_support.md) (the 16 KiB turns, the ring's geometry on Linux, the rejected wake skip), update the Backpressure paragraph of [core_session.md](../specs/core_session.md) (the consumer waits on the master on Linux too, and what that holds per session), the output pump table of [pty_crossplatform.md](../references/pty_crossplatform.md), the Linux paragraph of the README's Backends section, and the "Output buffer geometry" entry of [next_todo.md](../next_todo.md); remove this plan.
 
