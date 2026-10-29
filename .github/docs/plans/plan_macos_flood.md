@@ -2,7 +2,7 @@
 
 Goal: on macOS, MiniPty's 1 MiB flood should reach Porta.Pty's default mode, on an 8-core desktop and on CI's `macos-26` runner (Apple M1 virtual machine, 3 vCPUs), without giving up what MiniPty is built on: no thread held per idle session, no allocation per chunk, and reads that keep pace with the child while the consumer is busy.
 
-**Status:** implemented and confirmed on CI (2026-10-30). The cause was measured outside .NET with a throwaway C probe (its modes and results are below; the file was not kept), Phases 1 and 2 are built and measured on the M2 ([Results](#results)), and three CI runs put macOS at 1.15–1.53 times Porta.Pty's default mode with no slow iteration ([Results on CI](#results-on-ci)). Left: the README's tables update themselves on the next full run on `main`, and the lessons move into the specs with [plan_flood_throughput.md](plan_flood_throughput.md)'s Phase 3, which carried this gap over from its macOS results ([macOS on CI](plan_flood_throughput.md#macos-on-ci)).
+**Status:** implemented; the main change is confirmed on CI (2026-10-30) and the refinements after review await their CI run. The cause was measured outside .NET with a throwaway C probe (its modes and results are below; the file was not kept), Phases 1 and 2 are built and measured on the M2 ([Results](#results)), and three CI runs put macOS at 1.15–1.53 times Porta.Pty's default mode with no slow iteration ([Results on CI](#results-on-ci)). Left: the README's tables update themselves on the next full run on `main`, and the lessons move into the specs with [plan_flood_throughput.md](plan_flood_throughput.md)'s Phase 3, which carried this gap over from its macOS results ([macOS on CI](plan_flood_throughput.md#macos-on-ci)).
 
 ## Where MiniPty stands
 
@@ -167,11 +167,19 @@ Three runs of the benchmark workflow on commit `54d7c89`, started together on 20
 | Run 2 | 51.6 (19.8) | 44.0 (22.8) | 1.15 | 0 of 10 / 0 of 10 | 11.7 / 9.0 ms | 0.03 / 1,026 |
 | Run 3 | 49.7 (19.8) | 36.8 (26.9) | 1.35 | 0 of 10 / 0 of 10 | 11.7 / 15.6 ms | 0.09 / 1,026 |
 
-- **The CI gates hold.** The median ratio over the three runs is 1.35, against 0.68 over nine runs of the version before (range 0.30–0.96), and the goal of 1.0; none of MiniPty's 30 iterations took over 30 ms, against 47% before. MiniPty's iterations sit in a band of 16.7–23.4 ms across the three runs, where before a whole run sat near 18 ms or near 40–60 ms. Porta.Pty's `UseAsyncIo` shows what the runner still does to a design that waits on another thread: 80–100% of its iterations over 30 ms. Allocations stay at 0 B.
-- The 64 KiB flood: 37.6, 43.9 and 49.1 MiB/s against Porta.Pty's 15.7, 24.1 and 48.2 (1.02–2.4).
-- The plan asked for six paired rounds against `bench-baseline`; these are three unpaired runs. With every iteration of every run inside the gate, and the before figures from nine runs on the same runner type, more rounds were not needed to tell the two apart.
-- **Linux** reads as before within three runs: `AllCpus` 1 MiB at 0.90, 0.95 and 1.04 times Porta.Pty (median 1.03 over the earlier plan's nine runs) and `TwoCpus` at 1.08, 1.21 and 1.10 (1.11 before), with 7–26 work items and 4.1–5.2 ms of process CPU per flood as before. The only Linux change is that the loop's arms are applied by its next wait rather than at once; if `AllCpus` stays below 1.0 over more runs, that is the first thing to measure.
-- **Windows** code is untouched; its out-of-band `TwoCpus` floods trailed Porta.Pty in all three runs (0.66–0.81), as the in-box ones did before, where the earlier plan had them level or ahead locally. Runner spread is the first suspect (one run's `MiniPty` 64 KiB in-box case had a 40 ms standard deviation on a 10 ms mean), and it is outside this plan.
+Three more runs of the same commit `54d7c89`, started together on 2026-10-29 after the refinements below were committed but before that push reached the workflow ([40932856203](https://github.com/guitarrapc/MiniPty/actions/runs/40932856203), [40932884053](https://github.com/guitarrapc/MiniPty/actions/runs/40932884053), [40932911073](https://github.com/guitarrapc/MiniPty/actions/runs/40932911073)):
+
+| `macos-26`, 1 MiB flood | MiniPty MiB/s (median ms) | Porta.Pty MiB/s (median ms) | MiniPty ÷ Porta.Pty | Iterations over 30 ms, MiniPty / Porta.Pty | Process CPU, MiniPty / Porta.Pty |
+|---|---|---|---|---|---|
+| Run 4 | 53.1 (18.7) | 38.9 (26.0) | 1.37 | 0 of 10 / 1 of 10 | 11.0 / 10.9 ms |
+| Run 5 | 43.7 (22.6) | 32.6 (31.4) | 1.34 | 0 of 10 / 7 of 10 | 13.8 / 15.5 ms |
+| Run 6 | 46.9 (21.6) | 37.4 (28.3) | 1.26 | 0 of 10 / 3 of 10 | 12.3 / 14.3 ms |
+
+- **The CI gates hold.** The median ratio over the six runs is 1.35 (1.15–1.53), against 0.68 over nine runs of the version before (range 0.30–0.96), and the goal of 1.0; none of MiniPty's 60 iterations took over 30 ms, against 47% before. MiniPty's iterations sit in a band of 16.7–24.9 ms across the six runs, where before a whole run sat near 18 ms or near 40–60 ms. Porta.Pty's `UseAsyncIo` shows what the runner still does to a design that waits on another thread: 80–100% of its iterations over 30 ms. Allocations stay at 0 B.
+- The 64 KiB flood: 37.6, 43.9, 49.1, 50.1, 41.4 and 42.2 MiB/s against Porta.Pty's 15.7, 24.1, 48.2, 20.9, 15.0 and 35.7 (1.02–2.8).
+- The plan asked for six paired rounds against `bench-baseline`; these are six unpaired runs. With every iteration of every run inside the gate, and the before figures from nine runs on the same runner type, pairing was not needed to tell the two apart.
+- **Linux** reads as before: `AllCpus` 1 MiB at 0.90, 0.95, 1.04, 1.03, 1.04 and 1.03 times Porta.Pty (median 1.03, as over the earlier plan's nine runs) and `TwoCpus` at 1.08, 1.21, 1.10, 1.17, 1.16 and 1.11 (1.11 before), with 7–26 work items and 4.0–5.2 ms of process CPU per flood as before. The first three runs' `AllCpus` figures were runner spread, not the deferred arms these six runs all had; Linux arms at once again anyway (below).
+- **Windows** code is untouched. Its `AllCpus` floods are level with Porta.Pty on the in-box ConPTY (0.99–1.00 in all six runs) and about 12% behind on the out-of-band one (0.86–0.89), as the README's run before this plan had them (3.4 against 3.9 MiB/s); on `TwoCpus` MiniPty trailed in 11 of 12 cases (0.60–0.99), where the earlier plan had the out-of-band floods ahead locally. That is a Windows question for that plan's Phase 3, outside this one.
 
 ## Refinements after review (2026-10-30)
 
@@ -188,6 +196,8 @@ A review of the change for side effects found two costs worth removing, measured
 - **Linux deferred its arms for nothing.** `epoll_ctl` cannot ride on `epoll_wait`, so deferring an arm to the wait saved no call and only moved it to the end of the pass. Linux arms at once again, as before this plan; kqueue keeps the deferral. The CI Linux figures above (0.90–1.04 on `AllCpus`) were taken with the deferral and are the first thing to re-read on the next run.
 
 Tests: `OnMacOSAConsumerDoesNotWaitAfterAShortRead` checks that a child writing a line every 10 ms never has its consumer wait in the kernel.
+
+**Not yet on CI.** The refinements are commit `52ef862`; the six CI runs above all ran `54d7c89`, before them. A run of `52ef862` is still owed, to confirm that macOS keeps its figures with the streaming flag and that Linux is unchanged with its arms applied at once again.
 
 ## Risks
 
