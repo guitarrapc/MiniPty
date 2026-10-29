@@ -2,7 +2,7 @@
 
 Goal: MiniPty's output floods should not fall behind Porta.Pty on CI's hosted runners, which have 2 cores and 4 threads, without giving up what MiniPty is built on: no thread held per session, no allocation per chunk, and reads that keep pace with the child while the consumer is busy.
 
-**Status:** open (2026-10-29). The cause is measured. Phase 0 is in the benchmarks and reproduces CI's ranking locally. Phase 1 (Unix) is implemented and meets its gates on Linux locally; macOS has not run it. Both wait for a CI run: the build workflow's tests on macOS, and a full benchmark run. Phase 2 (Windows) is next.
+**Status:** open (2026-10-29). The cause is measured. Phase 0 is in the benchmarks and reproduces CI's ranking locally. Phase 1 (Unix) is implemented and meets its gates on Linux locally; on macOS locally its tests pass and its `AllCpus` flood rose, though MiniPty still trails Porta.Pty there, as before (Phase 1). Both wait for a CI run: the build workflow's tests on macOS, and a full benchmark run. Phase 2 (Windows) is next.
 
 ## Finding
 
@@ -153,6 +153,20 @@ Results on the machine above (WSL, 8 logical CPUs), the gate run's two rounds, 1
 - Keystrokes stayed within the spread between runs: on `AllCpus` MiniPty's P50 was 125–130 μs against `UseAsyncIo`'s 123–124 μs in the same runs, and one work item per keystroke as before. Allocations stayed at 0 B.
 - The machine varied by up to 2× between rounds, because WSL shares its CPUs with the `docker-desktop` distro. Compare within a round, and read the CPU and work-item columns, which held in every round.
 
+Results on macOS, 2026-10-29: Apple M2 (8 cores), macOS 27.0.1, one run each of this phase and of `main` before it. Only `AllCpus` runs there.
+
+| `AllCpus`, 1 MiB flood | MiniPty | Porta.Pty | Porta.Pty, `UseAsyncIo` |
+|---|---|---|---|
+| Before (`main`), MiB/s | 103.4 | 162.6 | 100.6 |
+| After, MiB/s | 122.2 | 161.7 | 100.1 |
+| After, Process CPU | 24.75 ms | 15.61 ms | 27.10 ms |
+| After, work items | 695 | 1,026 | 1,009 |
+
+- The 64 KiB flood rose from 99.2 to 115.1 MiB/s (Porta.Pty 149.5 and 148.2). Keystroke P50 went from 26.2 to 27.0 μs, within the spread (Porta.Pty 13.7 and 19.8 μs in the same runs). Allocations stayed at 0 B.
+- The `AllCpus` gate holds on macOS, but MiniPty trails Porta.Pty's default mode on this machine, before and after. On CI's `macos-26` runner it leads (80.9 against 71.2 MiB/s, run 40726196725), so this gap is outside this plan's goal and is left for after it.
+- Inline reads rarely find output there: 695 work items per 1 MiB, against 15.9–18.5 on Linux `TwoCpus`. A macOS master holds 1 KiB of output and its writer refills it only after each read, so the consumer waits after almost every read and each chunk is a hand-off again. Reading again briefly before waiting had no consistent gain on Linux (below) and has not been tried on macOS.
+- The tests ran on macOS for the first time: after the two fixes below, the classes covering the loop, kqueue, the post-exit drain and disposal passed five runs each, and the whole suite three runs.
+
 What this phase learned:
 
 | Tried | Result | Why |
@@ -164,6 +178,8 @@ What this phase learned:
 | Nobody reads for a consumer that reads inline and then stops | Lost the child's last output on Linux | The post-exit drain closed a quiet master that still held output. On macOS the child's exit would wait until the master was read. Hence the millisecond check. |
 | `MoveNextAsync` racing disposal in its own loop | Ended the enumeration normally | The withdrawn wait went on to see the end of output. Inline reads keep the consumer in that loop far more often. Disposal now fails each turn of the loop, as the wait would. |
 | Count loop passes per chunk in a test | Too close to the old figure (0.27 against 0.32) | The millisecond check wakes the loop on its own. Thread-pool work items per chunk tell the designs apart: 0.89–0.97 before, under 0.25 after, for a child that writes in 1 MiB writes. A child that writes slower than the consumer reads makes it wait every few reads. |
+| `PtyKqueueWatchTests` left as they were at the switch to `EV_DISPATCH` | Three of them failed on every run on macOS | They were written for level-triggered filters and waited for a second report without arming again. They now arm before each wait, and a new test checks that a report disarms the registration; it fails without `EV_DISPATCH`. |
+| The order test splitting output on `\r\n` | Failed in every whole-suite run on macOS, and in one of five runs of its class | The terminal's `ONLCR` gave `\r\r\n` a few times per run while the reader paused, reading without MiniPty too. The child now turns it off (`stty -onlcr`); see [Unix line discipline](../references/pty_crossplatform.md#unix-line-discipline). |
 
 ### Phase 2: Windows
 
@@ -180,7 +196,7 @@ What this phase learned:
 ### Phase 3: Confirm on CI and record
 
 - A full benchmark run on CI, whose README tables update themselves.
-- Move this plan's findings and lessons into [platform_support.md](../specs/platform_support.md) and the driver descriptions in [core_session.md](../specs/core_session.md), then remove this plan.
+- Move this plan's findings and lessons into [platform_support.md](../specs/platform_support.md) and the driver descriptions in [core_session.md](../specs/core_session.md), then remove this plan. Carry the macOS flood gap (Phase 1) over as open work, with its measurements, so a later look starts from them.
 
 ## Risks
 
