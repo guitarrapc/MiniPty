@@ -59,6 +59,13 @@ namespace MiniPty.Internal;
 /// so a completion never writes into a ring another session owns.
 /// </para>
 /// <para>
+/// <b>Failures.</b> A failure while the loop serves a session ends that session's output with it, and the loop and the
+/// other sessions go on, as on Unix. Every call into the pump runs inside a step, which ends output with what it threw. A
+/// step that fails with a read posted cannot end output yet, because the read still points into this driver and its ring,
+/// and the driver would go back to the pool before the read's completion arrived: it cancels the read, and the step that
+/// handles the completion ends output with the failure.
+/// </para>
+/// <para>
 /// Drivers are pooled across sessions, and each keeps its read's overlapped structure and the handle the loop finds it by
 /// in one native block for the process's life, so a session pays nothing for its read or its pipe's binding to the port.
 /// </para>
@@ -101,6 +108,15 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
     // What a zero-byte read points at: never written, but a read must not be given a null buffer.
     private static readonly byte[] s_zeroByteTarget = GC.AllocateArray<byte>(1, pinned: true);
 
+    /// <summary>A pump whose session's reads on the loop fail, for the test that one failure ends one session. Null: none.</summary>
+    internal static PtyOutputPump? FailReadsOfPumpForTests;
+
+    /// <summary>
+    /// A pump whose session's step fails right after it posts its zero-byte read, for the test that a failure with a read
+    /// posted ends output only once the read completed. Null: none.
+    /// </summary>
+    internal static PtyOutputPump? FailWithReadPostedOfPumpForTests;
+
     // The read's overlapped structure and the handle the loop finds this driver by. Native, so a posted read never points
     // into the managed heap; never freed, since the pool keeps every driver.
     private readonly ReadBlock* _block;
@@ -114,6 +130,8 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
     private int _requests;
     // The posted read was canceled already, so a second cancel cannot reach the read posted after it.
     private bool _cancelIssued;
+    // A failure kept until no read is posted, when the next step ends output with it. On the loop's thread.
+    private Exception? _failure;
 
     /// <summary>Whether this driver waits on the loop's queue of drivers to look at. Guarded by the loop's lock.</summary>
     internal bool ServiceQueued;
@@ -165,6 +183,7 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
         driver._pump = pump;
         driver._pipe = pipe;
         driver._cancelIssued = false;
+        driver._failure = null;
         Volatile.Write(ref driver._requests, 0);
         Volatile.Write(ref driver._state, StateRunning);
         pump.AttachDriver(driver);
@@ -234,14 +253,8 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
                 break;
 
             case StateParked:
-                // A driver parked on a full ring ends the free-space handshake here; otherwise the drain would never see the
-                // transport go quiet.
                 Volatile.Write(ref _state, StateRunning);
-                var pump = _pump!;
-                if (pump.IsWaitingForFreeSpace)
-                    pump.EndWaitForFreeSpace();
-
-                Step(Completion.None, 0, 0);
+                Step(Completion.Resumed, 0, 0);
                 break;
 
             case StateZeroPosted or StateRingPosted:
@@ -253,31 +266,91 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
 
     private enum Completion
     {
+        /// <summary>No read completed: the first step, or the next after a step reached its bound.</summary>
         None,
         ZeroByte,
         Ring,
+        /// <summary>A wake of a driver parked on a full ring.</summary>
+        Resumed,
     }
 
     /// <summary>
     /// Reads until a read stays posted, the ring is full, the step's bound, or end of output. Runs on the loop with
-    /// <see cref="StateRunning"/>, and never throws: a failure ends the pump with it.
+    /// <see cref="StateRunning"/>, and never throws: a failure ends the pump with it, once no read is posted.
     /// </summary>
     private void Step(Completion completed, uint errorCode, uint numBytes)
     {
         var pump = _pump!;
-        Exception? error = null;
-        try
+        // A failure kept for this step ends output now; what the completed read brought is dropped with it.
+        var error = _failure;
+        if (error is null)
         {
-            if (Continue(pump, completed, errorCode, numBytes))
-                return;
-        }
-        catch (Exception ex)
-        {
-            error = ex;
+            try
+            {
+                if (completed == Completion.Resumed)
+                {
+                    // A driver parked on a full ring ends the free-space handshake here; otherwise the drain would never see
+                    // the transport go quiet.
+                    if (pump.IsWaitingForFreeSpace)
+                        pump.EndWaitForFreeSpace();
+
+                    completed = Completion.None;
+                }
+
+                if (Continue(pump, completed, errorCode, numBytes))
+                    return;
+            }
+            catch (Exception ex)
+            {
+                if (_state is StateZeroPosted or StateRingPosted)
+                {
+                    FailOnLoop(ex);
+                    return;
+                }
+
+                error = ex;
+            }
         }
 
         // End of output. No read is posted, so the ring and the driver can go.
+        _failure = null;
+        if (error is not null)
+        {
+            try
+            {
+                // A step that failed between parking and resuming leaves the handshake open; the drain waits on it.
+                if (pump.IsWaitingForFreeSpace)
+                    pump.EndWaitForFreeSpace();
+            }
+            catch (Exception)
+            {
+                // Finish reports the failure that brought the step here.
+            }
+        }
+
         pump.Finish(error);
+    }
+
+    /// <summary>
+    /// Ends this session's output with <paramref name="error"/>, a failure while the loop served it; the loop and the other
+    /// sessions go on. A read still posted points into this driver and its ring, so it is canceled, and the step that
+    /// handles its completion ends output; otherwise the loop's next look at the driver does. On the loop.
+    /// </summary>
+    private void FailOnLoop(Exception error)
+    {
+        if (Volatile.Read(ref _pump) is null)
+            return;
+
+        _failure ??= error;
+        if (_state is StateZeroPosted or StateRingPosted)
+        {
+            // A read canceled already, or ended by the pipe's close, completes all the same.
+            CancelPostedRead();
+            return;
+        }
+
+        Volatile.Write(ref _state, StateRunning);
+        Loop.RequestService(this);
     }
 
     /// <summary>Returns <see langword="true"/> while reading goes on (a read is posted, the driver parked, or it waits for its next step).</summary>
@@ -401,6 +474,9 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
             if (disposed || dataReady)
             {
                 dataReady = false;
+                if (FailReadsOfPumpForTests is { } failing && failing == pump)
+                    throw new IOException("Injected read failure");
+
                 pump.HoldRing();
                 var read = ReadNow(handle, pump.NextReadSpan, out var posted);
                 if (posted)
@@ -425,10 +501,14 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
             var zero = ReadNow(handle, Span<byte>.Empty, out var zeroPosted);
             if (zeroPosted)
             {
+                // The state says a read is posted before anything else can fail, so a failure waits for its completion.
+                EnterPosted(StateZeroPosted);
+                if (FailWithReadPostedOfPumpForTests is { } failing && failing == pump)
+                    throw new IOException("Injected failure with a read posted");
+
                 // The wait stays posted, so let go of the ring: it goes back once the consumer has released everything.
                 // Not before the read, so output already waiting keeps the ring.
                 pump.LetGoOfRing();
-                EnterPosted(StateZeroPosted);
                 return true;
             }
 
@@ -579,12 +659,27 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
     {
         private const uint Infinite = 0xFFFFFFFF;
         private const nuint WakeKey = 1;
+        private const int WaitTimeout = 258;
+
+        /// <summary>
+        /// How long the loop waits before it waits on the port again after a wait failed without a completion, as the
+        /// Unix loop does after a failed <c>epoll_wait</c> or <c>kevent</c>.
+        /// </summary>
+        private const int FailedWaitBackoffMs = 10;
 
         private static readonly Lock s_lock = new();
         private static IntPtr s_port;
         // Drivers that asked for a look, linked through NextService. Guarded by s_lock.
         private static WindowsOutputDriver? s_head;
         private static WindowsOutputDriver? s_tail;
+        // Written by the loop's thread only.
+        private static long s_passes;
+
+        /// <summary>Passes the loop has made, for tests that check it does not spin.</summary>
+        internal static long Passes => Volatile.Read(ref s_passes);
+
+        /// <summary>While set, every wait on the port fails as a closed port's would, for the test that the loop backs off.</summary>
+        internal static volatile bool FailWaitsForTests;
 
         /// <summary>Binds <paramref name="pipe"/> to the loop's port, starting the loop on the first call.</summary>
         internal static void Bind(SafeFileHandle pipe)
@@ -665,18 +760,38 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
                 lock (s_lock)
                     queued = s_head is not null;
 
-                uint bytes;
-                nuint key;
-                NativeOverlapped* overlapped;
-                var completed = WindowsInterop.GetQueuedCompletionStatus(port, &bytes, &key, &overlapped, queued ? 0 : Infinite);
-                // No overlapped structure: a wake, or no completion within the timeout.
-                if (overlapped is not null)
+                uint bytes = 0;
+                nuint key = 0;
+                NativeOverlapped* overlapped = null;
+                bool completed;
+                int error;
+                if (FailWaitsForTests)
                 {
-                    var error = completed ? 0u : (uint)Marshal.GetLastPInvokeError();
-                    var driver = (WindowsOutputDriver)GCHandle.FromIntPtr(((ReadBlock*)overlapped)->Driver).Target!;
-                    Serve(driver, error, bytes, isCompletion: true);
+                    completed = false;
+                    error = ErrorInvalidHandle;
+                }
+                else
+                {
+                    completed = WindowsInterop.GetQueuedCompletionStatus(port, &bytes, &key, &overlapped, queued ? 0 : Infinite);
+                    error = completed ? 0 : Marshal.GetLastPInvokeError();
                 }
 
+                Volatile.Write(ref s_passes, s_passes + 1);
+                if (overlapped is not null)
+                {
+                    // A completion: the read's own result, failed or not.
+                    var driver = (WindowsOutputDriver)GCHandle.FromIntPtr(((ReadBlock*)overlapped)->Driver).Target!;
+                    Serve(driver, (uint)error, bytes, isCompletion: true);
+                }
+                else if (!completed && error != WaitTimeout)
+                {
+                    // The wait itself failed, which only a port closed or broken under the loop makes it do. Waiting again
+                    // at once would spin the loop for as long as that lasts; drivers that asked for a look are still
+                    // served below, at this pace.
+                    Thread.Sleep(FailedWaitBackoffMs);
+                }
+
+                // Otherwise a wake, or no completion within the timeout.
                 ServeRequests();
             }
         }
@@ -709,8 +824,9 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
 
         private static void Serve(WindowsOutputDriver driver, uint error, uint bytes, bool isCompletion)
         {
-            // A step never throws, and anything else that did would end the process from this thread; the driver's own
-            // failure ends its session through its pump.
+            // A step never throws, and every call into the pump runs inside one. What is left outside is the driver's own
+            // bookkeeping; should that fail, the failure ends that session, as a step's would, and never the process from
+            // this thread.
             try
             {
                 if (isCompletion)
@@ -718,8 +834,15 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
                 else
                     driver.OnServiced();
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                try
+                {
+                    driver.FailOnLoop(ex);
+                }
+                catch (Exception)
+                {
+                }
             }
         }
     }

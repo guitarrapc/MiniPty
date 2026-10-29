@@ -5,9 +5,10 @@ using MiniPty.Internal;
 namespace MiniPty.Tests;
 
 /// <summary>
-/// The Windows output driver (<see cref="WindowsOutputDriver"/>), which reads every session on one loop thread and lets a
-/// consumer read on its own, driven over a plain named pipe whose writer the test controls, so each test decides when
-/// output arrives, stops, or floods. ConPTY sessions cover the same driver end to end in the rest of the suite.
+/// The Windows output driver (<see cref="WindowsOutputDriver"/>), which reads every session on one loop thread, driven over
+/// a plain named pipe whose writer the test controls, so each test decides when output arrives, stops, or floods. ConPTY
+/// sessions cover the same driver end to end in the rest of the suite. Tests that count the loop's passes or swap a
+/// driver between sessions run alone, since the loop and the pool of drivers serve every session in the process.
 /// </summary>
 public sealed class PtyWindowsOutputDriverTests
 {
@@ -388,6 +389,197 @@ public sealed class PtyWindowsOutputDriverTests
 
         writer.Join();
         await Assert.That(received.ToArray().AsSpan().SequenceEqual(expected)).IsTrue();
+    }
+
+    /// <summary>
+    /// A failure while the loop serves one session ends that session's output with the failure; another session keeps its
+    /// output, and the loop keeps running.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task AFailureInOneSessionEndsOnlyThatSession()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var failingBackend = new PipeBackend();
+        await using var failing = new PtySession(failingBackend);
+        var healthyBackend = new PipeBackend();
+        await using var healthy = new PtySession(healthyBackend);
+        await using var healthyOutput = healthy.ReadOutputAsync().GetAsyncEnumerator();
+
+        WindowsOutputDriver.FailReadsOfPumpForTests = failing.OutputPump;
+        try
+        {
+            failingBackend.Write("trigger"u8);
+            var failure = await Assert.That(async () => await ReadAllAsync(failing).WaitAsync(Timeout)).Throws<IOException>();
+            await Assert.That(failure!.Message).Contains("Injected read failure");
+        }
+        finally
+        {
+            WindowsOutputDriver.FailReadsOfPumpForTests = null;
+        }
+
+        healthyBackend.Write("still here"u8);
+        await Assert.That(await healthyOutput.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+        await Assert.That(System.Text.Encoding.ASCII.GetString(healthyOutput.Current.Data.Span)).IsEqualTo("still here");
+    }
+
+    /// <summary>
+    /// A step that fails with its zero-byte read posted ends output only once that read has completed. The read points
+    /// into the driver, which goes back to the pool when output ends: ended at once, the driver served the next session
+    /// while the old read was still posted, and that read's completion, when the failed session's pipe closed, would have
+    /// reached the next session as its own.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task AFailureWithAReadPostedEndsOutputOnlyOnceTheReadCompleted()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var failingBackend = new PipeBackend();
+        await using var failing = new PtySession(failingBackend);
+        var driver = (WindowsOutputDriver)failing.OutputPump.DriverForTests!;
+        WindowsOutputDriver.FailWithReadPostedOfPumpForTests = failing.OutputPump;
+        try
+        {
+            failingBackend.Write("x"u8);
+            var failure = await Assert.That(async () => await ReadAllAsync(failing).WaitAsync(Timeout)).Throws<IOException>();
+            await Assert.That(failure!.Message).Contains("Injected failure with a read posted");
+        }
+        finally
+        {
+            WindowsOutputDriver.FailWithReadPostedOfPumpForTests = null;
+        }
+
+        // The pool hands the failed session's driver to the next session.
+        var nextBackend = new PipeBackend();
+        await using var next = new PtySession(nextBackend);
+        await Assert.That(ReferenceEquals(next.OutputPump.DriverForTests, driver)).IsTrue();
+        await using var output = next.ReadOutputAsync().GetAsyncEnumerator();
+        nextBackend.Write("one"u8);
+        await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+        await Assert.That(System.Text.Encoding.ASCII.GetString(output.Current.Data.Span)).IsEqualTo("one");
+
+        // Closing the failed session's pipe would complete a read it had left posted.
+        await failing.DisposeAsync();
+        await Task.Delay(100);
+        nextBackend.Write("two"u8);
+        await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+        await Assert.That(System.Text.Encoding.ASCII.GetString(output.Current.Data.Span)).IsEqualTo("two");
+    }
+
+    /// <summary>
+    /// A wait on the loop's port that fails without a completion, as a port closed under the loop would, makes the loop
+    /// back off instead of waiting again at once, and the loop reads what arrived meanwhile once waits succeed again.
+    /// Without the backoff the loop spun, millions of passes in the same time.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task AFailedPortWaitBacksOffInsteadOfSpinning()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var backend = new PipeBackend();
+        await using var session = new PtySession(backend);
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+        backend.Write("a"u8);
+        await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+
+        var next = output.MoveNextAsync().AsTask();
+        long passes;
+        WindowsOutputDriver.Loop.FailWaitsForTests = true;
+        try
+        {
+            var before = WindowsOutputDriver.Loop.Passes;
+            backend.Write("b"u8);
+            await Task.Delay(500);
+            passes = WindowsOutputDriver.Loop.Passes - before;
+        }
+        finally
+        {
+            WindowsOutputDriver.Loop.FailWaitsForTests = false;
+        }
+
+        await Assert.That(passes).IsLessThan(100L);
+        await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
+        await Assert.That(System.Text.Encoding.ASCII.GetString(output.Current.Data.Span)).IsEqualTo("b");
+    }
+
+    /// <summary>
+    /// Idle sessions, and a session parked on a full ring while its writer waits, cost the loop no passes: each waits with
+    /// one zero-byte read posted, or with no read at all, and nothing reports until output arrives or the consumer reads.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task IdleAndParkedSessionsDoNotSpinTheLoop()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var idleBackends = new PipeBackend[4];
+        var idle = new PtySession[idleBackends.Length];
+        var waits = new Task<bool>[idleBackends.Length];
+        var outputs = new IAsyncEnumerator<PtyOutputChunk>[idleBackends.Length];
+        try
+        {
+            for (var i = 0; i < idle.Length; i++)
+            {
+                idleBackends[i] = new PipeBackend();
+                idle[i] = new PtySession(idleBackends[i]);
+                outputs[i] = idle[i].ReadOutputAsync().GetAsyncEnumerator();
+                idleBackends[i].Write("x"u8);
+                await Assert.That(await outputs[i].MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+                waits[i] = outputs[i].MoveNextAsync().AsTask();
+            }
+
+            var expected = Pattern(PtyOutputPump.Capacity * 8);
+            var parkedBackend = new PipeBackend();
+            await using var parked = new PtySession(parkedBackend);
+            var writer = parkedBackend.WriteOnThread(expected, closeAfter: true);
+            var received = new List<byte>(expected.Length);
+            await using (var enumerator = parked.ReadOutputAsync().GetAsyncEnumerator())
+            {
+                // The first chunk is held, so the ring fills behind it and the driver parks.
+                await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+                received.AddRange(enumerator.Current.Data.Span);
+                await WaitUntilAsync(() => parked.OutputPump.IsWaitingForFreeSpace);
+
+                var before = WindowsOutputDriver.Loop.Passes;
+                await Task.Delay(500);
+                var passes = WindowsOutputDriver.Loop.Passes - before;
+                await Assert.That(passes).IsLessThan(50L);
+
+                while (await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout))
+                    received.AddRange(enumerator.Current.Data.Span);
+            }
+
+            writer.Join();
+            await Assert.That(received.ToArray().AsSpan().SequenceEqual(expected)).IsTrue();
+            foreach (var wait in waits)
+                await Assert.That(wait.IsCompleted).IsFalse();
+        }
+        finally
+        {
+            for (var i = 0; i < idle.Length; i++)
+            {
+                if (idle[i] is null)
+                    continue;
+
+                await idle[i].DisposeAsync();
+                try
+                {
+                    // Disposal ends the wait each idle session's consumer left pending.
+                    if (waits[i] is { } wait)
+                        await wait.WaitAsync(Timeout);
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
+        }
     }
 
     /// <summary>Windows sessions read through I/O completions on the overlapped output pipe.</summary>

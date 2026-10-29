@@ -256,13 +256,14 @@ What this phase learned:
   - The extra CPU is the pool workers, not the loop: the loop stayed 11–23% busy.
   - Porta.Pty's readers wait inside `ReadFile`, while MiniPty's consumers hand off through the pool, whose idle workers spin before they sleep. That is the same cost as the single-session gap above.
 - **Not pursued: raising the loop thread to `AboveNormal`.** It left throughput unchanged, and keystrokes on 2 CPUs were better in some cases and worse in others.
-- **Gaps against the Unix loop's precautions, still open:**
+- **Gaps against the Unix loop's precautions, closed the same day:**
   - Fault isolation:
-    - Unix tests that a failure in one session ends only that session (`AFailureInOneSessionEndsOnlyThatSession`, with a failure-injection hook). Windows has no such test.
-    - The Windows loop's last-resort catch, outside a driver's step, drops an exception without ending that session's output.
-  - A `GetQueuedCompletionStatus` failure that returns no packet is taken as a wake with no backoff, so a broken port would spin. Unix backs off for 10 ms.
-  - No pass counter, so no test can show the Windows loop does not spin. Unix has `LoopPassesForTests`.
-  - `SessionsInTwoLoadContextsAllReportExit` returns early on Windows. Each load does get its own port and thread, but only by construction.
+    - Every call into the pump now runs inside a step. A failure ends only its session, through a hook as on Unix (`AFailureInOneSessionEndsOnlyThatSession`).
+    - A step that fails with a read posted cancels the read and ends output once it completes (`AFailureWithAReadPostedEndsOutputOnlyOnceTheReadCompleted`). Ended at once, the driver served the next session with the read still posted, and that read's completion ended the next session's output: the test fails that way with the wait removed.
+    - The loop's last-resort catch, for the driver's own bookkeeping, now ends that session the same way instead of dropping the exception.
+  - A wait on the port that fails with no completion backs off for 10 ms, as on Unix. Without it, a test that fails every wait counted 18 million passes in 500 ms (`AFailedPortWaitBacksOffInsteadOfSpinning`).
+  - `WindowsOutputDriver.Loop.Passes` counts passes. Idle sessions and a parked session cost none (`IdleAndParkedSessionsDoNotSpinTheLoop`).
+  - The load-context tests run on Windows too, and check that each load reads its own sessions' output (`SessionsInTwoLoadContextsAllReadTheirOwnOutput`).
 
 ### Phase 3: Confirm on CI and record
 
