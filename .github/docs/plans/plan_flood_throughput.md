@@ -194,7 +194,7 @@ Results on CI, nine rounds, each starting this version and `bench-baseline` toge
 - Linux and Windows read as before. Their medians over the nine runs match `main`'s four, for example Linux 1.03 and 1.11 against 1.03 and 1.12 on `AllCpus` and `TwoCpus`.
 - Keystrokes, one round: MiniPty's P50 was 47.4 μs against Porta.Pty's 42.1 μs (1.13), against 1.00 for `bench-baseline` in the same round and 1.29 for inline reads in the README's run. Allocations stayed at 0 B.
 - On the M2, three rounds alternating with `main`: 88–103 MiB/s against 105–122, process CPU 36–42 ms against 25–30 ms, and 1,031–1,037 work items against 690–709. Inline reads saved that much there. Alternating with `bench-baseline` and the experiment, the three were indistinguishable: 80–89 MiB/s, 42–48 ms, 1,003–1,035 work items. Five busy loops on the M2 did not reproduce CI: there inline reads were not slower than `bench-baseline`.
-- **Open: MiniPty's slow runs.** On CI, MiniPty's iterations tend to stay near 18 ms or near 40–60 ms for a whole run, in every version: 47% of them took over 30 ms across these rounds, against 2% of Porta.Pty's default mode in the same processes, whose blocked reader runs the consumer's continuation itself. Porta.Pty's `UseAsyncIo`, which reads on the consumer's thread and waits on a poller thread, had 68%. These slow runs, not where the consumer reads, keep macOS below Porta.Pty on CI. Left for after this plan (Phase 3).
+- **Open: MiniPty's slow runs.** On CI, MiniPty's iterations tend to stay near 18 ms or near 40–60 ms for a whole run, in every version: 47% of them took over 30 ms across these rounds, against 2% of Porta.Pty's default mode in the same processes, whose blocked reader runs the consumer's continuation itself. Porta.Pty's `UseAsyncIo`, which reads on the consumer's thread and waits on a poller thread, had 68%. These slow runs, not where the consumer reads, keep macOS below Porta.Pty on CI. Their cause is measured and a fix planned in [plan_macos_flood.md](plan_macos_flood.md).
 
 What this phase learned:
 
@@ -300,7 +300,7 @@ What this phase learned:
 ### Phase 3: Confirm on CI and record
 
 - A full benchmark run on CI, whose README tables update themselves.
-- Move this plan's findings and lessons into [platform_support.md](../specs/platform_support.md) and the driver descriptions in [core_session.md](../specs/core_session.md), then remove this plan. Carry the macOS flood gap and MiniPty's slow runs on CI's macOS runner ([macOS on CI](#macos-on-ci)) over as open work, with their measurements, so a later look starts from them.
+- Move this plan's findings and lessons into [platform_support.md](../specs/platform_support.md) and the driver descriptions in [core_session.md](../specs/core_session.md), then remove this plan. The macOS flood gap and MiniPty's slow runs on CI's macOS runner ([macOS on CI](#macos-on-ci)) are carried over as open work in [plan_macos_flood.md](plan_macos_flood.md), with their measurements.
 
 ## Risks
 
