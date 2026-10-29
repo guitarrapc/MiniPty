@@ -59,6 +59,8 @@ Both steady-state classes also run Porta.Pty, the maintained .NET PTY library cl
 
 Porta.Pty is referenced by the benchmark project only; MiniPty itself takes no dependency.
 
+Every steady-state case runs twice: on the whole machine (job `AllCpus`) and, on Linux and Windows, on logical CPUs 0 and 1 (job `TwoCpus`). The second job brings a hosted runner's scarcity to a large machine, where a library that hands each chunk of output to another thread finds an idle thread spinning for it and looks faster than it is on CI. Both classes report thread-pool work items per operation (`Completed Work Items`). The throughput class also reports the benchmark process's CPU time per operation (`Process CPU`), all threads, without the child or the ConPTY host. The latency class has no CPU column: BenchmarkDotNet forces a full collection around each iteration, and with one keystroke per iteration that collection would be most of the figure.
+
 Steady-state measurements (2026-10-27, Ryzen 9 7950X3D; Windows 11 build 26200, Linux on WSL Ubuntu 24.04; three runs on Windows, ranges where runs differed):
 
 | | Keystroke round trip (P50 / P95) | Throughput, 64 KiB / 1 MiB floods | Allocated per operation |

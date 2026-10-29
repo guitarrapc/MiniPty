@@ -2,7 +2,7 @@
 
 Goal: MiniPty's output floods should not fall behind Porta.Pty on CI's hosted runners, which have 2 cores and 4 threads, without giving up what MiniPty is built on: no thread held per session, no allocation per chunk, and reads that keep pace with the child while the consumer is busy.
 
-**Status:** open (2026-10-29). The cause is measured. Phase 0 (reproduction and counters) is next. No library code has changed.
+**Status:** open (2026-10-29). The cause is measured. Phase 0 is in the benchmarks and reproduces CI's ranking locally; its confirmation on CI waits for the next full benchmark run. Phase 1 is next. No library code has changed.
 
 ## Finding
 
@@ -87,9 +87,42 @@ Not pursued: a thread blocked in `read` per session, Porta.Pty's default mode. I
 
 ### Phase 0: Reproduce CI in the benchmarks and count the work
 
-- Add a constrained job to `PtyThroughputBenchmarks` and `PtyLatencyBenchmarks`, with affinity set to 2 logical CPUs (one core and its sibling). The serve child and the ConPTY host inherit the affinity. Keep the current job for comparison.
-- Report thread-pool work items and process CPU time per operation, as columns or a diagnoser, so the hand-offs show up in CI reports and in the README's source reports.
-- **Closed when:** the constrained job puts MiniPty behind Porta.Pty locally on Linux and Windows and on CI, in the same direction as the table above.
+- `PtyThroughputBenchmarks` and `PtyLatencyBenchmarks` run every case as job `AllCpus` and, on Linux and Windows with more than 2 logical CPUs, as job `TwoCpus`, with affinity on logical CPUs 0 and 1 ([SteadyStateJobs.cs](../../../src/MiniPty.Benchmarks/SteadyStateJobs.cs)). The README's tables quote `AllCpus`.
+- Both report `Completed Work Items` and `Lock Contentions` per operation (BenchmarkDotNet's `ThreadingDiagnoser`). The throughput class also reports `Process CPU`: the benchmark process's CPU time over the measured iterations, per operation ([ProcessCpuDiagnoser.cs](../../../src/MiniPty.Benchmarks/ProcessCpuDiagnoser.cs)).
+- **Closed when:** the constrained job puts MiniPty behind Porta.Pty locally on Linux and Windows and on CI, in the same direction as the table above. Met locally (below); CI is pending.
+
+Results on the machine above, 2026-10-29. WSL has 8 logical CPUs here.
+
+Linux, 1 MiB flood:
+
+| Job, run | MiniPty | Porta.Pty | Porta.Pty, `UseAsyncIo` |
+|---|---|---|---|
+| `AllCpus` run 1, MiB/s | 206.3 | 169.8 | 210.1 |
+| `AllCpus` run 2, MiB/s | 174.5 | 143.1 | 189.8 |
+| `TwoCpus` run 1, MiB/s | 177.7 | 192.3 | 214.5 |
+| `TwoCpus` run 2, MiB/s | 158.2 | 179.4 | 193.6 |
+| `AllCpus` run 1, Process CPU | 13.71 ms | 14.72 ms | 4.70 ms |
+| `TwoCpus` run 1, Process CPU | 9.59 ms | 8.39 ms | 4.70 ms |
+| `TwoCpus` run 1, work items | 318.9 | 190.7 | 10.7 |
+
+Windows, 1 MiB flood on 2 CPUs (`TwoCpus`):
+
+| ConPTY, run | MiniPty | Porta.Pty | Porta.Pty, `UseAsyncIo` |
+|---|---|---|---|
+| in-box run 1, MiB/s | 6.5 | 6.9 | 6.3 |
+| in-box run 2, MiB/s | 6.2 | 7.1 | 6.5 |
+| in-box run 3, MiB/s | 6.6 | 7.1 | 6.1 |
+| out-of-band run 1, MiB/s | 9.2 | 10.2 | 8.5 |
+| out-of-band run 2, MiB/s | 11.6 | 10.3 | 10.4 |
+| out-of-band run 3, MiB/s | 10.0 | 10.2 | 11.0 |
+| in-box run 1, Process CPU | 148.96 ms | 132.03 ms | 180.47 ms |
+| out-of-band run 1, Process CPU | 135.62 ms | 98.70 ms | 122.27 ms |
+| work items, every run and ConPTY | 7,739–8,224 | 4,066–4,105 | 7,753–8,174 |
+
+- Linux ranks the libraries as CI does in both runs. Windows does on the in-box ConPTY in every run. On the out-of-band ConPTY MiniPty was behind in two runs of three and ahead in one; its CPU per flood was 125–136 ms in the runs it trailed and 89 ms in the one it led. A path that is fast only when it catches a spinning thread varies this way, so judge Windows floods over several runs, and by work items, which hold in every run.
+- On `AllCpus`, MiniPty leads Porta.Pty on Linux in both runs; on Windows each library leads in some runs.
+- Keystrokes on 2 CPUs: on Windows' out-of-band ConPTY, MiniPty's P50 was 153.5 and 121.0 μs in two runs, Porta.Pty's 92.7 and 94.8 μs; on `AllCpus` they are level (71.8 against 70.0 μs). Both libraries take 2 work items per keystroke there, so MiniPty's are slower hand-offs, not more of them. On Linux MiniPty's keystrokes are no slower on either job, and the in-box ConPTY's frame schedule (about 14.5 ms) hides any difference.
+- On Linux, BenchmarkDotNet's affinity reached every thread. In 25 samples of `/proc/<pid>/task/*/status` during `TwoCpus` cases, every thread of the benchmark process and of the serve child was on CPUs 0–1. BenchmarkDotNet sets the main thread's affinity right after the process starts, evidently before the runtime starts another thread, and later threads inherit it.
 
 ### Phase 1: Unix
 
@@ -98,8 +131,8 @@ Not pursued: a thread blocked in `read` per session, Porta.Pty's default mode. I
 - Hand reading back to the loop whenever the consumer stops: a wait, the enumeration's disposal, cancellation, disposal of the session.
 - **Tests:** end of output and hang-up seen by an inline read; disposal and enumeration disposal while the consumer reads inline; a consumer that stops reading mid-flood (the loop takes over, the child is not stalled); macOS's 1 KiB master buffer; output order across consumer and loop reads.
 - **Closed when:**
-  - The constrained job's 1 MiB flood is at least `UseAsyncIo`'s and within the spread between runs of Porta.Pty's default mode.
-  - The current job's flood is no more than 5% below today's.
+  - The `TwoCpus` 1 MiB flood is at least `UseAsyncIo`'s and within the spread between runs of Porta.Pty's default mode.
+  - The `AllCpus` flood is no more than 5% below today's.
   - Process CPU per flood is within 1.5 times `UseAsyncIo`'s.
   - Keystroke P50 and P95 stay within the spread between runs, on both jobs.
   - Allocations stay at 0 B.
@@ -108,7 +141,12 @@ Not pursued: a thread blocked in `read` per session, Porta.Pty's default mode. I
 
 - The same model on the ConPTY output pipe: the consumer takes what the pipe holds when the ring is empty (`PeekNamedPipe`, then a read that completes at once without a completion packet). A zero-byte read is posted only when the consumer is about to wait or is busy with room in the ring.
 - The earlier lesson still holds: never leave a read posted into the ring for a consumer that keeps up, because canceling it costs a completion per write ([platform_support.md](../specs/platform_support.md)).
-- **Closed when:** work items per 1 MiB fall from about 8,100 to 4,100 or fewer on both ConPTYs, the constrained job's floods are within the spread between runs of Porta.Pty's default mode, and keystrokes and allocations are unchanged.
+- A keystroke takes 2 work items in MiniPty and in Porta.Pty, yet MiniPty's is 25–60 μs slower on `TwoCpus` on the out-of-band ConPTY (Phase 0). Find which hand-off waits there before deciding whether the read model above covers it.
+- **Closed when:**
+  - Work items per 1 MiB fall from about 8,100 to 4,100 or fewer on both ConPTYs.
+  - The `TwoCpus` floods are within the spread between runs of Porta.Pty's default mode, over at least three runs.
+  - The `TwoCpus` out-of-band keystroke P50 is within the spread between runs of Porta.Pty's.
+  - The `AllCpus` keystrokes and all allocations are unchanged.
 
 ### Phase 3: Confirm on CI and record
 

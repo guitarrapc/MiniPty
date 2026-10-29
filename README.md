@@ -68,7 +68,7 @@ Hosted runners get a different CPU from run to run, and the gap between the libr
 
 The keystroke and throughput benchmarks keep one child running with raw input, as a shell or an editor runs, so they measure the PTY path and not process startup. [Porta.Pty](https://www.nuget.org/packages/Porta.Pty) 2.2.3 runs the same child for comparison, in its default mode (method `PortaPty`).
 
-**Keystroke round trip** (`PtyLatencyBenchmarks`, columns `P50`, `P95` and `Allocated`): one byte written until the child's echo of it is read.
+**Keystroke round trip** (`PtyLatencyBenchmarks`, job `AllCpus`, columns `P50`, `P95` and `Allocated`): one byte written until the child's echo of it is read.
 
 <!-- benchmark:latency:start -->
 
@@ -83,7 +83,7 @@ The keystroke and throughput benchmarks keep one child running with raw input, a
 
 On Windows each library runs on both ConPTY implementations, the `ConPty` parameter. The in-box ConPTY repaints on its own frame schedule, which sets the round trip for any library; the [out-of-band ConPTY](#out-of-band-conpty-for-windows) removes that wait.
 
-**Output throughput** (`PtyThroughputBenchmarks`, `PayloadBytes` 1048576, columns `MiB/s` and `Allocated`): the child writes 1 MiB of 77-character lines, read until its end marker.
+**Output throughput** (`PtyThroughputBenchmarks`, job `AllCpus`, `PayloadBytes` 1048576, columns `MiB/s` and `Allocated`): the child writes 1 MiB of 77-character lines, read until its end marker.
 
 <!-- benchmark:throughput:start -->
 
@@ -110,7 +110,7 @@ ConPTY renders the child's output and sends its own VT stream, so on Windows thi
 
 <!-- benchmark:startup:end -->
 
-The run's reports also include every other benchmark, Porta.Pty's `UseAsyncIo` mode (`PortaPtyAsyncIo`), and 64 KiB floods. Run them locally with `dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter "*PtyLatencyBenchmarks*"`.
+The run's reports also include every other benchmark, Porta.Pty's `UseAsyncIo` mode (`PortaPtyAsyncIo`), and 64 KiB floods. On Linux and Windows, each keystroke and throughput case also runs on two of the runner's four logical CPUs (job `TwoCpus`), and those reports add the thread-pool work items (`Completed Work Items`) and, for throughput, the benchmark process's CPU time (`Process CPU`) per operation. Run them locally with `dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter "*PtyLatencyBenchmarks*"`.
 
 
 ## Quick start
