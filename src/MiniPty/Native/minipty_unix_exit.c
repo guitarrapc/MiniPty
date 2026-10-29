@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <poll.h>
 
 #if defined(__linux__)
 #include <sys/epoll.h>
@@ -830,6 +831,34 @@ int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_
  * minipty_master_wait returns 1 when the master reported (output, or EV_EOF, which the caller's read tells apart), 0 on
  * the timeout or an interruption, and -1 on failure. Without kqueue both fail with ENOTSUP.
  */
+/*
+ * Linux's consumer wait: one poll of the master, so the session holds no descriptor for it. A poll of one descriptor
+ * builds no registration worth measuring on Linux, where it measured level with an epoll of the session's own; on macOS
+ * each poll builds and drops a kqueue registration, which is why the session's kqueue below serves there. Returns as
+ * minipty_master_wait does. Elsewhere it fails with ENOTSUP.
+ */
+int minipty_master_poll(int master, int timeout_ms)
+{
+#if defined(__linux__)
+    struct pollfd fd;
+    int ready;
+
+    fd.fd = master;
+    fd.events = POLLIN;
+    fd.revents = 0;
+    ready = poll(&fd, 1, timeout_ms);
+    if (ready < 0)
+        return errno == EINTR ? 0 : -1;
+
+    return ready;
+#else
+    (void)master;
+    (void)timeout_ms;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
 int minipty_master_wait_open(int master)
 {
 #if defined(MINIPTY_CHILD_WATCH_KQUEUE)

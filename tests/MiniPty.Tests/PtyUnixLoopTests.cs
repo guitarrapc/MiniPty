@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using MiniPty.Internal;
@@ -393,8 +393,88 @@ public sealed class PtyUnixLoopTests
         var passes = UnixPtyBackend.LoopPassesForTests - passesBefore;
         await Assert.That(received).IsEqualTo(Size);
         await Assert.That(handOffs).IsLessThan(chunks / 4L).Because($"{handOffs} thread-pool work items for {chunks} chunks");
-        if (OperatingSystem.IsMacOS())
-            await Assert.That(passes).IsLessThan(chunks / 4L).Because($"{passes} loop passes for {chunks} chunks");
+        await Assert.That(passes).IsLessThan(chunks / 4L).Because($"{passes} loop passes for {chunks} chunks");
+    }
+
+    /// <summary>
+    /// A burst that arrives while the consumer waits costs one hand-off, not one per ring. On Linux a 64 KiB burst, the
+    /// benchmarks' smaller flood, was read in 16 KiB turns: the loop's pass filled the ring and parked on it, the consumer
+    /// drained it and could not read inline while the loop was parked, so each ring cost a wake of the loop and of a pool
+    /// thread. The loop now reads once for a consumer that waits after reading inline, and the consumer reads on, or, while
+    /// the child streams, waits for the master on its own thread, which the child's write wakes. Judged by thread-pool work
+    /// items, loop passes and the consumer's waits per burst, not by timing. The child answers each line of input with
+    /// 64 KiB.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task ABurstReachesAWaitingConsumerWithOneHandOff()
+    {
+        if (!(OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()))
+            return;
+
+        const int Burst = 64 * 1024;
+        const int Bursts = 64;
+        // The burst is built by doubling: mawk's sprintf cannot build a string this long.
+        await using var session = Pty.Start(Shell(
+            "stty -echo; awk 'BEGIN { s = \"x\"; while (length(s) < " + Burst + ") s = s s } { printf \"%s\", s; fflush() }'"));
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+
+        async Task BurstAsync()
+        {
+            await session.WriteInputAsync("\n");
+            var seen = 0;
+            while (seen < Burst)
+            {
+                await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+                seen += output.Current.Data.Span.Count((byte)'x');
+            }
+
+            await Assert.That(seen).IsEqualTo(Burst);
+        }
+
+        for (var i = 0; i < 8; i++)
+            await BurstAsync();
+
+        var before = ThreadPool.CompletedWorkItemCount;
+        var passesBefore = UnixPtyBackend.LoopPassesForTests;
+        var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
+        for (var i = 0; i < Bursts; i++)
+            await BurstAsync();
+
+        var handOffs = ThreadPool.CompletedWorkItemCount - before;
+        var passes = UnixPtyBackend.LoopPassesForTests - passesBefore;
+        var waits = UnixPtyBackend.ConsumerWaitsForTests - waitsBefore;
+        await Assert.That(handOffs).IsLessThan(2L * Bursts).Because($"{handOffs} thread-pool work items for {Bursts} bursts");
+        await Assert.That(passes).IsLessThan(2L * Bursts).Because($"{passes} loop passes for {Bursts} bursts");
+        await Assert.That(waits).IsGreaterThanOrEqualTo(Bursts / 2L).Because($"{waits} waits on the consumer's thread for {Bursts} bursts");
+    }
+
+    /// <summary>
+    /// A consumer that ended the loop's park on a full ring (it drained the ring and read inline again) and then stops
+    /// reading for a while has the loop read for it again, as a consumer that never met a park does: the child is not held
+    /// up and every byte arrives. The consumer pauses longer than the loop waits before it takes reading back, many times,
+    /// so the loop fills the ring and parks during each pause and the consumer ends the park after it.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task TheLoopReadsForAConsumerThatStopsAfterEndingItsPark()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        const int Size = 4 * 1024 * 1024;
+        await using var session = Pty.Start(Shell($"dd if=/dev/zero bs={1024 * 1024} count=4 2>/dev/null"));
+        var received = 0;
+        var chunks = 0;
+        await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
+        {
+            received += chunk.Data.Span.Count((byte)0);
+            if (++chunks % 4 == 0 && chunks <= 256)
+                await Task.Delay(3);
+        }
+
+        await Assert.That(received).IsEqualTo(Size);
+        await WaitUntilAsync(() => session.HasExited);
     }
 
     /// <summary>
@@ -493,8 +573,8 @@ public sealed class PtyUnixLoopTests
     /// reference on the master, so the descriptor stays open, and its number unused, until that read returns.
     /// </summary>
     /// <remarks>
-    /// On macOS the consumer also waits for the master on its own thread between reads, for up to a millisecond; the
-    /// disposal ends such a read the same way, once that wait returns.
+    /// On macOS and Linux the consumer also waits for the master on its own thread between reads, for up to a millisecond;
+    /// the disposal ends such a read the same way, once that wait returns.
     /// </remarks>
     [Test]
     public async Task DisposingTheSessionWhileItsConsumerReadsInlineEndsTheRead()
@@ -530,16 +610,17 @@ public sealed class PtyUnixLoopTests
     }
 
     /// <summary>
-    /// On macOS a consumer reading a flood waits for the master on its own thread when it finds it empty, instead of
-    /// parking on the loop: a macOS master holds 1 KiB and the child refills it only after each read, so a consumer that
-    /// parked there was handed every chunk by the loop, through the thread pool, which made macOS floods about half as
-    /// fast as a blocking reader's. Judged by the waits the consumer made and by the loop's passes, not by timing.
+    /// A consumer reading a flood waits for the master on its own thread when it finds it empty, instead of parking on the
+    /// loop. A macOS master holds 1 KiB and the child refills it only after each read, so a consumer that parked there was
+    /// handed every chunk by the loop, through the thread pool, which made macOS floods about half as fast as a blocking
+    /// reader's; a Linux master holds more, so the consumer there waits only now and then, when it catches the kernel
+    /// between refills. Judged by the waits the consumer made, the hand-offs, and the loop's passes, not by timing.
     /// </summary>
     [Test]
     [NotInParallel]
-    public async Task OnMacOSAConsumerWaitsForTheMasterOnItsOwnThread()
+    public async Task AConsumerWaitsForTheMasterOnItsOwnThread()
     {
-        if (!OperatingSystem.IsMacOS())
+        if (!(OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()))
             return;
 
         const int Size = 1024 * 1024;
@@ -547,6 +628,7 @@ public sealed class PtyUnixLoopTests
         var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
         var listingsBefore = UnixPtyBackend.InlineReaderListingsForTests;
         var passesBefore = UnixPtyBackend.LoopPassesForTests;
+        var handOffsBefore = ThreadPool.CompletedWorkItemCount;
         var received = 0;
         var chunks = 0;
         await using (var output = session.ReadOutputAsync().GetAsyncEnumerator())
@@ -560,22 +642,25 @@ public sealed class PtyUnixLoopTests
 
         var waits = UnixPtyBackend.ConsumerWaitsForTests - waitsBefore;
         var passes = UnixPtyBackend.LoopPassesForTests - passesBefore;
+        var handOffs = ThreadPool.CompletedWorkItemCount - handOffsBefore;
         await Assert.That(received).IsEqualTo(Size);
         await Assert.That(UnixPtyBackend.InlineReaderListingsForTests - listingsBefore).IsGreaterThanOrEqualTo(1L);
-        await Assert.That(waits).IsGreaterThan(chunks / 2L).Because($"{waits} waits on the consumer's thread for {chunks} chunks");
+        if (OperatingSystem.IsMacOS())
+            await Assert.That(waits).IsGreaterThan(chunks / 2L).Because($"{waits} waits on the consumer's thread for {chunks} chunks");
+        await Assert.That(handOffs).IsLessThan(chunks / 4L).Because($"{handOffs} thread-pool work items for {chunks} chunks");
         await Assert.That(passes).IsLessThan(chunks / 4L).Because($"{passes} loop passes for {chunks} chunks");
     }
 
     /// <summary>
-    /// On macOS a consumer waits for the master on its own thread only after a read that took the whole kilobyte the master
-    /// holds, which says the child was held up and has more. After a short read, a line of output at a time, it parks at
-    /// once: a wait there would hold a thread-pool thread for a millisecond per line, for output that is not coming.
+    /// A consumer waits for the master on its own thread only after a read of at least a kilobyte, which says the child was
+    /// held up and has more (on macOS the whole master). After a short read, a line of output at a time, it parks at once:
+    /// a wait there would hold a thread-pool thread for a millisecond per line, for output that is not coming.
     /// </summary>
     [Test]
     [NotInParallel]
-    public async Task OnMacOSAConsumerDoesNotWaitAfterAShortRead()
+    public async Task AConsumerDoesNotWaitAfterAShortRead()
     {
-        if (!OperatingSystem.IsMacOS())
+        if (!(OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()))
             return;
 
         await using var session = Pty.Start(Shell("for i in 1 2 3 4 5 6 7 8; do echo line$i; sleep 0.01; done"));
@@ -589,15 +674,15 @@ public sealed class PtyUnixLoopTests
     }
 
     /// <summary>
-    /// A consumer on a thread with a scheduling context, a UI thread, never waits for the master in the kernel on macOS:
-    /// it reads what the master holds and otherwise parks, as on Linux, so the thread is never blocked. Judged by the
-    /// waits consumers made while this one read a flood.
+    /// A consumer on a thread with a scheduling context, a UI thread, never waits for the master in the kernel: it reads
+    /// what the master holds and otherwise parks, so the thread is never blocked. Judged by the waits consumers made while
+    /// this one read a flood.
     /// </summary>
     [Test]
     [NotInParallel]
     public async Task AConsumerWithASchedulingContextNeverWaitsForTheMasterInTheKernel()
     {
-        if (!OperatingSystem.IsMacOS())
+        if (!(OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()))
             return;
 
         const int Size = 1024 * 1024;

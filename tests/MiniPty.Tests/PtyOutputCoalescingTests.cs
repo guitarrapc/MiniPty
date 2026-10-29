@@ -289,8 +289,10 @@ public sealed class PtyOutputCoalescingTests
 
     /// <summary>
     /// The output a late wait leaves unread does not start the next burst when it wraps the ring's end either, where it
-    /// comes out as two chunks. The burst starts at the ring's start, and an in-time chunk of 10 KiB leaves the head 2 KiB
-    /// before the end. No tick serves the next deadline, and the minimum comes long after it, in 8 KiB that wrap.
+    /// comes out as two chunks. A ring with nothing unread starts over at its beginning, so the wrap is built with output
+    /// unread: the in-time chunk of 10 KiB is still held while 6 KiB more fills the ring to its end, and the late 2 KiB
+    /// that completes the minimum lands at the start. No tick serves the deadline, so the wait completes late with 8 KiB
+    /// to skip, 6 KiB before the end and 2 KiB after it.
     /// </summary>
     [Test]
     public async Task OutputALateWaitLeavesDoesNotStartTheNextBurstWhenItWrapsTheRing()
@@ -309,13 +311,17 @@ public sealed class PtyOutputCoalescingTests
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
         await Assert.That(output.Current.Data.Length).IsEqualTo(10240);
 
+        // Held, so the ring keeps its place: these fill it to its end.
+        backend.Write(2048);
+        backend.Write(2048);
+        backend.Write(2048);
         next = output.MoveNextAsync().AsTask();
         await Assert.That(Reader(session).IsInBurst).IsTrue();
         await WriteMinimumLateAsync(backend, next);
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
-        await Assert.That(output.Current.Data.Length).IsEqualTo(2048);
-        await Assert.That(await output.MoveNextAsync()).IsTrue();
         await Assert.That(output.Current.Data.Length).IsEqualTo(6144);
+        await Assert.That(await output.MoveNextAsync()).IsTrue();
+        await Assert.That(output.Current.Data.Length).IsEqualTo(2048);
 
         await AssertNextReadIsHandedOutAtOnceAsync(backend, session, output);
         backend.End();
@@ -324,7 +330,7 @@ public sealed class PtyOutputCoalescingTests
     /// <summary>
     /// Output that comes after a late wait's leftovers counts toward the next burst, also in the chunk that holds the last of
     /// them. The leftovers wrap the ring as in the test above, and 4 KiB more arrives before the remainder is taken, so one
-    /// chunk holds 6 KiB to skip and 4 KiB to count.
+    /// chunk holds 2 KiB to skip and 4 KiB to count.
     /// </summary>
     [Test]
     public async Task OutputAfterTheLeftoversOfALateWaitCountsTowardTheNextBurst()
@@ -341,15 +347,19 @@ public sealed class PtyOutputCoalescingTests
         backend.Write(2048);
         backend.Write(4096);
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
+        await Assert.That(output.Current.Data.Length).IsEqualTo(10240);
 
+        backend.Write(2048);
+        backend.Write(2048);
+        backend.Write(2048);
         next = output.MoveNextAsync().AsTask();
         await WriteMinimumLateAsync(backend, next);
         await Assert.That(await next.WaitAsync(Timeout)).IsTrue();
-        await Assert.That(output.Current.Data.Length).IsEqualTo(2048);
+        await Assert.That(output.Current.Data.Length).IsEqualTo(6144);
 
         backend.Write(4096);
         await Assert.That(await output.MoveNextAsync()).IsTrue();
-        await Assert.That(output.Current.Data.Length).IsEqualTo(10240);
+        await Assert.That(output.Current.Data.Length).IsEqualTo(6144);
         await Assert.That(Reader(session).IsInBurst).IsFalse();
 
         // Releasing it counts the 4 KiB that came after the leftovers, a burst's worth.
@@ -948,15 +958,14 @@ public sealed class PtyOutputCoalescingTests
     }
 
     /// <summary>
-    /// Completes <paramref name="next"/>, a wait of a burst whose 200 ms deadline no tick serves, late: past the deadline it
-    /// writes the minimum as 2 KiB to the ring's end, 4 KiB, and 2 KiB. 8 KiB in 250 ms is far below the rate that keeps a
-    /// burst, and the deadline found nothing, so the burst ends with all of it left to skip.
+    /// Completes <paramref name="next"/>, a wait of a burst whose 200 ms deadline no tick serves, late: 6 KiB of the
+    /// minimum is already unread at the ring's end, and past the deadline this writes the last 2 KiB at its start. 8 KiB in
+    /// 250 ms is far below the rate that keeps a burst, and the deadline found nothing, so the burst ends with all of it
+    /// left to skip.
     /// </summary>
     private static async Task WriteMinimumLateAsync(ManualOutputBackend backend, Task<bool> next)
     {
         await Task.Delay(250);
-        backend.Write(2048);
-        backend.Write(4096);
         await Assert.That(next.IsCompleted).IsFalse();
         backend.Write(2048);
     }

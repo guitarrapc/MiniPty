@@ -44,7 +44,7 @@ On CI's 2-core Windows runner and locally on two logical CPUs, MiniPty's 1 MiB f
 - **FreeBSD** is tested neither locally nor in CI. Its termios (`VERASE2`, and `_POSIX_VDISABLE` being 0xff), whether it revokes the tty when the session leader exits, as macOS does, and the readiness behavior `kqueue` was chosen on, which the Unix loop and its coalescing tick run on, follow from source only. `scripts/pty-readiness-probe.c` checks the readiness part where a FreeBSD machine is available.
 - **Host exit on macOS under NativeAOT.** A host that disposes a session whose child ignores `SIGHUP` and then exits sends the pending kill at exit. On macOS that was probed under CoreCLR and NativeAOT with an earlier version that armed a timer per disposal, not with the current exit-watcher deadline; CI runs the CoreCLR test (`HostExitKillsAChildStillInItsHangupGrace`) there.
 - **An echo during a flood through a bridge** is not tested against the coalescing bound; the tests time the end of a burst only.
-- **Output buffer geometry.** The 16 KiB ring keeps the size of the four 4 KiB slots it replaced, which were chosen because every allocation benchmark improved with them, and a read takes up to 4 KiB. Throughput has not been tuned for either size.
+- **Output buffer geometry.** The 16 KiB ring keeps the size of the four 4 KiB slots it replaced, which were chosen because every allocation benchmark improved with them, and a read takes up to 4 KiB. Throughput has not been tuned for either size; an empty ring starts over at its beginning, since a Linux master hands out 4,095 bytes per read and four of those left 4 bytes before the end.
 
 ## Rare Test Timeouts Under Heavy Load
 

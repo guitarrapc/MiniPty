@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Threading.Tasks.Sources;
 
 namespace MiniPty.Internal;
@@ -235,7 +235,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// <summary>
     /// The span the next read fills: at least <see cref="PublishSize"/> is free unless the ring is full, so it holds no
     /// unread output. It ends at <see cref="PublishSize"/> or at the end of the buffer, and the next publish continues
-    /// at the start. After disposal nothing reads the ring, so the driver reuses the same span only to let the
+    /// at the start; a ring with nothing unread starts at the beginning again. After disposal nothing reads the ring, so the driver reuses the same span only to let the
     /// transport end. Only while the driver holds the ring (<see cref="HoldRing"/>); the buffer is pinned, so a read
     /// may stay posted into the span until it completes.
     /// </summary>
@@ -245,6 +245,15 @@ internal sealed class PtyOutputPump : IValueTaskSource
         {
             Debug.Assert(_ringState == RingHeld);
             var start = _tail;
+            // An empty ring starts over at its beginning, so a read never has to fit the few bytes left before the end: a
+            // Linux master hands out 4,095 bytes per read, so four reads left 4 bytes, and the fifth read took only those.
+            // Nothing is unread, so the consumer holds no chunk and reads neither index until the next publish.
+            if (start != 0 && Volatile.Read(ref _count) == 0)
+            {
+                _head = 0;
+                _tail = start = 0;
+            }
+
             return _ring!.AsSpan(start, Math.Min(PublishSize, Capacity - start));
         }
     }
