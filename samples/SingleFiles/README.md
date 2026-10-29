@@ -31,7 +31,12 @@ Full-screen TUIs and GUI terminal windows have their own projects: [TuiDemo](../
 [Session.cs](Session.cs). `CompleteAsync` reads all output and waits for the exit, which is all a command run for its result needs:
 
 ```csharp
-await using var session = Pty.Start(new PtyStartInfo { FileName = "/bin/sh", Arguments = ["-c", "echo hello"] });
+await using var session = Pty.Start(new PtyStartInfo
+{
+    FileName = "/bin/sh",
+    Arguments = ["-c", "echo hello"],
+    KillProcessTree = true,   // Windows: also end what the command started, when the session ends
+});
 var result = await session.CompleteAsync(new PtyCompleteOptions { ExitTimeout = TimeSpan.FromSeconds(15) });
 Console.WriteLine($"exit={result.ExitCode}: {PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText)}");
 ```
@@ -40,15 +45,20 @@ To feed the child's stdin, read the `Output` stream yourself and end the input w
 
 ```csharp
 await using var session = Pty.Start(startInfo);
-var pump = session.Output.CopyToAsync(sink);   // keep reading from the start, or the child blocks on a full PTY
-await session.WriteInputAsync("line 3\nline 1\nline 2\n");
-session.SendEof();                             // Ctrl+D on Unix, Ctrl+Z and Enter on Windows
+using var output = new MemoryStream();
+var pump = session.Output.CopyToAsync(output);   // keep reading from the start, or the child blocks on a full PTY
+await session.WriteInputAsync("line 3\rline 1\rline 2\r");
+session.SendEof();                               // Ctrl+D on Unix, Ctrl+Z and Enter on Windows
 var status = await session.WaitForExitAsync();
-await pump;                                    // ends after the last output
+await pump;                                      // ends after the last output
+var text = Encoding.UTF8.GetString(output.ToArray());   // decode once: a read can end inside a UTF-8 character
 ```
 
-- PTY output is terminal output: colors, cursor moves, and `\r\n` line ends. `PtyOutput.ToDisplayText(..., PlainText)` strips them for logs and assertions; keep the raw bytes when a terminal displays them.
+- **Enter is `\r`** on every platform, as a terminal sends it: ConPTY reads it as Enter, and MiniPty's Unix PTYs turn it into a newline.
+- **`KillProcessTree`** (Windows) ends everything the command started when the session ends, even programs in a console of their own. Turn it on for commands run for their result; leave it off for interactive terminals, where a window the user opened should outlive the tab.
+- PTY output is terminal output: colors, cursor moves, and `\r\n` line ends. `PtyOutput.ToDisplayText(..., PlainText)` strips them for logs and assertions; keep the raw bytes when a terminal displays them. The output also contains the input, because a terminal echoes what is typed.
 - `session.Resize(new PtySize(100, 28))` works at any time; the child sees the new size (`stty size`).
+- In a `cmd /c` command, name Windows tools by full path (`%SystemRoot%\System32\sort.exe`): a bare `sort` or `find` can resolve to another program first on PATH, such as Git's GNU tools. What follows `/c` is parsed by `cmd.exe`, so never put user input there.
 
 ## Drive an interactive program
 
@@ -56,27 +66,24 @@ await pump;                                    // ends after the last output
 
 ```csharp
 await using var session = Pty.Start(startInfo);
-var pump = PumpAsync(session);                  // started before the first write
+var output = new OutputLog();
+var reader = output.ReadAllAsync(session, ct);   // the one reader, started before the first write
 
-await WaitForTextAsync("ready");
-await session.WriteInputAsync("alpha\n");
-await WaitForTextAsync("first:alpha");
+await output.WaitForAsync("ready", ct);
+await session.WriteInputAsync("alpha\r");
+await output.WaitForAsync("first:alpha", ct);    // text only the child's answer contains, not the echo of the input
 session.Resize(new PtySize(100, 28));
-await session.WriteInputAsync("beta\n");
+await session.WriteInputAsync("beta\r");
 
-await pump;                                     // ends at the child's last output
+await reader;                                    // ends at the child's last output
 var status = await session.WaitForExitAsync();
-
-async Task PumpAsync(PtySession session)
-{
-    await foreach (var chunk in session.ReadOutputAsync())
-        Append(Encoding.UTF8.GetString(chunk.Data.Span));
-}
 ```
 
-- `ReadOutputAsync` is the only reader. `chunk.Data` is valid until the next iteration; copy it to keep it.
-- A chunk can end in the middle of a UTF-8 character. The sample's markers are ASCII; for other text, decode with one `Decoder` kept across chunks.
-- The loop ends when the child's output ends, so it also tells you the child has finished writing.
+`OutputLog` is a small class in the sample:
+
+- `ReadAllAsync` runs `await foreach` over `ReadOutputAsync` and decodes each chunk right away, because `chunk.Data` is valid only until the next iteration. It decodes with one `Decoder` kept across chunks, since a chunk can end in the middle of a UTF-8 character.
+- `WaitForAsync` checks the text so far and otherwise waits for a signal the reader gives on each chunk, so nothing polls. One deadline (`ct`) bounds the whole conversation, so a child that never prints the marker cannot hang it.
+- On Windows the output shows earlier lines twice after a resize: ConPTY repaints the screen, which a terminal frontend draws over the same cells.
 
 ## Capture output with timing
 
@@ -85,7 +92,8 @@ async Task PumpAsync(PtySession session)
 ```csharp
 var result = await PtyCapture.RunAsync(startInfo, new PtyCaptureOptions
 {
-    Completion = new PtyCompleteOptions { Input = "line 1\n", ExitTimeout = TimeSpan.FromSeconds(30) },
+    // Input is typed once the child starts, then end of input follows (SendEofAfterInput defaults to true).
+    Completion = new PtyCompleteOptions { Input = "line 1\r", ExitTimeout = TimeSpan.FromSeconds(30) },
 });
 
 foreach (var chunk in result.GetTextChunks())
@@ -114,7 +122,7 @@ using (var input = PtyConsoleInput.Attach(session))
 - MiniPty.Console handles input and the window size. Copying output to stdout stays your job.
 - Write status messages before `Attach`. While attached, stdout on Unix is raw and does not turn `\n` into `\r\n`, so after detaching the sample writes `\r\n` to put the parent shell's prompt at the start of a line.
 - With `InheritCursor`, attach before the output copy starts; the [TUI demo](../TuiDemo/README.md#using-minipty-with-a-tui) explains why, and covers running full-screen programs.
-- On Windows, set `Console.OutputEncoding = Encoding.UTF8` while copying if the output can contain non-ASCII text.
+- On Windows the sample sets `Console.OutputEncoding = Encoding.UTF8` while the shell runs and restores it afterwards: PTY output is UTF-8, and a console with a legacy code page would misdecode non-ASCII text. MiniPty.Console handles the input side itself.
 
 ## Web terminal
 
@@ -149,7 +157,9 @@ app.Map("/ws", async context =>
 });
 ```
 
-`RunAsync` returns the exit status when the shell exits, after the last output and an `exit` message. When the browser disconnects or the token is canceled, it ends the shell. One connection is one shell; for terminals that survive a reload, use `PtyWebSocketSessionManager` as the [VS Code sample's persistent terminal](../VsCodeExtension/README.md#persistent-terminal-a-service-that-outlives-the-extension) does.
+`RunAsync` returns the exit status when the shell exits, after the last output and an `exit` message. When the browser disconnects or the token is canceled, it ends the shell.
+
+The shell's `PtyStartInfo` describes the frontend, not the server's own terminal: `TerminalName = "xterm-256color"` (MiniPty uses that default only when no `TERM` is inherited, and a server started from tmux would pass on `screen-256color`), and `COLORTERM=truecolor` in `Environment`, because xterm.js draws 24-bit color. On Windows the sample stays on the in-box ConPTY so it publishes as one file; a production terminal should use the [out-of-band ConPTY](../../README.md#out-of-band-conpty-for-windows). One connection is one shell; for terminals that survive a reload, use `PtyWebSocketSessionManager` as the [VS Code sample's persistent terminal](../VsCodeExtension/README.md#persistent-terminal-a-service-that-outlives-the-extension) does.
 
 ### Browser
 

@@ -697,10 +697,11 @@ static class Shell
             return new PtyStartInfo { FileName = cmd, Size = new PtySize(80, 24) };
         }
 
-        // No startup files, so that a user's shell configuration does not change what is measured.
+        // No startup files, so that a user's shell configuration does not change what is measured. TERM describes the
+        // frontend, xterm.js, rather than the terminal this server was started from (see WebTerminal.cs).
         return File.Exists("/bin/bash")
-            ? new PtyStartInfo { FileName = "/bin/bash", Arguments = ["--noprofile", "--norc", "-i"], Size = new PtySize(80, 24) }
-            : new PtyStartInfo { FileName = "/bin/sh", Arguments = ["-i"], Size = new PtySize(80, 24) };
+            ? new PtyStartInfo { FileName = "/bin/bash", Arguments = ["--noprofile", "--norc", "-i"], Size = new PtySize(80, 24), TerminalName = "xterm-256color" }
+            : new PtyStartInfo { FileName = "/bin/sh", Arguments = ["-i"], Size = new PtySize(80, 24), TerminalName = "xterm-256color" };
     }
 }
 

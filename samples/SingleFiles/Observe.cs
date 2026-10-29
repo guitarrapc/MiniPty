@@ -7,10 +7,21 @@
 #:project ../../src/MiniPty/MiniPty.csproj
 #:project ../../src/MiniPty.Capture/MiniPty.Capture.csproj
 
+// Observe: record what a command prints and when, with MiniPty.Capture.
+//
+//   dotnet samples/SingleFiles/Observe.cs
+//
+// PtyCapture.RunAsync starts the child, writes its input, waits for the exit, and returns every read with its time since
+// Pty.Start. The first part prints a timeline of output that arrives in steps; the second feeds stdin and shows where
+// each read begins and ends.
+
 using System.Runtime.InteropServices;
 using System.Text;
 using MiniPty;
 using MiniPty.Capture;
+
+// The Enter key: a PTY treats CR as Enter on every platform (see Session.cs).
+const string Enter = "\r";
 
 if (!Pty.IsSupported)
 {
@@ -34,6 +45,8 @@ static async Task ObserveStaggeredOutputAsync()
 {
     Console.WriteLine("=== Observe output over time ===");
 
+    // Completion takes the same options as PtySession.CompleteAsync. ExitTimeout makes the capture throw
+    // TimeoutException if the command runs longer.
     var result = await PtyCapture.RunAsync(
         CreateStaggeredStartInfo(),
         new PtyCaptureOptions
@@ -48,6 +61,8 @@ static async Task ObserveStaggeredOutputAsync()
     Console.WriteLine($"exit={result.ExitCode} chunks={result.Chunks.Count} bytes={result.Output.Length} chars={text.Length}");
     Console.WriteLine("timeline (elapsed since session start):");
 
+    // One entry per read from the PTY, not per write by the child: the OS can join or split writes. GetTextChunks gives
+    // the same reads as text, with each read's time.
     var textChunks = result.GetTextChunks();
     for (var i = 0; i < textChunks.Count; i++)
     {
@@ -62,6 +77,7 @@ static async Task ObserveStaggeredOutputAsync()
         Console.WriteLine($"session span: {last.Time.TotalSeconds:F3}s");
     }
 
+    // result.Output holds every byte; result.Chunks splits the same bytes into reads, in order and with no gaps.
     var mergedOffset = 0;
     foreach (var chunk in result.Chunks)
     {
@@ -99,14 +115,17 @@ static async Task ObserveStdinPipelineAsync()
         {
             Completion = new PtyCompleteOptions
             {
-                Input = CreateStdinPipelineInput(),
+                // Written as typed input once the child starts, then followed by end of input (SendEofAfterInput
+                // defaults to true), so the child's read of stdin ends.
+                Input = $"line 3{Enter}line 1{Enter}line 2{Enter}",
                 ExitTimeout = TimeSpan.FromSeconds(15),
             },
         });
 
     Console.WriteLine($"exit={result.ExitCode}");
-    Console.WriteLine("merged output:");
-    Console.WriteLine(result.GetTextString().TrimEnd());
+    // Plain text: written raw, the PTY's terminal sequences (such as ConPTY's screen clear) would act on this console.
+    Console.WriteLine("merged output (plain):");
+    Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText).TrimEnd());
 
     Console.WriteLine("chunk boundaries (useful when rebuilding a consumer timeline):");
     var cursor = TimeSpan.Zero;
@@ -157,7 +176,8 @@ static PtyStartInfo CreateStaggeredStartInfo()
             Arguments =
             [
                 "/c",
-                "echo alpha& timeout /t 1 /nobreak >nul & echo beta& timeout /t 1 /nobreak >nul & echo gamma",
+                // Full path: a bare `timeout` can find another program first on PATH, such as Git's GNU tools.
+                @"echo alpha& %SystemRoot%\System32\timeout.exe /t 1 /nobreak >nul & echo beta& %SystemRoot%\System32\timeout.exe /t 1 /nobreak >nul & echo gamma",
             ],
             Size = new PtySize(80, 24),
         };
@@ -175,6 +195,7 @@ static PtyStartInfo CreateStaggeredStartInfo()
     };
 }
 
+/// <summary>A child that sorts its stdin, which ends only at end of input, then prints a marker.</summary>
 static PtyStartInfo CreateStdinPipelineStartInfo()
 {
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -183,7 +204,8 @@ static PtyStartInfo CreateStdinPipelineStartInfo()
         return new PtyStartInfo
         {
             FileName = cmd,
-            Arguments = ["/c", "find /v \"\" >nul & echo minipty-stdin-pipeline"],
+            // Full path: a bare `sort` can find another program first on PATH, such as Git's GNU tools.
+            Arguments = ["/c", @"%SystemRoot%\System32\sort.exe & echo minipty-stdin-pipeline"],
             Size = new PtySize(80, 24),
         };
     }
@@ -191,12 +213,7 @@ static PtyStartInfo CreateStdinPipelineStartInfo()
     return new PtyStartInfo
     {
         FileName = "/bin/sh",
-        Arguments = ["-c", "cat >/dev/null; printf 'minipty-stdin-pipeline\\n'"],
+        Arguments = ["-c", "sort; printf 'minipty-stdin-pipeline\\n'"],
         Size = new PtySize(80, 24),
     };
 }
-
-static string CreateStdinPipelineInput() =>
-    RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-        ? "line 3\r\nline 1\r\nline 2\r\n"
-        : "line 3\nline 1\nline 2\n";

@@ -34,6 +34,8 @@ Console.CancelKeyPress += (_, eventArgs) =>
 
 try
 {
+    // stdout carries only frames from here on; write diagnostics to stderr. The bridge returns after the exit frame,
+    // which follows the last output. When the extension closes stdin, the bridge ends the shell.
     await using var input = Console.OpenStandardInput();
     await using var output = Console.OpenStandardOutput();
     var status = await PtyStdioBridge.RunAsync(
@@ -41,6 +43,8 @@ try
         input,
         output,
         cancellationToken: cancellation.Token);
+    // node-pty's convention, which the exit frame uses too: a child ended by a signal reports 0. (status.ExitCode keeps
+    // MiniPty's 128 + signal.)
     return status.NodePtyExitCode;
 }
 catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
@@ -53,8 +57,18 @@ catch (Exception exception)
     return 1;
 }
 
+/// <summary>The program the terminal runs: the command line given to the helper, or the user's shell.</summary>
+/// <remarks>
+/// VS Code's terminal is xterm.js. <c>TerminalName</c> sets <c>TERM</c> to what it implements on Unix, instead of the
+/// <c>TERM</c> the helper inherited from VS Code's environment, and <c>COLORTERM</c> tells programs it draws 24-bit color,
+/// as VS Code sets for its own terminals. Windows: VS Code runs its own terminals on the out-of-band ConPTY; to match it,
+/// reference <c>Microsoft.Windows.Console.ConPTY</c> and set <c>ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()</c>.
+/// This sample stays on the in-box ConPTY so that it publishes as one file.
+/// </remarks>
 static PtyStartInfo CreateStartInfo(string[] arguments)
 {
+    var environment = new Dictionary<string, string?> { ["COLORTERM"] = "truecolor" };
+
     if (arguments.Length > 0)
     {
         return new PtyStartInfo
@@ -62,6 +76,7 @@ static PtyStartInfo CreateStartInfo(string[] arguments)
             FileName = arguments[0],
             Arguments = arguments[1..],
             TerminalName = "xterm-256color",
+            Environment = environment,
         };
     }
 
@@ -70,6 +85,7 @@ static PtyStartInfo CreateStartInfo(string[] arguments)
         return new PtyStartInfo
         {
             FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+            Environment = environment,
         };
     }
 
@@ -77,6 +93,7 @@ static PtyStartInfo CreateStartInfo(string[] arguments)
     {
         FileName = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/sh",
         TerminalName = "xterm-256color",
+        Environment = environment,
     };
 }
 

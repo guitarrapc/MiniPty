@@ -144,7 +144,7 @@ await session.WriteInputAsync("echo hello\r");
 await session.WriteInputAsync("exit\r");
 session.Resize(new PtySize(100, 40));
 
-var stdout = Console.OpenStandardOutput();
+using var stdout = Console.OpenStandardOutput();
 await foreach (var chunk in session.ReadOutputAsync())
     await stdout.WriteAsync(chunk.Data);
 
@@ -201,7 +201,7 @@ await output;
 
 static async Task CopyOutputAsync(PtySession session)
 {
-    var stdout = Console.OpenStandardOutput();
+    using var stdout = Console.OpenStandardOutput();
     await foreach (var chunk in session.ReadOutputAsync())
     {
         await stdout.WriteAsync(chunk.Data);

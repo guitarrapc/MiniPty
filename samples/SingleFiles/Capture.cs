@@ -7,6 +7,13 @@
 #:project ../../src/MiniPty/MiniPty.csproj
 #:project ../../src/MiniPty.Capture/MiniPty.Capture.csproj
 
+// Capture: the smallest use of MiniPty.Capture, and a check that it works on this machine.
+//
+//   dotnet samples/SingleFiles/Capture.cs
+//
+// PtyCapture.RunAsync runs a command in a PTY and returns its exit code, its output, and every read with its time.
+// Observe.cs shows the timeline and stdin.
+
 using System.Runtime.InteropServices;
 using MiniPty;
 using MiniPty.Capture;
@@ -19,6 +26,7 @@ if (!Pty.IsSupported)
 
 try
 {
+    // Waits for the exit and returns once the output has been read to the end.
     var result = await PtyCapture.RunAsync(CreateEchoStartInfo());
     if (result.ExitCode != 0)
     {

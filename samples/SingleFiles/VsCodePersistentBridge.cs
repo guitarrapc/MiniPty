@@ -52,7 +52,15 @@ try
         shutdown.Cancel();
     };
 
-    await using var manager = new PtyWebSocketSessionManager();
+    // One manager owns every session, independently of the WebSockets that come and go; disposing it ends them all.
+    // These are the defaults, spelled out: a session nobody is connected to is killed after 5 minutes, at most 64 run
+    // at once, and each keeps the last 512 KiB of output to replay to a client that reconnects.
+    await using var manager = new PtyWebSocketSessionManager(new PtyWebSocketSessionManagerOptions
+    {
+        DetachedSessionTimeout = TimeSpan.FromMinutes(5),
+        MaxSessions = 64,
+        ReplayBufferSize = 512 * 1024,
+    });
     using var listener = StartListener(port);
     Console.Error.WriteLine($"MiniPty persistent bridge listening on http://127.0.0.1:{port}/ (Ctrl+C to stop)");
     await ServeAsync(listener, manager, accessToken!, shutdown.Token);
@@ -171,8 +179,10 @@ static async Task HandleRequestAsync(
                 return;
             }
 
+            // Starts the shell now; it runs whether or not a client is connected. The session token is returned only
+            // here, once: hand it to the client over this authenticated channel, and never log it or put it in a URL.
             var credentials = manager.CreateSession(CreateShellStartInfo());
-            var json = $$"""{"sessionId":"{{credentials.SessionId:D}}","authenticationToken":"{{credentials.AuthenticationToken}}"}""";
+            var json =$$"""{"sessionId":"{{credentials.SessionId:D}}","authenticationToken":"{{credentials.AuthenticationToken}}"}""";
             await WriteTextAsync(context.Response, HttpStatusCode.Created, json, "application/json", cancellationToken);
             return;
         }
@@ -223,6 +233,8 @@ static async Task HandleRequestAsync(
         using var webSocket = webSocketContext.WebSocket;
         try
         {
+            // Replays the output after `offset` (the client's last acknowledged byte), then streams live output until
+            // the client disconnects (null: the shell keeps running) or the shell exits (its status).
             var status = await manager.ConnectAsync(sessionId, sessionToken, offset, webSocket, cancellationToken);
             if (status is not null)
                 await AwaitPeerCloseAsync(webSocket);
@@ -259,14 +271,17 @@ static async Task HandleRequestAsync(
     }
 }
 
+/// <summary>The shell for a new session. See VsCodeTerminalHelper.cs for why TERM and COLORTERM are set.</summary>
 static PtyStartInfo CreateShellStartInfo()
 {
+    var environment = new Dictionary<string, string?> { ["COLORTERM"] = "truecolor" };
+
     if (OperatingSystem.IsWindows())
     {
         return new PtyStartInfo
         {
             FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-            TerminalName = "xterm-256color",
+            Environment = environment,
         };
     }
 
@@ -275,6 +290,7 @@ static PtyStartInfo CreateShellStartInfo()
         FileName = Environment.GetEnvironmentVariable("SHELL") ?? "/bin/sh",
         Arguments = ["-i"],
         TerminalName = "xterm-256color",
+        Environment = environment,
     };
 }
 

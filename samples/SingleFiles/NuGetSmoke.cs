@@ -1,3 +1,8 @@
+// NuGetSmoke: checks the packed NuGet packages, not the sources. It has no #: directives on purpose:
+// scripts/run-nuget-smoke.sh compiles it in a temporary project that references the packages in a local feed, then
+// runs it under `dotnet run` and, given a RID, after a publish. On Windows it also checks that the package's build
+// targets staged OpenConsole.exe beside conpty.dll.
+
 using System.Runtime.InteropServices;
 using MiniPty;
 using MiniPty.Capture;

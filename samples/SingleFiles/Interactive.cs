@@ -6,11 +6,20 @@
 #:property PublishAot=true
 #:project ../../src/MiniPty/MiniPty.csproj
 
+// Interactive: drive a running program through a PTY, the way a test harness or an "expect" script does.
+//
+//   dotnet samples/SingleFiles/Interactive.cs
+//
+// One reader takes the session's output for its whole life. The code waits until the child prints a prompt, answers
+// it, resizes the terminal while the child runs, and lets the child exit on its own.
+
+using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Text;
 using MiniPty;
 
-const int SessionTimeoutSeconds = 30;
+// The Enter key: a PTY treats CR as Enter on every platform (see Session.cs).
+const string Enter = "\r";
 
 if (!Pty.IsSupported)
 {
@@ -20,8 +29,8 @@ if (!Pty.IsSupported)
 
 try
 {
-    await RunPersistentCommandLoopAsync();
-    Console.Error.WriteLine("ok Interactive sample: ReadOutputAsync command loop, Resize, natural exit");
+    await RunConversationAsync();
+    Console.Error.WriteLine("ok Interactive sample: ReadOutputAsync reader, prompted writes, Resize, natural exit");
     return 0;
 }
 catch (Exception ex)
@@ -30,166 +39,59 @@ catch (Exception ex)
     return 1;
 }
 
-static async Task RunPersistentCommandLoopAsync()
+static async Task RunConversationAsync()
 {
-    Console.Error.WriteLine("=== Persistent ReadOutputAsync command loop ===");
+    Console.Error.WriteLine("=== Prompted conversation over ReadOutputAsync ===");
 
-    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(SessionTimeoutSeconds));
+    // One deadline for the whole conversation, so a child that never prints what we wait for cannot hang the sample.
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
     await using var session = Pty.Start(CreateInteractiveStartInfo());
 
-    var output = new StringBuilder();
-    var outputLock = new object();
-    var pumpTask = PumpReadOutputAsync(session, output, outputLock, cts.Token);
+    // Start the reader before the first write and keep it running to the end. It is the session's only output
+    // consumer; the writes below happen while it reads.
+    var output = new OutputLog();
+    var reader = output.ReadAllAsync(session, cts.Token);
 
-    var newline = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "\r\n" : "\n";
+    await output.WaitForAsync("ready", cts.Token);
+    await session.WriteInputAsync("alpha" + Enter, cancellationToken: cts.Token);
+    await output.WaitForAsync("first:alpha", cts.Token);
 
-    await WaitForMarkerAsync(output, outputLock, pumpTask, "ready", cts.Token);
-    Console.Error.WriteLine("marker ready");
-
-    await session.WriteInputAsync("alpha" + newline, cancellationToken: cts.Token);
-
-    await WaitForMarkerAsync(output, outputLock, pumpTask, "first:alpha", cts.Token);
-    Console.Error.WriteLine("marker first:alpha");
-
+    // Resize while the child runs. On Unix the child's `stty size` below reports the new size.
     session.Resize(new PtySize(100, 28));
     Console.Error.WriteLine($"parent reports {session.Size.Columns}x{session.Size.Rows}");
 
-    await session.WriteInputAsync("beta" + newline, cancellationToken: cts.Token);
-
+    await session.WriteInputAsync("beta" + Enter, cancellationToken: cts.Token);
     var finalMarker = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
         ? "second:beta"
         : "second:beta size:28 100";
-    await WaitForMarkerAsync(output, outputLock, pumpTask, finalMarker, cts.Token);
-    Console.Error.WriteLine($"marker {finalMarker}");
+    await output.WaitForAsync(finalMarker, cts.Token);
 
-    await pumpTask.ConfigureAwait(false);
-    var exitCode = (await session.WaitForExitAsync(cts.Token).ConfigureAwait(false)).ExitCode;
+    // The reader ends at end of output, which follows the child's exit.
+    await reader;
+    var status = await session.WaitForExitAsync(cts.Token);
 
-    var text = GetOutputText(output, outputLock);
-    Console.Error.WriteLine($"pid={session.ProcessId} exit={exitCode}");
+    var text = output.Text;
+    Console.Error.WriteLine($"pid={session.ProcessId} exit={status.ExitCode}");
+    // On Windows, ConPTY repaints the screen after a resize, so the earlier lines appear a second time. A terminal
+    // frontend draws that repaint over the same cells; as plain text it reads as a repeat.
     Console.Error.WriteLine("child output (plain):");
     Console.Error.WriteLine(PtyOutput.ToDisplayText(text, PtyOutputDisplayMode.PlainText).TrimEnd());
 
-    if (exitCode != 0)
-        throw new InvalidOperationException($"interactive child exited with {exitCode}");
-
-    if (!text.Contains("first:alpha", StringComparison.Ordinal))
-        throw new InvalidOperationException("expected marker missing: first:alpha");
-
-    if (!text.Contains(finalMarker, StringComparison.Ordinal))
-        throw new InvalidOperationException($"expected marker missing: {finalMarker}");
+    if (status.ExitCode != 0)
+        throw new InvalidOperationException($"interactive child exited with {status.ExitCode}");
 }
 
-static async Task PumpReadOutputAsync(
-    PtySession session,
-    StringBuilder sink,
-    object outputLock,
-    CancellationToken cancellationToken)
-{
-    await foreach (var chunk in session.ReadOutputAsync(cancellationToken).ConfigureAwait(false))
-    {
-        var text = Encoding.UTF8.GetString(chunk.Data.Span);
-        lock (outputLock)
-            sink.Append(text);
-    }
-}
-
-static async Task WaitForMarkerAsync(
-    StringBuilder output,
-    object outputLock,
-    Task pumpTask,
-    string marker,
-    CancellationToken cancellationToken)
-{
-    try
-    {
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (ContainsMarker(output, outputLock, marker))
-                return;
-
-            if (pumpTask.IsCompleted)
-            {
-                if (pumpTask.IsFaulted)
-                    await pumpTask.ConfigureAwait(false);
-
-                if (pumpTask.IsCanceled)
-                    throw new OperationCanceledException(cancellationToken);
-
-                var text = GetOutputText(output, outputLock);
-                throw new InvalidOperationException(
-                    $"PTY output ended before marker '{marker}' appeared. " +
-                    $"Output so far ({text.Length} chars): {EscapeForDisplay(text)}");
-            }
-
-            await Task.Delay(10, cancellationToken).ConfigureAwait(false);
-        }
-    }
-    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-    {
-        var text = GetOutputText(output, outputLock);
-        throw new InvalidOperationException(
-            $"Timed out after {SessionTimeoutSeconds}s waiting for PTY marker '{marker}'. " +
-            $"Output so far ({text.Length} chars): {EscapeForDisplay(text)}");
-    }
-}
-
-static bool ContainsMarker(StringBuilder output, object outputLock, string marker)
-{
-    lock (outputLock)
-    {
-        var maxStart = output.Length - marker.Length;
-        if (maxStart < 0)
-            return false;
-
-        for (var i = 0; i <= maxStart; i++)
-        {
-            var j = 0;
-            for (; j < marker.Length; j++)
-            {
-                if (output[i + j] != marker[j])
-                    break;
-            }
-
-            if (j == marker.Length)
-                return true;
-        }
-
-        return false;
-    }
-}
-
-static string GetOutputText(StringBuilder output, object outputLock)
-{
-    lock (outputLock)
-        return output.ToString();
-}
-
-static string EscapeForDisplay(string text)
-{
-    var builder = new StringBuilder(text.Length);
-    foreach (var ch in text)
-    {
-        builder.Append(ch switch
-        {
-            '\r' => "\\r",
-            '\n' => "\\n",
-            '\t' => "\\t",
-            < ' ' or > '~' => $"\\u{(int)ch:X4}",
-            _ => ch.ToString(),
-        });
-    }
-
-    return builder.ToString();
-}
-
+/// <summary>
+/// A child that prints "ready", reads two lines, and answers each. The Unix child also prints its terminal size, which
+/// shows the resize.
+/// </summary>
 static PtyStartInfo CreateInteractiveStartInfo()
 {
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
-        if (!TryResolveWindowsPowerShell(out var powershell))
+        var powershell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+        if (!File.Exists(powershell))
             throw new InvalidOperationException("Windows PowerShell is required for the Interactive sample.");
 
         return new PtyStartInfo
@@ -218,12 +120,124 @@ static PtyStartInfo CreateInteractiveStartInfo()
     };
 }
 
-static bool TryResolveWindowsPowerShell(out string path)
+/// <summary>
+/// The session's output as text, and a way to wait until a marker appears in it. One task reads; any number of
+/// waiters are woken each time new output arrives, so nothing polls.
+/// </summary>
+/// <remarks>
+/// The child's own echo of what we type also lands here, so a marker such as "first:alpha" is chosen to be text only
+/// the child's answer contains. Searching the whole text on every chunk is fine for a short conversation.
+/// </remarks>
+sealed class OutputLog
 {
-    path = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.System),
-        "WindowsPowerShell",
-        "v1.0",
-        "powershell.exe");
-    return File.Exists(path);
+    private readonly Lock _gate = new();
+    private readonly StringBuilder _text = new();
+    // A chunk can end in the middle of a UTF-8 character. The decoder keeps those bytes until the next chunk.
+    private readonly Decoder _decoder = Encoding.UTF8.GetDecoder();
+    private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private bool _ended;
+
+    public string Text
+    {
+        get
+        {
+            lock (_gate)
+                return _text.ToString();
+        }
+    }
+
+    /// <summary>Reads the session's output until it ends, appending it as text.</summary>
+    public async Task ReadAllAsync(PtySession session, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var chunk in session.ReadOutputAsync(cancellationToken))
+                Append(chunk.Data.Span); // chunk.Data is valid only until the next iteration: decode it now.
+        }
+        finally
+        {
+            Signal(ended: true);
+        }
+    }
+
+    /// <summary>Completes once <paramref name="marker"/> has appeared in the output.</summary>
+    public async Task WaitForAsync(string marker, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            Task changed;
+            lock (_gate)
+            {
+                if (_text.ToString().Contains(marker, StringComparison.Ordinal))
+                {
+                    Console.Error.WriteLine($"marker {marker}");
+                    return;
+                }
+
+                if (_ended)
+                    throw new InvalidOperationException($"Output ended before '{marker}' appeared. Output: {Escape(_text.ToString())}");
+
+                changed = _changed.Task;
+            }
+
+            try
+            {
+                await changed.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException($"Timed out waiting for '{marker}'. Output so far: {Escape(Text)}");
+            }
+        }
+    }
+
+    private void Append(ReadOnlySpan<byte> bytes)
+    {
+        var chars = ArrayPool<char>.Shared.Rent(Encoding.UTF8.GetMaxCharCount(bytes.Length));
+        try
+        {
+            var count = _decoder.GetChars(bytes, chars, flush: false);
+            lock (_gate)
+                _text.Append(chars, 0, count);
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(chars);
+        }
+
+        Signal(ended: false);
+    }
+
+    /// <summary>Wakes every waiter, and gives later waiters a fresh signal unless output has ended.</summary>
+    private void Signal(bool ended)
+    {
+        TaskCompletionSource changed;
+        lock (_gate)
+        {
+            _ended |= ended;
+            changed = _changed;
+            if (!_ended)
+                _changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        changed.TrySetResult();
+    }
+
+    private static string Escape(string text)
+    {
+        var builder = new StringBuilder(text.Length);
+        foreach (var ch in text)
+        {
+            builder.Append(ch switch
+            {
+                '\r' => "\\r",
+                '\n' => "\\n",
+                '\t' => "\\t",
+                < ' ' or > '~' => $"\\u{(int)ch:X4}",
+                _ => ch.ToString(),
+            });
+        }
+
+        return builder.ToString();
+    }
 }

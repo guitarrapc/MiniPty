@@ -7,6 +7,10 @@
 #:package MiniPty@1.4.0
 #:package MiniPty.Console@1.4.0
 
+// The MiniPty.Console section of README.md's Quick start, as a runnable file (from an interactive terminal):
+//   dotnet samples/SingleFiles/README_MiniPty.Console.cs
+// It uses the published NuGet packages, as an application that installs them does. Keep it in step with the README.
+
 using MiniPty;
 using MiniPty.Console;
 
@@ -26,7 +30,7 @@ await output;
 
 static async Task CopyOutputAsync(PtySession session)
 {
-    var stdout = Console.OpenStandardOutput();
+    using var stdout = Console.OpenStandardOutput();
     await foreach (var chunk in session.ReadOutputAsync())
     {
         await stdout.WriteAsync(chunk.Data);

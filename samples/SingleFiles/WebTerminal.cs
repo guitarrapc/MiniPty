@@ -228,6 +228,10 @@ static async Task HandleRequestAsync(HttpListenerContext context, int port, stri
 
             var wsContext = await context.AcceptWebSocketAsync(LocalAccess.Protocol);
             Console.Error.WriteLine("terminal session started");
+            // The whole terminal backend: starts the shell, streams its output with flow control, applies the page's
+            // input and resizes, and sends an exit message after the last output. It returns when the shell exits, and
+            // ends the shell when the browser disconnects or the token is canceled. HttpListener has no per-request
+            // abort token; ASP.NET Core hosts pass HttpContext.RequestAborted (see WebTerminalScale.cs).
             var status = await PtyWebSocketBridge.RunAsync(
                 CreateShellStartInfo(),
                 wsContext.WebSocket,
@@ -291,16 +295,38 @@ static async Task SendBinaryAsync(ClientWebSocket socket, string text, Cancellat
 static async Task SendTextAsync(ClientWebSocket socket, string json, CancellationToken cancellationToken) =>
     await socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
 
+/// <summary>
+/// The shell for one browser connection. The size is a placeholder: the page sends its real size as soon as it connects.
+/// </summary>
+/// <remarks>
+/// Windows: this sample runs on the in-box ConPTY so that it publishes as one file. A production terminal on Windows
+/// should reference <c>Microsoft.Windows.Console.ConPTY</c> and set
+/// <c>ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()</c>: the in-box ConPTY withholds graphics, some terminal
+/// queries, and mouse tracking from some programs.
+/// </remarks>
 static PtyStartInfo CreateShellStartInfo()
 {
+    // xterm.js draws 24-bit color, and programs look at COLORTERM to decide whether to use it.
+    var environment = new Dictionary<string, string?> { ["COLORTERM"] = "truecolor" };
+
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
-        return new PtyStartInfo { FileName = cmd, Size = new PtySize(80, 24) };
+        return new PtyStartInfo { FileName = cmd, Size = new PtySize(80, 24), Environment = environment };
     }
 
     var shell = File.Exists("/bin/bash") ? "/bin/bash" : "/bin/sh";
-    return new PtyStartInfo { FileName = shell, Arguments = ["-i"], Size = new PtySize(80, 24) };
+    return new PtyStartInfo
+    {
+        FileName = shell,
+        Arguments = ["-i"],
+        Size = new PtySize(80, 24),
+        Environment = environment,
+        // TERM describes the frontend, xterm.js. Without this the shell would inherit the TERM of the terminal this
+        // server was started from (screen-256color under tmux, for example); MiniPty's xterm-256color default applies
+        // only when no TERM is set.
+        TerminalName = "xterm-256color",
+    };
 }
 
 /// <summary>

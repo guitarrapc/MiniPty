@@ -6,6 +6,9 @@
 #:property PublishAot=true
 #:package MiniPty@1.4.0
 
+// The MiniPty section of README.md's Quick start, as a runnable file: dotnet samples/SingleFiles/README_MiniPty.cs
+// It uses the published NuGet package, as an application that installs MiniPty does. Keep it in step with the README.
+
 using MiniPty;
 
 var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh";
@@ -23,7 +26,7 @@ await session.WriteInputAsync("echo hello\r");
 await session.WriteInputAsync("exit\r");
 session.Resize(new PtySize(100, 40));
 
-var stdout = Console.OpenStandardOutput();
+using var stdout = Console.OpenStandardOutput();
 await foreach (var chunk in session.ReadOutputAsync())
     await stdout.WriteAsync(chunk.Data);
 

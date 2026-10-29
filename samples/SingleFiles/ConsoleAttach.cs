@@ -7,7 +7,16 @@
 #:project ../../src/MiniPty/MiniPty.csproj
 #:project ../../src/MiniPty.Console/MiniPty.Console.csproj
 
+// ConsoleAttach: run a shell inside a PTY and hand it this terminal, with MiniPty.Console.
+//
+//   dotnet samples/SingleFiles/ConsoleAttach.cs     (from an interactive terminal; type `exit` to end)
+//
+// PtyConsoleInput.Attach forwards the keyboard (and mouse reports and replies to terminal queries) to the PTY and keeps
+// the PTY at this window's size. Copying the PTY's output to stdout stays the application's job. For full-screen
+// programs, see samples/TuiDemo.
+
 using System.Runtime.InteropServices;
+using System.Text;
 using MiniPty;
 using MiniPty.Console;
 
@@ -26,8 +35,13 @@ if (Console.IsInputRedirected || Console.IsOutputRedirected)
     return 0;
 }
 
+// PTY output is UTF-8. A Windows console with a legacy output code page would misdecode it (Japanese text, for
+// example), so write UTF-8 while the shell runs and restore the console afterwards. MiniPty.Console sets the input side
+// itself while attached; the output side belongs to whoever writes the output.
+var outputEncoding = Console.OutputEncoding;
 try
 {
+    Console.OutputEncoding = Encoding.UTF8;
     return RunInteractiveShell();
 }
 catch (Exception ex)
@@ -35,12 +49,17 @@ catch (Exception ex)
     Console.Error.WriteLine($"{ex.GetType().Name}: {ex.Message}");
     return 1;
 }
+finally
+{
+    Console.OutputEncoding = outputEncoding;
+}
 
 static int RunInteractiveShell()
 {
     using var session = Pty.Start(CreateShellStartInfo());
 
-    // Status on stderr before Attach makes host stdout raw (Unix OPOST off) and before the PTY output pump.
+    // Write status before Attach. Once attached, Unix stdout is raw (OPOST off: \n no longer returns to the start of the
+    // line), and the shell's own output starts arriving.
     Console.Error.WriteLine($"Starting PTY shell (pid {session.ProcessId})...");
     Console.Error.WriteLine("Keyboard input is forwarded to the child; PTY output is written to this terminal.");
     Console.Error.WriteLine("Exit the shell (for example type exit) to end the sample.");
@@ -64,9 +83,11 @@ static int RunInteractiveShell()
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
 
+        // Keys are forwarded in the background from Attach on; this only blocks until the child exits.
         consoleInput.PumpInputUntil(attachCts.Token);
 
         exitCode = exitTask.IsCompletedSuccessfully ? exitTask.Result.ExitCode : session.ExitCode ?? -1;
+        // Drain the shell's last output before detaching, so it reaches the terminal before its modes are restored.
         pumpTask.GetAwaiter().GetResult();
     }
 
@@ -95,6 +116,8 @@ static async Task PumpOutputToHostAsync(PtySession session)
     var stdout = Console.OpenStandardOutput();
 #pragma warning restore CA2000
 
+    // The session's only output reader. The bytes go to the terminal unchanged: it interprets the escape sequences and
+    // reassembles a UTF-8 character split across two chunks.
     await foreach (var chunk in session.ReadOutputAsync().ConfigureAwait(false))
     {
         await stdout.WriteAsync(chunk.Data, CancellationToken.None).ConfigureAwait(false);
@@ -113,7 +136,7 @@ static PtyStartInfo CreateShellStartInfo()
         {
             FileName = powershell,
             Arguments = ["-NoLogo", "-NoProfile"],
-            Size = new PtySize(80, 24),
+            Size = new PtySize(80, 24), // replaced by this window's size when MiniPty.Console attaches
             // Keep the host's existing screen instead of letting ConPTY clear it. The host terminal answers
             // ConPTY's cursor position query, and the attached input pump forwards that answer to the PTY.
             InheritCursor = true,
