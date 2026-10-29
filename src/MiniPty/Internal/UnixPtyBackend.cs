@@ -289,6 +289,13 @@ internal static partial class UnixPtyBackend
         private const int ConsumerWaitMs = 1;
         // macOS: the consumer's own kqueue with the master's read filter, opened on its first wait, closed with the master.
         private int _consumerWait = -1;
+        // macOS: whether the child is streaming output, so a consumer that finds the master empty waits for it on its own
+        // thread (TryReadInline). Set by a read that took the whole 1 KiB the master holds, which says the child was held up
+        // and has more; cleared by a wait that brought nothing. Written by whichever thread read, under the producer's turn,
+        // and by the consumer after its wait.
+        private bool _outputStreams;
+        // What a macOS master holds (xnu's TTYCLSIZE): a read of this many bytes emptied a full master.
+        private const int MacOsMasterCapacity = 1024;
 
         /// <summary>Waits a consumer made on its own thread for a master's output (macOS), for tests of where it waits.</summary>
         internal static long ConsumerWaits;
@@ -818,10 +825,15 @@ internal static partial class UnixPtyBackend
         /// consumer, which is what cost macOS floods their speed (about 4 ms per MiB on an 8-core M2, and the slow runs on
         /// CI's 3-vCPU runner). So on macOS a consumer that reads nothing waits for the master on its own thread, on a
         /// kqueue of the session's own, for up to <see cref="ConsumerWaitMs"/>: the child's next write wakes it, and it
-        /// reads again. Only a wait that times out arms the loop and parks. A consumer on a thread with a scheduling
-        /// context (a UI thread) never waits here, as it never blocks. See <c>.github/docs/plans/plan_macos_flood.md</c>
-        /// for the measurements. Windows does not read on the consumer's thread (<see cref="WindowsOutputDriver"/>), and
-        /// FreeBSD reads inline as Linux does, unmeasured.
+        /// reads again. Only a wait that times out arms the loop and parks. It waits only while the child streams
+        /// (<see cref="_outputStreams"/>): a read that took the whole kilobyte the master holds says the child was held up
+        /// and has more, and a wait that brings nothing says it has stopped. A flood's reads on the loop fill the master,
+        /// and its reads on this thread, which wake on the first bytes, are often short but their waits pay off; a
+        /// keystroke's echo or a line of a log never fills it, and waiting after those would hold a thread-pool thread
+        /// for a millisecond per event that never comes. A consumer on a thread with a
+        /// scheduling context (a UI thread) never waits here, as it never blocks. See
+        /// <c>.github/docs/plans/plan_macos_flood.md</c> for the measurements. Windows does not read on the consumer's
+        /// thread (<see cref="WindowsOutputDriver"/>), and FreeBSD reads inline as Linux does, unmeasured.
         /// </para>
         /// </remarks>
         bool IPtyOutputDriver.TryReadInline(PtyOutputPump pump)
@@ -830,8 +842,15 @@ internal static partial class UnixPtyBackend
                 return false;
 
             var published = TryReadInlineOnce(pump);
-            if (!published && OperatingSystem.IsMacOS() && !PtyConsumerYield.HasSchedulingContext() && WaitForOutputOnConsumer())
-                published = TryReadInlineOnce(pump);
+            if (!published && OperatingSystem.IsMacOS() && Volatile.Read(ref _outputStreams) && !PtyConsumerYield.HasSchedulingContext())
+            {
+                if (WaitForOutputOnConsumer())
+                    published = TryReadInlineOnce(pump);
+
+                // The wait timed out, or reported end of file: the child has stopped, until a full read says otherwise.
+                if (!published)
+                    Volatile.Write(ref _outputStreams, false);
+            }
 
             if (published)
             {
@@ -994,6 +1013,8 @@ internal static partial class UnixPtyBackend
                     pump.OnOutputRead();
                     pump.Publish(read, timestamp);
                     published = true;
+                    if (read >= MacOsMasterCapacity)
+                        _outputStreams = true;
                     // A short read took what the terminal held; another would most likely find nothing.
                     if (read < span.Length)
                         break;
@@ -1250,6 +1271,8 @@ internal static partial class UnixPtyBackend
                     var timestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                     pump.OnOutputRead();
                     pump.Publish(read, timestamp);
+                    if (read >= MacOsMasterCapacity)
+                        _outputStreams = true;
                     // A macOS master hands out at most the 1 KiB it holds, so a short read emptied it, and a read after it
                     // would find nothing: one system call per chunk fewer. What the child writes before the next arm is
                     // reported by the next wait. Linux hands out what it has in 4 KiB reads, and a short read there can

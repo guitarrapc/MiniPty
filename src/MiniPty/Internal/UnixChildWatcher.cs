@@ -274,9 +274,10 @@ internal static partial class UnixPtyBackend
             _ = minipty_watch_modify(s_watchFd, master, MasterToken(slot, generation), interest);
 
         /// <summary>
-        /// <see cref="SetInterest"/> from this thread's pass: the arm is kept and applied by the next wait, in the same
-        /// system call with kqueue (<c>minipty_watch_wait_arm</c>), so a pass that arms a master costs one call instead
-        /// of two. A later arm of the same slot in the pass replaces the earlier one. On this thread only.
+        /// <see cref="SetInterest"/> from this thread's pass: with kqueue the arm is kept and applied by the next wait, in
+        /// the same system call (<c>minipty_watch_wait_arm</c>), so a pass that arms a master costs one call instead of
+        /// two; a later arm of the same slot in the pass replaces the earlier one. With epoll it is applied at once, as a
+        /// consumer's is. On this thread only.
         /// </summary>
         /// <remarks>
         /// Deferring is safe because every arm of this thread is followed by its wait before anything else can need it,
@@ -286,6 +287,13 @@ internal static partial class UnixPtyBackend
         /// </remarks>
         internal static void SetInterestOnLoop(int master, int slot, int generation, int interest)
         {
+            // epoll cannot take a change with its wait, so deferring would only delay the arm to the end of the pass.
+            if (OperatingSystem.IsLinux())
+            {
+                SetInterest(master, slot, generation, interest);
+                return;
+            }
+
             var count = s_armCount;
             for (var i = 0; i < count; i++)
             {

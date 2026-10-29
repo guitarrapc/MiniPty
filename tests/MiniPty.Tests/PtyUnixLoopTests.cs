@@ -567,6 +567,28 @@ public sealed class PtyUnixLoopTests
     }
 
     /// <summary>
+    /// On macOS a consumer waits for the master on its own thread only after a read that took the whole kilobyte the master
+    /// holds, which says the child was held up and has more. After a short read, a line of output at a time, it parks at
+    /// once: a wait there would hold a thread-pool thread for a millisecond per line, for output that is not coming.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task OnMacOSAConsumerDoesNotWaitAfterAShortRead()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return;
+
+        await using var session = Pty.Start(Shell("for i in 1 2 3 4 5 6 7 8; do echo line$i; sleep 0.01; done"));
+        var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
+        var lines = 0;
+        await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
+            lines += chunk.Data.Span.Count((byte)'\n');
+
+        await Assert.That(lines).IsEqualTo(8);
+        await Assert.That(UnixPtyBackend.ConsumerWaitsForTests - waitsBefore).IsEqualTo(0L);
+    }
+
+    /// <summary>
     /// A consumer on a thread with a scheduling context, a UI thread, never waits for the master in the kernel on macOS:
     /// it reads what the master holds and otherwise parks, as on Linux, so the thread is never blocked. Judged by the
     /// waits consumers made while this one read a flood.

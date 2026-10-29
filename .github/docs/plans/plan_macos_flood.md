@@ -173,6 +173,22 @@ Three runs of the benchmark workflow on commit `54d7c89`, started together on 20
 - **Linux** reads as before within three runs: `AllCpus` 1 MiB at 0.90, 0.95 and 1.04 times Porta.Pty (median 1.03 over the earlier plan's nine runs) and `TwoCpus` at 1.08, 1.21 and 1.10 (1.11 before), with 7–26 work items and 4.1–5.2 ms of process CPU per flood as before. The only Linux change is that the loop's arms are applied by its next wait rather than at once; if `AllCpus` stays below 1.0 over more runs, that is the first thing to measure.
 - **Windows** code is untouched; its out-of-band `TwoCpus` floods trailed Porta.Pty in all three runs (0.66–0.81), as the in-box ones did before, where the earlier plan had them level or ahead locally. Runner spread is the first suspect (one run's `MiniPty` 64 KiB in-box case had a 40 ms standard deviation on a 10 ms mean), and it is outside this plan.
 
+## Refinements after review (2026-10-30)
+
+A review of the change for side effects found two costs worth removing, measured with the same harness against the committed version (`54d7c89`):
+
+- **A millisecond of a thread-pool thread per sparse output event.** After any chunk, the consumer's next read found the master empty and waited the whole millisecond before it parked: for a keystroke's echo or a line of a log, output that was not coming. Not CPU, so the earlier figures did not show it, but on a host with thousands of sessions each writing a line every few milliseconds it would have held a thread per session in waits. The consumer now waits only while the child streams (`_outputStreams`): a read that took the whole kilobyte the master holds sets it, since the child was held up and has more, and a wait that brings nothing clears it. The first version of this rule, "wait only if the last read was a full kilobyte", lost a third of the flood (150–170 MiB/s, 42–47 hand-offs per MiB): the consumer's reads wake on the first bytes the child queues and are often short, 461 bytes on average in the probe, even though its waits pay off. Keeping the flag until a wait fails keeps the flood whole.
+
+| | 1 MiB flood, MiB/s | Keystrokes back to back, P50 / waits per key | Keystrokes 3 ms apart, P50 / waits per key / loop passes per key |
+|---|---|---|---|
+| `54d7c89` (always waits) | 241–302 | 12 μs / 1.00 | 41 μs / 0.99 / 3.4 |
+| Refined | 244–246 | 12 μs / 1.00 | 48 μs / 0.05 / 1.2 |
+
+  Back-to-back keystrokes still wait, and should: each wait brings the next echo within microseconds, so the stream of echoes is read without a hand-off. Three milliseconds apart, the wait would time out every time, and it no longer happens.
+- **Linux deferred its arms for nothing.** `epoll_ctl` cannot ride on `epoll_wait`, so deferring an arm to the wait saved no call and only moved it to the end of the pass. Linux arms at once again, as before this plan; kqueue keeps the deferral. The CI Linux figures above (0.90–1.04 on `AllCpus`) were taken with the deferral and are the first thing to re-read on the next run.
+
+Tests: `OnMacOSAConsumerDoesNotWaitAfterAShortRead` checks that a child writing a line every 10 ms never has its consumer wait in the kernel.
+
 ## Risks
 
 - **A pool thread waits in the kernel for up to the timeout.** During a flood it is the consumer's own thread, busy anyway; after a flood's last chunk it waits one timeout, then parks. Many sessions flooding at once each hold a pool thread while they flood, as they hold it to consume. The timeout bounds every wait, and the pool's injection covers the rest. Document it in core_session.md.
