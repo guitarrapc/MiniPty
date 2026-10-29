@@ -832,7 +832,7 @@ internal static partial class UnixPtyBackend
         /// keystroke's echo or a line of a log never fills it, and waiting after those would hold a thread-pool thread
         /// for a millisecond per event that never comes. A consumer on a thread with a
         /// scheduling context (a UI thread) never waits here, as it never blocks. See
-        /// <c>.github/docs/plans/plan_macos_flood.md</c> for the measurements. Windows does not read on the consumer's
+        /// the lessons in <c>.github/docs/specs/platform_support.md</c> for the measurements. Windows does not read on the consumer's
         /// thread (<see cref="WindowsOutputDriver"/>), and FreeBSD reads inline as Linux does, unmeasured.
         /// </para>
         /// </remarks>
@@ -892,7 +892,7 @@ internal static partial class UnixPtyBackend
         /// <remarks>
         /// No retry before the wait: the child refills the master within about 10 μs on an idle machine, but retrying the
         /// read for that long, yielding between tries, took the M2's floods from 250 to 72 MiB/s and a loaded core's from
-        /// 85 to 27, since the retries took the CPU the child needed to refill (plan_macos_flood.md). The wait alone matched
+        /// 85 to 27, since the retries took the CPU the child needed to refill (platform_support.md, lessons). The wait alone matched
         /// or beat a blocking reader on every load.
         /// </remarks>
         private bool WaitForOutputOnConsumer()

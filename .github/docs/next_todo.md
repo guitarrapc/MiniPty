@@ -31,6 +31,12 @@ If an embedder asks:
 
 `System.Diagnostics.Metrics` counters (active sessions, bytes, full-buffer stalls, loop delay) are AOT-safe and useful to web operators. Whether to add them is a separate decision.
 
+## Open
+
+### Windows floods on two CPUs trail Porta.Pty's default mode
+
+On CI's 2-core Windows runner and locally on two logical CPUs, MiniPty's 1 MiB floods trail Porta.Pty's default mode by 5–30% on both ConPTYs (CI: 11 of 12 cases over six runs, 0.60–0.99; the in-box flood about 5% behind locally), while all-CPU floods are level in-box and about 12% behind out-of-band. Porta.Pty holds a thread per session blocked in `ReadFile`, so one wake carries each ConPTY write to its consumer; MiniPty needs the loop's wake and the consumer's continuation, since no consumer code runs on the loop. A consumer that reads the pipe itself was measured slower, because ConPTY renders more slowly than a consumer reads ([platform lessons](specs/platform_support.md#lessons-learned)). Closing the gap without a thread per session has no known design; the gap is recorded, not planned.
+
 ## Unverified
 
 - **`ClosePseudoConsole` on older Windows builds.** On build 26200 it returned within 1 ms in every measured session, also while an unrelated process held the output pipe open. Whether it can block on Windows 10, or on Windows 11 before 24H2, while output is not drained is not verified; disposal switches the pump to discarding output before the close for that reason. If it can block, `Dispose` must close off the calling thread and `DisposeAsync` must include the close in its wait. Also unverified: whether, on a build where the close waits for the console host, a process that inherited the output pipe keeps that host alive and makes the close wait for it too.
