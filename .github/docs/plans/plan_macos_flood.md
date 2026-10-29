@@ -2,7 +2,7 @@
 
 Goal: on macOS, MiniPty's 1 MiB flood should reach Porta.Pty's default mode, on an 8-core desktop and on CI's `macos-26` runner (Apple M1 virtual machine, 3 vCPUs), without giving up what MiniPty is built on: no thread held per idle session, no allocation per chunk, and reads that keep pace with the child while the consumer is busy.
 
-**Status:** implemented and confirmed on CI (2026-10-30). The cause was measured outside .NET with a C probe ([scripts/pty-read-path-probe.c](../../../scripts/pty-read-path-probe.c)), Phases 1 and 2 are built and measured on the M2 ([Results](#results)), and three CI runs put macOS at 1.15–1.53 times Porta.Pty's default mode with no slow iteration ([Results on CI](#results-on-ci)). Left: the README's tables update themselves on the next full run on `main`, and the lessons move into the specs with [plan_flood_throughput.md](plan_flood_throughput.md)'s Phase 3, which carried this gap over from its macOS results ([macOS on CI](plan_flood_throughput.md#macos-on-ci)).
+**Status:** implemented and confirmed on CI (2026-10-30). The cause was measured outside .NET with a throwaway C probe (its modes and results are below; the file was not kept), Phases 1 and 2 are built and measured on the M2 ([Results](#results)), and three CI runs put macOS at 1.15–1.53 times Porta.Pty's default mode with no slow iteration ([Results on CI](#results-on-ci)). Left: the README's tables update themselves on the next full run on `main`, and the lessons move into the specs with [plan_flood_throughput.md](plan_flood_throughput.md)'s Phase 3, which carried this gap over from its macOS results ([macOS on CI](plan_flood_throughput.md#macos-on-ci)).
 
 ## Where MiniPty stands
 
@@ -20,11 +20,11 @@ On CI, MiniPty's iterations stay near 18 ms or near 40–60 ms for a whole run: 
 
 ### A macOS master holds 1,024 bytes
 
-The probe's `capacity` mode writes to the slave without blocking until the write fails: 1,024 bytes, and the first read of the master returns all 1,024. That is the output queue's fixed size in the kernel (`TTYCLSIZE` in xnu's `tty.c`), not a water mark, so the terminal's speed does not change it: at the `B38400` the shim sets, the high-water mark is 2,048 and never reached. A child writing a flood therefore sleeps after every kilobyte until the master is read below the low-water mark, so a 1 MiB flood is at least 1,024 turnarounds of whoever reads the master, and the cost of one turnaround is paid 1,024 times per MiB. A Linux master hands out 4 KiB per read and holds many times that, which is why the Linux fix in the earlier plan cut work items to 16 per MiB there and to 695 on macOS.
+The probe wrote to the slave without blocking until the write failed: 1,024 bytes, and the first read of the master returned all 1,024. That is the output queue's fixed size in the kernel (`TTYCLSIZE` in xnu's `tty.c`), not a water mark, so the terminal's speed does not change it: at the `B38400` the shim sets, the high-water mark is 2,048 and never reached. A child writing a flood therefore sleeps after every kilobyte until the master is read below the low-water mark, so a 1 MiB flood is at least 1,024 turnarounds of whoever reads the master, and the cost of one turnaround is paid 1,024 times per MiB. A Linux master hands out 4 KiB per read and holds many times that, which is why the Linux fix in the earlier plan cut work items to 16 per MiB there and to 695 on macOS.
 
 ### What a turnaround costs, by reader
 
-The probe drives a child through a real pty with no .NET involved, 200 floods of 1 MiB after 10 of warmup, Apple M2 (8 cores), macOS 27.0.1, 2026-10-30. Medians:
+The probe drove a child through a real pty with no .NET involved, 200 floods of 1 MiB after 10 of warmup, Apple M2 (8 cores), macOS 27.0.1, 2026-10-30. Medians:
 
 | Reader | Models | ms per MiB | MiB/s | Syscalls per chunk |
 |---|---|---|---|---|
@@ -98,7 +98,7 @@ The loop's own reads also get cheaper, which every path that stays on it keeps: 
 
 ### Phase 0: Measure on the real stack before changing it
 
-- Keep the probe in `scripts/` and its results here, so that a later reader starts from them.
+- Keep the probe's results here, so that a later reader starts from them. The probe itself was a one-off and was not kept: the harness that drives the real library ([Results](#results)) is what a later measurement would use.
 - Record a baseline of `PtyThroughputBenchmarks` on the M2 and one paired CI round (`bench-baseline` started together), with `Completed Work Items` and `Process CPU`, which already tell the designs apart (about 1,030 work items per MiB today).
 - **Closed when:** the baseline figures are in this plan.
 
@@ -129,7 +129,7 @@ The loop's own reads also get cheaper, which every path that stays on it keeps: 
 
 - Paired CI rounds against `bench-baseline`, judged as the earlier plan judges them: by ratios within a round, over many rounds, reading the per-iteration times.
 - Tune the two bounds on CI, then the README's tables update themselves on a full run.
-- Move the finding and lessons into [platform_support.md](../specs/platform_support.md) (the 1,024-byte master, the probe) and [core_session.md](../specs/core_session.md) (where a consumer reads and waits, per platform), and close this plan with the earlier one's Phase 3.
+- Move the finding and lessons into [platform_support.md](../specs/platform_support.md) (the 1,024-byte master, the probe's results) and [core_session.md](../specs/core_session.md) (where a consumer reads and waits, per platform), and close this plan with the earlier one's Phase 3.
 
 ## Results
 
