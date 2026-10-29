@@ -40,5 +40,27 @@ internal interface IPtyOutputDriver
     /// so the driver can release what it held for the pump.
     /// </summary>
     void OnPumpFinished(PtyOutputPump pump);
+
+    /// <summary>
+    /// Reads what the transport holds into the ring on the consumer's thread, without waiting, and publishes it. Called
+    /// by a consumer that found the ring empty. Returns <see langword="true"/> when it published output. Otherwise the
+    /// consumer is about to wait, and the driver has made sure it reads again itself, woken by the transport.
+    /// </summary>
+    /// <remarks>
+    /// A flood then costs the consumer's thread its reads and nothing else: no other thread is woken for output that
+    /// the consumer takes as fast as it arrives. On a machine with 2 cores, each such wake was a sleep and a wake of
+    /// another thread, and floods read by the driver alone fell behind libraries that read on the consumer's thread.
+    /// A driver that reads only on its own thread keeps this default.
+    /// </remarks>
+    bool TryReadInline(PtyOutputPump pump) => false;
+
+    /// <summary>
+    /// The consumer stops reading inline for longer than a read (its enumeration ended): the driver reads for the
+    /// pump again, so output keeps arriving in the ring for the next consumer. Never blocks. A driver that reads only on
+    /// its own thread keeps this default.
+    /// </summary>
+    void HandReadingBack(PtyOutputPump pump)
+    {
+    }
 }
 

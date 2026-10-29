@@ -105,6 +105,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private int _count;
     private int _flags;
     private int _producerWaiting;
+    // Who produces into the ring now (ProducerHeld), and whether the driver's own pass was turned away meanwhile
+    // (ProducerDeferred). See TryEnterProducer.
+    private int _producerGate;
+    private const int ProducerHeld = 1;
+    private const int ProducerDeferred = 2;
     // The armed consumer wait's generation, or 0 when no wait is armed. A signaler claims the generation it read.
     private int _consumerWaiting;
     // Consumer side: the generation of the last wait armed.
@@ -166,6 +171,50 @@ internal sealed class PtyOutputPump : IValueTaskSource
     // each read that returned bytes, and Publish; and Finish once at the end, also after a failure. After disposal it
     // skips the first two steps and keeps reading only to let the transport end. A driver that can wait for output
     // without a buffer calls LetGoOfRing for such a wait.
+    //
+    // A driver that also reads on the consumer's thread (IPtyOutputDriver.TryReadInline) has two producers, which take
+    // turns through TryEnterProducer: whoever holds the gate makes every producer call, so the ring keeps one producer
+    // at a time and output stays in the order it was read.
+
+    /// <summary>
+    /// Takes the producer's turn for a consumer reading inline. Fails while the driver's own thread produces; the
+    /// consumer then waits for what that thread publishes. Pair a success with <see cref="ExitProducer"/>.
+    /// </summary>
+    internal bool TryEnterProducer() => Interlocked.CompareExchange(ref _producerGate, ProducerHeld, 0) == 0;
+
+    /// <summary>
+    /// Takes the producer's turn for the driver's own thread. While a consumer reading inline holds it, this marks the
+    /// turn as owed instead and fails; the consumer's <see cref="ExitProducer"/> then reports that the driver must look
+    /// again. The driver's thread never waits for a consumer, which may be preempted while it holds the turn.
+    /// </summary>
+    internal bool TryEnterProducerOrDefer()
+    {
+        var state = Volatile.Read(ref _producerGate);
+        while (true)
+        {
+            var next = (state & ProducerHeld) == 0 ? ProducerHeld : state | ProducerDeferred;
+            var seen = Interlocked.CompareExchange(ref _producerGate, next, state);
+            if (seen == state)
+                return next == ProducerHeld;
+
+            state = seen;
+        }
+    }
+
+    /// <summary>
+    /// Ends a producer's turn. Returns <see langword="true"/> when the driver's own thread was turned away meanwhile and
+    /// must look at the pump again (<see cref="TryEnterProducerOrDefer"/>).
+    /// </summary>
+    internal bool ExitProducer() => (Interlocked.Exchange(ref _producerGate, 0) & ProducerDeferred) != 0;
+
+    /// <summary>
+    /// Has the driver read what the transport holds on this, the consumer's, thread (<see cref="IPtyOutputDriver.TryReadInline"/>).
+    /// Returns <see langword="true"/> when output was published; otherwise the consumer waits, and the driver reads.
+    /// </summary>
+    internal bool TryReadInline() => Volatile.Read(ref _driver) is { } driver && driver.TryReadInline(this);
+
+    /// <summary>The consumer stopped reading inline (<see cref="IPtyOutputDriver.HandReadingBack"/>).</summary>
+    internal void HandReadingBack() => Volatile.Read(ref _driver)?.HandReadingBack(this);
 
     /// <summary>
     /// Whether less than <see cref="PublishSize"/> is free, so the driver waits for the consumer instead of reading. It
@@ -212,7 +261,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// </summary>
     internal void HoldRing()
     {
-        // Only the driver moves the ring into or out of RingHeld, so it can read its own state without the lock.
+        // Only the producer moves the ring into or out of RingHeld, so it can read its own state without the lock.
         if (Volatile.Read(ref _ringState) == RingHeld)
             return;
 

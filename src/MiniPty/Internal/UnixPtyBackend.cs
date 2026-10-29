@@ -241,11 +241,45 @@ internal static partial class UnixPtyBackend
         // The watcher loop's state for this session, used only on its thread unless noted: the slot and token of its
         // registered master (the slot and its generation make the token), the interest registered, and the park on a full
         // ring.
+        // _loopSlot and _loopPhase are also read by a consumer that arms the master (ArmForConsumer), and _loopInterest is
+        // the interest last set by either. Arming needs no lock: see ArmForConsumer.
         private int _loopSlot = -1;
         private int _loopGeneration;
         private byte _loopInterest = ChildWatcher.InterestRead;
         private byte _loopPhase;
         private bool _loopParked;
+        // Who reads the master for the session's consumer (ConsumerReads*), and when the consumer last read inline or was
+        // handed output to read on from (Stopwatch ticks; written before the state), so the loop can take reading back
+        // from a consumer that stopped.
+        private int _consumerReads;
+        private long _consumerReadStamp;
+
+        // _consumerReads. Loop: the loop reads, and arms the master after each pass, as for any consumer.
+        private const int ConsumerReadsLoop = 0;
+        // Inline: the consumer reads the master on its own thread and arms it itself when it is about to wait, so the loop
+        // does not arm it for output after a pass.
+        private const int ConsumerReadsInline = 1;
+        // Waiting: a consumer that was reading inline waits with the master armed. The pass that hands it output leaves the
+        // master unarmed (Inline again), since that consumer reads on inline once it resumes.
+        private const int ConsumerReadsWaiting = 2;
+
+        /// <summary>What <see cref="CheckInlineReader"/> asks of the loop.</summary>
+        internal const int InlineReaderKeep = 0;
+        internal const int InlineReaderTakeOver = 1;
+        internal const int InlineReaderUnlist = 2;
+
+        // A consumer that has not read inline for this long is busy elsewhere (a UI frame, a send) or stopped: the loop
+        // reads for it, as it does for any consumer, so the child is not held up and output reaches the ring.
+        private static readonly long s_inlineReaderIdleTicks = System.Diagnostics.Stopwatch.Frequency / 1000;
+        // A session whose consumer has not read inline for this long leaves the loop's list, so an idle session does not
+        // keep the loop waking.
+        private static readonly long s_inlineReaderUnlistTicks = System.Diagnostics.Stopwatch.Frequency / 100;
+
+        /// <summary>Whether this session is on the watcher's list of inline readers. Guarded by its lock.</summary>
+        internal bool InlineReaderListed;
+
+        /// <summary>The next session on the watcher's list of inline readers. Guarded by its lock.</summary>
+        internal UnixPtyBackendInstance? NextInlineReader;
 
         /// <summary>Whether this session waits on the watcher's queue of sessions to look at. Guarded by its lock.</summary>
         internal bool ServiceQueued;
@@ -741,13 +775,253 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>
+        /// Reads the master on the consumer's thread while the loop reads this session, and otherwise leaves output to the
+        /// loop: a park on a full ring, disposal, the forced end, the close, end of output and read failures are the loop's
+        /// to handle, so the consumer then waits for the loop's pass to end its wait.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The consumer takes the producer's turn for its reads (<see cref="PtyOutputPump.TryEnterProducer"/>). When it
+        /// reads nothing, it waits: it arms the master's one-shot registration on its own thread, so the loop is woken only
+        /// when output arrives for a consumer that waits. While the consumer reads, the loop does not arm the registration for
+        /// output after its passes (<see cref="SetLoopInterest"/>), and the pass that hands a waiting consumer output leaves
+        /// it unarmed too, since that consumer reads on inline. A flood that the consumer keeps up with then wakes the loop
+        /// about once per wait, not once per read.
+        /// </para>
+        /// <para>
+        /// A consumer that stops reading inline for about a millisecond, busy elsewhere or gone, has the loop read for it
+        /// again (<see cref="CheckInlineReader"/>): the child is not held up, its last output reaches the ring before the
+        /// post-exit drain finds the master quiet and closes it, and on macOS the child's exit, which waits until the master
+        /// has read what it wrote, is not held up either.
+        /// </para>
+        /// </remarks>
+        bool IPtyOutputDriver.TryReadInline(PtyOutputPump pump)
+        {
+            if (Volatile.Read(ref _loopPhase) != LoopReading)
+                return false;
+
+            var published = false;
+            if (pump.TryEnterProducer())
+            {
+                try
+                {
+                    published = ReadInline(pump);
+                }
+                finally
+                {
+                    if (pump.ExitProducer())
+                        ChildWatcher.RequestService(this);
+                }
+            }
+
+            if (published)
+            {
+                MarkReadingInline();
+                return true;
+            }
+
+            // Nothing there now, or the loop holds the turn: the consumer waits, and the loop reads when the master reports.
+            // A consumer that was reading inline goes on reading inline once it is handed output.
+            Volatile.Write(ref _consumerReads,
+                Volatile.Read(ref _consumerReads) == ConsumerReadsLoop ? ConsumerReadsLoop : ConsumerReadsWaiting);
+            ArmForConsumer();
+            return false;
+        }
+
+        /// <summary>
+        /// The consumer reads inline from now on: stamped, and listed with the loop, which takes reading back from a consumer
+        /// that stops (<see cref="CheckInlineReader"/>).
+        /// </summary>
+        private void MarkReadingInline()
+        {
+            Volatile.Write(ref _consumerReadStamp, System.Diagnostics.Stopwatch.GetTimestamp());
+            if (Volatile.Read(ref _consumerReads) == ConsumerReadsInline)
+                return;
+
+            Volatile.Write(ref _consumerReads, ConsumerReadsInline);
+            if (!Volatile.Read(ref InlineReaderListed))
+                ChildWatcher.WatchInlineReader(this);
+        }
+
+        void IPtyOutputDriver.HandReadingBack(PtyOutputPump pump)
+        {
+            if (Volatile.Read(ref _consumerReads) == ConsumerReadsLoop)
+                return;
+
+            // The consumer kept the ring between its reads; an idle session holds none. While the loop holds the turn, its
+            // pass lets go of it.
+            if (pump.TryEnterProducer())
+            {
+                pump.LetGoOfRing();
+                if (pump.ExitProducer())
+                    ChildWatcher.RequestService(this);
+            }
+
+            Volatile.Write(ref _consumerReads, ConsumerReadsLoop);
+            ArmForConsumer();
+        }
+
+        /// <summary>
+        /// The loop's look at this session on its list of inline readers, under the watcher's lock: takes reading back from
+        /// a consumer that has not read inline for about a millisecond, and leaves the list once the consumer has not read
+        /// inline for longer, or output ended. A waiting consumer has the master armed and needs nothing.
+        /// </summary>
+        internal int CheckInlineReader(long now)
+        {
+            if (_loopPhase != LoopReading)
+                return InlineReaderUnlist;
+
+            var idle = now - Volatile.Read(ref _consumerReadStamp);
+            if (Volatile.Read(ref _consumerReads) != ConsumerReadsInline)
+                return idle < s_inlineReaderUnlistTicks ? InlineReaderKeep : InlineReaderUnlist;
+
+            if (idle < s_inlineReaderIdleTicks)
+                return InlineReaderKeep;
+
+            // A consumer that reads again meanwhile takes the turn back by its next read.
+            return Interlocked.CompareExchange(ref _consumerReads, ConsumerReadsLoop, ConsumerReadsInline) == ConsumerReadsInline
+                ? InlineReaderTakeOver
+                : InlineReaderKeep;
+        }
+
+        /// <summary>The loop reads for a consumer that stopped reading inline: arms the master for output. On the loop.</summary>
+        internal void TakeOverReading() => SetLoopInterest();
+
+        /// <summary>
+        /// The consumer's reads, under the producer's turn: up to <see cref="LoopReadsPerService"/> reads while each fills
+        /// its span, each published as it completes. Returns whether any output was published. A ring that nothing was read
+        /// into is let go of; one with output keeps for the consumer's next read.
+        /// </summary>
+        private unsafe bool ReadInline(PtyOutputPump pump)
+        {
+            // Under the turn the loop's own state holds still.
+            if (_loopPhase != LoopReading || _loopParked || pump.IsSessionDisposed || pump.IsEndOfOutputForced
+                || Volatile.Read(ref _disposed) || !TryAcquireMaster(out var master))
+            {
+                return false;
+            }
+
+            var published = false;
+            try
+            {
+                for (var reads = 0; reads < LoopReadsPerService && !pump.IsFull; reads++)
+                {
+                    pump.HoldRing();
+                    var span = pump.NextReadSpan;
+                    int read;
+                    fixed (byte* ptr = span)
+                        read = ReadMasterNow(master, ptr, span.Length);
+
+                    // Nothing more for now, or end of output, which the loop sees when it reads the master again.
+                    if (read <= 0)
+                        break;
+
+                    var timestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                    pump.OnOutputRead();
+                    pump.Publish(read, timestamp);
+                    published = true;
+                    // A short read took what the terminal held; another would most likely find nothing.
+                    if (read < span.Length)
+                        break;
+                }
+            }
+            catch (IOException)
+            {
+                // The loop reads the master again and ends the session's output with the failure.
+            }
+            finally
+            {
+                ReleaseMaster();
+                if (!published)
+                    pump.LetGoOfRing();
+            }
+
+            return published;
+        }
+
+        /// <summary>
+        /// Arms the master's registration from the consumer's thread, which is about to wait or has stopped reading: the
+        /// loop is then woken by the next output. Queued input keeps its write interest.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// No lock: under one, the loop's arming after each pass and this one contended on every wait, and a flood on two
+        /// CPUs took about 12 contentions per MiB. Each side sets the whole interest, so the arms may land in either order.
+        /// The loop arms without output only while it is parked on a full ring, when the consumer has output to take and
+        /// does not wait. Queued input is the other case: input queued after the check below has its own service request,
+        /// which the loop serves after this arm, and input queued between the check and the arm is caught by the second
+        /// check, which has the loop arm again.
+        /// </para>
+        /// <para>
+        /// A removal racing this arm is harmless: the reference keeps the descriptor, and its number, this session's; epoll
+        /// fails the arm of a removed descriptor, and a kqueue filter it adds back reports at most once (EV_DISPATCH), with a
+        /// token whose slot generation the removal retired, so the loop drops the report.
+        /// </para>
+        /// </remarks>
+        private void ArmForConsumer()
+        {
+            if (!TryAcquireMaster(out _))
+                return;
+
+            try
+            {
+                // Removed from the loop, or no longer read for a consumer: the loop's end of output ends the wait.
+                var slot = Volatile.Read(ref _loopSlot);
+                if (slot < 0 || Volatile.Read(ref _loopPhase) != LoopReading)
+                    return;
+
+                var inputQueued = Volatile.Read(ref _inputHead) is not null;
+                SetInterest(slot, ChildWatcher.InterestRead | (inputQueued ? ChildWatcher.InterestWrite : 0));
+                if (!inputQueued && Volatile.Read(ref _inputHead) is not null)
+                    ChildWatcher.RequestService(this);
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
+        }
+
+        /// <summary>
+        /// The pass handed output to a consumer that waits after reading inline: that consumer reads on inline once it
+        /// resumes, so the master stays unarmed, and the loop takes reading back if it does not resume within about a
+        /// millisecond.
+        /// </summary>
+        private void ResumeInlineReading(PtyOutputPump pump)
+        {
+            if (Volatile.Read(ref _consumerReads) != ConsumerReadsWaiting || !pump.HasUnreadOutput)
+                return;
+
+            Volatile.Write(ref _consumerReadStamp, System.Diagnostics.Stopwatch.GetTimestamp());
+            if (Interlocked.CompareExchange(ref _consumerReads, ConsumerReadsInline, ConsumerReadsWaiting) == ConsumerReadsWaiting
+                && !Volatile.Read(ref InlineReaderListed))
+            {
+                ChildWatcher.WatchInlineReader(this);
+            }
+        }
+
+        /// <summary>
         /// Serves this session on the loop: after a readiness <paramref name="report"/> from the master, or 0 when the
         /// session asked for a look. Writes queued input, reads output into the ring and publishes each read, within the
         /// per-service bound, parks on a full ring, and ends output. Never throws: a failure ends this session's output
         /// with it, and the loop goes on.
         /// </summary>
+        /// <remarks>
+        /// The pass takes the producer's turn, which a consumer reading inline may hold for its reads. A report of output
+        /// alone is then dropped: that consumer reads the output itself and arms the master again before it waits. Anything
+        /// else is owed, and the consumer has the loop look again when it lets go of the turn.
+        /// </remarks>
         internal void ServiceOnLoop(int report)
         {
+            var pump = Volatile.Read(ref _pump);
+            if (pump is not null)
+            {
+                var outputOnly = report != 0
+                    && (report & ~(ChildWatcher.ReportReadable | ChildWatcher.ReportHangup)) == 0
+                    && _loopPhase == LoopReading;
+                if (!(outputOnly ? pump.TryEnterProducer() : pump.TryEnterProducerOrDefer()))
+                    return;
+            }
+
             try
             {
                 ServeOnLoop(report);
@@ -755,6 +1029,11 @@ internal static partial class UnixPtyBackend
             catch (Exception ex)
             {
                 FailOnLoop(ex);
+            }
+            finally
+            {
+                // The loop's own turn is never deferred.
+                pump?.ExitProducer();
             }
         }
 
@@ -818,6 +1097,7 @@ internal static partial class UnixPtyBackend
                 ParkWhileFull(pump);
             }
 
+            ResumeInlineReading(pump);
             pump.LetGoOfRing();
             SetLoopInterest();
         }
@@ -929,20 +1209,37 @@ internal static partial class UnixPtyBackend
             ChildWatcher.RenewInterest(_master, _loopSlot, _loopGeneration, _loopInterest);
         }
 
-        /// <summary>The interest the session's state needs: output while the ring has room, input while some is queued.</summary>
+        /// <summary>
+        /// Arms the master for what the session's state needs, after every pass, since a registration reports once:
+        /// output while the ring has room, input while some is queued. While the consumer reads inline, output is left to
+        /// it: it arms the master itself before it waits, and arming it here would wake the loop for output the consumer
+        /// is reading. On the loop.
+        /// </summary>
         private void SetLoopInterest()
         {
-            var interest = 0;
-            if (_loopPhase == LoopDiscarding || (_loopPhase == LoopReading && !_loopParked))
-                interest |= ChildWatcher.InterestRead;
-            if (_loopPhase == LoopReading && HasPendingInput)
-                interest |= ChildWatcher.InterestWrite;
-
-            if (interest == _loopInterest)
+            if (_loopSlot < 0)
                 return;
 
+            var read = _loopPhase == LoopDiscarding || (_loopPhase == LoopReading && !_loopParked);
+            var write = _loopPhase == LoopReading && Volatile.Read(ref _inputHead) is not null;
+            if (read && !write && _loopPhase == LoopReading && Volatile.Read(ref _consumerReads) == ConsumerReadsInline)
+                return;
+
+            var interest = (read ? ChildWatcher.InterestRead : 0) | (write ? ChildWatcher.InterestWrite : 0);
+            if (interest == 0 && _loopInterest == 0)
+                return;
+
+            SetInterest(_loopSlot, interest);
+        }
+
+        /// <summary>
+        /// Sets and arms the master's interest in its registration at <paramref name="slot"/>, from the loop or a consumer
+        /// (<see cref="ArmForConsumer"/>).
+        /// </summary>
+        private void SetInterest(int slot, int interest)
+        {
             _loopInterest = (byte)interest;
-            ChildWatcher.SetInterest(_master, _loopSlot, _loopGeneration, interest);
+            ChildWatcher.SetInterest(_master, slot, _loopGeneration, interest);
         }
 
         /// <summary>End of output on the loop: the master is removed first, so a hung-up master cannot report forever.</summary>
@@ -1025,6 +1322,10 @@ internal static partial class UnixPtyBackend
             {
                 ReleaseMaster();
             }
+
+            // The registration reported once; it reports the child's next output only once armed again.
+            if (_loopPhase == LoopDiscarding)
+                SetLoopInterest();
         }
 
         /// <summary>A failure in this session's work ends its output with the failure; the loop and other sessions go on.</summary>
@@ -1061,7 +1362,8 @@ internal static partial class UnixPtyBackend
             if (slot < 0)
                 return;
 
-            _loopSlot = -1;
+            // Before the removal, so a consumer that arms the master from now on sees it gone (ArmForConsumer).
+            Volatile.Write(ref _loopSlot, -1);
             ChildWatcher.DeregisterMaster(_master, slot);
             ReleaseMaster();
         }

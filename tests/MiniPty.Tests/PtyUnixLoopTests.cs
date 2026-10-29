@@ -356,6 +356,163 @@ public sealed class PtyUnixLoopTests
     }
 #pragma warning restore IL2026, IL2072, IL2075, IL3000
 
+    /// <summary>
+    /// A flood that its consumer keeps up with is read on the consumer's thread, so another thread hands the consumer
+    /// output about once per wait, not once per read: the consumer's continuation is queued to the thread pool only when it
+    /// waited. A hand-off for every read was what cost floods their speed on CI's 2-core runners, where each one was a sleep
+    /// and a wake. Counted as thread-pool work items, which the reads themselves do not queue.
+    /// </summary>
+    /// <remarks>
+    /// The child writes in 1 MiB writes, so the terminal holds output whenever the consumer comes back, as for the
+    /// benchmarks' flood. A child that writes more slowly than the consumer reads makes the consumer wait, rightly, every
+    /// few reads (<c>head | tr</c> took about one hand-off per four reads). Linux only: a macOS master hands out about
+    /// 1 KiB per read, and its writer refills the terminal only after each read, so a consumer there can wait after every
+    /// read.
+    /// </remarks>
+    [Test]
+    [NotInParallel]
+    public async Task AFloodTheConsumerKeepsUpWithIsNotHandedOverOncePerRead()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        const int Size = 4 * 1024 * 1024;
+        await using var session = Pty.Start(Shell($"dd if=/dev/zero bs={1024 * 1024} count=4 2>/dev/null"));
+        var received = 0;
+        var chunks = 0;
+        var before = ThreadPool.CompletedWorkItemCount;
+        await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
+        {
+            received += chunk.Data.Span.Count((byte)0);
+            chunks++;
+        }
+
+        var handOffs = ThreadPool.CompletedWorkItemCount - before;
+        await Assert.That(received).IsEqualTo(Size);
+        await Assert.That(handOffs).IsLessThan(chunks / 4L).Because($"{handOffs} thread-pool work items for {chunks} chunks");
+    }
+
+    /// <summary>
+    /// The consumer's inline reads and the loop's reads take turns on one ring without reordering or losing output. A
+    /// counting child is read by one enumeration that stops partway, then by a second that pauses every few chunks for
+    /// longer than the loop waits before it reads for a consumer, so reading moves between the two many times; every number
+    /// arrives once, in order.
+    /// </summary>
+    [Test]
+    public async Task OutputStaysInOrderWhileReadingMovesBetweenTheConsumerAndTheLoop()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        const int Count = 200_000;
+        await using var session = Pty.Start(Shell($"seq 1 {Count}"));
+        var text = new StringBuilder();
+        await using (var first = session.ReadOutputAsync().GetAsyncEnumerator())
+        {
+            while (text.Length < 256 * 1024 && await first.MoveNextAsync().AsTask().WaitAsync(Timeout))
+                text.Append(Encoding.ASCII.GetString(first.Current.Data.Span));
+        }
+
+        // Between the two enumerations the loop reads into the ring.
+        await Task.Delay(20);
+        var chunks = 0;
+        await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
+        {
+            text.Append(Encoding.ASCII.GetString(chunk.Data.Span));
+            if (++chunks % 16 == 0)
+                await Task.Delay(3);
+        }
+
+        var lines = text.ToString().Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+        var firstWrong = -1;
+        for (var i = 0; i < Count && i < lines.Length; i++)
+        {
+            if (lines[i] != (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture))
+            {
+                firstWrong = i;
+                break;
+            }
+        }
+
+        await Assert.That(firstWrong).IsEqualTo(-1).Because(firstWrong < 0 ? "" : $"line {firstWrong + 1} is '{lines[firstWrong]}'");
+        await Assert.That(lines.Length).IsEqualTo(Count);
+    }
+
+    /// <summary>
+    /// A consumer that has been reading a flood inline and then stops reading for a while, busy elsewhere, has the loop
+    /// read for it again. What the child writes meanwhile reaches the ring: the child is not held up and exits (on macOS
+    /// its exit waits until the master has read what it wrote), and the post-exit drain, which closes the master once reads
+    /// go quiet, finds nothing left unread in it. Without the loop taking over, nobody would read the master during the
+    /// pause, and on Linux the drain would close it with the tail in it.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task TheLoopReadsForAConsumerThatStopsReadingInline()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        const int Flood = 1024 * 1024;
+        const int Tail = 2048;
+        await using var session = Pty.Start(Shell(
+            $"head -c {Flood} /dev/zero | tr '\\0' x; sleep 0.3; head -c {Tail} /dev/zero | tr '\\0' y"));
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+        var floodSeen = 0;
+        while (floodSeen < Flood)
+        {
+            await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+            floodSeen += output.Current.Data.Span.Count((byte)'x');
+        }
+
+        // Busy elsewhere, holding the last chunk, while the child writes its tail and exits.
+        await Task.Delay(1000);
+        var exitedMeanwhile = session.HasExited;
+        var tailSeen = 0;
+        while (await output.MoveNextAsync().AsTask().WaitAsync(Timeout))
+            tailSeen += output.Current.Data.Span.Count((byte)'y');
+
+        await Assert.That(tailSeen).IsEqualTo(Tail);
+        await Assert.That(exitedMeanwhile).IsTrue();
+    }
+
+    /// <summary>
+    /// Disposing a session while its consumer reads a flood inline on another thread ends that consumer's enumeration with
+    /// <see cref="ObjectDisposedException"/> and ends the child, without waiting for the flood. The consumer's read holds a
+    /// reference on the master, so the descriptor stays open, and its number unused, until that read returns.
+    /// </summary>
+    [Test]
+    public async Task DisposingTheSessionWhileItsConsumerReadsInlineEndsTheRead()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var session = Pty.Start(Shell("yes 0123456789abcdefghijklmnopqrstuvwxyz"));
+        long bytes = 0;
+        var reader = Task.Run(async () =>
+        {
+            await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
+                Interlocked.Add(ref bytes, chunk.Data.Length);
+        });
+
+        while (Interlocked.Read(ref bytes) < 1024 * 1024)
+            await Task.Delay(10);
+
+        await session.DisposeAsync().AsTask().WaitAsync(Timeout);
+        Exception? ended = null;
+        try
+        {
+            await reader.WaitAsync(Timeout);
+        }
+        catch (Exception ex)
+        {
+            ended = ex;
+        }
+
+        await Assert.That(ended is ObjectDisposedException).IsTrue().Because(ended?.ToString() ?? "the read ended without an exception");
+        // The disposal hangs the child up, and the watcher reaps it.
+        await WaitUntilAsync(() => session.HasExited);
+    }
+
     [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
     private static extern int kill(int pid, int sig);
 

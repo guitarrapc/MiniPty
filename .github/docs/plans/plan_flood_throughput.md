@@ -2,7 +2,7 @@
 
 Goal: MiniPty's output floods should not fall behind Porta.Pty on CI's hosted runners, which have 2 cores and 4 threads, without giving up what MiniPty is built on: no thread held per session, no allocation per chunk, and reads that keep pace with the child while the consumer is busy.
 
-**Status:** open (2026-10-29). The cause is measured. Phase 0 is in the benchmarks and reproduces CI's ranking locally; its confirmation on CI waits for the next full benchmark run. Phase 1 is next. No library code has changed.
+**Status:** open (2026-10-29). The cause is measured. Phase 0 is in the benchmarks and reproduces CI's ranking locally. Phase 1 (Unix) is implemented and meets its gates on Linux locally; macOS has not run it. Both wait for a CI run: the build workflow's tests on macOS, and a full benchmark run. Phase 2 (Windows) is next.
 
 ## Finding
 
@@ -137,11 +137,40 @@ Windows, 1 MiB flood on 2 CPUs (`TwoCpus`):
   - Keystroke P50 and P95 stay within the spread between runs, on both jobs.
   - Allocations stay at 0 B.
 
+**Built (2026-10-29).** A plain `ReadOutputAsync` that finds the ring empty reads the master on its own thread (`IPtyOutputDriver.TryReadInline`). The loop and the consumer take turns as the ring's one producer through a gate in the pump; while the consumer holds it, the loop drops a report of output alone and defers anything else to the consumer's exit from the gate. Masters are registered one report at a time (`EPOLLONESHOT`, `EV_DISPATCH`). The consumer arms the master when it is about to wait, and the loop arms it after its passes unless the consumer reads inline. The pass that hands a consumer output after it waited leaves the master unarmed, since that consumer reads on inline. The loop checks the consumers that read inline about every millisecond, and reads again for one that has not read for that long. Coalescing reads and `Output` read as before.
+
+Results on the machine above (WSL, 8 logical CPUs), the gate run's two rounds, 1 MiB flood:
+
+| Job, round | MiniPty | Porta.Pty | Porta.Pty, `UseAsyncIo` | MiniPty before, same round |
+|---|---|---|---|---|
+| `TwoCpus` 1, MiB/s | 192.5 | 181.0 | 189.2 | 166.0 |
+| `TwoCpus` 2, MiB/s | 156.2 | 163.1 | 161.0 | 120.2 |
+| `AllCpus` 1, MiB/s | 187.7 | 162.9 | 188.2 | 184.6 |
+| `AllCpus` 2, MiB/s | 161.8 | 125.0 | 178.5 | 111.7 |
+| `TwoCpus`, Process CPU | 4.80–5.73 ms | 8.88–9.90 ms | 5.08–5.66 ms | 10.23–12.65 ms |
+| `TwoCpus`, work items | 15.9–18.5 | 193–202 | 10.2–10.7 | 319 |
+
+- Keystrokes stayed within the spread between runs: on `AllCpus` MiniPty's P50 was 125–130 μs against `UseAsyncIo`'s 123–124 μs in the same runs, and one work item per keystroke as before. Allocations stayed at 0 B.
+- The machine varied by up to 2× between rounds, because WSL shares its CPUs with the `docker-desktop` distro. Compare within a round, and read the CPU and work-item columns, which held in every round.
+
+What this phase learned:
+
+| Tried | Result | Why |
+|---|---|---|
+| Arm the master under the session's lock, from the loop and from the consumer | 10–14 lock contentions per 1 MiB flood; over five rounds a `TwoCpus` median of 139 MiB/s at 1 MiB and 97 MiB/s at 64 KiB, against 144 and 118 without the lock | Each wait armed twice, once on each thread, and they met on the lock. Each side now sets the whole interest without a lock; the arms may land in either order. |
+| Arm again after the pass that hands a waiting consumer output | About two loop passes per wait | The consumer is back reading inline before that arm reports. A consumer that waited after reading inline now stays unarmed once handed output, and the millisecond check covers it if it does not come back. |
+| Yield once and read again before waiting | No consistent gain | Dropped. |
+| The loop's discard after disposal, unchanged | Hung-up children blocked until the grace kill | It had relied on level-triggered readiness reporting again. Every pass that keeps reading must arm the master again; two disposal tests caught it. |
+| Nobody reads for a consumer that reads inline and then stops | Lost the child's last output on Linux | The post-exit drain closed a quiet master that still held output. On macOS the child's exit would wait until the master was read. Hence the millisecond check. |
+| `MoveNextAsync` racing disposal in its own loop | Ended the enumeration normally | The withdrawn wait went on to see the end of output. Inline reads keep the consumer in that loop far more often. Disposal now fails each turn of the loop, as the wait would. |
+| Count loop passes per chunk in a test | Too close to the old figure (0.27 against 0.32) | The millisecond check wakes the loop on its own. Thread-pool work items per chunk tell the designs apart: 0.89–0.97 before, under 0.25 after, for a child that writes in 1 MiB writes. A child that writes slower than the consumer reads makes it wait every few reads. |
+
 ### Phase 2: Windows
 
 - The same model on the ConPTY output pipe: the consumer takes what the pipe holds when the ring is empty (`PeekNamedPipe`, then a read that completes at once without a completion packet). A zero-byte read is posted only when the consumer is about to wait or is busy with room in the ring.
 - The earlier lesson still holds: never leave a read posted into the ring for a consumer that keeps up, because canceling it costs a completion per write ([platform_support.md](../specs/platform_support.md)).
 - A keystroke takes 2 work items in MiniPty and in Porta.Pty, yet MiniPty's is 25–60 μs slower on `TwoCpus` on the out-of-band ConPTY (Phase 0). Find which hand-off waits there before deciding whether the read model above covers it.
+- Phase 1's pieces carry over: `IPtyOutputDriver.TryReadInline` and `HandReadingBack`, the pump's producer gate, and the reader's disposal check on every turn. So do its lessons: nothing the consumer does before a wait may take a lock the driver takes per read, a consumer that stops reading inline must not hold the child up or leave output for the post-exit drain to close on, and runs are judged by work items and CPU over several rounds.
 - **Closed when:**
   - Work items per 1 MiB fall from about 8,100 to 4,100 or fewer on both ConPTYs.
   - The `TwoCpus` floods are within the spread between runs of Porta.Pty's default mode, over at least three runs.

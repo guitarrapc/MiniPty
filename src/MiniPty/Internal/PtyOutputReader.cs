@@ -58,6 +58,8 @@ internal class PtyOutputReader :
     // Whether the current enumeration coalesces bursts. Only a PtyCoalescingOutputReader can, and it holds the state, so a
     // session read plainly pays nothing for it.
     private bool _coalesce;
+    // Whether the current enumeration has read the transport inline, so its end hands reading back to the driver.
+    private bool _readInline;
 
     private PtyCoalescingOutputReader Coalescing => (PtyCoalescingOutputReader)this;
 
@@ -103,6 +105,7 @@ internal class PtyOutputReader :
         _holdsChunk = false;
         _current = default;
         _yieldPending = false;
+        _readInline = false;
         Debug.Assert(!coalesce || this is PtyCoalescingOutputReader);
         _coalesce = coalesce;
         if (coalesce)
@@ -143,6 +146,17 @@ internal class PtyOutputReader :
                     return new ValueTask<bool>(hasChunk);
                 }
 
+                // The ring is empty: read what the transport holds on this thread before waiting for the driver to. A
+                // flood then reaches this caller without a wake of another thread per chunk. A coalescing read waits for
+                // the driver to gather its minimum instead, as before.
+                if (!_coalesce && _pump.TryReadInline())
+                {
+                    _readInline = true;
+                    // A read that raced the disposal fails as a wait would (below).
+                    _session.ThrowIfDisposed();
+                    continue;
+                }
+
                 _core.Reset();
                 // A yield abandoned without being awaited must not complete this wait before the pump signals it.
                 _yieldPending = false;
@@ -150,7 +164,12 @@ internal class PtyOutputReader :
                     Coalescing.BeforeWait();
 
                 if (!_pump.ArmWait(this, wakeOnData: true, minimum))
+                {
+                    // A wait withdrawn because the session was disposed fails as the signaled wait would have
+                    // (GetResult), instead of handing out a chunk of a disposed session or ending the enumeration.
+                    _session.ThrowIfDisposed();
                     continue;
+                }
 
                 // After arming, so its deadline can only lower this wait's minimum. A signal may complete the wait meanwhile,
                 // but GetResult, which ends it, cannot run before this method returns.
@@ -309,6 +328,13 @@ internal class PtyOutputReader :
         {
             _coalesce = false;
             Coalescing.OnEnded();
+        }
+
+        // Output that arrives before the next consumer goes into the ring, as it did before this one read inline.
+        if (_readInline)
+        {
+            _readInline = false;
+            _pump.HandReadingBack();
         }
         var linked = _linkedTokenSource;
         _linkedTokenSource = null;
