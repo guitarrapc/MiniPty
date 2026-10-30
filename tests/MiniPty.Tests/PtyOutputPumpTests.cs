@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using MiniPty.Internal;
 
 namespace MiniPty.Tests;
@@ -514,6 +514,50 @@ public sealed class PtyOutputPumpTests
         await Assert.That(result.Output.Length).IsEqualTo(3);
     }
 
+    /// <summary>
+    /// A ring with nothing unread starts its next read at its beginning, so a read never has to fit the few bytes left
+    /// before the end: a Linux master hands out 4,095 bytes per read, and four of those left 4 bytes, which the fifth read
+    /// took alone, a read and a publish per 16 KiB for nothing. A ring with unread output keeps its place, so the next read
+    /// takes what is left before the end and the consumer's chunk stays contiguous.
+    /// </summary>
+    [Test]
+    public async Task AnEmptyRingStartsOverAtItsBeginning()
+    {
+        const int LinuxRead = 4095;
+        var backend = new ManualRingBackend();
+        await using var session = new PtySession(backend);
+        var pump = session.OutputPump;
+
+        pump.HoldRing();
+        for (var i = 0; i < 8; i++)
+        {
+            await Assert.That(pump.NextReadSpan.Length).IsEqualTo(PtyOutputPump.PublishSize).Because($"read {i}, {pump.UnreadCount} unread");
+            pump.Publish(LinuxRead, 0);
+            await Assert.That(pump.TryPeek(out var chunk)).IsTrue();
+            await Assert.That(chunk.Length).IsEqualTo(LinuxRead);
+            pump.Release();
+        }
+
+        // Unread output keeps the ring's place: three reads leave 4,099 bytes before the end, a full read then 3, and the
+        // next span is those 3, until the consumer takes everything so far as one chunk. A driver takes the span before
+        // every read, which is where an empty ring starts over.
+        for (var i = 0; i < 3; i++)
+        {
+            await Assert.That(pump.NextReadSpan.Length).IsEqualTo(PtyOutputPump.PublishSize);
+            pump.Publish(LinuxRead, 0);
+        }
+
+        await Assert.That(pump.NextReadSpan.Length).IsEqualTo(PtyOutputPump.PublishSize);
+        pump.Publish(PtyOutputPump.PublishSize, 0);
+        await Assert.That(pump.NextReadSpan.Length).IsEqualTo(PtyOutputPump.Capacity - 3 * LinuxRead - PtyOutputPump.PublishSize);
+        await Assert.That(pump.TryPeek(out var all)).IsTrue();
+        await Assert.That(all.Length).IsEqualTo(3 * LinuxRead + PtyOutputPump.PublishSize);
+        pump.Release();
+        await Assert.That(pump.NextReadSpan.Length).IsEqualTo(PtyOutputPump.PublishSize);
+        pump.LetGoOfRing();
+        backend.End();
+    }
+
     private static async Task<bool> WaitUntilAsync(Func<bool> condition)
     {
         var deadline = Environment.TickCount64 + (long)Timeout.TotalMilliseconds;
@@ -728,6 +772,43 @@ public sealed class PtyOutputPumpTests
             Thread.Yield();
             buffer[0] = (byte)'x';
             return 1;
+        }
+    }
+
+    /// <summary>A backend whose ring the test fills itself: it is the session's output driver and never reads.</summary>
+    private sealed class ManualRingBackend : FakeBackend, IPtyOutputDriver
+    {
+        private PtyOutputPump? _pump;
+        private int _finished;
+
+        public override int OutputChunkLimit => PtyOutputPump.Capacity;
+
+        public override void StartOutput(PtyOutputPump pump)
+        {
+            _pump = pump;
+            pump.AttachDriver(this);
+        }
+
+        public void End()
+        {
+            if (Interlocked.Exchange(ref _finished, 1) == 0)
+                _pump!.Finish(null);
+        }
+
+        void IPtyOutputDriver.Wake(PtyOutputPump pump)
+        {
+            if (pump.IsSessionDisposed)
+                End();
+        }
+
+        void IPtyOutputDriver.CancelRead(PtyOutputPump pump)
+        {
+            if (pump.IsSessionDisposed)
+                End();
+        }
+
+        void IPtyOutputDriver.OnPumpFinished(PtyOutputPump pump)
+        {
         }
     }
 

@@ -26,9 +26,9 @@ internal static partial class UnixPtyBackend
     /// input while some is queued (<see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). A registration reports once and is
     /// armed again after each pass, by the pass's next wait in one system call (<see cref="SetInterestOnLoop"/>), and a
     /// consumer that reads the master on its own thread arms it only when it is about to wait, so a flood that the
-    /// consumer keeps up with wakes this thread about once per wait. On macOS such a consumer also waits for the master on
-    /// its own thread (<c>UnixPtyBackendInstance.TryReadInline</c>), so a flood there wakes this thread only for
-    /// its millisecond check of inline readers. kqueue keeps the
+    /// consumer keeps up with wakes this thread about once per wait. On macOS and Linux such a consumer also waits for the
+    /// master on its own thread while the child streams (<c>UnixPtyBackendInstance.TryReadInline</c>), so a flood wakes
+    /// this thread only for its millisecond check of inline readers. kqueue keeps the
     /// two interests as two filters of the master, and the native wait joins their events into one report per master, as
     /// epoll gives. A master's token names its slot and the slot's
     /// generation, so a report that arrives after the session's registration was removed never reaches the session that

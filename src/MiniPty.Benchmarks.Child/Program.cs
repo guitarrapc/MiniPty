@@ -13,6 +13,43 @@ if (args is ["--serve", var serveBytes])
     return Serve.Run(floodBytes);
 }
 
+if (args is ["--burst", var burstBytesArg, var burstIntervalArg, var burstCountArg])
+{
+    // Burst probe (MiniPty.Benchmarks --burst-probe): a burst of printable bytes at an interval, then exit.
+    if (!int.TryParse(burstBytesArg, NumberStyles.None, CultureInfo.InvariantCulture, out var burstBytes)
+        || !int.TryParse(burstIntervalArg, NumberStyles.None, CultureInfo.InvariantCulture, out var burstIntervalMs)
+        || !int.TryParse(burstCountArg, NumberStyles.None, CultureInfo.InvariantCulture, out var burstCount))
+    {
+        Console.Error.WriteLine("Usage: MiniPty.Benchmarks.Child --burst <bytes> <interval ms> <count>");
+        return 2;
+    }
+
+    var burst = new byte[burstBytes];
+    burst.AsSpan().Fill((byte)'x');
+    if (OperatingSystem.IsWindows())
+    {
+        var text = new string('x', burstBytes);
+        for (var i = 0; i < burstCount; i++)
+        {
+            Console.Out.Write(text);
+            Console.Out.Flush();
+            Thread.Sleep(burstIntervalMs);
+        }
+    }
+    else
+    {
+        using var stdout = Console.OpenStandardOutput();
+        for (var i = 0; i < burstCount; i++)
+        {
+            stdout.Write(burst);
+            stdout.Flush();
+            Thread.Sleep(burstIntervalMs);
+        }
+    }
+
+    return 0;
+}
+
 if (args is ["--stdin-sink"])
 {
     // Input benchmarks: read stdin until end of input and discard it.
@@ -27,7 +64,7 @@ if (args is ["--stdin-sink"])
 
 if (!TryParseBytesArg(args, out var byteCount))
 {
-    Console.Error.WriteLine("Usage: MiniPty.Benchmarks.Child --bytes <count> | --stdin-sink | --serve <flood bytes>");
+    Console.Error.WriteLine("Usage: MiniPty.Benchmarks.Child --bytes <count> | --stdin-sink | --serve <flood bytes> | --burst <bytes> <interval ms> <count>");
     return 2;
 }
 

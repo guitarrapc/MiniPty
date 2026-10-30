@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <poll.h>
 
 #if defined(__linux__)
 #include <sys/epoll.h>
@@ -874,6 +875,39 @@ int minipty_master_wait(int wait_fd, int timeout_ms)
 #else
     (void)wait_fd;
     (void)timeout_ms;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+/*
+ * Linux's consumer wait: one ppoll of the master, so the session holds no descriptor for it, with a timeout in
+ * microseconds. A poll of one descriptor builds no registration worth measuring on Linux, where it measured level with
+ * an epoll of the session's own; on macOS each poll builds and drops a kqueue registration, which is why the session's
+ * kqueue above serves there. Returns as minipty_master_wait does: 1 when the master reported (output, hang-up or an
+ * error, which the caller's read tells apart), 0 on the timeout or an interruption, -1 on failure. Elsewhere it fails
+ * with ENOTSUP.
+ */
+int minipty_master_poll(int master, int timeout_us)
+{
+#if defined(__linux__)
+    struct pollfd fd;
+    struct timespec timeout;
+    int ready;
+
+    fd.fd = master;
+    fd.events = POLLIN;
+    fd.revents = 0;
+    timeout.tv_sec = timeout_us / 1000000;
+    timeout.tv_nsec = (long)(timeout_us % 1000000) * 1000L;
+    ready = ppoll(&fd, 1, &timeout, NULL);
+    if (ready < 0)
+        return errno == EINTR ? 0 : -1;
+
+    return ready;
+#else
+    (void)master;
+    (void)timeout_us;
     errno = ENOTSUP;
     return -1;
 #endif

@@ -33,6 +33,11 @@ If an embedder asks:
 
 ## Open
 
+### Linux bursts of 32 KiB or more cost their consumer one 200 μs wait
+
+On Linux a plain `ReadOutputAsync` consumer waits for the master on its own thread once the child has streamed eight whole reads (32 KiB), so a burst that large and then silence costs a thread-pool thread one 200 μs `ppoll` at the burst's end (`platform_support.md`, lessons). Bursts up to 16 KiB never wait, floods wait and are repaid, and a consumer on a UI thread never waits. Nothing is planned: the trade-off is measured and bounded, and a host that serves many sessions redrawing large screens at once can be measured with `MiniPty.Benchmarks --burst-probe`.
+
+
 ### Windows floods on two CPUs trail Porta.Pty's default mode
 
 On CI's 2-core Windows runner and locally on two logical CPUs, MiniPty's 1 MiB floods trail Porta.Pty's default mode by 5–30% on both ConPTYs (CI: 11 of 12 cases over six runs, 0.60–0.99; the in-box flood about 5% behind locally), while all-CPU floods are level in-box and about 12% behind out-of-band. Porta.Pty holds a thread per session blocked in `ReadFile`, so one wake carries each ConPTY write to its consumer; MiniPty needs the loop's wake and the consumer's continuation, since no consumer code runs on the loop. A consumer that reads the pipe itself was measured slower, because ConPTY renders more slowly than a consumer reads ([platform lessons](specs/platform_support.md#lessons-learned)). Closing the gap without a thread per session has no known design; the gap is recorded, not planned.
