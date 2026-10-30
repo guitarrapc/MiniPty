@@ -408,6 +408,13 @@ public sealed class PtyUnixLoopTests
     /// child counts as streaming, so a consumer that catches the kernel's worker between refills in its first 32 KiB is
     /// handed the next read by the loop as well, a hand-off or two more per burst.
     /// </summary>
+    /// <remarks>
+    /// The count of loop passes leaves out the passes that read for a consumer the loop took reading back from. A consumer
+    /// whose thread is preempted for over a millisecond, as on a loaded CI runner, has the loop read for it until it
+    /// reads inline again, and on macOS that is a pass per 1 KiB the master holds: hundreds of passes in a run on a
+    /// 3-core macOS runner, none on an idle machine. How many depends on the scheduler, not on the loop, and the waits on
+    /// the consumer's thread and the hand-offs still fail a consumer that never reads inline.
+    /// </remarks>
     [Test]
     [NotInParallel]
     public async Task ABurstReachesAWaitingConsumerWithOneHandOff()
@@ -442,6 +449,7 @@ public sealed class PtyUnixLoopTests
         var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
         var loopReadsBefore = UnixPtyBackend.LoopReadsForWaitingConsumerForTests;
         var loopPassesBefore = UnixPtyBackend.LoopPassesForWaitingConsumerForTests;
+        var takenBackBefore = UnixPtyBackend.LoopPassesForLoopConsumerForTests;
         var started = Stopwatch.GetTimestamp();
         for (var i = 0; i < Bursts; i++)
             await BurstAsync();
@@ -452,13 +460,16 @@ public sealed class PtyUnixLoopTests
         var waits = UnixPtyBackend.ConsumerWaitsForTests - waitsBefore;
         var loopReads = UnixPtyBackend.LoopReadsForWaitingConsumerForTests - loopReadsBefore;
         var loopPasses = UnixPtyBackend.LoopPassesForWaitingConsumerForTests - loopPassesBefore;
+        var takenBack = UnixPtyBackend.LoopPassesForLoopConsumerForTests - takenBackBefore;
         // One read per pass that hands a waiting consumer output; a loop that read on made four on Linux (on macOS the master
         // holds one read, so the pass stops after it either way).
         await Assert.That(loopPasses).IsGreaterThanOrEqualTo(Bursts / 2L).Because($"{loopPasses} loop passes handed the waiting consumer output in {Bursts} bursts");
         await Assert.That(loopReads).IsEqualTo(loopPasses).Because($"{loopReads} loop reads in {loopPasses} passes for the waiting consumer");
         await Assert.That(handOffs).IsLessThan(4L * Bursts).Because($"{handOffs} thread-pool work items for {Bursts} bursts");
         // Besides a pass per hand-off, the loop wakes about once a millisecond to check on inline readers while one is listed.
-        await Assert.That(passes).IsLessThan(2L * Bursts + elapsedMs).Because($"{passes} loop passes for {Bursts} bursts over {elapsedMs} ms");
+        // Passes that read for a consumer the loop took reading back from are the scheduler's doing (see remarks).
+        await Assert.That(passes - takenBack).IsLessThan(2L * Bursts + elapsedMs)
+            .Because($"{passes} loop passes, {takenBack} of them reading for a consumer taken back from, for {Bursts} bursts over {elapsedMs} ms");
         await Assert.That(waits).IsGreaterThanOrEqualTo(Bursts / 2L).Because($"{waits} waits on the consumer's thread for {Bursts} bursts");
     }
 

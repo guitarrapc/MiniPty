@@ -52,6 +52,12 @@ internal static partial class UnixPtyBackend
     internal static long LoopPassesForWaitingConsumerForTests => Volatile.Read(ref UnixPtyBackendInstance.LoopPassesForWaitingConsumer);
 
     /// <summary>
+    /// Passes of the loop that read output for a consumer it reads for (one that never read inline, or one it took reading
+    /// back from after the consumer stopped for about a millisecond), for tests that leave those out of a count of passes.
+    /// </summary>
+    internal static long LoopPassesForLoopConsumerForTests => Volatile.Read(ref UnixPtyBackendInstance.LoopPassesForLoopConsumer);
+
+    /// <summary>
     /// Runs before each inline read attempt of a consumer, for the test that a park on a ring still full survives the
     /// attempt. Null in production; a test sets it and clears it.
     /// </summary>
@@ -351,6 +357,12 @@ internal static partial class UnixPtyBackend
 
         /// <summary>Passes of the loop that read while the session's consumer waited after reading inline, for tests: one read each.</summary>
         internal static long LoopPassesForWaitingConsumer;
+
+        /// <summary>
+        /// Passes of the loop that read output for a consumer the loop reads for: one that never read inline, or one the
+        /// loop took reading back from (<see cref="CheckInlineReader"/>), for tests. Written by the loop's thread alone.
+        /// </summary>
+        internal static long LoopPassesForLoopConsumer;
 
         /// <summary>Whether this session is on the watcher's list of inline readers. Guarded by its lock.</summary>
         internal bool InlineReaderListed;
@@ -1339,7 +1351,8 @@ internal static partial class UnixPtyBackend
                 return false;
             }
 
-            var forWaitingConsumer = Volatile.Read(ref _consumerReads) == ConsumerReadsWaiting;
+            var consumerReads = Volatile.Read(ref _consumerReads);
+            var forWaitingConsumer = consumerReads == ConsumerReadsWaiting;
             try
             {
                 for (var reads = 0; reads < LoopReadsPerService; reads++)
@@ -1379,6 +1392,10 @@ internal static partial class UnixPtyBackend
                         Interlocked.Increment(ref LoopReadsForWaitingConsumer);
                         break;
                     }
+
+                    // Only this thread writes the count, so it needs no interlocked add.
+                    if (reads == 0 && consumerReads == ConsumerReadsLoop)
+                        Volatile.Write(ref LoopPassesForLoopConsumer, LoopPassesForLoopConsumer + 1);
 
                     // A macOS master hands out at most the 1 KiB it holds, so a short read emptied it, and a read after it
                     // would find nothing: one system call per chunk fewer. What the child writes before the next arm is
