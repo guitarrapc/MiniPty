@@ -239,6 +239,15 @@ public sealed class PtyUnixDisposeTests
     /// not wait for a child that ignores the hang-up. A reader that waited for the master would finish only once the
     /// grace kill closed it.
     /// </summary>
+    /// <remarks>
+    /// Timed to when the disposal's wait completes, not to when an <c>await</c> of it resumes: the resumption is a
+    /// thread-pool work item, and on a loaded runner the pool's queue, not the reader, decided the time. On a Mac's
+    /// efficiency cores under the whole suite (about CI's run time) the loop finished the reader 0.4–101 ms after the
+    /// disposal, and the awaiting test resumed 52–190 ms after that; CI's <c>macos-26-intel</c> runner measured 1,245 ms
+    /// to the resumption. So the test polls <see cref="ValueTask.IsCompleted"/> on the thread it already runs on, which
+    /// needs no work item from the pool, and awaits the completed wait after. A reader that waited for the master still
+    /// completes only after the grace and fails it.
+    /// </remarks>
     [Test]
     public async Task DisposeAsyncDoesNotWaitForAChildThatIgnoresHangup()
     {
@@ -252,8 +261,14 @@ public sealed class PtyUnixDisposeTests
             await WaitForReadyAsync(session);
 
             var sw = Stopwatch.StartNew();
-            await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30));
-            await Assert.That(sw.ElapsedMilliseconds).IsLessThan(UnixPtyBackend.DisposeHangupGraceMs);
+            var stop = session.DisposeAsync();
+            while (!stop.IsCompleted && sw.ElapsedMilliseconds < 30_000)
+                Thread.Sleep(1);
+
+            var stoppedMs = sw.ElapsedMilliseconds;
+            await Assert.That(stop.IsCompleted).IsTrue();
+            await stop;
+            await Assert.That(stoppedMs).IsLessThan(UnixPtyBackend.DisposeHangupGraceMs);
 
             await Assert.That(await WaitForProcessGoneAsync(pid)).IsTrue();
         }
