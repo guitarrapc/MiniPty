@@ -397,13 +397,16 @@ public sealed class PtyUnixLoopTests
     }
 
     /// <summary>
-    /// A burst that arrives while the consumer waits costs one hand-off, not one per ring. On Linux a 64 KiB burst, the
-    /// benchmarks' smaller flood, was read in 16 KiB turns: the loop's pass filled the ring and parked on it, the consumer
-    /// drained it and could not read inline while the loop was parked, so each ring cost a wake of the loop and of a pool
-    /// thread. The loop now reads once for a consumer that waits after reading inline, and the consumer reads on, or, while
-    /// the child streams, waits for the master on its own thread, which the child's write wakes. Judged by thread-pool work
-    /// items, loop passes and the consumer's waits per burst, not by timing. The child answers each line of input with
-    /// 64 KiB.
+    /// A burst that arrives while the consumer waits costs one hand-off, not one per ring: the loop reads once for a
+    /// consumer that waits after reading inline, and the consumer reads the rest on its own thread, or, while the child
+    /// streams, waits for the master there, which the child's write wakes. A loop that read on filled the ring and parked on
+    /// it, the consumer could not read inline while it was parked, and each ring then cost a wake of the loop and of a pool
+    /// thread (four of each per 64 KiB on Linux). Judged by the loop's reads per pass for the waiting consumer, thread-pool
+    /// work items, loop passes and the consumer's waits per burst, not by timing. The child answers each line of input with
+    /// 64 KiB after 2 ms, longer than the consumer waits on its own thread, so every burst reaches a consumer parked on the
+    /// loop, which is the path the loop's one read is about; on Linux a burst apart from the last also starts before the
+    /// child counts as streaming, so a consumer that catches the kernel's worker between refills in its first 32 KiB is
+    /// handed the next read by the loop as well, a hand-off or two more per burst.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -414,9 +417,8 @@ public sealed class PtyUnixLoopTests
 
         const int Burst = 64 * 1024;
         const int Bursts = 64;
-        // The burst is built by doubling: mawk's sprintf cannot build a string this long.
         await using var session = Pty.Start(Shell(
-            "stty -echo; awk 'BEGIN { s = \"x\"; while (length(s) < " + Burst + ") s = s s } { printf \"%s\", s; fflush() }'"));
+            "stty -echo; perl -e '$| = 1; $s = \"x\" x " + Burst + "; while (<STDIN>) { select(undef, undef, undef, 0.002); print $s }'"));
         await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
 
         async Task BurstAsync()
@@ -438,22 +440,104 @@ public sealed class PtyUnixLoopTests
         var before = ThreadPool.CompletedWorkItemCount;
         var passesBefore = UnixPtyBackend.LoopPassesForTests;
         var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
+        var loopReadsBefore = UnixPtyBackend.LoopReadsForWaitingConsumerForTests;
+        var loopPassesBefore = UnixPtyBackend.LoopPassesForWaitingConsumerForTests;
+        var started = Stopwatch.GetTimestamp();
         for (var i = 0; i < Bursts; i++)
             await BurstAsync();
 
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         var handOffs = ThreadPool.CompletedWorkItemCount - before;
         var passes = UnixPtyBackend.LoopPassesForTests - passesBefore;
         var waits = UnixPtyBackend.ConsumerWaitsForTests - waitsBefore;
-        await Assert.That(handOffs).IsLessThan(2L * Bursts).Because($"{handOffs} thread-pool work items for {Bursts} bursts");
-        await Assert.That(passes).IsLessThan(2L * Bursts).Because($"{passes} loop passes for {Bursts} bursts");
+        var loopReads = UnixPtyBackend.LoopReadsForWaitingConsumerForTests - loopReadsBefore;
+        var loopPasses = UnixPtyBackend.LoopPassesForWaitingConsumerForTests - loopPassesBefore;
+        // One read per pass that hands a waiting consumer output; a loop that read on made four on Linux (on macOS the master
+        // holds one read, so the pass stops after it either way).
+        await Assert.That(loopPasses).IsGreaterThanOrEqualTo(Bursts / 2L).Because($"{loopPasses} loop passes handed the waiting consumer output in {Bursts} bursts");
+        await Assert.That(loopReads).IsEqualTo(loopPasses).Because($"{loopReads} loop reads in {loopPasses} passes for the waiting consumer");
+        await Assert.That(handOffs).IsLessThan(4L * Bursts).Because($"{handOffs} thread-pool work items for {Bursts} bursts");
+        // Besides a pass per hand-off, the loop wakes about once a millisecond to check on inline readers while one is listed.
+        await Assert.That(passes).IsLessThan(2L * Bursts + elapsedMs).Because($"{passes} loop passes for {Bursts} bursts over {elapsedMs} ms");
         await Assert.That(waits).IsGreaterThanOrEqualTo(Bursts / 2L).Because($"{waits} waits on the consumer's thread for {Bursts} bursts");
     }
 
     /// <summary>
-    /// A consumer that ended the loop's park on a full ring (it drained the ring and read inline again) and then stops
-    /// reading for a while has the loop read for it again, as a consumer that never met a park does: the child is not held
-    /// up and every byte arrives. The consumer pauses longer than the loop waits before it takes reading back, many times,
-    /// so the loop fills the ring and parks during each pause and the consumer ends the park after it.
+    /// A consumer that comes back to a ring the loop filled and parked on while it was away leaves that park to the loop: it
+    /// takes the chunk, and the park ends when its release frees space and wakes the loop. A consumer that ended the park
+    /// while the ring was still full left the loop's free-space wait and the release's wake out of step, and on kqueue the
+    /// loop's deferred interest could then disarm the master after the consumer armed it, so nobody watched the master.
+    /// Judged by the parks consumers ended, which the attempt must not add to, and by the pump's free-space wait, which the
+    /// loop holds again by the time the chunk is taken either way.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task AParkOnARingStillFullSurvivesTheConsumersInlineRead()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        const int Size = 4 * 1024 * 1024;
+        await using var session = Pty.Start(Shell($"dd if=/dev/zero bs={1024 * 1024} count=4 2>/dev/null"));
+        var pump = session.OutputPump;
+        var hookRuns = 0;
+        var parkedWhenTheConsumerCameBack = false;
+        long parksEndedBeforeTheAttempt = 0;
+        UnixPtyBackend.InlineReadHookForTests = () =>
+        {
+            // Once: stay away until the loop has read for this consumer, filled the ring and parked on it.
+            if (Interlocked.Exchange(ref hookRuns, 1) != 0)
+                return;
+
+            var deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 5;
+            while (!pump.IsWaitingForFreeSpace && Stopwatch.GetTimestamp() < deadline)
+                Thread.Sleep(1);
+
+            // The loop parks inside its pass and still holds the producer's turn for a moment; the consumer must find the
+            // park with the turn free, or its attempt is turned away before it reaches the park.
+            Thread.Sleep(5);
+            parkedWhenTheConsumerCameBack = pump.IsWaitingForFreeSpace;
+            Volatile.Write(ref parksEndedBeforeTheAttempt, UnixPtyBackend.ParksEndedByConsumerForTests);
+        };
+
+        try
+        {
+            var received = 0;
+            var checkedPark = false;
+            var parkSurvived = false;
+            long parksEndedByTheAttempt = 0;
+            await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+            while (await output.MoveNextAsync().AsTask().WaitAsync(Timeout))
+            {
+                received += output.Current.Data.Span.Count((byte)0);
+                // The first chunk after the hook's wait is the ring the loop filled, taken and not yet released: the ring was
+                // full throughout the consumer's attempt, so the attempt must not have ended the park, and the loop is
+                // parked on it now.
+                if (!checkedPark && Volatile.Read(ref hookRuns) != 0)
+                {
+                    checkedPark = true;
+                    parksEndedByTheAttempt = UnixPtyBackend.ParksEndedByConsumerForTests - Volatile.Read(ref parksEndedBeforeTheAttempt);
+                    parkSurvived = pump.IsWaitingForFreeSpace;
+                }
+            }
+
+            await Assert.That(parkedWhenTheConsumerCameBack).IsTrue().Because("the loop did not park on a full ring while the consumer was away");
+            await Assert.That(parksEndedByTheAttempt).IsEqualTo(0L).Because("the consumer's inline read ended the loop's park on a ring that was still full");
+            await Assert.That(parkSurvived).IsTrue().Because("the loop is not parked on the ring the consumer holds");
+            await Assert.That(received).IsEqualTo(Size);
+        }
+        finally
+        {
+            UnixPtyBackend.InlineReadHookForTests = null;
+        }
+    }
+
+    /// <summary>
+    /// A consumer that pauses many times during a flood, each pause longer than the loop waits before it takes reading
+    /// back, has the loop fill the ring and park during each pause; back from a pause it releases its chunk, which wakes
+    /// the loop, and ends the park itself when it reads inline before the loop's pass does. Whichever side ends it, the
+    /// child is not held up and every byte arrives. Judged by the parks the consumer ended, which must be at least one, and
+    /// by the bytes.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -464,6 +548,7 @@ public sealed class PtyUnixLoopTests
 
         const int Size = 4 * 1024 * 1024;
         await using var session = Pty.Start(Shell($"dd if=/dev/zero bs={1024 * 1024} count=4 2>/dev/null"));
+        var parksBefore = UnixPtyBackend.ParksEndedByConsumerForTests;
         var received = 0;
         var chunks = 0;
         await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
@@ -473,7 +558,9 @@ public sealed class PtyUnixLoopTests
                 await Task.Delay(3);
         }
 
+        var parks = UnixPtyBackend.ParksEndedByConsumerForTests - parksBefore;
         await Assert.That(received).IsEqualTo(Size);
+        await Assert.That(parks).IsGreaterThanOrEqualTo(1L).Because("the consumer never ended a park");
         await WaitUntilAsync(() => session.HasExited);
     }
 
@@ -647,14 +734,17 @@ public sealed class PtyUnixLoopTests
         await Assert.That(UnixPtyBackend.InlineReaderListingsForTests - listingsBefore).IsGreaterThanOrEqualTo(1L);
         if (OperatingSystem.IsMacOS())
             await Assert.That(waits).IsGreaterThan(chunks / 2L).Because($"{waits} waits on the consumer's thread for {chunks} chunks");
+        else
+            await Assert.That(waits).IsGreaterThanOrEqualTo(1L).Because($"{waits} waits on the consumer's thread for {chunks} chunks");
         await Assert.That(handOffs).IsLessThan(chunks / 4L).Because($"{handOffs} thread-pool work items for {chunks} chunks");
         await Assert.That(passes).IsLessThan(chunks / 4L).Because($"{passes} loop passes for {chunks} chunks");
     }
 
     /// <summary>
-    /// A consumer waits for the master on its own thread only after a read of at least a kilobyte, which says the child was
-    /// held up and has more (on macOS the whole master). After a short read, a line of output at a time, it parks at once:
-    /// a wait there would hold a thread-pool thread for a millisecond per line, for output that is not coming.
+    /// A consumer waits for the master on its own thread only after a read that says the child had more than a read's worth:
+    /// the whole master on macOS (1 KiB), a whole read on Linux (4,095 bytes). After a short read, a line of output at a
+    /// time, it parks at once: a wait there would hold a thread-pool thread for the wait per line, for output that is not
+    /// coming.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -670,6 +760,29 @@ public sealed class PtyUnixLoopTests
             lines += chunk.Data.Span.Count((byte)'\n');
 
         await Assert.That(lines).IsEqualTo(8);
+        await Assert.That(UnixPtyBackend.ConsumerWaitsForTests - waitsBefore).IsEqualTo(0L);
+    }
+
+    /// <summary>
+    /// On Linux a child that writes bursts of a few reads, 16 KiB every 10 ms, never makes its consumer wait for the master:
+    /// a burst of fewer than eight full reads is what a TUI's redraw or a long log line writes before the child stops, and a
+    /// wait after it would hold a thread-pool thread for the timeout per burst. A park before the child counts as streaming
+    /// resets the count, so the bursts do not add up to a wait either. macOS waits after one full read by design.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task OnLinuxAConsumerDoesNotWaitAfterABurstOfAFewReads()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        await using var session = Pty.Start(Shell("for i in 1 2 3 4 5 6 7 8; do head -c 16384 /dev/zero | tr '\\0' x; sleep 0.01; done"));
+        var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
+        var received = 0;
+        await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
+            received += chunk.Data.Span.Count((byte)'x');
+
+        await Assert.That(received).IsEqualTo(8 * 16384);
         await Assert.That(UnixPtyBackend.ConsumerWaitsForTests - waitsBefore).IsEqualTo(0L);
     }
 

@@ -33,6 +33,11 @@ If an embedder asks:
 
 ## Open
 
+### Linux bursts of 32 KiB or more cost their consumer one 200 μs wait
+
+On Linux a plain `ReadOutputAsync` consumer waits for the master on its own thread once the child has streamed eight whole reads (32 KiB), so a burst that large and then silence costs a thread-pool thread one 200 μs `ppoll` at the burst's end (`platform_support.md`, lessons). Bursts up to 16 KiB never wait, floods wait and are repaid, and a consumer on a UI thread never waits. Nothing is planned: the trade-off is measured and bounded, and a host that serves many sessions redrawing large screens at once can be measured with `MiniPty.Benchmarks --burst-probe`.
+
+
 ### Windows floods on two CPUs trail Porta.Pty's default mode
 
 On CI's 2-core Windows runner and locally on two logical CPUs, MiniPty's 1 MiB floods trail Porta.Pty's default mode by 5–30% on both ConPTYs (CI: 11 of 12 cases over six runs, 0.60–0.99; the in-box flood about 5% behind locally), while all-CPU floods are level in-box and about 12% behind out-of-band. Porta.Pty holds a thread per session blocked in `ReadFile`, so one wake carries each ConPTY write to its consumer; MiniPty needs the loop's wake and the consumer's continuation, since no consumer code runs on the loop. A consumer that reads the pipe itself was measured slower, because ConPTY renders more slowly than a consumer reads ([platform lessons](specs/platform_support.md#lessons-learned)). Closing the gap without a thread per session has no known design; the gap is recorded, not planned.
@@ -44,7 +49,7 @@ On CI's 2-core Windows runner and locally on two logical CPUs, MiniPty's 1 MiB f
 - **FreeBSD** is tested neither locally nor in CI. Its termios (`VERASE2`, and `_POSIX_VDISABLE` being 0xff), whether it revokes the tty when the session leader exits, as macOS does, and the readiness behavior `kqueue` was chosen on, which the Unix loop and its coalescing tick run on, follow from source only. `scripts/pty-readiness-probe.c` checks the readiness part where a FreeBSD machine is available.
 - **Host exit on macOS under NativeAOT.** A host that disposes a session whose child ignores `SIGHUP` and then exits sends the pending kill at exit. On macOS that was probed under CoreCLR and NativeAOT with an earlier version that armed a timer per disposal, not with the current exit-watcher deadline; CI runs the CoreCLR test (`HostExitKillsAChildStillInItsHangupGrace`) there.
 - **An echo during a flood through a bridge** is not tested against the coalescing bound; the tests time the end of a burst only.
-- **Output buffer geometry.** The 16 KiB ring keeps the size of the four 4 KiB slots it replaced, which were chosen because every allocation benchmark improved with them, and a read takes up to 4 KiB. Throughput has not been tuned for either size; an empty ring starts over at its beginning, since a Linux master hands out 4,095 bytes per read and four of those left 4 bytes before the end.
+- **Output buffer geometry.** The 16 KiB ring keeps the size of the four 4 KiB slots it replaced, which were chosen because every allocation benchmark improved with them, and a read takes up to 4 KiB. Throughput has not been tuned for either size.
 
 ## Rare Test Timeouts Under Heavy Load
 

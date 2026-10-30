@@ -51,9 +51,13 @@ internal static partial class UnixInterop
     [LibraryImport("minipty_unix", SetLastError = true)]
     internal static partial int minipty_master_wait_open(int master);
 
-    /// <summary>Linux: polls <paramref name="master"/> for output for up to <paramref name="timeoutMs"/>; 1 when it reported, 0 on the timeout, -1 on failure.</summary>
+    /// <summary>
+    /// Linux: waits up to <paramref name="timeoutMicros"/> for <paramref name="master"/> to report. 1 when it reported
+    /// (output, hang-up or an error, which the read that follows tells apart), 0 on the timeout or an interruption, -1 on
+    /// failure.
+    /// </summary>
     [LibraryImport("minipty_unix", SetLastError = true)]
-    internal static partial int minipty_master_poll(int master, int timeoutMs);
+    internal static partial int minipty_master_poll(int master, int timeoutMicros);
 
     /// <summary>Waits on <paramref name="waitFd"/> up to <paramref name="timeoutMs"/>: 1 when the master reported, 0 on timeout, -1 on failure.</summary>
     [LibraryImport("minipty_unix", SetLastError = true)]

@@ -30,8 +30,9 @@ internal interface IPtyOutputWaiter
 /// <see cref="IPtyBackend.OutputChunkLimit"/>), so a consumer that fell behind, such as a WebSocket still sending
 /// the previous chunk, takes several reads at once. When less than <see cref="PublishSize"/> is free the pump stops
 /// reading, and backpressure reaches the child through the OS pipe. The ring is single-producer, single-consumer:
-/// the pump owns <see cref="_tail"/>, the active consumer owns <see cref="_head"/>, and <see cref="_count"/>
-/// publishes bytes between them with full fences.
+/// the pump owns <see cref="_tail"/>, the active consumer advances <see cref="_head"/>, and <see cref="_count"/>
+/// publishes bytes between them with full fences. While nothing is unread the consumer touches neither index, and the
+/// producer moves both back to the start (<see cref="NextReadSpan"/>).
 /// </para>
 /// <para>
 /// <b>Consumers.</b> <c>ReadOutputAsync</c> and the <c>Output</c> stream read the ring on their own thread and
@@ -96,7 +97,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     // which keeps it here, and a consumer racing disposal must find an array, not null.
     private byte[]? _ring;
     private int _ringState;
-    // Consumer side: where unread output starts, and how much of it the last TryPeek handed out.
+    // Consumer side: where unread output starts, and how much of it the last TryPeek handed out. The producer resets
+    // _head to 0 while nothing is unread (NextReadSpan).
     private int _head;
     private int _peeked;
     // Producer side: where the next read writes. Always (_head + _count) % Capacity once a read is published.
@@ -234,9 +236,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
     /// <summary>
     /// The span the next read fills: at least <see cref="PublishSize"/> is free unless the ring is full, so it holds no
-    /// unread output. It ends at <see cref="PublishSize"/> or at the end of the buffer, and the next publish continues
-    /// at the start; a ring with nothing unread starts at the beginning again. After disposal nothing reads the ring, so the driver reuses the same span only to let the
-    /// transport end. Only while the driver holds the ring (<see cref="HoldRing"/>); the buffer is pinned, so a read
+    /// unread output. It ends at <see cref="PublishSize"/> or at the end of the buffer, after which the next publish
+    /// wraps to the start; a ring with nothing unread restarts at the beginning before the read instead. After disposal
+    /// nothing reads the ring, so the driver reuses the same span only to let the transport end. Only while the driver holds the ring (<see cref="HoldRing"/>); the buffer is pinned, so a read
     /// may stay posted into the span until it completes.
     /// </summary>
     internal Span<byte> NextReadSpan

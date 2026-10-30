@@ -71,7 +71,7 @@ int minipty_watch_wait_arm(
     int *reports,
     int capacity,
     int timeout_ms);
-int minipty_master_poll(int master, int timeout_ms);
+int minipty_master_poll(int master, int timeout_us);
 int minipty_master_wait_open(int master);
 int minipty_master_wait(int wait_fd, int timeout_ms);
 int minipty_pidfd_open(int pid);
