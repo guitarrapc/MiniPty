@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using MiniPty.Internal;
@@ -383,17 +383,24 @@ public sealed class PtyUnixLoopTests
         var chunks = 0;
         var before = ThreadPool.CompletedWorkItemCount;
         var passesBefore = UnixPtyBackend.LoopPassesForTests;
+        var takenBackBefore = UnixPtyBackend.LoopPassesForLoopConsumerForTests;
+        var askedAgainBefore = UnixPtyBackend.LoopLooksAskedAgainByConsumerForTests;
+        var started = Stopwatch.GetTimestamp();
         await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
         {
             received += chunk.Data.Span.Count((byte)0);
             chunks++;
         }
 
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         var handOffs = ThreadPool.CompletedWorkItemCount - before;
         var passes = UnixPtyBackend.LoopPassesForTests - passesBefore;
+        var takenBack = UnixPtyBackend.LoopPassesForLoopConsumerForTests - takenBackBefore;
+        var askedAgain = UnixPtyBackend.LoopLooksAskedAgainByConsumerForTests - askedAgainBefore;
         await Assert.That(received).IsEqualTo(Size);
         await Assert.That(handOffs).IsLessThan(chunks / 4L).Because($"{handOffs} thread-pool work items for {chunks} chunks");
-        await Assert.That(passes).IsLessThan(chunks / 4L).Because($"{passes} loop passes for {chunks} chunks");
+        await Assert.That(passes - takenBack - askedAgain).IsLessThan(chunks / 4L + elapsedMs)
+            .Because($"{passes} loop passes, {takenBack} reading for a consumer taken back from and {askedAgain} asked for again by the consumer, for {chunks} chunks over {elapsedMs} ms");
     }
 
     /// <summary>
@@ -714,6 +721,14 @@ public sealed class PtyUnixLoopTests
     /// reader's; a Linux master holds more, so the consumer there waits only now and then, when it catches the kernel
     /// between refills. Judged by the waits the consumer made, the hand-offs, and the loop's passes, not by timing.
     /// </summary>
+    /// <remarks>
+    /// The count of loop passes leaves out what a loaded machine adds on its own, as in
+    /// <see cref="AFloodTheConsumerKeepsUpWithIsNotHandedOverOncePerRead"/>: the loop's millisecond check on inline
+    /// readers, the passes that read for a consumer taken back from, and the looks a consumer asks the loop for again
+    /// after turning it away. Counted whole, they failed CI's <c>ubuntu-24.04</c> runner (125 passes for 171 chunks), and
+    /// up to one run in five of a 2-CPU Linux container with every core busy, where the looks asked for again made up 116 of
+    /// 125 passes with two hand-offs in all.
+    /// </remarks>
     [Test]
     [NotInParallel]
     public async Task AConsumerWaitsForTheMasterOnItsOwnThread()
@@ -726,7 +741,10 @@ public sealed class PtyUnixLoopTests
         var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
         var listingsBefore = UnixPtyBackend.InlineReaderListingsForTests;
         var passesBefore = UnixPtyBackend.LoopPassesForTests;
+        var takenBackBefore = UnixPtyBackend.LoopPassesForLoopConsumerForTests;
+        var askedAgainBefore = UnixPtyBackend.LoopLooksAskedAgainByConsumerForTests;
         var handOffsBefore = ThreadPool.CompletedWorkItemCount;
+        var started = Stopwatch.GetTimestamp();
         var received = 0;
         var chunks = 0;
         await using (var output = session.ReadOutputAsync().GetAsyncEnumerator())
@@ -738,8 +756,11 @@ public sealed class PtyUnixLoopTests
             }
         }
 
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         var waits = UnixPtyBackend.ConsumerWaitsForTests - waitsBefore;
         var passes = UnixPtyBackend.LoopPassesForTests - passesBefore;
+        var takenBack = UnixPtyBackend.LoopPassesForLoopConsumerForTests - takenBackBefore;
+        var askedAgain = UnixPtyBackend.LoopLooksAskedAgainByConsumerForTests - askedAgainBefore;
         var handOffs = ThreadPool.CompletedWorkItemCount - handOffsBefore;
         await Assert.That(received).IsEqualTo(Size);
         await Assert.That(UnixPtyBackend.InlineReaderListingsForTests - listingsBefore).IsGreaterThanOrEqualTo(1L);
@@ -748,7 +769,8 @@ public sealed class PtyUnixLoopTests
         else
             await Assert.That(waits).IsGreaterThanOrEqualTo(1L).Because($"{waits} waits on the consumer's thread for {chunks} chunks");
         await Assert.That(handOffs).IsLessThan(chunks / 4L).Because($"{handOffs} thread-pool work items for {chunks} chunks");
-        await Assert.That(passes).IsLessThan(chunks / 4L).Because($"{passes} loop passes for {chunks} chunks");
+        await Assert.That(passes - takenBack - askedAgain).IsLessThan(chunks / 4L + elapsedMs)
+            .Because($"{passes} loop passes, {takenBack} reading for a consumer taken back from and {askedAgain} asked for again by the consumer, for {chunks} chunks over {elapsedMs} ms");
     }
 
     /// <summary>

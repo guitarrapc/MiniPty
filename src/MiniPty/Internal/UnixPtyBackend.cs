@@ -58,6 +58,12 @@ internal static partial class UnixPtyBackend
     internal static long LoopPassesForLoopConsumerForTests => Volatile.Read(ref UnixPtyBackendInstance.LoopPassesForLoopConsumer);
 
     /// <summary>
+    /// Looks a consumer asked the loop for again as it let go of the producer's turn, because the loop had been turned away
+    /// while the consumer held it: a pass of the loop each, for tests that leave those out of a count of passes.
+    /// </summary>
+    internal static long LoopLooksAskedAgainByConsumerForTests => Volatile.Read(ref UnixPtyBackendInstance.LoopLooksAskedAgainByConsumer);
+
+    /// <summary>
     /// Runs before each inline read attempt of a consumer, for the test that a park on a ring still full survives the
     /// attempt. Null in production; a test sets it and clears it.
     /// </summary>
@@ -363,6 +369,12 @@ internal static partial class UnixPtyBackend
         /// loop took reading back from (<see cref="CheckInlineReader"/>), for tests. Written by the loop's thread alone.
         /// </summary>
         internal static long LoopPassesForLoopConsumer;
+
+        /// <summary>
+        /// Looks a consumer asked the loop for again as it let go of the producer's turn, the loop having been turned away
+        /// meanwhile (<see cref="AskLoopAgain"/>), for tests.
+        /// </summary>
+        internal static long LoopLooksAskedAgainByConsumer;
 
         /// <summary>Whether this session is on the watcher's list of inline readers. Guarded by its lock.</summary>
         internal bool InlineReaderListed;
@@ -956,8 +968,19 @@ internal static partial class UnixPtyBackend
             finally
             {
                 if (pump.ExitProducer())
-                    ChildWatcher.RequestService(this);
+                    AskLoopAgain();
             }
+        }
+
+        /// <summary>
+        /// Has the loop look at the session again after a consumer let go of the producer's turn, which turned the loop away
+        /// meanwhile. On a loaded machine a consumer preempted under its turn has the loop turned away again by its next
+        /// read, so these looks grow with how often the scheduler does that, not with the output: counted for tests.
+        /// </summary>
+        private void AskLoopAgain()
+        {
+            Interlocked.Increment(ref LoopLooksAskedAgainByConsumer);
+            ChildWatcher.RequestService(this);
         }
 
         /// <summary>
@@ -1031,7 +1054,7 @@ internal static partial class UnixPtyBackend
             {
                 pump.LetGoOfRing();
                 if (pump.ExitProducer())
-                    ChildWatcher.RequestService(this);
+                    AskLoopAgain();
             }
 
             Volatile.Write(ref _consumerReads, ConsumerReadsLoop);
