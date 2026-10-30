@@ -54,11 +54,11 @@ Your application carries the following besides the MiniPty assembly. The package
 
 <!-- benchmark:run:start -->
 
-The numbers below are from [run 40951368543](https://github.com/guitarrapc/MiniPty/actions/runs/40951368543) on 2026-10-29, with .NET 10.0.14 on GitHub Actions hosted runners:
+The numbers below are from [run 41106916265](https://github.com/guitarrapc/MiniPty/actions/runs/41106916265) on 2026-10-30, with .NET 10.0.14 on GitHub Actions hosted runners:
 
-- Linux (`ubuntu-24.04`): Intel Xeon 6973P-C 3.65GHz, 1 CPU, 4 logical and 2 physical cores
+- Linux (`ubuntu-24.04`): Intel Xeon 6973P-C 4.08GHz, 1 CPU, 4 logical and 2 physical cores
 - macOS (`macos-26`): Apple M1 (Virtual), 1 CPU, 3 logical and 3 physical cores
-- Windows (`windows-2025`): AMD EPYC 9V45 2.60GHz, 1 CPU, 4 logical and 2 physical cores
+- Windows (`windows-2025`): AMD EPYC 7763 2.44GHz, 1 CPU, 4 logical and 2 physical cores
 
 <!-- benchmark:run:end -->
 
@@ -74,10 +74,10 @@ The keystroke and throughput benchmarks keep one child running with raw input, a
 
 | Runner | `ConPty` | `MiniPty` P50 / P95 | `PortaPty` P50 / P95 | Allocated (`MiniPty` / `PortaPty`) |
 |--------|----------|---------------------|----------------------|------------------------------------|
-| Linux | none | 90.34 μs / 111.8 μs | 95.02 μs / 122.7 μs | 0 B / 680 B |
-| macOS | none | 50.75 μs / 120.40 μs | 43.83 μs / 217.38 μs | 0 B / 680 B |
-| Windows | out-of-band | 110.30 μs / 124.5 μs | 108.20 μs / 126.9 μs | 0 B / 376 B |
-| Windows | in-box | 10,884.70 μs / 22,482.6 μs | 9,558.10 μs / 22,421.2 μs | 0 B / 0 B |
+| Linux | none | 74.97 μs / 100.4 μs | 86.22 μs / 113.6 μs | 0 B / 680 B |
+| macOS | none | 36.00 μs / 56.44 μs | 41.44 μs / 72.29 μs | 0 B / 680 B |
+| Windows | out-of-band | 201.2 μs / 240.6 μs | 205.7 μs / 237.8 μs | 0 B / 376 B |
+| Windows | in-box | 10,646.4 μs / 20,181.4 μs | 14,287.0 μs / 20,520.2 μs | 0 B / 160 B |
 
 <!-- benchmark:latency:end -->
 
@@ -89,10 +89,10 @@ On Windows each library runs on both ConPTY implementations, the `ConPty` parame
 
 | Runner | `ConPty` | `MiniPty` MiB/s | `PortaPty` MiB/s | Allocated (`MiniPty` / `PortaPty`) |
 |--------|----------|-----------------|------------------|------------------------------------|
-| Linux | none | 215.4 | 225.2 | 0 B / 90181 B |
-| macOS | none | 56.0 | 77.2 | 0 B / 492200 B |
-| Windows | out-of-band | 7.0 | 7.6 | 0 B / 884726 B |
-| Windows | in-box | 5.8 | 6.2 | 0 B / 80 B |
+| Linux | none | 275.9 | 247.8 | 0 B / 91992 B |
+| macOS | none | 43.1 | 54.4 | 0 B / 492170 B |
+| Windows | out-of-band | 3.8 | 4.2 | 12 B / 885020 B |
+| Windows | in-box | 3.2 | 3.2 | 0 B / 80 B |
 
 <!-- benchmark:throughput:end -->
 
@@ -104,9 +104,9 @@ ConPTY renders the child's output and sends its own VT stream, so on Windows thi
 
 | Runner | `Session_Exit0_WaitForExit` Mean / Allocated | `Session_Echo_Bytes` Mean / Allocated |
 |--------|----------------------------------------------|---------------------------------------|
-| Linux | 1.749 ms / 1.26 KB | 1.778 ms / 1.74 KB |
-| macOS | 6.646 ms / 1.26 KB | 9.867 ms / 1.75 KB |
-| Windows | 13.69 ms / 1.23 KB | 15.89 ms / 1.8 KB |
+| Linux | 1.569 ms / 1.26 KB | 1.602 ms / 1.74 KB |
+| macOS | 10.271 ms / 1.27 KB | 12.908 ms / 1.75 KB |
+| Windows | 16.87 ms / 1.23 KB | 22.21 ms / 1.8 KB |
 
 <!-- benchmark:startup:end -->
 
