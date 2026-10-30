@@ -19,6 +19,10 @@ namespace MiniPty.Tests;
 /// call instead. <see cref="IdleSessionsDoNotOccupyThreadPoolWorkers"/> needs no UI thread, because it counts
 /// occupied pool workers.
 /// </remarks>
+// Busy time is wall-clock time inside callbacks, including time the OS deschedules the UI thread.
+// Other tests deliberately flood PTYs, spawn processes, and pressure the pool. Keep those loads out of
+// these latency checks rather than relaxing the budget that detects blocking library code.
+[NotInParallel]
 public sealed class PtyCallerContextTests
 {
     /// <summary>Window over which UI-thread busy time is measured while the child is idle.</summary>
@@ -374,7 +378,6 @@ public sealed class PtyCallerContextTests
     }
 
     [Test]
-    [NotInParallel]
     public async Task IdleSessionsDoNotOccupyThreadPoolWorkers()
     {
         // With four idle sessions, one pool worker held per session would exceed the bound.
