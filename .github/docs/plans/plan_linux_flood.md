@@ -2,7 +2,7 @@
 
 Goal: fix what an adversarial review of the `linux` branch (`git diff main...HEAD`, commits `7389cb5`..`cd70eb9`) found in the Linux flood change. That change added the consumer's `poll` wait on Linux, the loop's one read for a waiting consumer, the consumer ending the loop's park, and the empty ring's restart. Keep its flood gains, and remove the costs and gaps it added.
 
-**Status:** implemented (2026-10-30), measured on the VM; CI pending ([Implementation](#implementation)). The findings below are as the review wrote them. Each finding passed three independent attempts to refute it; one claim that two of three refuted is listed at the end. The full suite passed on Linux before any fix: 731 of 731 in Apple Container (`mcr.microsoft.com/dotnet/sdk:10.0`, arm64, 4 vCPUs requested).
+**Status:** done (2026-10-30): implemented, measured on the VM and confirmed on CI ([Implementation](#implementation)). Once the README's tables have updated on a full run, this plan can be removed; its lessons are in `platform_support.md`. The findings below are as the review wrote them. Each finding passed three independent attempts to refute it; one claim that two of three refuted is listed at the end. The full suite passed on Linux before any fix: 731 of 731 in Apple Container (`mcr.microsoft.com/dotnet/sdk:10.0`, arm64, 4 vCPUs requested).
 
 ## Implementation
 
@@ -16,7 +16,18 @@ Built on the `linux` branch, measured in Apple Container (Ubuntu 24.04, arm64, 4
 - **D1–D18:** rewritten from the code: the native poll sits after the kqueue wait with its own comment; the interop summary states the three results; the loop-state, `TryReadInline`, `TakeOverReading`, wait, `ReadOnLoop`, watcher and pump comments say what the code does now; `pty_crossplatform.md`, `core_session.md`, `platform_support.md` (the broken sentence, the commit reference, the contradiction) and `next_todo.md` (the appended clause removed; the 32 KiB residual recorded under Open) likewise. The test summaries say what the tests check.
 - **Phase 0:** `MiniPty.Benchmarks --burst-probe [sessions] [bytes] [interval ms] [bursts]` and the child's `--burst` mode.
 
-Tests: macOS 733 of 733; Linux in the container 732 of 733, the failure being the container's `DisposeLetsAnInteractiveShellHangUpItsJobs` (a root shell with no job control), as on `main` there; `HostExitKillsAChildStillInItsHangupGrace` fails there in some runs for the container's PID 1, which reaps nothing. The loop tests passed twice in a row on Linux and the burst test five times. CI (throughput, keystrokes) is still to run on the result.
+Tests: macOS 733 of 733; Linux in the container 732 of 733, the failure being the container's `DisposeLetsAnInteractiveShellHangUpItsJobs` (a root shell with no job control), as on `main` there; `HostExitKillsAChildStillInItsHangupGrace` fails there in some runs for the container's PID 1, which reaps nothing. The loop tests passed twice in a row on Linux and the burst test five times.
+
+**CI** (commit `443b433`, three runs each of `PtyThroughputBenchmarks` [41003322808](https://github.com/guitarrapc/MiniPty/actions/runs/41003322808), [41003305999](https://github.com/guitarrapc/MiniPty/actions/runs/41003305999), [41003282698](https://github.com/guitarrapc/MiniPty/actions/runs/41003282698) and `PtyLatencyBenchmarks` [41003345864](https://github.com/guitarrapc/MiniPty/actions/runs/41003345864), [41003356908](https://github.com/guitarrapc/MiniPty/actions/runs/41003356908), [41003368492](https://github.com/guitarrapc/MiniPty/actions/runs/41003368492), 2026-10-30; the Windows throughput jobs had not finished when this was written, and Windows code is untouched):
+
+| `ubuntu-24.04`, MiniPty ÷ Porta.Pty default | Before the Linux change | Linux change (`6290522`) | With the review fixes (`443b433`) |
+|---|---|---|---|
+| 64 KiB, `AllCpus` | 0.90, 0.90, 0.92 | 1.04, 0.93, 0.98 | **1.11, 1.10, 0.94** |
+| 64 KiB, `TwoCpus` | 0.92, 1.04, 0.96 | 0.89 (Xeon), 1.41, 1.39 | **1.28, 1.29, 1.41** |
+| 1 MiB, `AllCpus` | 1.04, 0.97, 1.03 | 1.17, 0.99, 1.00 | 1.15, 1.16, 0.99 |
+| 1 MiB, `TwoCpus` | 1.11, 1.16, 1.08 | 1.39, 1.38, 1.49 | 1.35, 1.29, 1.48 |
+
+Work items per flood stayed at 0 (0.00–0.04 at 1 MiB) and process CPU per 64 KiB flood at 192–290 μs (453–681 before the Linux change); allocations 0 B except the 2 B per 1 MiB flood the pool's own thread adds. The 64 KiB all-CPU median is now 1.10, over the gate of 1.0 the Linux change had missed by its spread. macOS: MiniPty's own figures are in the band of the runs before (64 KiB 54.5–61.6 MiB/s, 1 MiB 48.8–60.6, 0.00–0.06 work items, 10–12 ms of CPU per MiB), while Porta.Pty's default mode had faster runs than before on that runner (its 1 MiB at 49–81 MiB/s against 34–51), so the ratios there read 0.75–1.00 at 1 MiB against 1.20–1.39; the runner's own spread is 2× between runs, and MiniPty's structure did not change there. Keystrokes on Linux: P50 / P95 45.0 / 72.6, 97.8 / 129.3 and 47.6 / 70.4 μs against Porta.Pty's 38.0 / 68.8, 112.2 / 138.2 and 47.9 / 69.8 in the same runs (the second an EPYC 7763 runner, as the earlier 93.4 / 108.3 against 111.5 / 144.3), one work item per keystroke, 0 B; on two CPUs 35.2, 58.0 and 45.7 μs against 55.2, 104.2 and 47.3. macOS keystrokes 32.9–33.4 μs against 33.7–38.9 in two runs and a stalled third run for both libraries (P95 10 ms each). Windows keystrokes unchanged (out-of-band P50 206, 103 and 218 μs against Porta.Pty's 217, 107 and 224).
 
 ## Findings
 
