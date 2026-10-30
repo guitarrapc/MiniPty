@@ -434,9 +434,7 @@ public sealed class PtyWebSocketBridgeTests
 
         // Split one resize message across two text frames; a broken accumulation path would parse
         // half a JSON document and fail the session with PolicyViolation.
-        var resize = Encoding.UTF8.GetBytes("{\"type\":\"resize\",\"cols\":100,\"rows\":40}");
-        await clientSocket.SendAsync(resize.AsMemory(0, 10), WebSocketMessageType.Text, endOfMessage: false, cts.Token);
-        await clientSocket.SendAsync(resize.AsMemory(10), WebSocketMessageType.Text, endOfMessage: true, cts.Token);
+        await client.SendFragmentedTextAsync("{\"type\":\"resize\",\"cols\":100,\"rows\":40}", 10, cts.Token);
         await client.SendBinaryAsync("FRAGMENTS_OK" + Enter, cts.Token);
 
         await clientTask;
@@ -714,6 +712,27 @@ public sealed class PtyWebSocketBridgeTests
 
         public Task SendTextAsync(string json, CancellationToken cancellationToken) =>
             SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, cancellationToken);
+
+        /// <summary>
+        /// Holds the send lock for the whole message: an ACK between fragments would end the unfinished
+        /// text message, even if none of the individual SendAsync calls overlapped.
+        /// </summary>
+        public async Task SendFragmentedTextAsync(string json, int splitAt, CancellationToken cancellationToken)
+        {
+            var payload = Encoding.UTF8.GetBytes(json);
+            await _sendLock.WaitAsync(cancellationToken);
+            try
+            {
+                await _socket.SendAsync(payload.AsMemory(0, splitAt), WebSocketMessageType.Text, endOfMessage: false, cancellationToken);
+                // Give the receive loop a chance to queue its ACK while this message is unfinished.
+                await Task.Yield();
+                await _socket.SendAsync(payload.AsMemory(splitAt), WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
+        }
 
         /// <summary>WebSocket allows only one outstanding send; serialize acks and test-driven sends.</summary>
         private async Task SendAsync(byte[] payload, WebSocketMessageType messageType, CancellationToken cancellationToken)
