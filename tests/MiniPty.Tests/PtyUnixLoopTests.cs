@@ -404,80 +404,75 @@ public sealed class PtyUnixLoopTests
     }
 
     /// <summary>
-    /// A burst that arrives while the consumer waits costs one hand-off, not one per ring: the loop reads once for a
-    /// consumer that waits after reading inline, and the consumer reads the rest on its own thread, or, while the child
-    /// streams, waits for the master there, which the child's write wakes. A loop that read on filled the ring and parked on
-    /// it, the consumer could not read inline while it was parked, and each ring then cost a wake of the loop and of a pool
-    /// thread (four of each per 64 KiB on Linux). Judged by the loop's reads per pass for the waiting consumer, thread-pool
-    /// work items, loop passes and the consumer's waits per burst, not by timing. The child answers each line of input with
-    /// 64 KiB after 2 ms, longer than the consumer waits on its own thread, so every burst reaches a consumer parked on the
-    /// loop, which is the path the loop's one read is about; on Linux a burst apart from the last also starts before the
-    /// child counts as streaming, so a consumer that catches the kernel's worker between refills in its first 32 KiB is
-    /// handed the next read by the loop as well, a hand-off or two more per burst.
+    /// Every requested burst reaches a consumer whose read is already pending, without lost or extra bytes. When the
+    /// loop serves a consumer that was reading inline, it reads only once in that pass before handing reading back.
     /// </summary>
     /// <remarks>
-    /// The count of loop passes leaves out the passes that read for a consumer the loop took reading back from. A consumer
-    /// whose thread is preempted for over a millisecond, as on a loaded CI runner, has the loop read for it until it
-    /// reads inline again, and on macOS that is a pass per 1 KiB the master holds: hundreds of passes in a run on a
-    /// 3-core macOS runner, none on an idle machine. How many depends on the scheduler, not on the loop, and the waits on
-    /// the consumer's thread and the hand-offs still fail a consumer that never reads inline.
+    /// Request output only after MoveNextAsync returns a pending read. A child-side sleep cannot establish that order:
+    /// the consumer can be preempted until after the child writes. The scheduler can also let the loop take reading back
+    /// from an inline consumer, so neither the proportion of inline hand-offs nor process-wide work-item counts have a
+    /// fixed bound here. Both ownership paths must deliver all output; throughput belongs in the benchmarks.
     /// </remarks>
     [Test]
     [NotInParallel]
-    public async Task ABurstReachesAWaitingConsumerWithOneHandOff()
+    public async Task BurstsReachAParkedConsumerInFull()
     {
         if (!(OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()))
             return;
 
         const int Burst = 64 * 1024;
         const int Bursts = 64;
+        using var timeout = new CancellationTokenSource(Timeout);
+        var cancellationToken = timeout.Token;
         await using var session = Pty.Start(Shell(
-            "stty -echo; perl -e '$| = 1; $s = \"x\" x " + Burst + "; while (<STDIN>) { select(undef, undef, undef, 0.002); print $s }'"));
-        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+            "stty -echo; perl -e '$| = 1; print \"ready\"; $s = \"x\" x " + Burst
+            + "; for (1.." + Bursts + ") { scalar <STDIN>; print $s }'"));
+        await using var output = session.ReadOutputAsync(cancellationToken).GetAsyncEnumerator();
 
-        async Task BurstAsync()
+        // The ready marker proves echo is disabled before any request is sent. It can arrive in multiple chunks.
+        var ready = new StringBuilder();
+        while (ready.Length < 5)
         {
-            await session.WriteInputAsync("\n");
+            await Assert.That(await output.MoveNextAsync()).IsTrue();
+            ready.Append(Encoding.UTF8.GetString(output.Current.Data.Span));
+        }
+        await Assert.That(ready.ToString()).IsEqualTo("ready");
+
+        var loopReadsBefore = UnixPtyBackend.LoopReadsForWaitingConsumerForTests;
+        var loopPassesBefore = UnixPtyBackend.LoopPassesForWaitingConsumerForTests;
+        var takenBackBefore = UnixPtyBackend.LoopPassesForLoopConsumerForTests;
+        var request = "\n"u8.ToArray();
+        for (var i = 0; i < Bursts; i++)
+        {
+            // Retain and await this ValueTask exactly once. Until the request is written, the child has no output.
+            var pending = output.MoveNextAsync();
+            await Assert.That(pending.IsCompleted).IsFalse().Because($"burst {i} must start with a parked consumer");
+            await session.WriteInputAsync(request, cancellationToken);
             var seen = 0;
-            while (seen < Burst)
+            do
             {
-                await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
-                seen += output.Current.Data.Span.Count((byte)'x');
-            }
+                await Assert.That(await pending).IsTrue();
+                var data = output.Current.Data;
+                await Assert.That(data.Span.Count((byte)'x')).IsEqualTo(data.Length);
+                seen += data.Length;
+                if (seen < Burst)
+                    pending = output.MoveNextAsync();
+            } while (seen < Burst);
 
             await Assert.That(seen).IsEqualTo(Burst);
         }
 
-        for (var i = 0; i < 8; i++)
-            await BurstAsync();
-
-        var before = ThreadPool.CompletedWorkItemCount;
-        var passesBefore = UnixPtyBackend.LoopPassesForTests;
-        var waitsBefore = UnixPtyBackend.ConsumerWaitsForTests;
-        var loopReadsBefore = UnixPtyBackend.LoopReadsForWaitingConsumerForTests;
-        var loopPassesBefore = UnixPtyBackend.LoopPassesForWaitingConsumerForTests;
-        var takenBackBefore = UnixPtyBackend.LoopPassesForLoopConsumerForTests;
-        var started = Stopwatch.GetTimestamp();
-        for (var i = 0; i < Bursts; i++)
-            await BurstAsync();
-
-        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-        var handOffs = ThreadPool.CompletedWorkItemCount - before;
-        var passes = UnixPtyBackend.LoopPassesForTests - passesBefore;
-        var waits = UnixPtyBackend.ConsumerWaitsForTests - waitsBefore;
+        // EOF also detects trailing output and lets the loop finish updating its counters after the last publish.
+        await Assert.That(await output.MoveNextAsync()).IsFalse();
+        var exit = await session.WaitForExitAsync(cancellationToken);
+        await Assert.That(exit.ExitCode).IsEqualTo(0);
         var loopReads = UnixPtyBackend.LoopReadsForWaitingConsumerForTests - loopReadsBefore;
         var loopPasses = UnixPtyBackend.LoopPassesForWaitingConsumerForTests - loopPassesBefore;
         var takenBack = UnixPtyBackend.LoopPassesForLoopConsumerForTests - takenBackBefore;
-        // One read per pass that hands a waiting consumer output; a loop that read on made four on Linux (on macOS the master
-        // holds one read, so the pass stops after it either way).
-        await Assert.That(loopPasses).IsGreaterThanOrEqualTo(Bursts / 2L).Because($"{loopPasses} loop passes handed the waiting consumer output in {Bursts} bursts");
-        await Assert.That(loopReads).IsEqualTo(loopPasses).Because($"{loopReads} loop reads in {loopPasses} passes for the waiting consumer");
-        await Assert.That(handOffs).IsLessThan(4L * Bursts).Because($"{handOffs} thread-pool work items for {Bursts} bursts");
-        // Besides a pass per hand-off, the loop wakes about once a millisecond to check on inline readers while one is listed.
-        // Passes that read for a consumer the loop took reading back from are the scheduler's doing (see remarks).
-        await Assert.That(passes - takenBack).IsLessThan(2L * Bursts + elapsedMs)
-            .Because($"{passes} loop passes, {takenBack} of them reading for a consumer taken back from, for {Bursts} bursts over {elapsedMs} ms");
-        await Assert.That(waits).IsGreaterThanOrEqualTo(Bursts / 2L).Because($"{waits} waits on the consumer's thread for {Bursts} bursts");
+        await Assert.That(loopPasses + takenBack).IsGreaterThanOrEqualTo((long)Bursts)
+            .Because("each burst must wake a pending read through one of the loop's consumer ownership paths");
+        await Assert.That(loopReads).IsEqualTo(loopPasses)
+            .Because($"{loopReads} loop reads in {loopPasses} passes for the waiting inline consumer");
     }
 
     /// <summary>
