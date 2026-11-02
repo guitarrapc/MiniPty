@@ -441,14 +441,22 @@ Results on x64, locally. "Old" is this tree with `minipty_unix.c`, `minipty_unix
 | Descriptor test, new | 100 of 100 consecutive runs pass (glibc container), each with 100 starts and about 420 probes |
 | Descriptor test, old | Fails every run: 4–6 of about 420 probes in WSL (three runs), 15 of 335 on musl |
 | Test suite, glibc | 733 of 733 pass in WSL before the new tests existed; 737 of 737 in the glibc container, twice, the last with the final code |
-| Test suite, musl (Alpine SDK container) | 737 of 737 pass with the final code in three consecutive runs. One earlier run of the same code failed 1 of 737, and its log kept only the summary, so the test is not known. The four new tests then passed 20 of 20 runs there |
+| Test suite, musl (Alpine SDK container) | One run of the final code failed 1 of 737, and its log kept only the summary, so the test is not known. It did not recur in 30 later complete runs: 15 on all 8 CPUs and 15 pinned to 2. The four new tests passed 20 of 20 runs there. One more run on 2 CPUs hung instead, in a test race that predates this phase (below) |
 | Package build, glibc 2.27 and musl 1.2.3 | Both build and pass `--check`, now including `BIND_NOW`, and compile without warnings under `-Wall -Wextra`. Highest glibc version required: 2.14 (2.17 before). No `forkpty`, no libutil |
 | NativeAOT, linux-x64 and linux-musl-x64 | `Capture`, `Session`, `Observe`, and `VsCodeTerminalHelper --smoke` publish against the floor-built archives and run |
+
+A test race found while chasing that failure, not caused by this phase: `PtyUnixLoopTests.AFailureInOneSessionEndsOnlyThatSession` can wait forever on Linux.
+
+- **Seen:** on 2 CPUs, one complete musl run stopped in it for over 16 minutes. Both `cat` children were asleep in `read`.
+- **Cause:** the test injects its failure only when the loop serves the failing session (`FailLoopReadsOfPidForTests`), and reads that session's output with no timeout. A consumer that reads inline can take the turn first. The loop then drops its report of output alone, the consumer reads all the output itself and waits, and the loop never serves the session again. No output is lost; only the injected failure never happens.
+- **Reproduced deterministically** with an instrumented build and a diagnosis test (neither kept). The test held the producer's turn while the loop reported, then let the consumer read. It hung in 5 of 5 runs on the new code and 5 of 5 on the `HEAD` code. The log read: report dropped, inline read published, inline read empty, no injected failure.
+- **Not reproduced by repetition:** the test alone passed 100 of 100 runs on 2 CPUs, on both codes. In the instrumented complete runs, 3 of 12 had the consumer's inline read in the same millisecond as the loop's service.
+- **Fix, not yet made:** wait until the loop has failed the session (`OutputPump.IsProducerFinished`) before reading its output, and bound the read with the test's timeout.
 
 Not verified locally:
 
 - **arm64:** there is no arm64 Docker host here. CI builds and tests natively.
-- **macOS:** only preprocessor guards changed there. CI builds and tests it.
+- **macOS:** only preprocessor guards changed there. `unifdef -D__APPLE__ -U__linux__ -U__FreeBSD__` gives the same 587 lines for `minipty_unix.c` before and after, comments aside. CI builds and tests it.
 - **FreeBSD:** the `forkpty` path lost only its Linux branches, and it was not compiled.
 - **CI:** no run yet, so CI's start figures (1.749 ms in its last run) have no counterpart.
 - **Kernels before 5.2 or 4.13:** neither the fallback for `CLONE_PIDFD` nor the one for `TIOCGPTPEER` was run.
