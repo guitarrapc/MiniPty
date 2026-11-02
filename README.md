@@ -338,15 +338,19 @@ await using var session = Pty.Start(new PtyStartInfo
 
 MiniPty reports what a host pays on the output path on a meter named `MiniPty`: open sessions, start time and failures, output bytes, stalls on a full output buffer, and (Unix) a consumer's native waits for output. Nothing is measured, timed, or allocated while nobody listens ([Metrics](.github/docs/specs/core_session.md#metrics)).
 
+With OpenTelemetry, add the meter; [AspireTerminal](samples/AspireTerminal) exports it this way to the Aspire dashboard:
+
 ```csharp
 builder.Services.AddOpenTelemetry().WithMetrics(metrics => metrics.AddMeter("MiniPty"));
 ```
+
+Without any setup, `dotnet-counters` reads it from a running process:
 
 ```shell
 dotnet-counters monitor --counters MiniPty --process-id <pid>
 ```
 
-Without OpenTelemetry, a `MeterListener` reads them: [WebTerminalScale](samples/SingleFiles/WebTerminalScale.cs) shows them beside its host's threads and memory, and [WinUiTerminal](samples/WinUiTerminal) and [AvaloniaTerminal](samples/AvaloniaTerminal) on their status line.
+In code without OpenTelemetry, a `MeterListener` reads it: [WebTerminalScale](samples/SingleFiles/WebTerminalScale.cs) shows them beside its host's threads and memory, and [WinUiTerminal](samples/WinUiTerminal) and [AvaloniaTerminal](samples/AvaloniaTerminal) on their status line.
 
 ### GUI hosts
 
@@ -382,6 +386,7 @@ Each guide shows how to build that kind of application with MiniPty.
 | A terminal window on Windows | [WinUiTerminal](samples/WinUiTerminal) | MiniPty |
 | A terminal window on Windows, Linux, and macOS | [AvaloniaTerminal](samples/AvaloniaTerminal) | MiniPty |
 | A terminal in the browser (xterm.js) | [Web terminal](samples/SingleFiles/README.md#web-terminal) | MiniPty.Terminal |
+| A browser terminal whose metrics the Aspire dashboard charts | [AspireTerminal](samples/AspireTerminal) | MiniPty.Terminal |
 | A VS Code terminal backend | [VsCodeExtension](samples/VsCodeExtension) | MiniPty.Terminal |
 
 Run them locally (JIT):
@@ -396,6 +401,8 @@ dotnet run --project samples/TuiDemo -c Release
 dotnet run --project samples/WinUiTerminal
 # Windows, Linux, macOS GUI terminal
 dotnet run --project samples/AvaloniaTerminal
+# browser terminal and the Aspire dashboard with MiniPty's metrics
+dotnet run samples/AspireTerminal/apphost.cs
 ```
 
 NativeAOT publish, with the same flags as CI (on Linux and macOS, run `bash scripts/build-native.sh <rid>` first):
