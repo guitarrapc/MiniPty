@@ -2,7 +2,7 @@
 
 Goal: MiniPty loads wherever .NET 10 runs on its platforms. A session's start costs the same whatever the host's size. The library reports accurately what it supports and how a child ended. The items below came from a review of the library as a whole. Each is closed by a fix, or by a decision recorded in the specifications, as its section says.
 
-**Status:** open (2026-11-02). Phase 1 is implemented. On x64 Linux it is verified locally. arm64 Linux and macOS are checked only by CI, which has not run yet. The measurements below were taken on 2026-11-02.
+**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phases 2–5 have not started. The measurements below were taken on 2026-11-02.
 
 ## Inventory
 
@@ -357,6 +357,17 @@ Only the musl test job failed, in one test: `DisposeLetsAnInteractiveShellHangUp
 - **A second test was also affected:** `HostExitKillsAChildStillInItsHangupGrace(exit-handler)` judges the same way and failed 2 of 5 runs there.
 - **Fix:** both tests now count a process that is not their own child as ended once it is a zombie.
 - **After the fix:** with `tail` as the first process, both passed 5 of 5 runs and the suite passed 733 of 733. On Ubuntu with systemd, their class passed 3 of 3 runs.
+
+**CI after the fix ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)).** All 27 jobs passed.
+
+- **musl tests:** the musl test job ran all 733 tests in the same `tail` container, and they all passed.
+- **Floor checks:** they reported the following.
+
+| RID | Floor check |
+|---|---|
+| `linux-x64`, `linux-arm64` | Highest glibc version required is 2.17 |
+| `linux-musl-x64`, `linux-musl-arm64` | Links musl's libc |
+| `osx-x64`, `osx-arm64` | Every file declares `minos 12.0` |
 
 ### Phase 2: Linux start without fork (I3)
 
