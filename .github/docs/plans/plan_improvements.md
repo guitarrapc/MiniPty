@@ -2,7 +2,7 @@
 
 Goal: MiniPty loads wherever .NET 10 runs on its platforms. A session's start costs the same whatever the host's size. The library reports accurately what it supports and how a child ended. The items below came from a review of the library as a whole. Each is closed by a fix, or by a decision recorded in the specifications, as its section says.
 
-**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is closed: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). The fix to a test race found along the way has not yet run in CI. Phase 3 is built and passes locally on Windows and Linux; it has not run in CI. Phase 4 is closed: the macOS flood is not a regression, five runs on `main` are recorded, and the ring stays at 16 KiB; the ring on macOS stays under next_todo's unverified items. Phase 5 is decided and built: all three items were taken up, and they pass the full suite locally on Windows and Linux (761 tests each) and a NativeAOT publish and run on Windows; they have not run in CI, so macOS and NativeAOT on Unix are untested. The measurements below were taken on 2026-11-02.
+**Status:** closed (2026-11-03). Every phase is closed. Phase 1: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). Phases 3 and 5, the fix to a test race found along the way, and the samples passed every job of [run 41512274422](https://github.com/guitarrapc/MiniPty/actions/runs/41512274422) on `f2a0c18`: 762 of 762 tests on the six RIDs and in the musl container (macOS skips 2–3 bridge frame-size tests it always skips), the NativeAOT samples on every RID, and the NuGet smoke on 14 systems. Phase 4: the macOS flood is not a regression, five runs on `main` are recorded, and the ring stays at 16 KiB; the ring on macOS stays under next_todo's unverified items. The measurements below were taken on 2026-11-02 and 2026-11-03.
 
 ## Inventory
 
@@ -471,7 +471,7 @@ Not verified locally:
 | Floor checks | Highest glibc version required: 2.14 on `linux-x64` and 2.17 on `linux-arm64`. Both musl RIDs link musl's libc. All four macOS files declare `minos 12.0` |
 | NuGet smoke | macOS 15 and 26 (arm64 and Intel), AlmaLinux 8 and Alpine 3.21 (x64 and arm64), and the Ubuntu and Windows runners |
 
-The commit predates the fix to `AFailureInOneSessionEndsOnlyThatSession`, so that fix has not run in CI.
+The commit predates the fix to `AFailureInOneSessionEndsOnlyThatSession`. That fix passed in CI later, with Phases 3 and 5 ([run 41512274422](https://github.com/guitarrapc/MiniPty/actions/runs/41512274422)).
 
 ### Phase 3: API (I4, I5)
 
@@ -517,7 +517,7 @@ Results, locally:
 | Test suite, Linux (WSL2, glibc) | 746 of 746 pass, including the new Unix signal tests, which return early on Windows |
 | Solution build, Release | No warnings |
 
-Not run locally: macOS, musl, and NativeAOT publishing. Nothing native changed, and the managed change uses no reflection; CI builds, tests, and publishes them.
+Not run locally: macOS, musl, and NativeAOT publishing. Nothing native changed, and the managed change uses no reflection. CI built, tested, and published them with Phase 5 ([run 41512274422](https://github.com/guitarrapc/MiniPty/actions/runs/41512274422)), including the Unix signal tests on macOS and in the musl container.
 
 ### Phase 4: Measurement (I6)
 
@@ -665,6 +665,11 @@ The minimum was measured by starting each shell with every host variable removed
 | | `TwoCpus` | 156.7 ms | 139.9 ms | 163 / 132 ms | 0 B / 168 B |
 
 Every Linux difference is inside the run-to-run error (0.15–0.33 ms). On Windows ConPTY's renderer sets the pace, and the in-box ConPTY's flood allocated a few bytes per operation in earlier runs as well. The recording methods themselves were counted at 0 B with a listener (above), so the 168 B does not come from them.
+
+- **Histogram buckets in seconds, found through the Aspire sample.** The durations are recorded in seconds, but OpenTelemetry's default buckets are for milliseconds, so the Aspire dashboard showed a P50 of 5 s for stalls of about 0.1 s. Each histogram now advises boundaries for its range, and the same stalls fell in the 0.1–0.25 s bucket. A test checks that each histogram advises sub-millisecond, ascending boundaries ([core_session.md](../specs/core_session.md#metrics)).
+- **Samples.** [WinUiTerminal](../../../samples/WinUiTerminal) and [AvaloniaTerminal](../../../samples/AvaloniaTerminal) show start time, output read, and stalls on their status line through a `MeterListener`; a 2.5 MiB flood stalled them 3 and 17 times. [WebTerminalScale](../../../samples/SingleFiles/WebTerminalScale.cs) shows the meter on its page and prints each step's start time and the flood's stalls in its bench. [AspireTerminal](../../../samples/AspireTerminal) exports the meter over OTLP to the Aspire dashboard, with a load resource whose slow reader stalls every round. WebTerminal stays the minimal embedding sample.
+
+The decisions are recorded: I7 in [core_session.md](../specs/core_session.md#metrics), I8 in [core_session.md](../specs/core_session.md#starting-from-the-minimum), and I9 in [pty_crossplatform.md](../references/pty_crossplatform.md#child-exit-observation). CI passed all three on every RID with the samples ([run 41512274422](https://github.com/guitarrapc/MiniPty/actions/runs/41512274422)).
 
 ## Not in This Plan
 
