@@ -35,9 +35,12 @@ MiniPty creates a real PTY on each supported OS. See [Backends](#backends) for h
 | OS | Architectures | Status |
 |----|---------------|--------|
 | Windows 10 1809+ / Windows 11 | x64, arm64 | Supported |
-| Linux | x64, arm64 | Supported |
-| macOS | x64, arm64 | Supported |
+| Linux, glibc 2.27+ | x64, arm64 | Supported |
+| Linux, musl 1.2.3+ (Alpine) | x64, arm64 | Supported |
+| macOS 12.0+ | x64, arm64 | Supported |
 | FreeBSD | — | Experimental: tested neither locally nor in CI, and the package ships no FreeBSD binary, so MiniPty works there only when built from source |
+
+The minimums are those of the native files. They reach at least as far back as .NET 10 itself runs.
 
 ### Native files
 
@@ -46,7 +49,7 @@ Your application carries the following besides the MiniPty assembly. The package
 | OS | Files beside the application | Under NativeAOT |
 |----|------------------------------|-----------------|
 | Windows | None: ConPTY comes with Windows. The [out-of-band ConPTY](#out-of-band-conpty-for-windows) is optional and supplied by your application | None |
-| Linux (x64, arm64) | `libminipty_unix.so` | None: the shim is linked into the executable |
+| Linux (x64, arm64; glibc and musl) | `libminipty_unix.so` | None: the shim is linked into the executable |
 | macOS (x64, arm64) | `libminipty_unix.dylib` and `minipty_spawn_helper` | `minipty_spawn_helper` only: the shim is linked into the executable, and the launcher must stay in the same directory, where MiniPty looks for it |
 | FreeBSD (experimental) | `libminipty_unix.so`, which the package does not include: it is built with `cc` when MiniPty is built from source on FreeBSD | Not supported by the package |
 

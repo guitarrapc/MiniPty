@@ -2,14 +2,14 @@
 
 Goal: MiniPty loads wherever .NET 10 runs on its platforms. A session's start costs the same whatever the host's size. The library reports accurately what it supports and how a child ended. The items below came from a review of the library as a whole. Each is closed by a fix, or by a decision recorded in the specifications, as its section says.
 
-**Status:** open (2026-11-02). Nothing is implemented. The measurements below were taken on 2026-11-02.
+**Status:** open (2026-11-02). Phase 1 is implemented. On x64 Linux it is verified locally. arm64 Linux and macOS are checked only by CI, which has not run yet. The measurements below were taken on 2026-11-02.
 
 ## Inventory
 
 | ID | Kind | Problem | Closed when |
 |---|---|---|---|
 | I1 | Distribution | The Linux shim needs glibc 2.38, and no musl build ships | The shim loads on glibc 2.27 and musl 1.2.3, and CI fails a build that raises the floor |
-| I2 | Distribution | The macOS binaries declare macOS 26.0 as their minimum | They declare macOS 15.0, and CI checks it |
+| I2 | Distribution | The macOS binaries declare macOS 26.0 as their minimum | They declare macOS 12.0, and CI checks it |
 | I3 | Performance, correctness | A Linux start forks the host, so its cost grows with the host's memory, and the terminal's descriptors can leak to processes started at the same time | Linux starts the child without copying the host, with both ends of the terminal opened close-on-exec |
 | I4 | API | `Pty.IsSupported` returns `true` on Windows builds without ConPTY | It returns `false` there, and `Pty.Start` throws `PlatformNotSupportedException` |
 | I5 | API | `PtyResult` carries the exit code only | It carries the exit status, signal included |
@@ -80,7 +80,9 @@ Nothing catches this:
 
 ### Fix
 
-- **Deployment target:** macOS 15.0 for the library, the archive and the helper. Availability warnings are errors, so a call to a newer API fails the build.
+- **Deployment target:** macOS 12.0 for the library, the archive and the helper. Availability warnings are errors, so a call to a newer API fails the build.
+  - **Why 12.0 and not 15:** NativeAOT links macOS applications for 12.0 (`AppleMinOSVersion` in the ILCompiler package's targets). An archive that declares a newer minimum makes the link warn.
+  - **Cost:** none. The shim calls nothing newer than macOS 10.15, and 12.0 also covers every macOS .NET 10 supports.
 - **Check:** the build fails if a binary declares a newer minimum (`vtool -show-build` or `otool -l`).
 - **Smoke test:** the package's smoke test also runs on the oldest hosted macOS runner, macOS 15.
 
@@ -284,12 +286,12 @@ This phase comes first: until it lands, the shipped package fails to load on pla
 
 **macOS:**
 
-- Set the deployment target to 15.0, with availability warnings as errors.
+- Set the deployment target to 12.0, with availability warnings as errors.
 - Check the declared minimum after each build.
 
 **Smoke tests:**
 
-- Run the NuGet smoke sample in containers: an RHEL 8-compatible image (glibc 2.28), Ubuntu 22.04, and Alpine (x64 and arm64).
+- Run the NuGet smoke sample in containers: an RHEL 8-compatible image (glibc 2.28, the oldest glibc .NET 10 supports) and Alpine, on x64 and arm64.
 - Run it on the oldest hosted macOS runner.
 - Run the test suite once on Alpine x64, since musl is a new platform.
 
@@ -298,13 +300,53 @@ This phase comes first: until it lands, the shipped package fails to load on pla
 - `readelf -V` on both Linux libraries shows no `GLIBC_` version above 2.27, and neither archive references `__isoc23_*`.
 - The smoke sample passes on every image and runner listed above.
 - The test suite passes on Alpine x64.
-- All macOS files (the library, the archive and the helper, for both architectures) declare `minos 15.0`.
+- All macOS files (the library, the archive and the helper, for both architectures) declare `minos 12.0`.
 
 **Documents:**
 
-- [platform_support.md](../specs/platform_support.md) and the README state the minimums: glibc 2.27, musl 1.2.3, and macOS 15.
+- [platform_support.md](../specs/platform_support.md) and the README state the minimums: glibc 2.27, musl 1.2.3, and macOS 12.0.
 - The README's native files table lists the musl RIDs.
 - [next_todo.md](../next_todo.md#unverified): the bullet on the minimum macOS version is removed.
+
+**Built (2026-11-02).** `scripts/build-native-package.sh` builds each shipped file and checks it.
+
+- **Linux:** the build runs in a pinned image on a runner of the file's own architecture, with no bind mount: tar carries the sources in and the files out.
+  - glibc: Ubuntu 18.04.
+  - musl: Alpine 3.17.
+- **macOS:** the build runs on the runner, with `-mmacosx-version-min=12.0 -Werror=unguarded-availability`.
+
+`build.yaml` and `release.yaml` build all six RIDs through it, and `pack-with-native.sh` requires the musl files. `buildTransitive/MiniPty.targets` links the musl archive under NativeAOT.
+
+The NuGet smoke runs in more places, each on x64 and arm64:
+
+- macOS 15.
+- AlmaLinux 8 containers.
+- Alpine 3.21 containers (`scripts/run-nuget-smoke-in-container.sh`).
+
+A new job runs the test suite in an Alpine SDK container on x64.
+
+Results on x64, locally, through Docker Desktop:
+
+| Check | Result |
+|---|---|
+| glibc library | Highest version required: `GLIBC_2.17`. `forkpty` binds to `GLIBC_2.2.5` through `libutil.so.1`, `pthread_sigmask` through `libpthread.so.0`, and `sscanf` and `strtol` to their plain names. |
+| musl library | Links `libc.musl-x86_64.so.1`. |
+| `--check` on 1.4.0's glibc library | Fails: `GLIBC_2.38` is above the floor. |
+| `--check` on a glibc library placed as musl | Fails: it does not link musl's libc. |
+| NuGet smoke, AlmaLinux 8 (glibc 2.28) | Passes under `dotnet run` and as a NativeAOT executable. |
+| NuGet smoke, Alpine 3.21 | Passes under `dotnet run` and as a NativeAOT executable. |
+| Same smoke with the published 1.4.0, AlmaLinux 8 | Fails with `DllNotFoundException`, whose message names ``version `GLIBC_2.34' not found``. |
+| Test suite, Alpine 3.24 (SDK 10.0.403) | 732 of 733 tests pass. The other, `BurstsReachAParkedConsumerInFull`, ran `perl` as its child, and the image has none. The child now uses shell builtins only. The test then passed 10 of 10 runs on Alpine (busybox ash, no `perl`) and on Ubuntu (dash), and its class passed there too. |
+
+Two more defects surfaced while building at the floors. Both are fixed and recorded in the [platform lessons](../specs/platform_support.md#lessons-learned):
+
+- **`close_range` compiled out silently.** The old headers lack `SYS_close_range`, so every start would have scanned the descriptor table instead.
+- **`-lutil` before the sources dropped libutil and libpthread on glibc 2.27.** The library then had unresolved `forkpty` and `pthread_sigmask`.
+
+Not verified locally:
+
+- **arm64:** Docker Desktop here has no arm64 emulation. CI builds on native arm64 runners and runs both smoke containers there.
+- **macOS:** no Mac is available. CI checks `minos` and runs the smoke on macOS 15.
 
 ### Phase 2: Linux start without fork (I3)
 

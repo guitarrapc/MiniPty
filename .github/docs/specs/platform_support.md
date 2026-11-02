@@ -7,9 +7,17 @@ Implemented public platform support, verification constraints, and platform-leve
 | OS | Backend | Minimum |
 |---|---|---|
 | Windows | ConPTY (`CreatePseudoConsole`), or an out-of-band ConPTY the application supplies (`PtyStartInfo.ConPty`) | Windows 10 1809+, Windows 11 |
-| Linux | `forkpty` + `execve` through native shim | Common glibc/musl targets |
-| macOS | `posix_spawn` + `minipty_spawn_helper` through native shim | Supported runners; helper bundled in `runtimes/osx-*/native/` |
+| Linux | `forkpty` + `execve` through native shim | glibc 2.27+ (`linux-x64`, `linux-arm64`); musl 1.2.3+ (`linux-musl-x64`, `linux-musl-arm64`), such as Alpine |
+| macOS | `posix_spawn` + `minipty_spawn_helper` through native shim | macOS 12.0+, declared by every binary; helper bundled in `runtimes/osx-*/native/` |
 | FreeBSD (experimental) | `forkpty` + `execve` through native shim | `libutil`; built from source only |
+
+**The native files are built at those minimums.** `scripts/build-native-package.sh` builds every file the package ships and fails a build that misses its minimum:
+
+- **Linux, glibc:** built in Ubuntu 18.04 (glibc 2.27), so every libc symbol binds to its oldest version. The check is that `readelf -V` shows no `GLIBC_` version above 2.27 and the archive has no `__isoc23_*` reference.
+- **Linux, musl:** built in Alpine 3.17 (musl 1.2.3). The check is that the library links musl's libc.
+- **macOS:** built for macOS 12.0. The check is that every file, and every member of the archive, declares `minos 12.0`.
+
+The Linux minimums are the .NET 10 runtime's own. The macOS one is the target that NativeAOT links applications for, so linking the archive does not warn. It is also below the oldest macOS that .NET 10 supports (15). Each Linux build runs in a container on a runner of its own architecture, never under emulation.
 
 **FreeBSD is experimental.** The backend is implemented and compiles when MiniPty is built on FreeBSD, but:
 
@@ -25,7 +33,11 @@ MiniPty does not use winpty or third-party PTY binaries. Backends are in-process
 
 ## Verification
 
-CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows.
+CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows. The packed packages are smoke-tested (`samples/SingleFiles/NuGetSmoke.cs`, under `dotnet run` and as a NativeAOT executable) on every test runner, plus these, each on x64 and arm64:
+
+- macOS 15, the oldest macOS .NET 10 supports.
+- An AlmaLinux 8 container: glibc 2.28, the oldest glibc .NET 10 supports.
+- Alpine 3.21 containers, for the musl files.
 
 | Check | Why |
 |---|---|
@@ -128,6 +140,7 @@ These are verification choices, not API requirements, but they document pitfalls
 | OS | Pitfall | Mitigation in tests |
 |---|---|---|
 | Linux | `bash -lc` on a PTY often stays interactive after `-c` completes. | Prefer `sh -c`, or spawn utilities directly. |
+| Linux (Alpine) | The image has busybox and no `perl` or `python`. A test child written in `perl` passed on every hosted runner, because they all carry it, and failed only in the Alpine job. | Children use shell builtins and the utilities busybox provides; build test data in the shell (doubling a string reaches 64 KiB in 16 steps). |
 | Linux | A single EOT with no trailing newline does not signal EOF in canonical mode. | One-shot stdin tests using EOT end input with `\n` before `SendEof()`. |
 | Windows | Ctrl+Z without a preceding line submit does not signal EOF for line-oriented readers. | `SendEof` submits a pending line with CR when input lacks a trailing `\r`/`\n`, then sends Ctrl+Z + CR; `PtyStdinEof_withoutTrailingNewline` covers Windows. |
 | Linux | GNU `stty rows` / `stty columns` without arguments set size instead of printing it. | Query via `stty size`. |
@@ -170,6 +183,14 @@ These are verification choices, not API requirements, but they document pitfalls
 - **macOS `posix_openpt` can fail with a negative errno.** Under concurrent PTY open/close, far below `kern.tty.ptmx_max`, it fails with errno set to `-ENXIO` (-6). Mapping that to `EINVAL` made `Pty.Start` fail intermittently with errno 22 (about 3% of 25,600 spawns from 4 processes × 32 threads); the shim retries `posix_openpt` itself on a 1 ms interval and reports a persisting failure as `ENXIO`, which the spawn retry loop treats as transient. Mapping alone left about 0.04% of spawns failing under heavy parallel spawning, because re-running the whole spawn after its longer backoff exhausted every attempt.
 - **macOS caps PTYs for the whole machine.** `kern.tty.ptmx_max` allows 511 by default (999 at most, and only root can raise it), and every terminal window and pane on the machine counts. A readiness probe opened 436 before `posix_openpt` failed with `ENXIO`. At the cap that error persists, so the spawn's retries for the transient case above only delay the failure. A macOS host cannot keep 1,000 sessions open without a raised limit ([readiness probe](../references/pty_crossplatform.md#readiness-on-a-pty-master)).
 - **`minipty_fork_pty_exec` returns spawn errno.** Failures return a positive errno to managed code; do not rely on `SetLastError` across the native shim boundary.
+- **A shim built on a new glibc does not load on an older one.** Up to 1.4.0 the Linux library was built on Ubuntu 24.04 (glibc 2.39) and required `GLIBC_2.38`, for three reasons:
+  - glibc 2.38's headers redirect `sscanf` and `strtol` to their C23 variants (`__isoc23_*`) under `_GNU_SOURCE`.
+  - glibc 2.34 re-versioned `forkpty` when it moved it into libc.
+  - glibc 2.32 did the same with `pthread_sigmask`.
+
+  Debian 12 (glibc 2.36) refused to load the library, and the static archive referenced the C23 names too. Symbol versions follow the build host's glibc, not the source, so the minimum is set by building against glibc 2.27 and checking the result, not by editing calls.
+- **Old headers silently compile out what their macros guard.** Built against Ubuntu 18.04's kernel headers and musl 1.2.3's, the `close_range` call compiled out, because `SYS_close_range` is missing there, and every start would have scanned the descriptor table instead. Nothing warned. The shim now defines the number itself, as it does for the pidfd calls, so the kernel decides at run time. Code that `#if`s on a header macro needs a fallback for headers older than the build host's.
+- **`-lutil` before the sources links nothing on glibc before 2.34.** There `forkpty` is in libutil, and Ubuntu's linker defaults to `--as-needed`, which drops a library that no earlier object needs. Linked in that order on Ubuntu 18.04, the library had neither libutil nor libpthread as a dependency, and `forkpty` and `pthread_sigmask` were unversioned undefined symbols. Libraries follow the sources, and the shim compiles with `-pthread`. Newer glibc hid this, because `forkpty` is in libc there.
 - **Linux fork child scrubs inherited fds; FreeBSD fd scrub is follow-up.** After `forkpty`, Linux closes or marks close-on-exec on inherited descriptors `>= 3` and resets signal handlers to `SIG_DFL` before exec. FreeBSD gets signal reset only; inherited-fd close (`closefrom` or equivalent) remains open work — see [pty_crossplatform.md](../references/pty_crossplatform.md) → Fork child hygiene.
 - **The exec payload need not outlive the spawn.** Holding it until disposal was believed to fix exit-127 flakes. A forked child reads its own copy-on-write image, so the parent's copy cannot affect it, which a measurement confirmed. The flakes most likely came from `ETXTBSY` on test fixtures written and executed at once. See [lifecycle.md](lifecycle.md).
 - **A macOS flood is 1,024 turnarounds per MiB, so the reader's wake path decides its speed.** The master holds 1,024 bytes (xnu's `TTYCLSIZE`; the line speed does not change it), and the child sleeps after each kilobyte until it is read. A throwaway C probe (not kept; its results are in the plan) put MiniPty's structure, a kqueue loop handing each chunk to another thread, at 114 MiB/s on an idle M2 against 192 for a thread blocked in `read`, and at 0.63 of it on a shared core, the ratio CI showed; the hand-off was the cost (4 ms per MiB), and the loop's separate re-arm `kevent` (1.6 ms per MiB) hid behind it, which is why a level-triggered experiment measured nothing. One thread that reads and waits on the master itself, in kqueue, matched the blocking reader on every load; `poll` was 2.5 ms per MiB slower per call's registration; and retrying the read before the wait doubled throughput idle but halved it on a saturated core. The consumer now waits on its own kqueue on macOS while the child streams (a full 1 KiB read starts it, a wait that brings nothing ends it, so a keystroke's echo costs no wait), and the loop arms with its kqueue wait: 1 MiB floods went from about 100 to 244–280 MiB/s on the M2 against Porta.Pty's 169, at a tenth of the process CPU, with no thread-pool work item and about 3 loop passes per flood; on CI's `macos-26` runner, from 0.68 times Porta.Pty's default mode (median of nine runs, 47% of iterations over 30 ms) to 1.11–1.53 (nine runs, median 1.35, none of 90 iterations over 30 ms). The detailed tables are in the plan that drove it, `plan_macos_flood.md`, in the history up to commit `7ee5ce9`.

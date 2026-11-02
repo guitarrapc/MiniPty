@@ -15,6 +15,10 @@
     <MiniPtyUnixNativeLibraryName Condition="'$(MiniPtyUnixNativeLibraryName)' == ''">libminipty_unix.so</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLinkFlags Condition="$([MSBuild]::IsOSPlatform('Linux')) Or $([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD'))">-lutil</MiniPtyUnixNativeLinkFlags>
     <MiniPtyUnixNativeLinkFlags Condition="'$(MiniPtyUnixNativeLinkFlags)' == ''"></MiniPtyUnixNativeLinkFlags>
+    <!-- Same flags as scripts/build-native.sh, which builds the shipped files: the macOS deployment target that
+         NativeAOT links for, and -pthread elsewhere. The link flags follow the sources there and here. -->
+    <MiniPtyUnixNativeCFlags Condition="$([MSBuild]::IsOSPlatform('OSX'))">-mmacosx-version-min=12.0 -Werror=unguarded-availability</MiniPtyUnixNativeCFlags>
+    <MiniPtyUnixNativeCFlags Condition="'$(MiniPtyUnixNativeCFlags)' == ''">-pthread</MiniPtyUnixNativeCFlags>
     <_MiniPtyUnixNativeSources>&quot;$(MSBuildThisFileDirectory)Native/minipty_unix.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exit.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_output.c&quot;</_MiniPtyUnixNativeSources>
     <_MiniPtyUnixNativeOutput Condition="'$(MiniPtyBuildUnixNative)' == 'true'">$(OutputPath)$(MiniPtyUnixNativeLibraryName)</_MiniPtyUnixNativeOutput>
     <_MiniPtySpawnHelperOutput Condition="'$(MiniPtyBuildUnixNative)' == 'true' and $([MSBuild]::IsOSPlatform('OSX'))">$(OutputPath)minipty_spawn_helper</_MiniPtySpawnHelperOutput>
@@ -62,9 +66,9 @@
   <Target Name="BuildMiniPtyUnixNative" BeforeTargets="AssignTargetPaths"
           Condition="'$(MiniPtyBuildUnixNative)' == 'true'">
     <MakeDir Directories="$(OutputPath)" Condition="!Exists('$(OutputPath)')" />
-    <Exec Command="cc -shared -fPIC -O2 $(MiniPtyUnixNativeLinkFlags) -o &quot;$(_MiniPtyUnixNativeOutput)&quot; $(_MiniPtyUnixNativeSources)" />
+    <Exec Command="cc -shared -fPIC -O2 $(MiniPtyUnixNativeCFlags) -o &quot;$(_MiniPtyUnixNativeOutput)&quot; $(_MiniPtyUnixNativeSources) $(MiniPtyUnixNativeLinkFlags)" />
     <Exec Condition="$([MSBuild]::IsOSPlatform('OSX'))"
-          Command="cc -O2 -o &quot;$(_MiniPtySpawnHelperOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_spawn_helper.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot;" />
+          Command="cc -O2 $(MiniPtyUnixNativeCFlags) -o &quot;$(_MiniPtySpawnHelperOutput)&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_spawn_helper.c&quot; &quot;$(MSBuildThisFileDirectory)Native/minipty_unix_exec.c&quot;" />
     <ItemGroup>
       <FileWrites Include="$(_MiniPtyUnixNativeOutput)" />
       <None Include="$(_MiniPtyUnixNativeOutput)">
