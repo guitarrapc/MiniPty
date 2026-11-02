@@ -250,9 +250,9 @@ Each OS has its own backend behind the same API. None of them uses winpty, and n
 
 MiniPty calls Win32 ConPTY (`CreatePseudoConsole`) directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. One background loop waits on an I/O completion port of MiniPty's own and reads every session's output, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty-for-windows).
 
-### Linux: `forkpty`
+### Linux: `clone`
 
-MiniPty uses the small `libminipty_unix` native shim to call the platform PTY API, then `execve` the child inside the PTY. Resize uses `TIOCSWINSZ`. One background loop (the exit watcher's thread, on epoll) reads every session's output and writes its queued input, so an idle session holds no thread and no output buffer.
+MiniPty uses the small `libminipty_unix` native shim to open the PTY, start the child with `clone(CLONE_VM | CLONE_VFORK)` as `posix_spawn` does, and `execve` it inside the PTY. The host is not copied as a `fork` would copy it, so a start costs the same in a host with a large heap. Resize uses `TIOCSWINSZ`. One background loop (the exit watcher's thread, on epoll) reads every session's output and writes its queued input, so an idle session holds no thread and no output buffer.
 
 ### macOS: `posix_spawn` + launcher
 

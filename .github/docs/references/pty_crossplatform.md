@@ -175,36 +175,60 @@ Packaging: the `Microsoft.Windows.Console.ConPTY` package carries `runtimes/win-
 
 ## Unix spawn
 
-Linux and FreeBSD use `forkpty` + native `execve`. macOS uses `posix_openpt` + `posix_spawn` of a bundled helper so the child acquires a controlling terminal without `fork` from a multithreaded parent.
+Linux uses `clone(CLONE_VM | CLONE_VFORK)` + native `execve`, FreeBSD `forkpty` + native `execve`. macOS uses `posix_openpt` + `posix_spawn` of a bundled helper so the child acquires a controlling terminal without `fork` from a multithreaded parent.
 
-### Linux / FreeBSD: forkpty + execve
+### Linux: clone + execve
 
-MiniPty uses a small `libminipty_unix` native shim that calls the platform `forkpty`, resolves executable names against the child environment `PATH`, then runs `execve` with an explicit environment block in the child process.
+A small `libminipty_unix` native shim opens the terminal and starts the child with `clone(CLONE_VM | CLONE_VFORK)`, the mechanism of glibc's `posix_spawn`. The child resolves the executable name against the child environment's `PATH`, then runs `execve` with an explicit environment block. It shares the host's memory until its exec, and the calling thread resumes only once it has exec'd or exited.
 
 ### Child setup
 
 ```text
-pipe2(report, O_CLOEXEC)               /* start failure report */
-forkpty(master, NULL, NULL, winsize)   /* parent blocked all signals before fork */
-child: reset signal handlers to SIG_DFL (while signals still blocked in child)
-child: restore signal mask
-parent: restore signal mask
-child: scrub inherited fds >= 3 (Linux only; close_range closes, else FD_CLOEXEC scan)
+parent: posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC) → grantpt → unlockpt
+parent: slave = ioctl(master, TIOCGPTPEER, O_RDWR | O_NOCTTY | O_CLOEXEC), else ptsname_r + open
+parent: tcsetattr(slave, default termios), TIOCSWINSZ
+parent: mmap the child's stack: 64 KiB plus a pointer per argument, over a guard page
+parent: block every signal (rt_sigprocmask itself)
+clone(CLONE_VM | CLONE_VFORK | CLONE_PIDFD | SIGCHLD)   /* the calling thread waits for the exec or exit */
+child: set every signal to SIG_DFL with rt_sigaction itself (signals still blocked)
+child: setsid; ioctl(slave, TIOCSCTTY)
+child: dup2 slave → 0, 1, 2 (a slave inside 0–2 is first copied above them)
+child: scrub inherited fds >= 3 (close_range CLOEXEC, else FD_CLOEXEC scan)
 child: optional chdir(cwd)
-child: resolve file against child PATH when needed
-child: execve(file, argv, envp)
-child: on failure, write stage and errno to the report pipe, then _exit
-parent: close the report write end; read until end of file or a report
-parent: keep master fd for PTY input/output
+child: restore the calling thread's signal mask
+child: resolve file against child PATH when needed; execve(file, argv, envp)
+child: on failure, write stage and errno into the start record, then _exit
+parent: restore signal mask; unmap the stack; close its slave descriptor
+parent: on a recorded failure, reap the child, close the master and the pidfd, fail the start
+parent: keep the master and the pidfd (from CLONE_PIDFD, else pidfd_open)
 ```
 
-**Fork child hygiene:** After `forkpty`, the child inherits the parent's fd table and signal dispositions. Before `chdir` / `execve`, the native shim resets all signal handlers to `SIG_DFL` (Linux and FreeBSD) while signals are still blocked in the child, then scrubs inherited descriptors `>= 3` on Linux (`close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` closes them when available; otherwise a bounded `fcntl(F_SETFD, FD_CLOEXEC)` scan marks them close-on-exec). The fallback scan bound is computed in the **parent** via `sysconf(_SC_OPEN_MAX)` before `forkpty`; the child uses only async-signal-safe syscalls (`fcntl`, `syscall`, `sigaction`, `chdir`, `execve`). Work avoids malloc and runs only in the short-lived fork child; the parent managed path is unchanged. FreeBSD fd close is tracked as follow-up work. In the **parent**, the master `forkpty` returns is marked close-on-exec at once, because glibc opens it without `O_CLOEXEC` and every child the host starts later would otherwise inherit it; a fork on another thread in that instant still can. The slave has a shorter window of its own: glibc's `openpty` opens it without `O_CLOEXEC` too, and `forkpty` closes the parent's copy only after the fork, so a process the host forks on another thread inside `forkpty` keeps the slave, and with it the terminal, open (output then ends through the [post-exit drain](#post-exit-drain)). The macOS path opens both ends with `O_CLOEXEC`.
+**Why not fork:** a fork copies the host's page tables and marks every resident page copy-on-write before the child can exec. With `forkpty` a start took about 6 ms per GiB of the host's resident memory: 0.13 ms at none, 13 ms at 2 GiB, and 26 ms at 4 GiB (a C probe, WSL2, kernel 6.6). All of it fell on the thread that called `Pty.Start`, which in a web host is a thread-pool thread. A vfork-style start stayed at 0.12–0.16 ms at every size. .NET's own `Process.Start` uses `vfork` on Linux for the same reason.
 
-**`forkpty()` safety:** Build executable path, `argv`, `envp`, and optional `cwd` as unmanaged UTF-8 C strings in the **parent** before `forkpty()`. The child path stays inside the native shim for `chdir`, path lookup, `execve`, and `_exit` after the fork boundary—no managed allocation, no `RuntimeInformation`, no string marshalling. The fork child reads these strings from its own copy-on-write image of the parent, taken at the fork, so the managed parent frees the payload as soon as the spawn returns: what the parent does with its copy afterwards cannot reach the child. `execve` replaces the child address space. (A payload held until disposal was once believed to fix exit-127 flakes; see [lifecycle.md](../specs/lifecycle.md) for why it did not.)
+**Why not `posix_spawn`:** it cannot run MiniPty's `PATH` lookup on the child's `PATH` with its `sh` fallback, and it cannot tell a `chdir` failure from an exec failure. Its `chdir` action (`posix_spawn_file_actions_addchdir_np`) also needs glibc 2.29, above the package's floor. A launcher like macOS's would cost a second exec per start.
+
+**Both ends close-on-exec:** glibc's `openpty`, inside `forkpty`, opened both ends without `O_CLOEXEC`, and MiniPty could mark the master only after `forkpty` returned. A process the host started on another thread in that window, `Process.Start` included, inherited them across its exec. The terminal then stayed open for as long as that process ran, so output ended only through the [post-exit drain](#post-exit-drain). Four threads started probes around 100 starts (`PtyUnixStartTests`): with `forkpty`, 4–6 of about 420 probes held terminal descriptors in each of three runs; now none do. Both ends are opened close-on-exec before the child exists, and only the child's `dup2` copies onto stdio are inherited.
+
+**A child in the host's memory:**
+
+- **It only makes system calls.** It may not allocate, take a lock, or use stdio. Everything it reads (`file`, `argv`, `envp`, `cwd`, the descriptor scan bound) is prepared in the parent before the clone, and the `PATH` lookup uses stack buffers.
+- **Only the calling thread is suspended.** The host's other threads keep running in the same memory, so the child writes nothing but its own stack and the start record.
+- **Signals stay blocked until the child has reset every handler to its default.** They are blocked from before the clone, with `rt_sigprocmask` itself, because the C library's own mask calls leave its internal signals (cancellation, setxid) unblocked. Without `CLONE_SIGHAND` the child resets its own copy of the handler table. The program then starts with the calling thread's mask, as it did after a fork.
+- **The reset goes to the kernel too.** The C library refuses to change its internal signals (glibc's 32 and 33, musl's 32 to 34), and an ignored signal stays ignored across exec. A musl host had signal 34 ignored, and with `sigaction` its children started with it ignored. `rt_sigaction` with an all-zero record sets every signal from 1 to 64 to `SIG_DFL`, whatever the architecture's record layout.
+- **The parent never reads `errno` from the child.** The child's `errno` lands in the suspended thread's storage, which is harmless; the parent reads the start record.
+- **No call in the child enters the dynamic linker.** The library is linked with `-z now`, so every symbol is bound at load; NativeAOT links its executables that way already. `build-native-package.sh` checks the flag.
+- **An overflow faults in the child.** A guard page below the stack keeps it from writing the host's memory.
+- **The pidfd comes with the child.** `CLONE_PIDFD` (Linux 5.2) returns it, so there is no instant in which the pid could be reused before the pidfd names it. Older kernels ignore the flag, and the start then opens the pidfd by pid as before; a kernel that rejects it gets a second clone without it. `clone3` is not used, because some container seccomp profiles refuse it.
+
+**Exec payload:** the executable path, `argv`, `envp`, and optional `cwd` are built as unmanaged UTF-8 C strings in the parent before the start, with no managed allocation, `RuntimeInformation`, or string marshalling in the child. The child reads them in the host's memory until its exec, and the spawn returns only after the exec, so the managed parent frees them as soon as the spawn returns. (A payload held until disposal was once believed to fix exit-127 flakes; see [lifecycle.md](../specs/lifecycle.md) for why it did not.)
 
 The native boundary uses `LibraryImport` with `byte* file`, `byte** argv`, and `byte** envp`—not `string[]` marshalling—so NativeAOT does not depend on runtime array marshalling for the exec boundary.
 
-If `file` contains `/`, the shim calls `execve` directly. Otherwise it searches the final child `PATH`; absent `PATH` falls back to `/bin:/usr/bin`, while an empty `PATH` is treated as an empty path entry for current-directory lookup. The fallback is fixed so the post-`forkpty()` child path does not need libc environment/path discovery calls before `execve`.
+If `file` contains `/`, the shim calls `execve` directly. Otherwise it searches the final child `PATH`; absent `PATH` falls back to `/bin:/usr/bin`, while an empty `PATH` is treated as an empty path entry for current-directory lookup. The fallback is fixed so that the child needs no libc environment or path discovery calls before `execve`.
+
+### FreeBSD: forkpty + execve (experimental)
+
+FreeBSD keeps `forkpty`. The parent blocks every signal around the fork, and the child resets its handlers to `SIG_DFL` before `chdir` and `execve` and reports a failure on the start report pipe. Inherited descriptors are not scrubbed yet, and the master is marked close-on-exec only once `forkpty` returns. FreeBSD is untested ([platform_support.md](../specs/platform_support.md)).
 
 ### Plain scripts and shell fallback
 
@@ -227,16 +251,18 @@ When the shim fails, the child reports the `errno` to the parent and exits with 
 
 ### Start failure report
 
-A Unix start that cannot enter `WorkingDirectory` or exec the program fails `Pty.Start` with `Win32Exception`, whose `NativeErrorCode` is the `errno`: `ENOENT` for a missing program, directory, or interpreter, `EACCES` for a file that may not be executed. Windows throws the same type from `CreateProcess`, and .NET's `Process.Start` throws it on Unix. Failures before a child exists (opening the terminal, forking) stay `IOException`.
+A Unix start that cannot enter `WorkingDirectory` or exec the program fails `Pty.Start` with `Win32Exception`, whose `NativeErrorCode` is the `errno`: `ENOENT` for a missing program, directory, or interpreter, `EACCES` for a file that may not be executed. Windows throws the same type from `CreateProcess`, and .NET's `Process.Start` throws it on Unix. Failures before a child exists (opening the terminal, starting the child), and a Linux child's failure to take the terminal (`setsid`, `TIOCSCTTY`, `dup2`), stay `IOException`.
 
-**Why:** the `chdir` and the exec run in the child, after the fork has succeeded. Before this, the session started and the child exited 127 or 126, so a caller could not tell a missing program from a program that exits 127 itself, and the same `PtyStartInfo` failed differently per platform.
+**Why:** the `chdir` and the exec run in the child, after the start has created it. Before this, the session started and the child exited 127 or 126, so a caller could not tell a missing program from a program that exits 127 itself, and the same `PtyStartInfo` failed differently per platform.
 
-**How the child reports:** Go's `os/exec`, Rust's `std::process::Command`, and the .NET runtime do the same.
+**How a Linux child reports:** it shares the parent's memory until its exec, and the calling thread resumes only once it has exec'd or exited. A child that fails writes the stage and the `errno` into a record on the calling thread's stack before `_exit`, and the parent reads it when `clone` returns, then reaps the child and closes what the start opened. No pipe is involved, so none of the pipe's constraints below apply, and concurrent starts each have a record of their own.
+
+**How a macOS or FreeBSD child reports:** its memory is its own, so it writes to a pipe, as Go's `os/exec`, Rust's `std::process::Command`, and the .NET runtime do.
 
 1. The parent opens a pipe, both ends close-on-exec.
 2. A child that fails writes the stage (`chdir` or exec) and the `errno` to it, one 8-byte write, before `_exit`.
 3. A successful exec closes the pipe without writing.
-4. The parent closes its write end right after the fork and reads until end of file or a report.
+4. The parent closes its write end right after the child starts and reads until end of file or a report.
 5. On a report, the parent reaps the child, closes the master, the slave, and the pidfd, and returns the `errno` with the stage. Nothing of the start remains, and no zombie.
 
 On macOS the helper receives the write end as descriptor 3 (a `posix_spawn` file action; `POSIX_SPAWN_CLOEXEC_DEFAULT` passes nothing else), marks it close-on-exec, and reports its own `chdir` and exec failures the same way.
@@ -248,7 +274,7 @@ On macOS the helper receives the write end as descriptor 3 (a `posix_spawn` file
   - On macOS, which has no `pipe2`, a process the host forks on another thread between `pipe()` and `FD_CLOEXEC` keeps it for good.
   - Elsewhere, a process forked without an exec keeps it until it exits.
   When the wait gives up, the start succeeds as it did before reports existed, and a failure then shows only as the exit status.
-- **The write end must not sit on a descriptor the child replaces.** `forkpty` replaces stdio with the terminal. On macOS, `posix_spawn`'s `adddup2` onto the same descriptor would leave close-on-exec set. The write end is therefore moved above descriptor 3 when it opens lower.
+- **The write end must not sit on a descriptor the child replaces.** On FreeBSD `forkpty` replaces stdio with the terminal. On macOS, `posix_spawn`'s `adddup2` onto the same descriptor would leave close-on-exec set. The write end is therefore moved above descriptor 3 when it opens lower.
 
 **Lesson:** a shim that ends the child with one status for every exec failure hides the `errno`. With the report, `EACCES` and `ENOENT` reach the caller apart, which the `sh` fallback change above made matter.
 
@@ -289,7 +315,7 @@ minipty_spawn_helper:
 | The host's slave descriptor | Returned with the master and closed with it, close-on-exec like it, so the child's exit is never the terminal's last close and macOS does not discard output the master has not read yet ([Post-exit drain](#post-exit-drain)) |
 | Host gone before the helper's open | A blocking open of a slave with `CLOCAL` clear waits for carrier, and a closed master never brings it back. The helper therefore opens non-blocking, which still makes the slave its controlling terminal. A terminal that has already hung up reports `POLLHUP` (macOS sets it only when `POLLIN` is requested), and the helper ends by `SIGHUP`, the signal a session leader gets when its terminal hangs up. Before this, a helper whose host crashed right after the spawn waited in `open` forever, reparented to `launchd` |
 
-Burst parallel `Pty.Start` from a multithreaded host must not require a global `forkpty` mutex on Linux or macOS.
+Burst parallel `Pty.Start` from a multithreaded host must not require a global spawn mutex on Linux or macOS.
 
 ### Output reading
 
@@ -297,7 +323,7 @@ The session's output pump starts reading at spawn, for every consumer and on eve
 
 ### Parent I/O (all Unix)
 
-1. `forkpty()` returns the PTY master fd and child pid to the parent.
+1. The spawn returns the PTY master fd and child pid to the parent.
 2. Consumer reads `Output` while the child runs.
 3. If one-shot stdin was provided, `SendEof()` before waiting—see [Unix stdin EOF](#unix-stdin-eof).
 4. If no stdin bytes, leave the master open for writes until the child exits (TUI programs).
@@ -340,13 +366,13 @@ Shared session logic lives in `UnixPtyBackend`; spawn and resize ioctl live in `
 
 | OS | Spawn API | Controlling TTY |
 |---|---|---|
-| Linux | `forkpty` + child `execve` | `forkpty` session |
+| Linux | `clone(CLONE_VM \| CLONE_VFORK)` + child `execve` | child `setsid` + `TIOCSCTTY` |
 | FreeBSD | `forkpty` + child `execve` | `forkpty` session |
 | macOS | `posix_spawn(minipty_spawn_helper)` | helper `open(slave)` |
 
 | OS | Native library / headers |
 |---|---|
-| Linux | `<pty.h>` / `libutil` |
+| Linux | `<sched.h>`, `<stdlib.h>` (`posix_openpt`) / libc only |
 | macOS | `<util.h>`, `<spawn.h>` / `libminipty_unix.dylib` + helper |
 | FreeBSD | `<libutil.h>` / `libutil` |
 
@@ -493,13 +519,13 @@ Exit is observed by one watcher per platform for each load of MiniPty, which is 
 | Platform | Mechanism |
 |---|---|
 | **Windows** | Background threads, each waiting on up to 63 child process handles with `WaitForMultipleObjects` (slot 0 is a wake event). The watcher owns a **duplicate** of each process handle and closes it when the child exits. |
-| **Linux** | One thread blocked in `epoll_wait` over pidfds (`pidfd_open`, Linux 5.3+) plus a wake pipe opened with `pipe2(O_CLOEXEC)`. Each session keeps its child's pidfd, which the spawn opens right after the fork, and signals and reaps the child through it (`pidfd_send_signal`, `waitid(P_PIDFD)`). The watcher closes it after the reap. |
+| **Linux** | One thread blocked in `epoll_wait` over pidfds (`pidfd_open`, Linux 5.3+) plus a wake pipe opened with `pipe2(O_CLOEXEC)`. Each session keeps its child's pidfd, which `clone` returns with the child (`CLONE_PIDFD`, Linux 5.2+), and signals and reaps the child through it (`pidfd_send_signal`, `waitid(P_PIDFD)`). The watcher closes it after the reap. |
 | **macOS / FreeBSD** | One thread blocked in `kevent` on `EVFILT_PROC` `NOTE_EXIT`, woken by an `EVFILT_USER` event on the same kqueue on macOS and by a wake pipe on FreeBSD. |
 | **Fallback** | A child that cannot be registered (no pidfd, seccomp, or already exited before `kqueue` registration) joins a set the same thread polls every 10 ms, through the child's pidfd when it has one and with `waitpid(WNOHANG)` otherwise. So does every child while the watcher's epoll or kqueue could not be opened; each later registration tries to open it again, and once one succeeds the thread waits natively, with the children registered meanwhile still polled until they are reaped. |
 
 The Unix watcher is the only code that reaps a session's child, through its pidfd on Linux and with `waitpid` otherwise. `HasExited`, `Kill`, and EOF staging read the recorded state instead; `Kill` and the reap share a lock so a signal can never reach a pid the reap has already released for reuse.
 
-Code outside MiniPty can still reap a child: a host that reaps every child it has, or one that ignores `SIGCHLD` so the kernel reaps them. The child's pid is then free before the watcher notices, and a later process can get it. On Linux the spawn opens the child's pidfd right after the fork and, on Linux 5.4 and later, refuses one that names no child of the host. The child's signals and its reap then go through the pidfd, so neither reaches a process that gets the pid later. The pidfd is still opened by pid: if the child dies in that instant and other code reaps it, another child of the host that got the pid would pass the check. The reap through the pidfd needs Linux 5.4, and Linux 5.3 reaps by pid. Without a pidfd (macOS, FreeBSD, or Linux when the spawn gets none), a signal is sent only while `waitid` with `WNOWAIT` reports the pid as an unreaped child of the host, and the watcher reaps by pid. That check cannot tell the session's child from another child of the host that got the same pid. If such a reuse lands before the watcher notices the outside reap, the session sends its signals to that other child while that child runs, and the watcher can take that child's exit status when that child ends, unless other code reaps that child first. Otherwise a child that other code reaped is reported with exit code 0, because its wait status is lost.
+Code outside MiniPty can still reap a child: a host that reaps every child it has, or one that ignores `SIGCHLD` so the kernel reaps them. The child's pid is then free before the watcher notices, and a later process can get it. On Linux 5.2 and later `clone` returns the child's pidfd with the child (`CLONE_PIDFD`), so it names the child from the start. The child's signals and its reap then go through the pidfd, so neither reaches a process that gets the pid later. On an older kernel the spawn opens the pidfd by pid right after the start, and on Linux 5.4 and later refuses one that names no child of the host: if the child dies in that instant and other code reaps it, another child of the host that got the pid would pass the check. The reap through the pidfd needs Linux 5.4, and Linux 5.3 reaps by pid. Without a pidfd (macOS, FreeBSD, or Linux when the spawn gets none), a signal is sent only while `waitid` with `WNOWAIT` reports the pid as an unreaped child of the host, and the watcher reaps by pid. That check cannot tell the session's child from another child of the host that got the same pid. If such a reuse lands before the watcher notices the outside reap, the session sends its signals to that other child while that child runs, and the watcher can take that child's exit status when that child ends, unless other code reaps that child first. Otherwise a child that other code reaped is reported with exit code 0, because its wait status is lost.
 
 Lessons learned:
 
@@ -523,13 +549,13 @@ PTY output is a **byte stream**, not lines or Unicode strings:
 
 ### Terminal size
 
-Initial size comes from `PtyStartInfo.Size` (character cells, not pixels). Windows: `COORD` for `CreatePseudoConsole` and `ResizePseudoConsole`. Unix: `winsize` in `forkpty` and `TIOCSWINSZ` via `minipty_set_winsize` (`PtySession.Resize`).
+Initial size comes from `PtyStartInfo.Size` (character cells, not pixels). Windows: `COORD` for `CreatePseudoConsole` and `ResizePseudoConsole`. Unix: `TIOCSWINSZ` on the slave before the child starts (`forkpty`'s `winsize` argument on FreeBSD), and `TIOCSWINSZ` via `minipty_set_winsize` (`PtySession.Resize`).
 
 Dimensions are clamped to what those structures encode: 1–32767 on Windows (`COORD` is two signed 16-bit values), 1–65535 on Unix. ConPTY accepts the full range: on Windows 11 build 26200, `CreatePseudoConsole` and `ResizePseudoConsole` succeeded at 32767×32767 in about 5 ms, and a PowerShell child reported 600×200, 4000×300, 32767×50, and 200×32767 as its window and buffer size. An earlier 512-cell cap silently disagreed with wide frontends.
 
 ### Unix line discipline
 
-The child's termios is set at spawn (`forkpty`'s termios argument on Linux and FreeBSD; `tcsetattr` on the slave before `posix_spawn` on macOS), not left to the kernel default, which differs by platform. The settings are input `ICRNL IXON IXANY IMAXBEL BRKINT IUTF8`, output `OPOST ONLCR`, control `CREAD CS8 HUPCL`, local `ICANON ISIG IEXTEN ECHO ECHOE ECHOK ECHOKE ECHOCTL`, and 38400 baud. Every control character slot starts disabled (`_POSIX_VDISABLE`), and the usual ones are enabled: `VEOF` ^D, `VERASE` DEL, `VWERASE` ^W, `VKILL` ^U, `VREPRINT` ^R, `VINTR` ^C, `VQUIT` ^\\, `VSUSP` ^Z, `VSTART` ^Q, `VSTOP` ^S, `VLNEXT` ^V, `VDISCARD` ^O, `VMIN` 1, `VTIME` 0, and where the platform defines them `VERASE2` ^H (FreeBSD), `VDSUSP` ^Y and `VSTATUS` ^T (macOS, FreeBSD). Flags and control characters a platform does not define are left out, so the line discipline is not identical everywhere: ^T, for example, reports status on BSD and is an ordinary character on Linux.
+The child's termios is set at spawn (`tcsetattr` on the slave before the child starts on Linux and macOS; `forkpty`'s termios argument on FreeBSD), not left to the kernel default, which differs by platform. The settings are input `ICRNL IXON IXANY IMAXBEL BRKINT IUTF8`, output `OPOST ONLCR`, control `CREAD CS8 HUPCL`, local `ICANON ISIG IEXTEN ECHO ECHOE ECHOK ECHOKE ECHOCTL`, and 38400 baud. Every control character slot starts disabled (`_POSIX_VDISABLE`), and the usual ones are enabled: `VEOF` ^D, `VERASE` DEL, `VWERASE` ^W, `VKILL` ^U, `VREPRINT` ^R, `VINTR` ^C, `VQUIT` ^\\, `VSUSP` ^Z, `VSTART` ^Q, `VSTOP` ^S, `VLNEXT` ^V, `VDISCARD` ^O, `VMIN` 1, `VTIME` 0, and where the platform defines them `VERASE2` ^H (FreeBSD), `VDSUSP` ^Y and `VSTATUS` ^T (macOS, FreeBSD). Flags and control characters a platform does not define are left out, so the line discipline is not identical everywhere: ^T, for example, reports status on BSD and is an ordinary character on Linux.
 
 Measured against the Linux pts default (iflag `ICRNL IXON`, oflag `OPOST ONLCR`, cflag `B38400 CS8 CREAD`, the same local flags and control characters), two differences change behavior. `IUTF8` makes a canonical-mode erase remove a whole multibyte character; without it, a shell that reads a line containing Japanese and a backspace receives invalid UTF-8. `IXANY` lets any character, not only ^Q, resume output stopped with ^S. `IMAXBEL`, `BRKINT`, and `HUPCL` have no visible effect on a Linux pts. The macOS default lacks `IUTF8` as well. Disabled slots matter on BSD, where `_POSIX_VDISABLE` is 0xff: a slot left at zero would make NUL act as that control character. A program that wants raw mode still changes the termios itself, as it would on any terminal.
 
@@ -580,7 +606,7 @@ See [spec.md](../spec.md) → Verification. `tests/MiniPty.Tests` exercises:
 
 | Check | Why |
 |---|---|
-| TTY detection (`redirected=False`) | Confirms ConPTY / `forkpty` attach |
+| TTY detection (`redirected=False`) | Confirms ConPTY / Unix PTY attach |
 | Simple command output | Confirms spawn + decode |
 | Stdin + EOF | Confirms staged EOF on both OSes |
 | Short TUI (`matrix 3`) | Confirms chunked ANSI capture |

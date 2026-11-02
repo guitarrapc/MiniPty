@@ -87,9 +87,8 @@ internal static partial class UnixPtyBackend
             spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd, &slave, &startStage);
         }
 
-        // Freed as soon as the spawn returns. A forked child reads its own copy-on-write image of these strings, taken at
-        // the fork, so the parent's copy is no longer needed; posix_spawn on macOS copies them before it returns. The
-        // spawn also returns only once the child has exec'd or reported a failure.
+        // Freed as soon as the spawn returns, which is only once the child has exec'd or reported a failure. The Linux
+        // child reads these strings in this process's memory until its exec; posix_spawn on macOS copies them first.
         exec.Dispose();
         if (spawnError != 0)
             throw CreateStartException(startInfo, startStage, spawnError);

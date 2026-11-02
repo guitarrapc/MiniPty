@@ -2,7 +2,7 @@
 
 Goal: MiniPty loads wherever .NET 10 runs on its platforms. A session's start costs the same whatever the host's size. The library reports accurately what it supports and how a child ended. The items below came from a review of the library as a whole. Each is closed by a fix, or by a decision recorded in the specifications, as its section says.
 
-**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phases 2–5 have not started. The measurements below were taken on 2026-11-02.
+**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is built and meets its gates locally on x64 (glibc and musl); it waits for CI. Phases 3–5 have not started. The measurements below were taken on 2026-11-02.
 
 ## Inventory
 
@@ -402,6 +402,56 @@ This phase needs Phase 1, for two reasons:
 - [platform_support.md](../specs/platform_support.md): the Linux backend row, plus the lessons learned.
 - [lifecycle.md](../specs/lifecycle.md): the failure table's close-on-exec pipe, and invariant 9's instants inside and after `forkpty`.
 - [pty_crossplatform.md](../references/pty_crossplatform.md): "Linux / FreeBSD: forkpty + execve", including the fork child hygiene paragraph, and "Start failure report" for Linux.
+
+**Built (2026-11-02).** `spawn_pty_child_linux` in `minipty_unix.c` replaces `forkpty` on Linux; FreeBSD keeps it.
+
+- **Terminal:** the parent opens both ends close-on-exec and `O_NOCTTY`. The slave comes from `TIOCGPTPEER`, or `ptsname_r` and `open` on kernels before 4.13. The termios and the window size are set on the slave before the child exists.
+- **Child:** `clone(CLONE_VM | CLONE_VFORK | CLONE_PIDFD | SIGCHLD)` on an `mmap`ed stack of 64 KiB plus a pointer per argument, over a guard page. It runs these steps:
+  1. Every signal set to `SIG_DFL` with `rt_sigaction`.
+  2. `setsid`, then `TIOCSCTTY`.
+  3. The slave `dup2`ed onto stdio, moved above stdio first if it landed there.
+  4. Descriptors scrubbed.
+  5. `chdir`.
+  6. The calling thread's mask restored.
+  7. The existing `PATH` lookup and exec.
+- **Failure report:** a failing child writes its stage and `errno` into a record on the calling thread's stack. The Linux report pipe is gone.
+- **Signals:** the parent blocks every signal with `rt_sigprocmask` around the clone.
+- **pidfd:** it comes from `CLONE_PIDFD`. A kernel that leaves it empty falls back to `pidfd_open`, and one that rejects the flag gets a second clone without it.
+- **Build:** `-lutil` leaves the Linux build in `build-native.sh`, the project's own native build, and the NativeAOT link (`buildTransitive/MiniPty.targets`). The Linux library links with `-z now`, and `build-native-package.sh` checks `BIND_NOW`.
+
+Changes from the steps above:
+
+- **Benchmark:** the host-memory case is a class of its own, `PtyStartupHostMemoryBenchmarks` (`HostResidentMiB` 0 and 2048), not a parameter of `PtyStartupBenchmarks`. The README generator reads `PtyStartupBenchmarks` by method name alone, and a parameter would have doubled every startup case.
+- **Descriptor test:** the probe lists the terminals among its own descriptors (`[ -t N ]`) instead of reading `/proc/<pid>/fd`, so it runs on macOS too.
+- **Two more tests:** one checks that the child leads a session on the terminal with its group in the foreground, from `/proc/<pid>/stat`. The other checks that it starts with no signal ignored and with the calling thread's mask. All four new tests are in `PtyUnixStartTests`.
+
+A defect surfaced on musl: the signal reset left signal 34 ignored.
+
+- **What was seen:** the first musl run failed the signal test, because the child's `SigIgn` had signal 34 set.
+- **Cause:** musl's `sigaction` refuses its internal signals 32–34, and the musl host had 34 ignored. An ignored signal stays ignored across exec.
+- **Not new:** the same test against the `forkpty` code failed the same way on musl.
+- **Fix:** the Linux child now resets every signal with the system call. Its new test passes on glibc and on musl.
+
+Results on x64, locally. "Old" is this tree with `minipty_unix.c`, `minipty_unix_internal.h`, and `MiniPty.csproj` from `HEAD`.
+
+| Check | Result |
+|---|---|
+| Start, `PtyStartupHostMemoryBenchmarks`, WSL2 (kernel 6.6) | Nothing touched / 2 GiB: new 0.94 / 0.88 ms, old 2.31 / 37.27 ms; 1.26 KB allocated in every case |
+| The same, in a Docker Desktop container (Ubuntu 24.04, glibc 2.39) | New 0.81 / 0.87 ms (2 GiB +7%), old 2.11 / 35.96 ms; 1.26 KB in every case |
+| Descriptor test, new | 100 of 100 consecutive runs pass (glibc container), each with 100 starts and about 420 probes |
+| Descriptor test, old | Fails every run: 4–6 of about 420 probes in WSL (three runs), 15 of 335 on musl |
+| Test suite, glibc | 733 of 733 pass in WSL before the new tests existed; 737 of 737 in the glibc container, twice, the last with the final code |
+| Test suite, musl (Alpine SDK container) | 737 of 737 pass with the final code in three consecutive runs. One earlier run of the same code failed 1 of 737, and its log kept only the summary, so the test is not known. The four new tests then passed 20 of 20 runs there |
+| Package build, glibc 2.27 and musl 1.2.3 | Both build and pass `--check`, now including `BIND_NOW`, and compile without warnings under `-Wall -Wextra`. Highest glibc version required: 2.14 (2.17 before). No `forkpty`, no libutil |
+| NativeAOT, linux-x64 and linux-musl-x64 | `Capture`, `Session`, `Observe`, and `VsCodeTerminalHelper --smoke` publish against the floor-built archives and run |
+
+Not verified locally:
+
+- **arm64:** there is no arm64 Docker host here. CI builds and tests natively.
+- **macOS:** only preprocessor guards changed there. CI builds and tests it.
+- **FreeBSD:** the `forkpty` path lost only its Linux branches, and it was not compiled.
+- **CI:** no run yet, so CI's start figures (1.749 ms in its last run) have no counterpart.
+- **Kernels before 5.2 or 4.13:** neither the fallback for `CLONE_PIDFD` nor the one for `TIOCGPTPEER` was run.
 
 ### Phase 3: API (I4, I5)
 

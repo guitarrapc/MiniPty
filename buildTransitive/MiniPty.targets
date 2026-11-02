@@ -15,7 +15,8 @@
   <ItemGroup Condition="'$(MiniPtyStaticUnixNative)' == 'true'">
     <DirectPInvoke Include="minipty_unix" />
     <NativeLibrary Include="$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\libminipty_unix.a" />
-    <LinkerArg Include="-lutil" />
+    <!-- Linux starts children with clone, not forkpty, so only macOS links libutil. -->
+    <LinkerArg Include="-lutil" Condition="$(RuntimeIdentifier.StartsWith('osx'))" />
     <LinkerArg Include="-lproc" Condition="$(RuntimeIdentifier.StartsWith('osx'))" />
   </ItemGroup>
 

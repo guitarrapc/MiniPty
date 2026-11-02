@@ -44,7 +44,7 @@ What differs by OS is only what MiniPty does underneath:
 | OS | `Pty.Start` creates | `DisposeAsync` on a running child |
 |---|---|---|
 | Windows | a ConPTY session (out-of-band when `conpty.dll` is beside the app) | terminates it |
-| Linux | a `forkpty` child | hangs it up (`SIGHUP`, so the shell can save its history), then kills it if it is still running a second later |
+| Linux | a child started with `clone`, as `posix_spawn` does | hangs it up (`SIGHUP`, so the shell can save its history), then kills it if it is still running a second later |
 | macOS | a child started through `posix_spawn` and `minipty_spawn_helper` | same as Linux |
 
 Points to get right:

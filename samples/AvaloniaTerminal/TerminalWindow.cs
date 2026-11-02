@@ -100,7 +100,7 @@ internal sealed class TerminalWindow : Window
     {
         var backend = _conPty is { } conPty
             ? $"ConPTY {conPty.FileVersion.ToString(2)} ({(conPty.HasConsoleHost ? "OpenConsole" : "conhost fallback")})"
-            : OperatingSystem.IsWindows() ? "ConPTY" : OperatingSystem.IsMacOS() ? "PTY (posix_spawn)" : "PTY (forkpty)";
+            : OperatingSystem.IsWindows() ? "ConPTY" : OperatingSystem.IsMacOS() ? "PTY (posix_spawn)" : OperatingSystem.IsLinux() ? "PTY (clone)" : "PTY (forkpty)";
         var pid = _session is { } session ? $" · pid {session.ProcessId}" : string.Empty;
         _status.Text = $"MiniPty {MiniPtyVersion} hosting {backend}{pid} · {_terminal.Columns}×{_terminal.Rows} · {_statusCommand} · {_statusState}";
     }

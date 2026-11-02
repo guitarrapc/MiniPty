@@ -44,6 +44,14 @@ check_elf_machine() {
   [[ "$header" == *"Machine:"*"$expected"* ]] || fail "$file is not built for $expected"
 }
 
+# A start's child runs in the host's memory until its exec, so the library binds every symbol at load (-z now): a lazy
+# binding would enter the dynamic linker in the child.
+check_bind_now() {
+  local file="$1" dynamic
+  dynamic="$(readelf -d "$file")"
+  [[ "$dynamic" == *"BIND_NOW"* ]] || fail "$file is not linked with -z now"
+}
+
 check() {
   local rid="$1"
   local dir="$root/runtimes/$rid/native"
@@ -53,6 +61,7 @@ check() {
   case "$rid" in
     linux-musl-*)
       check_elf_machine "$so" "$rid"
+      check_bind_now "$so"
       local dynamic
       dynamic="$(readelf -d "$so")"
       [[ "$dynamic" == *"[libc.musl-"* ]] || fail "$so does not link musl's libc"
@@ -61,6 +70,7 @@ check() {
       ;;
     linux-*)
       check_elf_machine "$so" "$rid"
+      check_bind_now "$so"
       local highest top
       highest="$(readelf -V "$so" | grep -o 'Name: GLIBC_[0-9][0-9.]*' | sed 's/Name: GLIBC_//' | sort -uV | tail -1)"
       [[ -n "$highest" ]] || fail "$so requires no versioned glibc symbol, so it was not linked against glibc"

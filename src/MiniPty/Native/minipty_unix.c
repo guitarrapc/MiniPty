@@ -29,8 +29,17 @@
 #if defined(__has_include) && __has_include(<linux/close_range.h>)
 #include <linux/close_range.h>
 #endif
-#include <pty.h>
+#include <sched.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
+/* Linux 5.2, newer than the headers the shipped library is built against. Older kernels ignore the flag. */
+#ifndef CLONE_PIDFD
+#define CLONE_PIDFD 0x00001000
+#endif
+/* Linux 4.13. Older kernels refuse the request, and the slave is opened by its path instead. */
+#ifndef TIOCGPTPEER
+#define TIOCGPTPEER _IO('T', 0x41)
+#endif
 /*
  * The shipped library is built against old headers (glibc 2.27's, musl 1.2.3's), which predate close_range (Linux 5.9)
  * and its CLOEXEC flag (5.11). Without these the call would compile out and every start would scan the descriptor
@@ -115,6 +124,13 @@ static void minipty_default_termios(struct termios *term)
     cfsetispeed(term, B38400);
     cfsetospeed(term, B38400);
 }
+
+#if !defined(__linux__)
+
+/*
+ * The start report pipe of macOS and FreeBSD, whose children run in memory of their own. A Linux child shares the
+ * host's memory until its exec and reports in it instead (struct minipty_clone_start).
+ */
 
 /*
  * How long a start waits for the child's report. A successful exec closes the pipe at once, so the bound matters only
@@ -222,12 +238,17 @@ static int minipty_await_start_report(int fd, int *stage_out, int *err_out)
     }
 }
 
+#endif /* !__linux__ */
+
 #if !defined(__APPLE__)
+
+#if !defined(__linux__)
 
 #ifndef NSIG
 #define NSIG 32
 #endif
 
+/* FreeBSD's forkpty child. The Linux child resets with the system call instead (minipty_reset_child_signals_to_default). */
 static void minipty_reset_child_signals(void)
 {
     struct sigaction sa;
@@ -240,6 +261,8 @@ static void minipty_reset_child_signals(void)
     for (int sig = 1; sig < NSIG; sig++)
         sigaction(sig, &sa, NULL);
 }
+
+#endif /* !__linux__ */
 
 #if defined(__linux__)
 
@@ -278,25 +301,308 @@ static void minipty_scrub_inherited_fds(int scan_limit)
 #endif
 
     /*
-     * node-pty-style fallback: set FD_CLOEXEC on fds >= 3 (does not close(2)).
-     * scan_limit is computed in the parent before forkpty so the child avoids
-     * libc queries (async-signal-safe).
+     * Kernels before 5.11: set FD_CLOEXEC on fds >= 3 (does not close(2)). scan_limit is computed in the parent, so
+     * the child makes no libc query.
      */
     for (int fd = 3; fd < scan_limit; fd++)
         minipty_set_close_on_exec(fd);
 }
 
-#endif /* __linux__ */
+/*
+ * The bytes of the kernel's signal set: 64 signals on every architecture .NET runs on. The start masks signals with
+ * the system call itself, because the C library's own calls leave its internal signals (cancellation, setxid)
+ * unblocked, and no handler may run in a child that shares the host's memory.
+ */
+#define MINIPTY_KERNEL_SIGSET_BYTES 8
 
-static void minipty_prepare_fork_child(int inherited_fd_scan_limit)
+/*
+ * Sets every signal to its default action with the system call itself. The C library refuses to change its internal
+ * signals (glibc's 32 and 33, musl's 32 to 34), and an ignored signal stays ignored across exec: a musl host had signal
+ * 34 ignored, and its children started with it ignored. An all-zero record is SIG_DFL with no flags and an empty mask
+ * in every architecture's layout; the kernel refuses SIGKILL and SIGSTOP, which are never anything else.
+ */
+static void minipty_reset_child_signals_to_default(void)
 {
-#if defined(__linux__)
-    minipty_scrub_inherited_fds(inherited_fd_scan_limit);
-#else
-    (void)inherited_fd_scan_limit;
-#endif
+    unsigned long action[8] = { 0 };
+
+    for (int sig = 1; sig <= MINIPTY_KERNEL_SIGSET_BYTES * 8; sig++)
+        syscall(SYS_rt_sigaction, sig, action, NULL, MINIPTY_KERNEL_SIGSET_BYTES);
 }
 
+/*
+ * The child's stack, not counting its guard page. The child's calls need a few kilobytes: the PATH lookup holds up to
+ * two PATH_MAX buffers, and the sh fallback copies the argument vector, one pointer per argument, which the start adds
+ * to this.
+ */
+#define MINIPTY_CLONE_STACK_BYTES (64 * 1024)
+
+/*
+ * What a Linux start hands its child, and what the child hands back. The child runs in the host's memory until its
+ * exec, and the calling thread resumes only once the child has exec'd or exited (CLONE_VFORK), so a child that cannot
+ * start writes its failure here, and the parent reads it when clone returns. The record lives on the calling thread's
+ * stack, so concurrent starts never share one.
+ */
+struct minipty_clone_start {
+    const char *cwd;
+    const char *file;
+    char *const *argv;
+    char *const *envp;
+    /* The calling thread's signal mask, which the child execs with. */
+    const sigset_t *exec_mask;
+    int slave;
+    int fd_scan_limit;
+    /* Written by a child that exits without exec: a stage of MINIPTY_START_STAGE_NONE is a failure to set up. */
+    volatile int failed;
+    volatile int stage;
+    volatile int err;
+};
+
+/*
+ * Opens both ends of a new terminal close-on-exec and sets MiniPty's termios and the initial window size on the slave.
+ * glibc's openpty opened them without O_CLOEXEC, so a process the host started on another thread at that moment kept
+ * the terminal open for as long as it ran. Opened this way, no process but the child gets them.
+ */
+static int minipty_open_terminal(int *master_out, int *slave_out, const struct winsize *winp)
+{
+    char name[64];
+    struct termios term;
+    int master;
+    int slave;
+    int err;
+
+    *master_out = -1;
+    *slave_out = -1;
+
+    /* O_NOCTTY on both ends: a host that leads a session without a controlling terminal must not acquire this one. */
+    master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (master < 0)
+        return errno > 0 ? errno : EINVAL;
+
+    if (grantpt(master) != 0 || unlockpt(master) != 0) {
+        err = errno > 0 ? errno : EINVAL;
+        close(master);
+        return err;
+    }
+
+    /* Opens the slave from the master itself, which a mount namespace with another /dev/pts cannot misdirect. */
+    slave = ioctl(master, TIOCGPTPEER, O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (slave < 0) {
+        /* ptsname_r returns the error number; musl's does not set errno. */
+        err = ptsname_r(master, name, sizeof(name));
+        if (err != 0) {
+            close(master);
+            return err;
+        }
+
+        slave = open(name, O_RDWR | O_NOCTTY | O_CLOEXEC);
+        if (slave < 0) {
+            err = errno > 0 ? errno : EINVAL;
+            close(master);
+            return err;
+        }
+    }
+
+    minipty_default_termios(&term);
+    if (tcsetattr(slave, TCSANOW, &term) != 0 || (winp != NULL && ioctl(slave, TIOCSWINSZ, winp) != 0)) {
+        err = errno > 0 ? errno : EINVAL;
+        close(slave);
+        close(master);
+        return err;
+    }
+
+    *master_out = master;
+    *slave_out = slave;
+    return 0;
+}
+
+/*
+ * The child of a Linux start. It runs on a stack of its own, but in the host's memory, with every signal blocked and
+ * the calling thread suspended until the exec, while the host's other threads keep running. So it only makes system
+ * calls: no allocation, no lock, no stdio, and no write to memory but its stack and the start record. Everything it
+ * reads was prepared before the clone. errno lands in the suspended thread's storage, which is harmless; the parent
+ * reads the record, never errno. The library is linked with -z now, so no call here enters the dynamic linker.
+ */
+static int minipty_clone_child(void *arg)
+{
+    struct minipty_clone_start *start = arg;
+    int slave = start->slave;
+    int stage = MINIPTY_START_STAGE_NONE;
+    int err;
+
+    /* Without CLONE_SIGHAND the child has a handler table of its own, so this leaves the host's untouched. */
+    minipty_reset_child_signals_to_default();
+
+    /* A session of its own, whose controlling terminal is the slave and whose foreground process group is the child. */
+    if (setsid() < 0 || ioctl(slave, TIOCSCTTY, 0) != 0)
+        goto failed;
+
+    /*
+     * dup2 onto the slave's own descriptor would leave close-on-exec set, so a slave inside the stdio range (the host
+     * had closed one of its own) is first copied above it. The copies dup2 makes onto stdio are inherited; the slave
+     * itself and the master close at the exec.
+     */
+    if (slave <= STDERR_FILENO) {
+        slave = fcntl(slave, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+        if (slave < 0)
+            goto failed;
+    }
+    for (int fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
+        if (dup2(slave, fd) < 0)
+            goto failed;
+    }
+
+    minipty_scrub_inherited_fds(start->fd_scan_limit);
+
+    if (start->cwd != NULL && start->cwd[0] != '\0' && chdir(start->cwd) != 0) {
+        stage = MINIPTY_START_STAGE_CHDIR;
+        goto failed;
+    }
+
+    /* Last, once every handler is the default: the program starts with the calling thread's mask, as after a fork. */
+    syscall(SYS_rt_sigprocmask, SIG_SETMASK, start->exec_mask, NULL, MINIPTY_KERNEL_SIGSET_BYTES);
+    minipty_execvpe(start->file, start->argv, start->envp);
+    stage = MINIPTY_START_STAGE_EXEC;
+
+failed:
+    err = errno;
+    start->err = err > 0 ? err : EINVAL;
+    start->stage = stage;
+    start->failed = 1;
+    _exit(stage == MINIPTY_START_STAGE_CHDIR ? 126 : 127);
+}
+
+/*
+ * Starts a Linux child with clone(CLONE_VM | CLONE_VFORK), as glibc's posix_spawn does, instead of forkpty. A fork
+ * copies the host's page tables and marks every resident page copy-on-write before the child can exec, which cost
+ * about 6 ms per GiB of the host's resident memory; here the child shares the host's memory until its exec, and a
+ * start costs the same in any host. posix_spawn itself cannot run MiniPty's PATH lookup with its sh fallback, nor tell
+ * a chdir failure from an exec failure.
+ */
+static int spawn_pty_child_linux(
+    int *master,
+    const struct winsize *winp,
+    const char *cwd,
+    const char *file,
+    char *const *argv,
+    char *const *envp,
+    pid_t *pid_out,
+    int *pidfd_out,
+    int *start_stage_out)
+{
+    struct minipty_clone_start start;
+    char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    size_t argc = 0;
+    size_t stack_bytes = 0;
+    char *stack = MAP_FAILED;
+    sigset_t all;
+    sigset_t old;
+    int slave = -1;
+    /* Where CLONE_PIDFD writes the child's pidfd. A kernel before 5.2 ignores the flag and leaves it at -1. */
+    int pidfd = -1;
+    int clone_err;
+    int err;
+    pid_t pid;
+
+    *master = -1;
+    *pidfd_out = -1;
+    if (child_envp == NULL)
+        return ENOMEM;
+
+    err = minipty_open_terminal(master, &slave, winp);
+    if (err != 0)
+        goto done;
+
+    while (argv[argc] != NULL)
+        argc++;
+    stack_bytes = (MINIPTY_CLONE_STACK_BYTES + (argc + 2) * sizeof(char *) + page - 1) / page * page;
+
+    /* One page more, below the stack and without access, so an overflow faults instead of writing the host's memory. */
+    stack = mmap(NULL, page + stack_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
+    if (stack == MAP_FAILED || mprotect(stack + page, stack_bytes, PROT_READ | PROT_WRITE) != 0) {
+        err = errno > 0 ? errno : ENOMEM;
+        goto done;
+    }
+
+    memset(&start, 0, sizeof(start));
+    start.cwd = cwd;
+    start.file = file;
+    start.argv = argv;
+    start.envp = child_envp;
+    start.exec_mask = &old;
+    start.slave = slave;
+    start.fd_scan_limit = minipty_compute_inherited_fd_scan_limit();
+
+    sigfillset(&all);
+    sigemptyset(&old);
+    syscall(SYS_rt_sigprocmask, SIG_BLOCK, &all, &old, MINIPTY_KERNEL_SIGSET_BYTES);
+
+    /*
+     * SIGCHLD makes the child an ordinary one, which waitpid reaps and whose exit the host's SIGCHLD handler sees. The
+     * thread pointer and child tid arguments are passed as NULL rather than left out: musl's wrapper reads all three
+     * variadic arguments, and the flags use none but the pidfd's.
+     */
+    pid = clone(minipty_clone_child, stack + page + stack_bytes, CLONE_VM | CLONE_VFORK | CLONE_PIDFD | SIGCHLD, &start,
+        &pidfd, NULL, NULL);
+    if (pid < 0 && errno == EINVAL) {
+        pidfd = -1;
+        pid = clone(minipty_clone_child, stack + page + stack_bytes, CLONE_VM | CLONE_VFORK | SIGCHLD, &start, NULL, NULL,
+            NULL);
+    }
+    clone_err = errno;
+
+    syscall(SYS_rt_sigprocmask, SIG_SETMASK, &old, NULL, MINIPTY_KERNEL_SIGSET_BYTES);
+
+    if (pid < 0) {
+        err = clone_err > 0 ? clone_err : EINVAL;
+        goto done;
+    }
+
+    if (start.failed) {
+        int exit_code;
+        int term_signal;
+
+        /* The child exited right after it wrote the record, so this reaps it at once and leaves no zombie. */
+        minipty_reap_child(pidfd, (int)pid, 1, &exit_code, &term_signal);
+        if (pidfd >= 0)
+            close(pidfd);
+        *start_stage_out = start.stage;
+        err = start.err;
+        goto done;
+    }
+
+    /*
+     * A kernel before 5.2 gave no pidfd with the child. One opened by pid names another process if the child has
+     * exited, been reaped by code outside MiniPty, and had its pid reused; right after the start that window is an
+     * instant, and from Linux 5.4 minipty_pidfd_open refuses a process that is not a child of this one.
+     */
+    if (pidfd < 0)
+        pidfd = minipty_pidfd_open((int)pid);
+
+    *pid_out = pid;
+    *pidfd_out = pidfd;
+    err = 0;
+
+done:
+    /* The child has exec'd or exited by now, so neither its stack nor the parent's copy of the slave is in use. */
+    if (stack != MAP_FAILED)
+        munmap(stack, page + stack_bytes);
+    if (slave >= 0)
+        close(slave);
+    if (err != 0 && *master >= 0) {
+        close(*master);
+        *master = -1;
+    }
+    if (envp == NULL)
+        free(child_envp);
+    return err;
+}
+
+#endif /* __linux__ */
+
+#if !defined(__linux__)
+
+/* FreeBSD (experimental, untested) keeps forkpty. */
 static int spawn_pty_child_forkpty(
     int *master,
     const struct winsize *winp,
@@ -313,12 +619,12 @@ static int spawn_pty_child_forkpty(
     sigset_t oldmask;
     struct termios term;
     char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
-    int inherited_fd_scan_limit = 0;
     int report[2];
     int report_err;
     int stage = MINIPTY_START_STAGE_NONE;
     int child_err = 0;
 
+    /* FreeBSD has no pidfd. */
     *pidfd_out = -1;
     if (child_envp == NULL) {
         errno = ENOMEM;
@@ -331,10 +637,6 @@ static int spawn_pty_child_forkpty(
             free(child_envp);
         return report_err;
     }
-
-#if defined(__linux__)
-    inherited_fd_scan_limit = minipty_compute_inherited_fd_scan_limit();
-#endif
 
     minipty_default_termios(&term);
 
@@ -358,10 +660,9 @@ static int spawn_pty_child_forkpty(
     }
 
     if (pid == 0) {
-        /* errno is saved first: the report's write could change it. */
+        /* errno is saved first: the report's write could change it. Inherited descriptors are not scrubbed here yet. */
         int err;
 
-        minipty_prepare_fork_child(inherited_fd_scan_limit);
         if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0) {
             err = errno;
             minipty_report_start_failure(report[1], MINIPTY_START_STAGE_CHDIR, err);
@@ -380,11 +681,9 @@ static int spawn_pty_child_forkpty(
         free(child_envp);
 
     /*
-     * forkpty opens the master without O_CLOEXEC (glibc's openpty), so every child the host starts later would inherit
-     * it and keep the terminal from hanging up. MiniPty's own children close it in minipty_prepare_fork_child either
-     * way. A fork on another thread before this call can still inherit it. The slave has the same window inside forkpty:
-     * openpty opens it unmarked too, and forkpty closes the parent's copy only after the fork. Only opening both ends
-     * with O_CLOEXEC, which forkpty does not offer, would close those windows; the macOS path does.
+     * forkpty may open the master without O_CLOEXEC, so every child the host starts later would inherit it and keep the
+     * terminal from hanging up. A fork on another thread before this call can still inherit it, and the slave inside
+     * forkpty; the Linux and macOS paths open both ends close-on-exec instead.
      */
     if (fcntl(*master, F_SETFD, FD_CLOEXEC) != 0) {
         int err = errno > 0 ? errno : EINVAL;
@@ -400,18 +699,9 @@ static int spawn_pty_child_forkpty(
     }
 
     /*
-     * Here rather than when the managed session is built. A pidfd is opened by pid, so it names another process if the
-     * child has already exited, been reaped by code outside MiniPty, and had its pid reused. Right after the fork that
-     * window is an instant, and on Linux 5.4 and later minipty_pidfd_open refuses a process that is not a child of this
-     * one. Holding the child until the pidfd is open would narrow the window further, but it deadlocks concurrent
-     * spawns on a forkpty that waits for end of file on a pipe of its own.
-     */
-    *pidfd_out = minipty_pidfd_open((int)pid);
-
-    /*
-     * The child never waits on this pipe, only the parent does. Holding a child until the parent signalled it, as the
-     * pidfd comment describes, deadlocked concurrent spawns; here a concurrent spawn's child that inherited the write
-     * end closes it at its own exec, which delays this read but cannot block it.
+     * The child never waits on this pipe, only the parent does. Holding a forked child until the parent signalled it
+     * deadlocked concurrent spawns; here a concurrent spawn's child that inherited the write end closes it at its own
+     * exec, which delays this read but cannot block it.
      */
     if (minipty_await_start_report(report[0], &stage, &child_err)) {
         int exit_code;
@@ -419,11 +709,7 @@ static int spawn_pty_child_forkpty(
 
         close(report[0]);
         /* The child reported just before _exit, so this reaps it promptly and leaves no zombie. */
-        minipty_reap_child(*pidfd_out, (int)pid, 1, &exit_code, &term_signal);
-        if (*pidfd_out >= 0) {
-            close(*pidfd_out);
-            *pidfd_out = -1;
-        }
+        minipty_reap_child(-1, (int)pid, 1, &exit_code, &term_signal);
         close(*master);
         *master = -1;
         *start_stage_out = stage;
@@ -434,6 +720,8 @@ static int spawn_pty_child_forkpty(
     *pid_out = pid;
     return 0;
 }
+
+#endif /* !__linux__ */
 
 #endif /* !__APPLE__ */
 
@@ -829,6 +1117,8 @@ static int spawn_pty_child(
 #if defined(__APPLE__)
     *pidfd_out = -1;
     return spawn_pty_child_darwin(master, winp, cwd, file, argv, envp, pid_out, slave_out, start_stage_out);
+#elif defined(__linux__)
+    return spawn_pty_child_linux(master, winp, cwd, file, argv, envp, pid_out, pidfd_out, start_stage_out);
 #else
     return spawn_pty_child_forkpty(master, winp, cwd, file, argv, envp, pid_out, pidfd_out, start_stage_out);
 #endif
