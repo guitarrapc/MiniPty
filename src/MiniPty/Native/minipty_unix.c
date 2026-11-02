@@ -309,9 +309,10 @@ static void minipty_scrub_inherited_fds(int scan_limit)
 }
 
 /*
- * The bytes of the kernel's signal set: 64 signals on every architecture .NET runs on. The start masks signals with
- * the system call itself and a set of its own, because the C library's calls and its sigfillset leave its internal
- * signals (cancellation, setxid) unblocked, and no handler may run in a child that shares the host's memory.
+ * The bytes of the kernel's signal set: 64 signals on every architecture .NET runs on. No handler may run in a child
+ * that shares the host's memory, so the start masks signals with the system call and a set of its own. glibc's mask
+ * calls drop its internal signals from the set. sigfillset leaves out each library's own (glibc's 32 and 33, musl's
+ * 32 to 34).
  */
 #define MINIPTY_KERNEL_SIGSET_BYTES 8
 
@@ -576,9 +577,11 @@ static int spawn_pty_child_linux(
     }
 
     /*
-     * A kernel before 5.2 gave no pidfd with the child. One opened by pid names another process if the child has
-     * exited, been reaped by code outside MiniPty, and had its pid reused; right after the start that window is an
-     * instant, and from Linux 5.4 minipty_pidfd_open refuses a process that is not a child of this one.
+     * Reached when clone gave no pidfd. A kernel before 5.2 ignores the flag and has no pidfd_open, which came in
+     * Linux 5.3, so the open fails and the session has no pidfd. It succeeds only after clone failed with EINVAL for
+     * the flag and ran again without it. One opened by pid names another process if the child has exited, been reaped
+     * by code outside MiniPty, and had its pid reused. Right after the start that window is an instant, and from
+     * Linux 5.4 minipty_pidfd_open refuses a process that is not a child of this one.
      */
     if (pidfd < 0)
         pidfd = minipty_pidfd_open((int)pid);

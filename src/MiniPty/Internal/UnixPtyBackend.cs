@@ -241,8 +241,8 @@ internal static partial class UnixPtyBackend
         // Serializes the child's reap with signal delivery, so Kill can never reach a pid the watcher has
         // already released for reuse.
         private readonly Lock _pidLock = new();
-        // The child's pidfd on Linux, opened by the spawn right after the fork, or -1 when there is none. The child's
-        // signals go through it, and so does its reap from Linux 5.4. The watcher closes it once the child is reaped.
+        // The child's pidfd on Linux, from the spawn, or -1 when there is none. The child's signals go through it, and
+        // so does its reap from Linux 5.4. The watcher closes it once the child is reaped.
         // Written only by the constructor and, under _pidLock, by ClosePidfd.
         private int _pidfd = -1;
         // Mutable struct: used only through this field, never copied.

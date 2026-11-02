@@ -20,7 +20,7 @@ I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries d
 - Idle sessions cost nothing: an idle session holds no thread and no output buffer ([how each OS reads output](#backends))
 - Bounded memory with backpressure: output goes into a 16 KiB buffer per session, and a slow consumer pauses the child instead of growing memory
 - Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call
-- Signals the right process: on Linux, signals go through a pidfd, so a reused PID is never hit
+- Signals the right process: on Linux 5.2 and later, signals go through a pidfd that `clone` returns with the child, so a reused PID is never hit
 
 **Not supported**
 

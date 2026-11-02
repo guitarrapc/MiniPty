@@ -49,9 +49,10 @@ internal static partial class UnixPtyBackend
     /// The native shim reports exits through pidfd + epoll (Linux 5.3+) or <c>kqueue</c>
     /// <c>EVFILT_PROC</c> (macOS, FreeBSD). A child the shim cannot register joins a polling set that the same
     /// thread checks every <see cref="PollIntervalMs"/>. On Linux that is a child the spawn got no pidfd for, because
-    /// the kernel gave none, a seccomp filter blocked it, or the pidfd named no child. With <c>kqueue</c> it is a child
-    /// that exited before its registration. When the watcher's descriptors could not be opened, every child is polled, and
-    /// each later registration tries to open them again (see <see cref="EnsureStarted"/>).
+    /// the kernel gave none, a seccomp filter blocked it, or the pidfd named no child. On Linux 5.2 it is also a child
+    /// whose pidfd epoll cannot watch. With <c>kqueue</c> it is a child that exited before its registration. When the
+    /// watcher's descriptors could not be opened, every child is polled, and each later registration tries to open them
+    /// again (see <see cref="EnsureStarted"/>).
     /// </para>
     /// <para>
     /// The epoll or kqueue and its wake descriptors belong to this class, not to the shim. A second
