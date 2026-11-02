@@ -242,7 +242,7 @@ internal static partial class UnixPtyBackend
         // already released for reuse.
         private readonly Lock _pidLock = new();
         // The child's pidfd on Linux, from the spawn, or -1 when there is none. The child's signals go through it, and
-        // so does its reap from Linux 5.4. The watcher closes it once the child is reaped.
+        // so does its reap where the kernel supports that. The watcher closes it once the child is reaped.
         // Written only by the constructor and, under _pidLock, by ClosePidfd.
         private int _pidfd = -1;
         // Mutable struct: used only through this field, never copied.

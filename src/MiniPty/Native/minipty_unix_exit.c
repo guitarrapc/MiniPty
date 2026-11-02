@@ -51,13 +51,11 @@
  * macOS and FreeBSD watch EVFILT_PROC NOTE_EXIT with kqueue.
  *
  * The watcher only reports that a child exited. Reaping stays with the managed caller so the wait status is read
- * exactly once, by one owner. On Linux the caller also owns each child's pidfd. The spawn gets it from clone with the
- * child, or opens it by pid right after the start when clone ran without CLONE_PIDFD. The caller signals the child
- * through it, and from Linux 5.4 also reaps the child through it. Once the child is reaped it removes the
- * registration and then closes the pidfd. A child that cannot be registered makes minipty_child_watch_add fail, and
- * the caller polls that child instead. On Linux that is a child without a pidfd, which the kernel did not give or the
- * spawn refused, or a child on Linux 5.2, whose pidfd epoll cannot watch. With kqueue it is a child that already
- * exited before its registration.
+ * exactly once, by one owner. On Linux the caller also owns each child's pidfd, from the spawn, and signals and reaps
+ * the child through it where the kernel supports that. Once the child is reaped it removes the registration and then
+ * closes the pidfd. A child that cannot be registered makes minipty_child_watch_add fail, and the caller polls that
+ * child instead. On Linux that is a child without a pidfd that epoll can watch. With kqueue it is a child that
+ * already exited before its registration.
  *
  * A self-pipe wakes the wait when the caller's polling set changes. On macOS an EVFILT_USER event on the kqueue
  * does instead. Every descriptor is opened close-on-exec, so no later child ever keeps the watcher's descriptors
@@ -794,7 +792,7 @@ int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_
             return 1;
         }
 
-        /* Linux 5.2 and 5.3 have pidfds but not P_PIDFD, and reap by pid. */
+        /* Kernels before 5.4 have no P_PIDFD and reap by pid. */
         if (errno != EINVAL)
             return -1;
     }
