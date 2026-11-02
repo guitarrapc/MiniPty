@@ -348,6 +348,16 @@ Not verified locally:
 - **arm64:** Docker Desktop here has no arm64 emulation. CI builds on native arm64 runners and runs both smoke containers there.
 - **macOS:** no Mac is available. CI checks `minos` and runs the smoke on macOS 15.
 
+**CI ([run 41401444747](https://github.com/guitarrapc/MiniPty/actions/runs/41401444747), 2026-11-02).** Every native build and its check passed. So did every NuGet smoke: macOS 15 (arm64 and Intel), AlmaLinux 8 and Alpine 3.21 (x64 and arm64), and the existing runners.
+
+Only the musl test job failed, in one test: `DisposeLetsAnInteractiveShellHangUpItsJobs`.
+
+- **Cause:** the job container's first process is `tail -f /dev/null`, which never reaps. The shell's job did end on the hang-up, but it stayed a zombie, and the test waited for it to be gone.
+- **Reproduced** locally with the same entrypoint: the test failed, a zombie `sleep` was left with parent 1, and with `--init` it passed.
+- **A second test was also affected:** `HostExitKillsAChildStillInItsHangupGrace(exit-handler)` judges the same way and failed 2 of 5 runs there.
+- **Fix:** both tests now count a process that is not their own child as ended once it is a zombie.
+- **After the fix:** with `tail` as the first process, both passed 5 of 5 runs and the suite passed 733 of 733. On Ubuntu with systemd, their class passed 3 of 3 runs.
+
 ### Phase 2: Linux start without fork (I3)
 
 This phase needs Phase 1, for two reasons:

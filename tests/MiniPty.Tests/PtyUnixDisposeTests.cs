@@ -174,9 +174,9 @@ public sealed class PtyUnixDisposeTests
         await Assert.That(host.ExitCode).IsEqualTo(0);
         await Assert.That(int.TryParse(pidLine, out var pid)).IsTrue();
 
-        // A child left behind by a failure is not killed here: init reaps it, so its pid could already be reused. It ends
-        // by itself once its loop finishes.
-        var gone = await WaitForAsync(() => UnixInterop.kill(pid, 0) != 0 && Marshal.GetLastPInvokeError() == ESRCH, 5_000);
+        // A child left behind by a failure is not killed here: with its host gone, whoever adopted it reaps it, so its pid
+        // could already be reused. It ends by itself once its loop finishes. Not this process's child, so a zombie counts.
+        var gone = await WaitForAsync(() => HasEnded(pid), 5_000);
         await Assert.That(gone).IsTrue();
     }
 
@@ -224,7 +224,8 @@ public sealed class PtyUnixDisposeTests
 
             session.Dispose();
 
-            var gone = await WaitForAsync(() => UnixInterop.kill(job, 0) != 0 && Marshal.GetLastPInvokeError() == ESRCH, UnixPtyBackend.DisposeHangupGraceMs + 15_000);
+            // The job is the shell's child, not this process's, so it has hung up once it is gone or a zombie.
+            var gone = await WaitForAsync(() => HasEnded(job), UnixPtyBackend.DisposeHangupGraceMs + 15_000);
             await Assert.That(gone).IsTrue();
         }
         finally
@@ -624,6 +625,45 @@ public sealed class PtyUnixDisposeTests
         WaitForAsync(
             () => UnixInterop.kill(pid, 0) != 0 && Marshal.GetLastPInvokeError() == ESRCH,
             UnixPtyBackend.DisposeHangupGraceMs + 15_000);
+
+    /// <summary>
+    /// True once a process that is not a child of this process has ended: it is gone, or it is a zombie.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Reaping such a process is up to whoever adopted it, normally init. A container whose first process never reaps
+    /// leaves it a zombie for good: a GitHub job container runs <c>tail -f /dev/null</c> there. <c>kill(pid, 0)</c> still
+    /// succeeds on a zombie.
+    /// </para>
+    /// <para>
+    /// A child of this process must instead be gone (<see cref="WaitForProcessGoneAsync"/>), because a zombie child is
+    /// one MiniPty failed to reap.
+    /// </para>
+    /// <para>
+    /// The state is read on Linux only. macOS has launchd to reap.
+    /// </para>
+    /// </remarks>
+    private static bool HasEnded(int pid)
+    {
+        if (UnixInterop.kill(pid, 0) != 0 && Marshal.GetLastPInvokeError() == ESRCH)
+            return true;
+
+        if (!OperatingSystem.IsLinux())
+            return false;
+
+        try
+        {
+            // "pid (comm) state ...": comm may hold spaces and parentheses, so the state follows the last ')'.
+            var stat = File.ReadAllText($"/proc/{pid}/stat");
+            var end = stat.LastIndexOf(')');
+            return end >= 0 && end + 2 < stat.Length && stat[end + 2] == 'Z';
+        }
+        catch (IOException)
+        {
+            // Gone between the two checks. The next poll sees ESRCH.
+            return false;
+        }
+    }
 
     private static async Task<bool> WaitForAsync(Func<bool> condition, int timeoutMs)
     {
