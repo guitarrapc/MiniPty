@@ -2,7 +2,7 @@
 
 Goal: MiniPty loads wherever .NET 10 runs on its platforms. A session's start costs the same whatever the host's size. The library reports accurately what it supports and how a child ended. The items below came from a review of the library as a whole. Each is closed by a fix, or by a decision recorded in the specifications, as its section says.
 
-**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is built and meets its gates locally on x64 (glibc and musl); it waits for CI. Phases 3–5 have not started. The measurements below were taken on 2026-11-02.
+**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is closed: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). The fix to a test race found along the way has not yet run in CI. Phases 3–5 have not started. The measurements below were taken on 2026-11-02.
 
 ## Inventory
 
@@ -445,21 +445,33 @@ Results on x64, locally. "Old" is this tree with `minipty_unix.c`, `minipty_unix
 | Package build, glibc 2.27 and musl 1.2.3 | Both build and pass `--check`, now including `BIND_NOW`, and compile without warnings under `-Wall -Wextra`. Highest glibc version required: 2.14 (2.17 before). No `forkpty`, no libutil |
 | NativeAOT, linux-x64 and linux-musl-x64 | `Capture`, `Session`, `Observe`, and `VsCodeTerminalHelper --smoke` publish against the floor-built archives and run |
 
-A test race found while chasing that failure, not caused by this phase: `PtyUnixLoopTests.AFailureInOneSessionEndsOnlyThatSession` can wait forever on Linux.
+A test race found while chasing that failure, not caused by this phase: `PtyUnixLoopTests.AFailureInOneSessionEndsOnlyThatSession` can wait forever on Unix; it was seen on Linux.
 
 - **Seen:** on 2 CPUs, one complete musl run stopped in it for over 16 minutes. Both `cat` children were asleep in `read`.
 - **Cause:** the test injects its failure only when the loop serves the failing session (`FailLoopReadsOfPidForTests`), and reads that session's output with no timeout. A consumer that reads inline can take the turn first. The loop then drops its report of output alone, the consumer reads all the output itself and waits, and the loop never serves the session again. No output is lost; only the injected failure never happens.
 - **Reproduced deterministically** with an instrumented build and a diagnosis test (neither kept). The test held the producer's turn while the loop reported, then let the consumer read. It hung in 5 of 5 runs on the new code and 5 of 5 on the `HEAD` code. The log read: report dropped, inline read published, inline read empty, no injected failure.
 - **Not reproduced by repetition:** the test alone passed 100 of 100 runs on 2 CPUs, on both codes. In the instrumented complete runs, 3 of 12 had the consumer's inline read in the same millisecond as the loop's service.
-- **Fix, not yet made:** wait until the loop has failed the session (`OutputPump.IsProducerFinished`) before reading its output, and bound the read with the test's timeout.
+- **Fix:** the test waits until the loop has failed the session (`OutputPump.IsProducerFinished`) before reading its output, and bounds the read with its timeout. The constraint is recorded in [platform_support.md](../specs/platform_support.md#platform-specific-test-constraints). Verified on 2 CPUs on musl: the test passed 100 of 100 runs, and the suite passed 737 of 737 tests in 10 of 10 runs. The suite also passed 737 of 737 on glibc.
 
 Not verified locally:
 
 - **arm64:** there is no arm64 Docker host here. CI builds and tests natively.
 - **macOS:** only preprocessor guards changed there. `unifdef -D__APPLE__ -U__linux__ -U__FreeBSD__` gives the same 587 lines for `minipty_unix.c` before and after, comments aside. CI builds and tests it.
 - **FreeBSD:** the `forkpty` path lost only its Linux branches, and it was not compiled.
-- **CI:** no run yet, so CI's start figures (1.749 ms in its last run) have no counterpart.
+- **CI's start figures:** the Build workflow runs no benchmark, so CI's 1.749 ms from its last benchmark run has no counterpart. The gate is met by the local A/B above.
 - **Kernels before 5.2 or 4.13:** neither the fallback for `CLONE_PIDFD` nor the one for `TIOCGPTPEER` was run.
+
+**macOS, on an Apple M2 with macOS 27.0.1 and .NET 10.0.13, run by hand.** `PtyStartupHostMemoryBenchmarks` took 6.042 ms with nothing touched and 6.134 ms at 2 GiB (+1.5%), with 1.27 KB allocated in both. `posix_spawn` does not copy the host, as its documentation says.
+
+**CI ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814), commit `5e61886`, 2026-11-02).** All 27 jobs passed.
+
+| Check | Result |
+|---|---|
+| Test suite | 737 of 737 on each of `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-26`, `macos-26-intel`, `windows-2025`, `windows-11-arm`, and the Alpine container (`linux-musl-x64`) |
+| Floor checks | Highest glibc version required: 2.14 on `linux-x64` and 2.17 on `linux-arm64`. Both musl RIDs link musl's libc. All four macOS files declare `minos 12.0` |
+| NuGet smoke | macOS 15 and 26 (arm64 and Intel), AlmaLinux 8 and Alpine 3.21 (x64 and arm64), and the Ubuntu and Windows runners |
+
+The commit predates the fix to `AFailureInOneSessionEndsOnlyThatSession`, so that fix has not run in CI.
 
 ### Phase 3: API (I4, I5)
 

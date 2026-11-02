@@ -380,7 +380,7 @@ Shared session logic lives in `UnixPtyBackend`; spawn and resize ioctl live in `
 
 ## Output pump
 
-Each session's output is read by one pump, from spawn until end of output: through overlapped reads completed on a completion port of MiniPty's own on Windows, which one thread waits on for every session, and on the exit watcher's loop on Unix (epoll on Linux, kqueue on macOS and FreeBSD). On Linux a consumer also reads the master itself to take what is already waiting; on macOS and Windows only the loop or the driver reads. No consumer waits in a read, so no consumer blocks a caller's thread or a thread-pool worker, and output produced before a consumer attaches is never stranded.
+Each session's output is read by one pump, from spawn until end of output: through overlapped reads completed on a completion port of MiniPty's own on Windows, which one thread waits on for every session, and on the exit watcher's loop on Unix (epoll on Linux, kqueue on macOS and FreeBSD). On Unix a plain consumer also reads the master itself to take what is already waiting (`UnixPtyBackendInstance.TryReadInline`); on Windows only the driver reads. No consumer waits in a read, so no consumer blocks a caller's thread or a thread-pool worker, and output produced before a consumer attaches is never stranded.
 
 | Aspect | Implementation |
 |---|---|
