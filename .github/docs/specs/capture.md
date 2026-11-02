@@ -15,6 +15,7 @@ PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
 // result.Output          - merged raw PTY bytes
 // result.GetText()       - decoded text (ReadOnlyMemory<char>)
 // result.ExitCode
+// result.ExitStatus      - exit code plus the Unix termination signal
 // result.Chunks          - PtyCaptureChunk(TimeSpan Time, ReadOnlyMemory<byte> Data)
 // result.GetTextChunks() - PtyCaptureTextChunk(TimeSpan Time, ReadOnlyMemory<char> Text)
 ```
@@ -23,7 +24,7 @@ PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
 - `PtyCaptureOptions.TimeProvider` supplies the clock for chunk timestamps. Default is `TimeProvider.System`.
 - Each chunk's `Time` is the elapsed time from session start, immediately after `Pty.Start`, to the completion of the read that produced it. With `TimeProvider.System` the read's own timestamp is used; another provider is asked when the read is delivered, which is the same moment for output read after capture attached. Output read before capture attached is timestamped on delivery; a read that completed before the origin counts as zero. Chunk times never decrease: a read already in flight when capture attached is delivered after that earlier output and takes its time.
 - The session is disposed when `RunAsync` completes. Disposal ends the child if it is still running (see [Core session](core_session.md)).
-- Merged `Output`, decoded text, and `ExitCode` are stable results. Chunk count and split points follow output reads, and are not compatibility guarantees: reads that follow one another within 500 µs join one chunk, up to 4 KiB and 2 ms from its first read, whose time is that first read's.
+- Merged `Output`, decoded text, `ExitCode`, and `ExitStatus` are stable results. The session is disposed by then, so `ExitStatus` is where a caller learns that a signal ended the child. Chunk count and split points follow output reads, and are not compatibility guarantees: reads that follow one another within 500 µs join one chunk, up to 4 KiB and 2 ms from its first read, whose time is that first read's.
 
 PTY output is a raw byte stream. Capture APIs do not normalize newlines or strip control sequences by default; sequences may span chunk boundaries.
 

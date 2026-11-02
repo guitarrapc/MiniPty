@@ -72,7 +72,7 @@ public sealed class PtyOutputTests
 
         var result = new PtyCaptureResult(
             new PtyPumpPayload(mergedBytes, mergedChars, Encoding.UTF8),
-            0,
+            exitStatus: default,
             byteChunks,
             textChunks);
         var fromResult = result.ToDisplayText(PtyOutputDisplayMode.PlainText);

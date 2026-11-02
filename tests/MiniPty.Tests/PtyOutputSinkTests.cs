@@ -25,7 +25,7 @@ public sealed class PtyOutputSinkTests
         sink.Write("backlog"u8, timestamp: 0);
         sink.Write("in-flight"u8, inFlightReadCompleted);
         sink.OnOutputEnded();
-        var result = sink.ToResult(exitCode: 0);
+        var result = sink.ToResult(exitStatus: default);
 
         await Assert.That(result.Chunks.Count).IsEqualTo(2);
         await Assert.That(result.Chunks[1].Time).IsGreaterThanOrEqualTo(result.Chunks[0].Time);
@@ -61,7 +61,7 @@ public sealed class PtyOutputSinkTests
         sink.Write("g"u8, timestamp: 0);
         sink.Write("h"u8, timestamp: 0);
         sink.OnOutputEnded();
-        var result = sink.ToResult(exitCode: 0);
+        var result = sink.ToResult(exitStatus: default);
 
         string[] expected = ["abc", "dddddd", "d", new string('e', PtyOutputPump.PublishSize - 1), "ff", "g", "h"];
         await Assert.That(result.Chunks.Count).IsEqualTo(expected.Length);
@@ -109,7 +109,7 @@ public sealed class PtyOutputSinkTests
             sink.Write(euro.AsSpan(0, 1), timestamp: 0);
             sink.Write(euro.AsSpan(1), timestamp: 0);
             sink.OnOutputEnded();
-            decoded = sink.ToResult(exitCode: 0).GetTextString();
+            decoded = sink.ToResult(exitStatus: default).GetTextString();
         }
         else
         {
@@ -171,7 +171,7 @@ public sealed class PtyOutputSinkTests
         {
             var sink = new PtyCaptureSink(Stopwatch.GetTimestamp(), TimeProvider.System, Encoding.UTF8, decodeOutput: true);
             Feed(sink);
-            var result = sink.ToResult(exitCode: 0);
+            var result = sink.ToResult(exitStatus: default);
             output = result.Output;
             decoded = result.GetTextString();
 
@@ -225,7 +225,7 @@ public sealed class PtyOutputSinkTests
         sink.Write("!"u8, timestamp: 0);
         sink.OnOutputEnded();
 
-        var chunks = sink.ToResult(exitCode: 0).GetTextChunks();
+        var chunks = sink.ToResult(exitStatus: default).GetTextChunks();
 
         await Assert.That(chunks.Count).IsEqualTo(2);
         await Assert.That(new string(chunks[0].Text.Span)).IsEqualTo(text);

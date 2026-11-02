@@ -2,7 +2,7 @@
 
 Goal: MiniPty loads wherever .NET 10 runs on its platforms. A session's start costs the same whatever the host's size. The library reports accurately what it supports and how a child ended. The items below came from a review of the library as a whole. Each is closed by a fix, or by a decision recorded in the specifications, as its section says.
 
-**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is closed: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). The fix to a test race found along the way has not yet run in CI. Phases 3–5 have not started. The measurements below were taken on 2026-11-02.
+**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is closed: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). The fix to a test race found along the way has not yet run in CI. Phase 3 is built and passes locally on Windows and Linux; it has not run in CI. Phases 4 and 5 have not started. The measurements below were taken on 2026-11-02.
 
 ## Inventory
 
@@ -495,6 +495,29 @@ This phase is independent of Phases 1 and 2 and can ship with either.
 
 - The doc comments of `Pty.IsSupported` and `PtyResult`.
 - [core_session.md](../specs/core_session.md).
+
+**Built (2026-11-02).**
+
+- **`IsSupported`:** on Windows it compares `Environment.OSVersion.Version` with 10.0.17763 (`Pty.IsSupportedWindowsVersion`). `Pty.Start` throws `PlatformNotSupportedException` when it is `false`, and on Windows the message names the required build and the current one.
+- **`PtyResult.ExitStatus`:** `ExitCode` is now read from it. The shared completion (`PtyCompletion.RunAsync`) returns a `PtyExitStatus` instead of an exit code. The session's allocation-free exit wait still carries the code alone, so the signal is read from the session once that wait has completed.
+
+Changes from the steps above:
+
+- **`PtyCaptureResult.ExitStatus` too.** `PtyCapture.RunAsync` disposes the session it starts, so a capture caller had no way at all to learn that a signal ended the child. Both results come from the same completion, so both gained the property.
+- **The build is pinned by a test.** Hosted runners cannot run a build before 1809, so `PtyIsSupportedOnlyOnWindowsBuildsWithConPty` checks the comparison itself, at builds 9200, 9600, 14393, 17134, 17763 and 26200.
+- **README and specifications.** The README's platform table and [platform_support.md](../specs/platform_support.md) name Windows Server 2019, and say what happens on earlier builds. [completion.md](../specs/completion.md) and [capture.md](../specs/capture.md) list `ExitStatus`.
+
+Cost: each result object holds an `int?` beside the exit code, which by field layout makes it 8 bytes larger (`PtyResult` 48 to 56 bytes on 64-bit). The startup benchmark that runs `CompleteAsync` allocates one per run; it was not rerun.
+
+Results, locally:
+
+| Check | Result |
+|---|---|
+| Test suite, Windows 11 (build 26200) | 746 of 746 pass |
+| Test suite, Linux (WSL2, glibc) | 746 of 746 pass, including the new Unix signal tests, which return early on Windows |
+| Solution build, Release | No warnings |
+
+Not run locally: macOS, musl, and NativeAOT publishing. Nothing native changed, and the managed change uses no reflection; CI builds, tests, and publishes them.
 
 ### Phase 4: Measurement (I6)
 

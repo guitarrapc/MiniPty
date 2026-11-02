@@ -34,13 +34,13 @@ MiniPty creates a real PTY on each supported OS. See [Backends](#backends) for h
 
 | OS | Architectures | Status |
 |----|---------------|--------|
-| Windows 10 1809+ / Windows 11 | x64, arm64 | Supported |
+| Windows 10 1809+ / Windows 11 / Windows Server 2019+ | x64, arm64 | Supported |
 | Linux, glibc 2.27+ | x64, arm64 | Supported |
 | Linux, musl 1.2.3+ (Alpine) | x64, arm64 | Supported |
 | macOS 12.0+ | x64, arm64 | Supported |
 | FreeBSD | — | Experimental: tested neither locally nor in CI, and the package ships no FreeBSD binary, so MiniPty works there only when built from source |
 
-The minimums are those of the native files. They reach at least as far back as .NET 10 itself runs.
+The Linux and macOS minimums are those of the native files. They reach at least as far back as .NET 10 itself runs. Windows needs ConPTY, which first shipped in Windows 10 1809 and Windows Server 2019. .NET 10 also runs on earlier builds, such as Windows 10 1607 and Windows Server 2016; there `Pty.IsSupported` is `false` and `Pty.Start` throws `PlatformNotSupportedException`.
 
 ### Native files
 

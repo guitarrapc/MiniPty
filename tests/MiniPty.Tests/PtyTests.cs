@@ -694,14 +694,20 @@ public sealed class PtyTests
             var result = await PtyCapture.RunAsync(WindowsCommand("exit /b 42"));
 
             await Assert.That(result.ExitCode).IsEqualTo(42);
+            await Assert.That(result.ExitStatus).IsEqualTo(new PtyExitStatus(42, null));
             return;
         }
 
         var unix = await PtyCapture.RunAsync(UnixShell("exit 42"));
 
         await Assert.That(unix.ExitCode).IsEqualTo(42);
+        await Assert.That(unix.ExitStatus).IsEqualTo(new PtyExitStatus(42, null));
     }
 
+    /// <summary>
+    /// <see cref="PtyCapture.RunAsync"/> disposes the session it starts, so its result is the only place a capture
+    /// caller learns that a signal ended the child.
+    /// </summary>
     [Test]
     public async Task PtySignalExitCodeIsCapturedOnUnix()
     {
@@ -711,6 +717,64 @@ public sealed class PtyTests
         var result = await PtyCapture.RunAsync(UnixShell("kill -TERM $$"));
 
         await Assert.That(result.ExitCode).IsEqualTo(143);
+        await Assert.That(result.ExitStatus).IsEqualTo(new PtyExitStatus(143, 15));
+    }
+
+    [Test]
+    public async Task PtyCompleteAsyncReportsSignalOnUnix()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using var session = Pty.Start(UnixShell("kill -TERM $$"));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var result = await session.CompleteAsync(cancellationToken: cts.Token);
+
+        await Assert.That(result.ExitCode).IsEqualTo(143);
+        await Assert.That(result.ExitStatus).IsEqualTo(new PtyExitStatus(143, 15));
+        await Assert.That(session.ExitStatus).IsEqualTo(result.ExitStatus);
+    }
+
+    /// <summary>
+    /// A child that exits with 143 itself was not signaled, although its exit code is the one <c>SIGTERM</c> maps to.
+    /// Only the exit status tells the two apart. On Windows the signal is never reported.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncHasNoSignalWhenTheChildExitsWithASignalsExitCode()
+    {
+        await using var session = Pty.Start(RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? WindowsCommand("exit /b 143")
+            : UnixShell("exit 143"));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var result = await session.CompleteAsync(cancellationToken: cts.Token);
+
+        await Assert.That(result.ExitCode).IsEqualTo(143);
+        await Assert.That(result.ExitStatus).IsEqualTo(new PtyExitStatus(143, null));
+        await Assert.That(session.ExitStatus).IsEqualTo(result.ExitStatus);
+    }
+
+    /// <summary>CI's Windows runners (Windows Server 2025, Windows 11) are later than ConPTY's first build.</summary>
+    [Test]
+    public async Task PtyIsSupportedOnEveryPlatformTheSuiteRunsOn()
+    {
+        await Assert.That(Pty.IsSupported).IsTrue();
+    }
+
+    /// <summary>
+    /// ConPTY first shipped in Windows 10 version 1809 (build 17763). .NET also runs on earlier builds, where
+    /// <c>CreatePseudoConsole</c> does not exist, and hosted runners cannot run them, so the build is pinned here.
+    /// The version has a revision, as <see cref="Environment.OSVersion"/> reports it.
+    /// </summary>
+    [Test]
+    [Arguments(6, 2, 9200, false)]   // Windows Server 2012
+    [Arguments(6, 3, 9600, false)]   // Windows Server 2012 R2
+    [Arguments(10, 0, 14393, false)] // Windows 10 1607, Windows Server 2016
+    [Arguments(10, 0, 17134, false)] // Windows 10 1803, the last build without ConPTY
+    [Arguments(10, 0, 17763, true)]  // Windows 10 1809, Windows Server 2019
+    [Arguments(10, 0, 26200, true)]  // Windows 11 25H2
+    public async Task PtyIsSupportedOnlyOnWindowsBuildsWithConPty(int major, int minor, int build, bool expected)
+    {
+        await Assert.That(Pty.IsSupportedWindowsVersion(new Version(major, minor, build, 0))).IsEqualTo(expected);
     }
 
     [Test]

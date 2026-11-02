@@ -480,7 +480,10 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <param name="cancellationToken">
     /// When canceled, behavior depends on <see cref="PtyCompleteOptions.KillOnCancellation"/> (default: kill child).
     /// </param>
-    /// <returns>A <see cref="PtyResult"/> with merged <see cref="PtyResult.Output"/> bytes and exit code.</returns>
+    /// <returns>
+    /// A <see cref="PtyResult"/> with merged <see cref="PtyResult.Output"/> bytes and the child's
+    /// <see cref="PtyResult.ExitStatus"/>.
+    /// </returns>
     /// <remarks>
     /// Output is collected as it is read while the child runs, never on the calling thread, so awaiting this method
     /// does not block it. <see cref="PtyCompleteOptions.Input"/> is written as by
@@ -499,8 +502,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         try
         {
             var sink = new PtyCompletionSink(options.OutputEncoding, options.DecodeOutput);
-            var exitCode = await PtyCompletion.RunAsync(this, options, sink, cancellationToken).ConfigureAwait(false);
-            return new PtyResult(sink.ToPayload(), exitCode);
+            var exitStatus = await PtyCompletion.RunAsync(this, options, sink, cancellationToken).ConfigureAwait(false);
+            return new PtyResult(sink.ToPayload(), exitStatus);
         }
         finally
         {

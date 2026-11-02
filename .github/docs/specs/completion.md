@@ -26,7 +26,8 @@ This API is intended for one-shot command execution. It is not a high-level long
 | Member | Type | Description |
 |---|---|---|
 | `Output` | `ReadOnlyMemory<byte>` | Merged raw PTY output. |
-| `ExitCode` | `int` | Child exit code. |
+| `ExitCode` | `int` | Child exit code; `128 + signal` for a Unix child ended by a signal. Equals `ExitStatus.ExitCode`. |
+| `ExitStatus` | `PtyExitStatus` | Exit code plus the Unix termination signal, as `WaitForExitAsync` reports it ([Exit Status](core_session.md#exit-status)). |
 | `GetText()` | `ReadOnlyMemory<char>` | Decoded text; zero-alloc when `DecodeOutput` was true. |
 | `GetTextString()` | `string` | Materialized decoded text. |
 | `Contains(string)` | `bool` | Search decoded text. |

@@ -181,6 +181,7 @@ MiniPty ships no binary because it cannot guarantee the host's placement in ever
 - `NodePtyExitCode` projects that status into node-pty's frontend shape: zero when `Signal` is present, otherwise `ExitCode`. Terminal bridges use this projection without changing core completion semantics.
 - `Signal` is the raw OS signal number (`waitpid` `WTERMSIG`), null on normal exit and when the wait status was lost (ECHILD reap-lost path). Windows never reports a signal.
 - `PtySignal` members are logical identifiers mapped to native numbers per platform (SIGUSR1/SIGUSR2 numbering differs between Linux and macOS/FreeBSD); reporting uses raw OS numbers.
+- One-shot results carry the same status: `PtyResult.ExitStatus` from `CompleteAsync`, and `PtyCaptureResult.ExitStatus` from `PtyCapture.RunAsync`, whose session is already disposed when it returns. Their `ExitCode` alone cannot tell a child killed by `SIGTERM` from one that exited with 143.
 
 ## Embedder Patterns
 

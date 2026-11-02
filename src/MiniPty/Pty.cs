@@ -25,21 +25,38 @@ namespace MiniPty;
 public static class Pty
 {
     /// <summary>
+    /// The first Windows version with ConPTY: Windows 10 version 1809 and Windows Server 2019 (build 17763).
+    /// .NET also runs on earlier builds, such as Windows 10 1607 and Windows Server 2016, where
+    /// <c>CreatePseudoConsole</c> does not exist.
+    /// </summary>
+    private static readonly Version MinimumWindowsVersion = new(10, 0, 17763);
+
+    /// <summary>
     /// Gets a value indicating whether the current operating system supports pseudo-terminals.
     /// </summary>
     /// <value>
-    /// <see langword="true"/> on Windows 10 1809+, Linux, macOS, and FreeBSD; otherwise <see langword="false"/>.
+    /// <see langword="true"/> on Windows 10 version 1809 (build 17763) or later, Windows Server 2019 or later, Linux,
+    /// macOS, and FreeBSD; otherwise <see langword="false"/>.
     /// </value>
     /// <remarks>
+    /// <para>
+    /// On Windows this checks the build, because ConPTY first shipped in build 17763 and .NET also runs on earlier
+    /// builds. An out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>) does not change the answer: whether one runs on
+    /// an earlier build is not verified.
+    /// </para>
+    /// <para>
     /// FreeBSD support is experimental: it is not tested, and the package ships no FreeBSD native library, so
     /// <see cref="Start"/> works there only when MiniPty is built from source. This property reports whether the
     /// operating system has pseudo-terminals MiniPty can drive, not whether the native library is present.
+    /// </para>
     /// </remarks>
     public static bool IsSupported =>
-        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ||
-        RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ||
-        RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ||
-        RuntimeInformation.IsOSPlatform(OSPlatform.FreeBSD);
+        OperatingSystem.IsWindows()
+            ? IsSupportedWindowsVersion(Environment.OSVersion.Version)
+            : OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsFreeBSD();
+
+    /// <summary>Whether a Windows version has ConPTY. Separate from <see cref="IsSupported"/> so tests can pin the build.</summary>
+    internal static bool IsSupportedWindowsVersion(Version version) => version >= MinimumWindowsVersion;
 
     /// <summary>
     /// Spawns a child process attached to a new pseudo-terminal.
@@ -55,7 +72,10 @@ public static class Pty
     /// a carriage return, a line feed, or a NUL, when one of its arguments contains a carriage return, a line feed, or
     /// a NUL, or when its <c>cmd.exe</c> command line would exceed 8191 characters.
     /// </exception>
-    /// <exception cref="PlatformNotSupportedException">The current operating system is not supported.</exception>
+    /// <exception cref="PlatformNotSupportedException">
+    /// The current operating system is not supported (<see cref="IsSupported"/> is <see langword="false"/>), including
+    /// Windows builds before Windows 10 version 1809, which have no ConPTY.
+    /// </exception>
     /// <exception cref="System.ComponentModel.Win32Exception">
     /// Windows: process or ConPTY creation failed. For a batch file this includes a script that MiniPty's lookup does
     /// not find, or cannot open, before anything is created, with the error <c>CreateProcess</c> would report; the
@@ -75,7 +95,11 @@ public static class Pty
         if (startInfo.CommandLine is not null && !OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("PtyStartInfo.CommandLine is supported only on Windows.");
         if (!IsSupported)
-            throw new PlatformNotSupportedException("PTY is not supported on this operating system.");
+        {
+            throw new PlatformNotSupportedException(OperatingSystem.IsWindows()
+                ? $"PTY on Windows needs ConPTY, which Windows provides from Windows 10 version 1809 (build {MinimumWindowsVersion.Build}); this is build {Environment.OSVersion.Version.Build}."
+                : "PTY is not supported on this operating system.");
+        }
 
         ThrowIfContainsNul(startInfo);
 

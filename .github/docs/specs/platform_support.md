@@ -6,7 +6,7 @@ Implemented public platform support, verification constraints, and platform-leve
 
 | OS | Backend | Minimum |
 |---|---|---|
-| Windows | ConPTY (`CreatePseudoConsole`), or an out-of-band ConPTY the application supplies (`PtyStartInfo.ConPty`) | Windows 10 1809+, Windows 11 |
+| Windows | ConPTY (`CreatePseudoConsole`), or an out-of-band ConPTY the application supplies (`PtyStartInfo.ConPty`) | Windows 10 1809+ (build 17763), Windows 11, Windows Server 2019+ |
 | Linux | `clone(CLONE_VM \| CLONE_VFORK)` + `execve` through native shim | glibc 2.27+ (`linux-x64`, `linux-arm64`); musl 1.2.3+ (`linux-musl-x64`, `linux-musl-arm64`), such as Alpine |
 | macOS | `posix_spawn` + `minipty_spawn_helper` through native shim | macOS 12.0+, declared by every binary; helper bundled in `runtimes/osx-*/native/` |
 | FreeBSD (experimental) | `forkpty` + `execve` through native shim | `libutil`; built from source only |
@@ -26,6 +26,8 @@ The Linux minimums are the .NET 10 runtime's own. The macOS one is the target th
 - One step the Linux child takes is missing: inherited descriptors are not closed before exec (see the lessons below).
 
 `Pty.IsSupported` still returns `true` on FreeBSD. It reports whether the operating system has pseudo-terminals MiniPty can drive, not whether this build ships a binary for it.
+
+On Windows it checks the build. ConPTY first shipped in build 17763 (Windows 10 1809, Windows Server 2019), and .NET 10 also runs on earlier builds (Windows 10 1607, Windows Server 2012, 2012 R2, and 2016). There `IsSupported` is `false` and `Pty.Start` throws `PlatformNotSupportedException`; before the check, it returned `true` and the start failed on the missing `CreatePseudoConsole` export instead. The check also holds with an out-of-band ConPTY, because whether one runs on an earlier build is not verified. Hosted runners cannot run those builds, so a test pins the build number instead (`PtyIsSupportedOnlyOnWindowsBuildsWithConPty`).
 
 Pipe redirect without ConPTY is not a PTY. On Windows, TUI tools require ConPTY-backed spawn.
 
