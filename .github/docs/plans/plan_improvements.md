@@ -2,7 +2,7 @@
 
 Goal: MiniPty loads wherever .NET 10 runs on its platforms. A session's start costs the same whatever the host's size. The library reports accurately what it supports and how a child ended. The items below came from a review of the library as a whole. Each is closed by a fix, or by a decision recorded in the specifications, as its section says.
 
-**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is closed: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). The fix to a test race found along the way has not yet run in CI. Phase 3 is built and passes locally on Windows and Linux; it has not run in CI. Phase 4 is closed: the macOS flood is not a regression, five runs on `main` are recorded, and the ring stays at 16 KiB; the ring on macOS stays under next_todo's unverified items. Phase 5 has not started. The measurements below were taken on 2026-11-02.
+**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is closed: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). The fix to a test race found along the way has not yet run in CI. Phase 3 is built and passes locally on Windows and Linux; it has not run in CI. Phase 4 is closed: the macOS flood is not a regression, five runs on `main` are recorded, and the ring stays at 16 KiB; the ring on macOS stays under next_todo's unverified items. Phase 5 is decided and built: all three items were taken up, and they pass the full suite locally on Windows and Linux (761 tests each) and a NativeAOT publish and run on Windows; they have not run in CI, so macOS and NativeAOT on Unix are untested. The measurements below were taken on 2026-11-02.
 
 ## Inventory
 
@@ -611,6 +611,60 @@ Each item starts only after its decision. The three decisions are independent of
   - Test that 200 sessions all have their exit observed, while the number of threads stays the same.
 
 **Closed when:** each decision is recorded, in a specification or in [next_todo.md](../next_todo.md). Each item that was implemented passes its tests and keeps 0 B.
+
+**Decided and built (2026-11-03).** All three items were taken up. Their deferrals are removed from [next_todo.md](../next_todo.md).
+
+**I9: the exit watcher uses a thread-pool wait per child.** The decision ruled out an API that is not documented, which excluded associating wait completion packets with MiniPty's completion port (`NtAssociateWaitCompletionPacket`). The documented Win32 thread-pool wait (`SetThreadpoolWait`, Windows Vista and later) was probed instead, on Windows 11 build 26200:
+
+| Design | Threads added by 2,000 pending waits | Signal to observer, P50 / P90 / P99 |
+|---|---|---|
+| Threads that each wait on 63 handles (`WaitForMultipleObjects`), as before | 32 | 7.3–7.4 / 11.7–12.9 / 19.2–21.4 μs |
+| `SetThreadpoolWait` | 0 | 7.0–7.5 / 11.2–12.2 / 18.8–19.7 μs |
+
+- **No thread per 63 sessions, at the same latency.** Two runs each. .NET's `RegisterWaitForSingleObject` added 32 threads as the earlier design did.
+- **The guarantee is not documented.** A pool wait holds no thread because of how the Windows thread pool has waited since Windows 8. A pool that waited on threads of its own would cost what the earlier design did, not more.
+- **What moved.** The callback runs on a worker of the process's native thread pool for microseconds, and only records exit. The observer reaches it through a `GCHandle` in a native block, so a registration allocates nothing on the managed heap. The watcher keeps owning a duplicate of each process handle. The code lost its threads, lock, slot arrays, and wake event.
+- **Tests.** 1,000 waits on events add no thread outside the pool beyond the tolerance of 4; against the earlier watcher the same test counted 16 more and failed. 200 open sessions whose children exit at once each report their own exit code. The idle-session thread test lost its allowance for watcher threads.
+
+**I8: `PtyStartInfo.InheritEnvironment`, a `bool` defaulting to `true`.** `false` starts the child from a minimum, with `Environment` applied on top. The shape was chosen against an enumeration of starting points (`Inherit`, `Minimal`) after weighing the extensions in sight:
+
+| Extension | `bool` | Enumeration |
+|---|---|---|
+| Keep some host variables (an allow-list) | The caller copies them through `Environment` | The same |
+| The minimum changes on a future Windows | The internal list changes | The same |
+| Expose the minimum for inspection | A separate property | The same |
+| A fully empty environment | The minimum's keys removed through `Environment` | A new member |
+| A starting point built from a user's account | A second property | A new member; MiniPty does not switch users, and a login shell builds it itself |
+
+The minimum was measured by starting each shell with every host variable removed, on Windows 11 build 26200:
+
+| Variables kept | `cmd.exe` | `pwsh` 7 | Windows PowerShell |
+|---|---|---|---|
+| None | Starts | Starts and resolves its host name | Fails: `8009001d`, a cryptographic provider that did not load |
+| `SystemRoot` | Starts | Starts | Starts |
+| `SystemRoot`, `PATH` | Starts, and finds `where` and `findstr` | Starts | Starts |
+
+- **The Windows minimum is `SystemRoot`,** set to the Windows directory rather than copied from the host. On Unix it is empty: `TERM` follows `TerminalName` as before, MiniPty's lookup falls back to `/bin:/usr/bin`, and shells set a default `PATH`.
+- **On Windows the child's `PATH` is never the host's,** so MiniPty looks `FileName` up itself: the fixed locations, then a `PATH` the overlay sets. `cmd.exe` is found in the system directory.
+- **Tests.** Builder tests check both platforms' minimum, the overlay on top, and the lookup flag. A variable set in the test host reaches a child that inherits and not one that does not, while the overlay and the minimum do. `cmd.exe`, Windows PowerShell, and `pwsh` (when installed) start and run from the Windows minimum.
+- **Recorded:** [core_session.md](../specs/core_session.md#starting-from-the-minimum) and the README.
+
+**I7: a meter named `MiniPty` with six instruments.** The instruments are open sessions, start duration, start failures, output bytes, stalls on a full ring, and the Unix consumer's native waits; [core_session.md](../specs/core_session.md#metrics) lists them.
+
+- **When nothing listens,** each instrument is one branch on its `Enabled` flag, with no timestamp taken. Only the open-session count is kept always, so that a listener that attaches later reads the sessions open. It costs an interlocked add per start and per disposal, and is read through an observable instrument.
+- **No tag differs per session.** Start failures carry `error.type`.
+- **Tests.** A `MeterListener` sees each instrument published and each move: open sessions up by one and back on disposal, not again on a second disposal; one start timed and one failed start counted as `Win32Exception`; output bytes at least the bytes delivered; a stall of at least 90 ms when a flood waits 100 ms for a reader; and consumer waits on Unix, each under 0.5 s. A test calls every recording method 1,000 times and counts 0 B with and without a listener, and no timestamp without one.
+- **One meter per load.** The open-session test read 0 throughout in the full suite and passed alone. An earlier test loads MiniPty into a second `AssemblyLoadContext`, whose meter has the same name and counts that load's sessions, and the test's listener had matched meters by name. It now matches its meter by identity, and the [specification](../specs/core_session.md#metrics) tells hosts that a reading by name is one load's count.
+- **Cost, measured with `PtyMetricsBenchmarks`:** MiniPty's 1 MiB flood without a listener and with one that enables every instrument through no-op callbacks.
+
+| Platform | Job | Without listener | With listener | Process CPU per flood, without / with | Allocated |
+|---|---|---|---|---|---|
+| Linux, glibc container on WSL2, 8 vCPUs, two rounds | `AllCpus` | 4.96–5.17 ms | 5.11–5.25 ms | 3.87–4.02 / 3.89–4.14 ms | 0 B |
+| | `TwoCpus` | 5.16–5.24 ms | 5.11–5.15 ms | 3.89–3.95 / 3.83–3.98 ms | 0 B |
+| Windows 11 build 26200, in-box ConPTY, one round | `AllCpus` | 128.3 ms | 140.6 ms ± 16.1 | 181 / 196 ms | 8 B / 0 B |
+| | `TwoCpus` | 156.7 ms | 139.9 ms | 163 / 132 ms | 0 B / 168 B |
+
+Every Linux difference is inside the run-to-run error (0.15–0.33 ms). On Windows ConPTY's renderer sets the pace, and the in-box ConPTY's flood allocated a few bytes per operation in earlier runs as well. The recording methods themselves were counted at 0 B with a listener (above), so the 168 B does not come from them.
 
 ## Not in This Plan
 

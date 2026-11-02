@@ -103,13 +103,26 @@ public static class Pty
 
         ThrowIfContainsNul(startInfo);
 
-        IPtyBackend backend;
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            backend = WindowsPtyBackend.Start(startInfo);
-        else
-            backend = UnixPtyBackend.Start(startInfo);
+        var started = PtyMetrics.StartTimestamp();
+        PtySession session;
+        try
+        {
+            IPtyBackend backend;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                backend = WindowsPtyBackend.Start(startInfo);
+            else
+                backend = UnixPtyBackend.Start(startInfo);
 
-        return new PtySession(backend);
+            session = new PtySession(backend);
+        }
+        catch (Exception error) when (PtyMetrics.RecordStartFailure(error))
+        {
+            // Not reached: the filter only counts the failure and lets the exception propagate untouched.
+            throw;
+        }
+
+        PtyMetrics.RecordStart(started);
+        return session;
     }
 
     /// <summary>

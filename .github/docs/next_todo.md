@@ -4,14 +4,6 @@
 
 The one-second hang-up grace before the kill (`UnixPtyBackend.DisposeHangupGraceMs`) is fixed. It can become an option if an embedder needs a different one.
 
-### Windows exit observation in O(1) threads
-
-Windows exit watchers each wait on up to 63 children with `WaitForMultipleObjects`, so a host adds a thread per 63 sessions. Thread-pool waits or another mechanism can remove that once it matters.
-
-### Environment baseline for multi-tenant hosts
-
-`Environment` is an overlay on the host's environment, so a web server's secrets (connection strings, cloud credentials) reach every shell unless each key is removed. A minimal-base option needs its own design, because Windows children fail to start without variables such as `SystemRoot`.
-
 ### Out-of-process PTY host guidance
 
 A web host that serves untrusted users would run MiniPty in a separate, less privileged process or container and talk to it over `PtyStdioBridge`, as VS Code runs node-pty in its pty host. That gives crash and privilege isolation and lets the web tier restart without ending shells. It is documentation and a sample, not a library change.
@@ -26,10 +18,6 @@ If an embedder asks:
 - **Windows:** ConPTY has no device, so the property is null there, as `ActiveProcessName` is.
 - **Naming:** name it for a path (`TtyPath`). `PtyStartInfo.TerminalName` already means the `TERM` value.
 - **Reading termios:** a caller that wants to read the termios can open this path with `O_NOCTTY` and call `tcgetattr`, so no termios API is needed for that.
-
-### Metrics
-
-`System.Diagnostics.Metrics` counters (active sessions, bytes, full-buffer stalls, loop delay) are AOT-safe and useful to web operators. Whether to add them is a separate decision.
 
 ## Open
 

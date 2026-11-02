@@ -77,6 +77,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         // The child may have exited before the listener was set; repeating the notification is harmless.
         if (backend.HasExited)
             _pump.OnChildExited();
+
+        PtyMetrics.SessionStarted();
     }
 
     /// <summary>
@@ -546,6 +548,7 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
 
+        PtyMetrics.SessionDisposed();
         Volatile.Write(ref _outputReaderActive, OutputConsumerNone);
 
         // Discard mode first: closing the pseudo-console waits for ConPTY to flush, which needs its output read.

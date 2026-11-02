@@ -19,6 +19,7 @@ on:
           - "*PtyConPtyBenchmarks*"
           - "*PtyOutputBenchmarks*"
           - "*PtyCaptureDisplayBenchmarks*"
+          - "*PtyMetricsBenchmarks*"
 
 jobs:
   benchmark:

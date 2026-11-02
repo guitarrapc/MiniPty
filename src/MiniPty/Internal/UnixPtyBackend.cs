@@ -1005,7 +1005,10 @@ internal static partial class UnixPtyBackend
                 if (OperatingSystem.IsLinux())
                 {
                     Interlocked.Increment(ref ConsumerWaits);
-                    return UnixInterop.minipty_master_poll(master, LinuxConsumerWaitMicros) > 0;
+                    var polled = PtyMetrics.ConsumerWaitTimestamp();
+                    var ready = UnixInterop.minipty_master_poll(master, LinuxConsumerWaitMicros) > 0;
+                    PtyMetrics.RecordConsumerWait(polled);
+                    return ready;
                 }
 
                 var wait = _consumerWait;
@@ -1019,7 +1022,10 @@ internal static partial class UnixPtyBackend
                 }
 
                 Interlocked.Increment(ref ConsumerWaits);
-                return UnixInterop.minipty_master_wait(wait, MacOsConsumerWaitMs) > 0;
+                var started = PtyMetrics.ConsumerWaitTimestamp();
+                var reported = UnixInterop.minipty_master_wait(wait, MacOsConsumerWaitMs) > 0;
+                PtyMetrics.RecordConsumerWait(started);
+                return reported;
             }
             finally
             {

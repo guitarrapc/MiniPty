@@ -66,7 +66,7 @@ internal static partial class WindowsProgramLookup
 
     internal static string SystemDirectory => s_systemDirectory ??= Environment.SystemDirectory;
 
-    private static string WindowsDirectory => s_windowsDirectory ??= Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+    internal static string WindowsDirectory => s_windowsDirectory ??= Environment.GetFolderPath(Environment.SpecialFolder.Windows);
 
     private static string? ProcessDirectory => s_processDirectory ??= Path.GetDirectoryName(Environment.ProcessPath);
 

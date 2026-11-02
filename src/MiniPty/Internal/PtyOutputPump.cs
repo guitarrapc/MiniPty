@@ -107,6 +107,9 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private int _count;
     private int _flags;
     private int _producerWaiting;
+    // When the producer last stopped on a full ring, for minipty.output.stall.duration; 0 when not stopped or when
+    // nothing listened as it stopped. Touched only by the producer, in BeginWaitForFreeSpace and EndWaitForFreeSpace.
+    private long _stallStarted;
     // Who produces into the ring now (ProducerHeld), and whether the driver's own pass was turned away meanwhile
     // (ProducerDeferred). See TryEnterProducer.
     private int _producerGate;
@@ -315,6 +318,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// </summary>
     internal void Publish(int length, long timestamp)
     {
+        PtyMetrics.RecordOutputRead(length);
         if (!IsSessionDisposed)
             Deliver(_tail, length, timestamp);
     }
@@ -336,7 +340,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
     internal bool BeginWaitForFreeSpace()
     {
         Interlocked.Exchange(ref _producerWaiting, 1);
-        return IsFull && !IsSessionDisposed && Volatile.Read(ref _sink) is null;
+        var stalled = IsFull && !IsSessionDisposed && Volatile.Read(ref _sink) is null;
+        if (stalled)
+            _stallStarted = PtyMetrics.OutputStallTimestamp();
+
+        return stalled;
     }
 
     /// <summary>
@@ -349,6 +357,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
     {
         Volatile.Write(ref _lastReadTick, Environment.TickCount64);
         Volatile.Write(ref _producerWaiting, 0);
+        if (_stallStarted != 0)
+        {
+            PtyMetrics.RecordOutputStall(_stallStarted);
+            _stallStarted = 0;
+        }
     }
 
     private void Deliver(int start, int length, long timestamp)

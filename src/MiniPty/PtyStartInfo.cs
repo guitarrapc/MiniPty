@@ -124,9 +124,10 @@ public sealed record PtyStartInfo
     /// Gets or sets environment variable overrides for the child process.
     /// </summary>
     /// <value>
-    /// <see langword="null"/> to inherit the parent environment. A non-null dictionary overlays
-    /// the parent environment; null values remove variables and empty strings set empty values on
-    /// platforms that preserve empty environment variables.
+    /// <see langword="null"/> to leave the environment the child starts from unchanged: the parent environment, or the
+    /// minimum when <see cref="InheritEnvironment"/> is <see langword="false"/>. A non-null dictionary overlays that
+    /// environment; null values remove variables and empty strings set empty values on platforms that preserve empty
+    /// environment variables.
     /// </value>
     /// <remarks>
     /// On Windows, setting or removing <c>PATH</c> here also decides where a <see cref="FileName"/> without a root is
@@ -135,6 +136,42 @@ public sealed record PtyStartInfo
     /// <see cref="FileName"/>.
     /// </remarks>
     public IReadOnlyDictionary<string, string?>? Environment { get; init; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the child starts from this process's environment.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> (the default) to start from this process's environment. <see langword="false"/> to start
+    /// from the minimum a child needs to start: on Windows, <c>SystemRoot</c> set to the Windows directory; on Unix,
+    /// nothing. Either way <see cref="Environment"/> is applied on top, and on Unix <c>TERM</c> follows
+    /// <see cref="TerminalName"/>.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// Set it to <see langword="false"/> when this process's environment holds what a child must not see, such as a
+    /// web host's connection strings or cloud credentials. A variable then reaches the child only when
+    /// <see cref="Environment"/> names it, so nothing has to be removed key by key, and a variable added to the host
+    /// later does not leak.
+    /// </para>
+    /// <para>
+    /// Pass the host variables a child should keep through <see cref="Environment"/>, for example
+    /// <c>["PATH"] = System.Environment.GetEnvironmentVariable("PATH")</c>. What a shell misses without them:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// <c>PATH</c>: Unix shells use a built-in default, and MiniPty looks <see cref="FileName"/> up on <c>/bin:/usr/bin</c>.
+    /// On Windows MiniPty looks <see cref="FileName"/> up in the fixed locations only, such as the system directory, and
+    /// <c>cmd.exe</c> finds no external command by name.
+    /// </description></item>
+    /// <item><description>
+    /// <c>TEMP</c> and <c>TMP</c> on Windows: a program that asks Windows for its temporary directory gets the Windows
+    /// directory, which a standard user cannot write to.
+    /// </description></item>
+    /// <item><description><c>HOME</c> on Unix, <c>USERPROFILE</c> and <c>APPDATA</c> on Windows: where programs keep their settings.</description></item>
+    /// <item><description><c>LANG</c> on Unix: without it programs use the C locale, which does not treat text as UTF-8.</description></item>
+    /// </list>
+    /// </remarks>
+    public bool InheritEnvironment { get; init; } = true;
 
     /// <summary>
     /// Gets or sets the terminal name used for Unix <c>TERM</c>.

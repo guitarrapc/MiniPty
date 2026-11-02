@@ -21,6 +21,7 @@ I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries d
 - Bounded memory with backpressure: output goes into a 16 KiB buffer per session, and a slow consumer pauses the child instead of growing memory
 - Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call
 - Signals the right process: on Linux 5.2 and later, signals go through a pidfd that `clone` returns with the child, so a reused PID is never hit
+- Observable: a `MiniPty` meter reports open sessions, start time, output bytes, and stalls, at no cost while nobody listens ([Metrics](#metrics))
 
 **Not supported**
 
@@ -270,7 +271,7 @@ To use MiniPty effectively, keep the following points in mind.
 
 - **Keep reading output.** A PTY nobody reads fills up and blocks the child. `ReadOutputAsync`, `CompleteAsync`, and the `Output` stream all drain it.
 - **Disposing ends the child.** Windows terminates it. Unix hangs it up (`SIGHUP`, so a shell saves its history) and kills it if it has not exited a second later ([Session contract](.github/docs/specs/core_session.md#session-contract)).
-- **`Environment` overlays the parent's.** A null value removes a variable. On Unix, `TerminalName` sets `TERM`, which defaults to `xterm-256color` ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
+- **`Environment` overlays the parent's.** A null value removes a variable. On Unix, `TerminalName` sets `TERM`, which defaults to `xterm-256color` ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)). To keep your process's variables out of the child, see [Environment for shared hosts](#environment-for-shared-hosts).
 - **MiniPty is not a sandbox.** The child runs with your permissions. If a program name, path, or argument comes from untrusted input, read [Untrusted program names and paths](.github/docs/specs/core_session.md#untrusted-program-names-and-paths) and [Batch files](.github/docs/specs/core_session.md#batch-files-windows) first.
 
 ### Out-of-band ConPTY for Windows
@@ -313,6 +314,36 @@ await using var session = Pty.Start(new PtyStartInfo
     Arguments = ["/c", "npm test"],
     KillProcessTree = true,
 });
+```
+
+### Environment for shared hosts
+
+A web host's environment holds connection strings and cloud credentials that its shells must not see. `InheritEnvironment = false` starts the child from the minimum it needs (`SystemRoot` on Windows, nothing on Unix besides `TERM`), so a variable reaches it only when `Environment` names it. Pass what your shells need yourself ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
+
+```csharp
+await using var session = Pty.Start(new PtyStartInfo
+{
+    FileName = "bash",
+    InheritEnvironment = false,
+    Environment = new Dictionary<string, string?>
+    {
+        ["PATH"] = Environment.GetEnvironmentVariable("PATH"),
+        ["HOME"] = "/home/tenant",
+        ["LANG"] = "C.UTF-8",
+    },
+});
+```
+
+### Metrics
+
+MiniPty reports what a host pays on the output path on a meter named `MiniPty`: open sessions, start time and failures, output bytes, stalls on a full output buffer, and (Unix) a consumer's native waits for output. Nothing is measured, timed, or allocated while nobody listens ([Metrics](.github/docs/specs/core_session.md#metrics)).
+
+```csharp
+builder.Services.AddOpenTelemetry().WithMetrics(metrics => metrics.AddMeter("MiniPty"));
+```
+
+```shell
+dotnet-counters monitor --counters MiniPty --process-id <pid>
 ```
 
 ### GUI hosts

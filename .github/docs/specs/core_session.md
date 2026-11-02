@@ -15,7 +15,8 @@ Implemented user-facing contract for the **MiniPty** core session API.
 | `CommandLine` | Optional pre-escaped Windows argument command line. Mutually exclusive with `Arguments`, and unsupported on Unix. Passed without any escaping, also to a batch file. |
 | `WorkingDirectory` | Optional child working directory. Null inherits the parent working directory. |
 | `Size` | Initial terminal columns x rows. Default is 80x24. Each dimension is clamped to the platform limit at spawn and on `Resize`: 1–32767 on Windows (ConPTY's signed 16-bit `COORD`), 1–65535 on Unix (`winsize`). `PtySession.Size` reports the value applied. |
-| `Environment` | Optional child environment overlay. Null inherits the parent environment. Non-null entries override or remove inherited variables. On Windows, setting or removing `PATH` also makes MiniPty look `FileName` up on the child's `PATH`. See [Program lookup](#program-lookup-windows). |
+| `Environment` | Optional child environment overlay. Null leaves the environment the child starts from unchanged. Non-null entries override or remove variables of it. On Windows, setting or removing `PATH` also makes MiniPty look `FileName` up on the child's `PATH`. See [Program lookup](#program-lookup-windows). |
+| `InheritEnvironment` | Default `true`: the child starts from the parent environment. `false` starts it from the minimum a child needs, so a host variable reaches it only when `Environment` names it. See [Spawn environment](#spawn-environment). |
 | `TerminalName` | Optional Unix terminal name for `TERM`. Null or empty uses default behavior. Currently ignored on Windows. |
 | `InheritCursor` | Default `false`. On Windows, start the child at the frontend's cursor instead of on a cleared screen (node-pty `conptyInheritCursor`); the frontend must answer ConPTY's cursor position query. Ignored on Unix, which already starts at the frontend's cursor. See [Inherited cursor](#inherited-cursor). |
 | `KillProcessTree` | Default `false`. On Windows, run the child in a kill-on-close job, so `Dispose`, `Kill`, and the end of the host process, including a crash, end every process the child started. Ignored on Unix. See [Process tree](#process-tree). |
@@ -81,11 +82,11 @@ To check a program, resolve it with `Path.GetFullPath` and compare the result wi
 
 ## Spawn Environment
 
-`PtyStartInfo.Environment` is an overlay on top of the parent process environment, not a replacement block.
+`PtyStartInfo.Environment` is an overlay, not a replacement block. It applies on top of the parent process environment, or on top of a minimum when `InheritEnvironment` is `false`.
 
 | Value | Behavior |
 |---|---|
-| `Environment = null` | Inherit the parent environment. |
+| `Environment = null` | Leave the starting environment as it is: the parent's, or the minimum. |
 | `Environment["KEY"] = "value"` | Set or override `KEY` for the child. |
 | `Environment["KEY"] = null` | Remove `KEY` from the child environment. Removing a missing key succeeds. |
 | `Environment["KEY"] = ""` | Set an empty value on platforms that preserve empty environment variables. Windows children observe empty entries as missing. |
@@ -96,7 +97,22 @@ On Unix, MiniPty removes inherited terminal-container and size variables before 
 
 On Unix, `TerminalName` sets `TERM` after the environment overlay. If `TerminalName` is null or empty and no `TERM` remains, MiniPty sets `TERM=xterm-256color` unless `TERM` was explicitly removed by the overlay. `Environment["TERM"] = ""` is respected as an explicit empty value on Unix. On Windows, `TerminalName` does not set `TERM`; use `Environment["TERM"]` to pass it explicitly.
 
-MiniPty environment inheritance follows normal process-spawn behavior and is not a sandbox. Callers exposing PTYs to untrusted users must isolate the child process outside MiniPty, for example with OS users, containers, sandboxing, or explicit environment removal.
+### Starting from the minimum
+
+A web host's environment holds what its shells must not see: connection strings, cloud credentials, tokens. With inheritance, keeping them out means removing each key, which needs knowing every key, including those added to the host later. `InheritEnvironment = false` turns that around: the child starts from the minimum below, and a host variable reaches it only when `Environment` names it, for example `["PATH"] = Environment.GetEnvironmentVariable("PATH")`.
+
+| Platform | Minimum | Why |
+|---|---|---|
+| Windows | `SystemRoot`, set to the Windows directory | Without it Windows PowerShell failed to start (`8009001d`, a cryptographic provider that did not load). `cmd.exe` and `pwsh` started with nothing. |
+| Unix | Nothing; `TERM` follows `TerminalName` as above | A child starts with an empty environment. MiniPty looks `FileName` up on `/bin:/usr/bin` when the child has no `PATH`, and shells set a default `PATH` of their own. |
+
+The terminal-container variables above are not removed, since none is inherited. On Windows the child's `PATH` is then never the host's, so MiniPty looks `FileName` up itself, in `CreateProcess`'s fixed locations and the fully qualified entries of a `PATH` the overlay sets ([Program lookup](#program-lookup-windows)); `cmd.exe` is found in the system directory without one.
+
+Starting from the minimum gives a shell less than a login would: no `PATH` on Windows, so `cmd.exe` finds no external command by name; no `TEMP` or `TMP`, so a Windows program asking for its temporary directory gets the Windows directory, which a standard user cannot write; no `HOME`, `USERPROFILE`, or `APPDATA` for settings; and no `LANG` on Unix, so programs use the C locale. The host passes what its shells need through `Environment`.
+
+The shape is a `bool`, not an enumeration of starting points. The extensions in sight need no third starting point: an allow-list of host variables is an overlay the caller builds, and a change of the minimum on a future Windows changes the list, not the API. A fully empty environment is the minimum with its keys removed through the overlay. A starting point built from a user's account (`HOME`, `USER`, `SHELL`) would need one, but MiniPty does not switch users, and a login shell (`bash -l`) builds that itself.
+
+MiniPty environment inheritance follows normal process-spawn behavior and is not a sandbox. Callers exposing PTYs to untrusted users must isolate the child process outside MiniPty, for example with OS users, containers, or sandboxing; `InheritEnvironment = false` keeps the host's variables out, nothing more.
 
 ## Process Tree
 
@@ -211,6 +227,24 @@ Reading from spawn means early output is never stranded: a child does not stall 
 Only one output consumer is active per session (see [Lifecycle](lifecycle.md#output-consumer-exclusivity)). A concurrent reader attempt throws `InvalidOperationException`.
 
 Managed buffering is bounded by the buffer's capacity (currently 16 KiB). Each read is published as it completes, with no window: batching comes from the consumer's pace instead, so a consumer still busy with its previous chunk takes everything that arrived meanwhile as one chunk. A chunk is all the contiguous output published when the consumer asks for it, up to the end of the buffer: a consumer that keeps up gets each piece as it is published, and one that fell behind, such as a WebSocket still sending the previous chunk, gets several pieces as one chunk. Reading stops while less than 4 KiB is free. Output that fills the buffer while nobody reads it holds back the rest, so such a session may not reach end of output after exit until a consumer reads, and the consumer then gets all of it; a few small frames no longer fill it. On macOS the child's exit itself waits for that read when its last output is still in the terminal, because macOS would otherwise discard it 0.6 s after the exit. The capacity and the maximum chunk size are implementation details and may change. One-shot `CompleteAsync` and `PtyCapture.RunAsync` are the exception by design: their result holds the whole output, so it grows with it.
+
+## Metrics
+
+The output path runs on thresholds chosen by measurement (the consumer's native wait, coalescing, the full ring), and a host pays for them in ways that show only as latency: a thread held in a native wait, a child stopped behind a ring nobody drains. MiniPty reports them on a `System.Diagnostics.Metrics` meter named `MiniPty`, which OpenTelemetry (`AddMeter("MiniPty")`), `dotnet-counters monitor --counters MiniPty`, or a `MeterListener` collects.
+
+| Instrument | Kind | Unit | Measures |
+|---|---|---|---|
+| `minipty.session.active` | Observable up-down counter | `{session}` | Sessions started and not yet disposed. |
+| `minipty.session.start.duration` | Histogram | `s` | Time `Pty.Start` took, for a start that succeeded. |
+| `minipty.session.start.failures` | Counter | `{failure}` | Starts that failed after their arguments were accepted, tagged `error.type` with the exception's type. |
+| `minipty.output.bytes` | Counter | `By` | Bytes read from the terminals' output. |
+| `minipty.output.stall.duration` | Histogram | `s` | Each stop of a session's reading on a full ring that nobody drained; the child stays blocked meanwhile. |
+| `minipty.output.consumer_wait.duration` | Histogram | `s` | Each wait of a consumer's thread in native code for output (Unix): up to 200 μs on Linux and 1 ms on macOS. |
+
+- **Free when nobody listens.** Each instrument is a branch on its `Enabled` flag: no timestamp is taken and nothing is allocated. Only the active-session count is kept always, an interlocked add at each start and disposal, because a listener that attaches later must read the sessions open, not the starts since it attached; it is observed, so reading it costs nothing between collections.
+- **No per-session tags.** A host with thousands of sessions keeps one series per instrument. The one tag, `error.type`, takes a handful of values.
+- **Allocation-free with a listener.** No measurement carries a tag on the output path, so none boxes or allocates; the benchmarks' allocation columns stay at 0 B with a listener attached (`PtyMetricsBenchmarks`).
+- **One meter per load of MiniPty.** A host that loads MiniPty into several `AssemblyLoadContext`s has a meter named `MiniPty` in each, and each counts only its own sessions. A listener that enables instruments by meter name gets all of them, so one reading of `minipty.session.active` is one load's count, not the total. The suite's own test read 0 open sessions throughout until it matched its meter by identity, because an earlier test had loaded MiniPty a second time.
 
 ## Caller Context
 

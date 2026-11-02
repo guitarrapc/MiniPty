@@ -30,7 +30,7 @@ flowchart TB
 
 | Layer | Type | Responsibility |
 |---|---|---|
-| `PtyStartInfo` | Public data | Executable, arguments, cwd, size, environment overlay, Unix `TERM` name. No orchestration logic. |
+| `PtyStartInfo` | Public data | Executable, arguments, cwd, size, environment overlay and whether it starts from the parent's, Unix `TERM` name. No orchestration logic. |
 | `Pty.Start` | Public entry | Null and OS support checks; Windows vs Unix backend selection; returns `PtySession`. Does not wait for exit. |
 | `WindowsPtyBackend` / `UnixPtyBackend` | Internal | ConPTY or Unix PTY spawn, handle ownership, platform EOF and resize. |
 | `IPtyBackend` | Internal contract | Thin runtime boundary: input stream, the start of the session's output driver, process id, exit notification (task, internal waiter, listener), kill, transport close. Not a launch or plugin abstraction. |
