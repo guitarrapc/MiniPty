@@ -310,8 +310,8 @@ static void minipty_scrub_inherited_fds(int scan_limit)
 
 /*
  * The bytes of the kernel's signal set: 64 signals on every architecture .NET runs on. The start masks signals with
- * the system call itself, because the C library's own calls leave its internal signals (cancellation, setxid)
- * unblocked, and no handler may run in a child that shares the host's memory.
+ * the system call itself and a set of its own, because the C library's calls and its sigfillset leave its internal
+ * signals (cancellation, setxid) unblocked, and no handler may run in a child that shares the host's memory.
  */
 #define MINIPTY_KERNEL_SIGSET_BYTES 8
 
@@ -495,7 +495,7 @@ static int spawn_pty_child_linux(
     size_t argc = 0;
     size_t stack_bytes = 0;
     char *stack = MAP_FAILED;
-    sigset_t all;
+    unsigned char all[MINIPTY_KERNEL_SIGSET_BYTES];
     sigset_t old;
     int slave = -1;
     /* Where CLONE_PIDFD writes the child's pidfd. A kernel before 5.2 ignores the flag and leaves it at -1. */
@@ -533,9 +533,13 @@ static int spawn_pty_child_linux(
     start.slave = slave;
     start.fd_scan_limit = minipty_compute_inherited_fd_scan_limit();
 
-    sigfillset(&all);
+    /*
+     * Every bit, set by hand: sigfillset leaves out the C library's internal signals (glibc's 32 and 33, musl's 32 to
+     * 34), so a set it fills would leave them unblocked even through the system call.
+     */
+    memset(all, 0xff, sizeof(all));
     sigemptyset(&old);
-    syscall(SYS_rt_sigprocmask, SIG_BLOCK, &all, &old, MINIPTY_KERNEL_SIGSET_BYTES);
+    syscall(SYS_rt_sigprocmask, SIG_BLOCK, all, &old, MINIPTY_KERNEL_SIGSET_BYTES);
 
     /*
      * SIGCHLD makes the child an ordinary one, which waitpid reaps and whose exit the host's SIGCHLD handler sees. The

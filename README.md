@@ -379,7 +379,7 @@ Use `dotnet` for local development, debugging, or publishing.
 
 - [Specification](.github/docs/spec.md) — API contracts, scope, document map, lessons learned
 - [Lifecycle](.github/docs/specs/lifecycle.md) — responsibility split, session flow diagram, cancellation, EOF, drain, disposal
-- [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, `forkpty`, EOF staging
+- [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, Unix process start, EOF staging
 
 ### Build
 
