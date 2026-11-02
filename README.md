@@ -346,6 +346,8 @@ builder.Services.AddOpenTelemetry().WithMetrics(metrics => metrics.AddMeter("Min
 dotnet-counters monitor --counters MiniPty --process-id <pid>
 ```
 
+Without OpenTelemetry, a `MeterListener` reads them: [WebTerminalScale](samples/SingleFiles/WebTerminalScale.cs) shows them beside its host's threads and memory, and [WinUiTerminal](samples/WinUiTerminal) and [AvaloniaTerminal](samples/AvaloniaTerminal) on their status line.
+
 ### GUI hosts
 
 WinUI, WPF, WinForms, and Avalonia can call every MiniPty API on the UI thread. Nothing blocks it, and no marshaling is needed. Full terminal emulators built this way: [samples/WinUiTerminal](samples/WinUiTerminal) (Windows) and [samples/AvaloniaTerminal](samples/AvaloniaTerminal) (Windows, Linux, macOS). See also [GUI hosts](.github/docs/specs/core_session.md#gui-hosts).

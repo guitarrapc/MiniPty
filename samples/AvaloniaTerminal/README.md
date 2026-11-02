@@ -59,6 +59,7 @@ Points to get right:
 
   MiniPty's build targets copy `OpenConsole.exe` beside `conpty.dll`. Without them the session uses the in-box ConPTY, which withholds graphics, some terminal queries, and mouse tracking from some programs ([details](../../README.md#out-of-band-conpty-for-windows)).
 - **Expect a closing window.** Catch `ObjectDisposedException` and `IOException` from `WriteInputAsync`, mark the run as closing before `DisposeAsync`, and treat disposal exceptions as expected only then ([TerminalRun.cs](../TerminalEmulator/TerminalRun.cs)).
+- **Read MiniPty's metrics on the UI thread's own timer.** The status line shows what MiniPty's `MiniPty` meter reports for the session: start time, output read, and how often and how long reading stood still because the output buffer was full. The buffer fills when the screen falls behind a flood (`seq 1 2000000`; on Windows `dir /s /b C:\Windows\System32` read 2.5 MiB and stalled 17 times for 80 ms), while the child waits and nothing is lost. A `MeterListener` gets measurements on MiniPty's I/O thread, so [MiniPtyMetrics.cs](MiniPtyMetrics.cs) only adds them to interlocked totals, and a `DispatcherTimer` reads them once a second ([Metrics](../../.github/docs/specs/core_session.md#metrics)).
 
 ## What the sample adds on top
 
