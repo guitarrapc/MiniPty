@@ -36,6 +36,29 @@ public sealed class PtyMetricsTests
             await Assert.That(metrics.Published).Contains(name);
     }
 
+    /// <summary>
+    /// The histograms record seconds, so each advises bucket boundaries in seconds. OpenTelemetry's default boundaries
+    /// are for milliseconds (0, 5, 10, ... 10000): with them every measurement fell in the first bucket, and the Aspire
+    /// dashboard showed a P50 of 5 s for stalls of about 0.1 s.
+    /// </summary>
+    [Test]
+    public async Task HistogramsAdviseBucketBoundariesInSeconds()
+    {
+        using var metrics = new MetricsRecorder();
+        await using (var session = Pty.Start(Echo("buckets")))
+            await session.CompleteAsync();
+
+        string[] histograms = ["minipty.session.start.duration", "minipty.output.stall.duration", "minipty.output.consumer_wait.duration"];
+        foreach (var name in histograms)
+        {
+            var bounds = ((Histogram<double>)metrics.Instrument(name)).Advice?.HistogramBucketBoundaries;
+            await Assert.That(bounds).IsNotNull().Because(name);
+            await Assert.That(bounds![0]).IsLessThan(0.001).Because(name);
+            for (var i = 1; i < bounds.Count; i++)
+                await Assert.That(bounds[i]).IsGreaterThan(bounds[i - 1]).Because(name);
+        }
+    }
+
     [Test]
     public async Task ActiveSessionsCountsASessionUntilItIsDisposed()
     {
@@ -237,7 +260,7 @@ public sealed class PtyMetricsTests
         private readonly MeterListener _listener = new();
         private readonly Lock _lock = new();
         private readonly List<(string Name, double Value, string? ErrorType)> _measurements = [];
-        private readonly HashSet<string> _published = [];
+        private readonly Dictionary<string, Instrument> _published = [];
 
         public MetricsRecorder()
         {
@@ -248,7 +271,7 @@ public sealed class PtyMetricsTests
                     return;
 
                 lock (_lock)
-                    _published.Add(instrument.Name);
+                    _published[instrument.Name] = instrument;
                 listener.EnableMeasurementEvents(instrument);
             };
             _listener.SetMeasurementEventCallback<long>((instrument, value, tags, _) => Add(instrument.Name, value, tags));
@@ -261,8 +284,14 @@ public sealed class PtyMetricsTests
             get
             {
                 lock (_lock)
-                    return [.. _published];
+                    return [.. _published.Keys];
             }
+        }
+
+        public Instrument Instrument(string name)
+        {
+            lock (_lock)
+                return _published[name];
         }
 
         /// <summary>Reads <c>minipty.session.active</c> now.</summary>

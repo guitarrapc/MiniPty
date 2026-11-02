@@ -31,10 +31,18 @@ internal static class PtyMetrics
 
     private static readonly Meter s_meter = CreateMeter();
 
-    private static readonly Histogram<double> s_startDuration = s_meter.CreateHistogram<double>(
+    // Each histogram advises bucket boundaries in seconds, as ASP.NET Core's request duration does. Without advice,
+    // OpenTelemetry buckets a histogram for milliseconds (0, 5, 10, ... 10000), so every value here would fall in the
+    // first bucket: the Aspire dashboard showed a P50 of 5 s for stalls of about 0.1 s. The boundaries cover what was
+    // measured: starts of 0.5 ms (Linux) to 100 ms (Windows), stalls from microseconds to seconds, and consumer waits
+    // bounded at 200 μs (Linux) and 1 ms (macOS), with room above for a thread descheduled past its bound.
+
+    private static readonly Histogram<double> s_startDuration = s_meter.CreateHistogram(
         "minipty.session.start.duration",
         "s",
-        "Time Pty.Start took to start a child that started.");
+        "Time Pty.Start took to start a child that started.",
+        tags: null,
+        advice: new InstrumentAdvice<double> { HistogramBucketBoundaries = [0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10] });
 
     private static readonly Counter<long> s_startFailures = s_meter.CreateCounter<long>(
         "minipty.session.start.failures",
@@ -46,15 +54,19 @@ internal static class PtyMetrics
         "By",
         "Bytes read from the terminals' output.");
 
-    private static readonly Histogram<double> s_outputStallDuration = s_meter.CreateHistogram<double>(
+    private static readonly Histogram<double> s_outputStallDuration = s_meter.CreateHistogram(
         "minipty.output.stall.duration",
         "s",
-        "Time a session's reading stood still because its output ring was full and nobody drained it; the child stays blocked meanwhile.");
+        "Time a session's reading stood still because its output ring was full and nobody drained it; the child stays blocked meanwhile.",
+        tags: null,
+        advice: new InstrumentAdvice<double> { HistogramBucketBoundaries = [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30] });
 
-    private static readonly Histogram<double> s_consumerWaitDuration = s_meter.CreateHistogram<double>(
+    private static readonly Histogram<double> s_consumerWaitDuration = s_meter.CreateHistogram(
         "minipty.output.consumer_wait.duration",
         "s",
-        "Time a consumer's thread waited in native code for output (Unix), each wait bounded at 200 μs on Linux and 1 ms on macOS.");
+        "Time a consumer's thread waited in native code for output (Unix), each wait bounded at 200 μs on Linux and 1 ms on macOS.",
+        tags: null,
+        advice: new InstrumentAdvice<double> { HistogramBucketBoundaries = [0.00001, 0.000025, 0.00005, 0.0001, 0.00015, 0.0002, 0.0003, 0.0005, 0.00075, 0.001, 0.0015, 0.002, 0.005, 0.01] });
 
     /// <summary>This load's meter. Another load of MiniPty, in another <c>AssemblyLoadContext</c>, has one of the same name.</summary>
     internal static Meter MeterForTests => s_meter;
