@@ -2,7 +2,7 @@
 
 Goal: MiniPty loads wherever .NET 10 runs on its platforms. A session's start costs the same whatever the host's size. The library reports accurately what it supports and how a child ended. The items below came from a review of the library as a whole. Each is closed by a fix, or by a decision recorded in the specifications, as its section says.
 
-**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is closed: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). The fix to a test race found along the way has not yet run in CI. Phase 3 is built and passes locally on Windows and Linux; it has not run in CI. Phases 4 and 5 have not started. The measurements below were taken on 2026-11-02.
+**Status:** open (2026-11-02). Phase 1 is closed: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2 is closed: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). The fix to a test race found along the way has not yet run in CI. Phase 3 is built and passes locally on Windows and Linux; it has not run in CI. Phase 4 is closed: the macOS flood is not a regression, five runs on `main` are recorded, and the ring stays at 16 KiB; the ring on macOS stays under next_todo's unverified items. Phase 5 has not started. The measurements below were taken on 2026-11-02.
 
 ## Inventory
 
@@ -534,6 +534,63 @@ This phase is independent of the others. It runs after Phase 1, so that it measu
 - The distribution of macOS flood ratios over at least five runs of `main` is recorded.
 - If that distribution falls below the recorded 1.11–1.53, the cause is fixed, or it is recorded under [next_todo.md](../next_todo.md#open).
 - The capacity sweep is recorded in the platform lessons, and it replaces the "Output buffer geometry" bullet in [next_todo.md](../next_todo.md#unverified).
+
+**Measured (2026-11-02).**
+
+**The macOS flood is not a regression.** CI already held 17 runs of the rebuilt macOS reader, so they were read first. They come from the macOS branch, from `817a001` on `main`, from the Linux branch, and from `5ca042f` on `main`. Between them the code differs only off the macOS read path: `7ee5ce9` differs from `817a001` in two comments, and the Linux work changed the Linux path and test counters. Three runs of `df60b80` on `main` followed ([41456250878](https://github.com/guitarrapc/MiniPty/actions/runs/41456250878), [41457284601](https://github.com/guitarrapc/MiniPty/actions/runs/41457284601), [41458275092](https://github.com/guitarrapc/MiniPty/actions/runs/41458275092)); its only macOS change since `5ca042f` is the native compile flags (`-mmacosx-version-min=12.0`). 1 MiB flood on `macos-26`, job `AllCpus`; the baseline is a reader that blocks one thread per session:
+
+| Code | Runs | MiniPty MiB/s | Baseline MiB/s | Ratio |
+|---|---|---|---|---|
+| macOS branch, `54d7c89` | 6 | 43.7–53.1 | 32.6–44.0 | 1.17–1.53 |
+| macOS branch, `7ee5ce9` (the code of `817a001`) | 3 | 38.9–52.9 | 35.2–40.4 | 1.11–1.43 |
+| `817a001` on `main` | 1 | 56.0 | 77.2 | 0.73 |
+| Linux branch, `6290522` | 3 | 47.2–64.4 | 34.1–50.9 | 1.20–1.38 |
+| Linux branch, `443b433` | 3 | 48.8–60.6 | 49.6–81.3 | 0.75–0.98 |
+| `5ca042f` on `main` | 1 | 43.1 | 54.4 | 0.79 |
+| `df60b80` on `main` | 3 | 42.6–48.4 | 40.9–48.9 | 0.97–1.08 |
+| All 20 | 20 | 38.9–64.4, median 49.8 | 32.6–81.3, median 41.3 | 0.73–1.53 |
+
+- **MiniPty's own figure held.** One of its 200 iterations took over 30 ms: 31.7 ms, in a run of `df60b80` whose other nine took 20–29 ms. Before the rebuild (`642be11`, 12 runs) it was 20.4–57.8 MiB/s, median 35.9, with 48 of 120 iterations over 30 ms.
+- **The ratio followed the baseline.** The nine runs that recorded 1.11–1.53 had the baseline at 32.6–44.0 MiB/s, with 23 of its iterations over 30 ms. In five of the six runs where the baseline reached 49.6 MiB/s or more, MiniPty was at 0.73–0.98 of it. Both README runs on `main` are among those five. In the three runs of `df60b80` the baseline sat between the two groups, at 40.9–48.9, and the ratio at 0.97–1.08.
+- **Five runs on `main`:** 0.73, 0.79, 0.97, 1.04, and 1.08, median 0.97. That falls below the recorded 1.11–1.53, which came from runs with a slow baseline, so the gap is recorded below.
+- **Keystrokes swing the same way.** In the eight runs of the rebuilt reader that measured them, MiniPty's P50 was 33–105 μs and the baseline's 34–78 μs, and each led in some runs.
+- **No bisect was needed.** MiniPty's figure on `main` (56.0, 43.1, 42.6, 47.2, and 48.4) sits inside its band.
+- **Recorded:** the gap against a fast baseline is under [next_todo.md](../next_todo.md#open), and the lesson on judging a macOS runner in [platform_support.md](../specs/platform_support.md#lessons-learned) now says what the ratio leaves out. The README's caveat on hosted runners names the macOS swing.
+
+**The ring stays at 16 KiB.** Each capacity was built from the same tree and run as `PtyThroughputBenchmarks.MiniPty` and `PtyLatencyBenchmarks.MiniPty`, in a rotating order. 32 and 64 KiB need the pump's 16-bit wait minimum (`_waiterMinimumData`) widened to an `int`, because a `short` cannot hold a minimum that large.
+
+Linux, a glibc container (`mcr.microsoft.com/dotnet/sdk:10.0`) on WSL2 with 8 vCPUs, six rounds:
+
+| Case | 16 KiB | 32 KiB | 64 KiB |
+|---|---|---|---|
+| 1 MiB flood, `AllCpus`, MiB/s | 185–230, median 215 | 179–214, median 190 | 183–216, median 205 |
+| 1 MiB flood, `TwoCpus`, MiB/s | 201–227, median 211 | 193–224, median 204 | 199–213, median 205 |
+| 64 KiB flood, `AllCpus`, MiB/s | 145–159, median 156 | 139–156, median 153 | 143–159, median 150 |
+| 64 KiB flood, `TwoCpus`, MiB/s | 154–165, median 158 | 152–163, median 154 | 154–159, median 158 |
+| Process CPU per 1 MiB flood | 3.57–4.82 ms | 3.63–4.20 ms | 3.64–4.33 ms |
+| Keystroke P50 / P95, `AllCpus`, μs | 122–150 / 147–229 | 123–131 / 148–198 | 122–127 / 145–169 |
+| Keystroke P50 / P95, `TwoCpus`, μs | 69–113 / 117–181 | 66–125 / 116–222 | 67–112 / 130–167 |
+
+Every case allocated 0 B. On two CPUs, each capacity's keystroke P50 moved between about 66 and 125 μs from run to run, so the medians there say nothing about the ring.
+
+Windows 11 (build 26200), two rounds:
+
+| Case | 16 KiB | 32 KiB | 64 KiB |
+|---|---|---|---|
+| 1 MiB flood, `AllCpus`, out-of-band / in-box, MiB/s | 14.7–14.8 / 9.6–9.8 | 14.9 / 9.6–9.8 | 14.7–15.1 / 9.7–9.8 |
+| 1 MiB flood, `TwoCpus`, out-of-band / in-box, MiB/s | 10.4–11.4 / 7.2–7.3 | 10.6–11.8 / 7.2 | 11.4–11.9 / 7.2 |
+| 64 KiB flood, `AllCpus`, out-of-band / in-box, MiB/s | 14.8–14.9 / 9.2–9.5 | 14.9–15.0 / 9.7 | 14.8 / 9.5–9.6 |
+| Thread-pool work items per 1 MiB flood | 4,074–4,106 | 4,094–4,107 | 4,094–4,106 |
+| Keystroke P50, out-of-band, `AllCpus` / `TwoCpus`, μs | 58–65 / 94–106 | 60–74 / 95–104 | 58–59 / 83–95 |
+| Keystroke P50, in-box, μs | 14,440–14,563 | 14,463–14,556 | 14,498–14,584 |
+
+ConPTY's renderer sets the pace on Windows, as the throughput benchmark's remarks say. The in-box 1 MiB flood on two CPUs allocated 12 B per operation with every capacity, and one 64 KiB case with 32 KiB allocated 8 B; neither comes from the ring.
+
+**Decision:** the ring stays at 16 KiB. No capacity won a case outside the others' spread on either platform. A larger one would cost each session 16 or 48 KiB more pinned memory, plus the widened field, and would double or quadruple the burst a bridge coalesces (half the ring). The lesson is in [platform_support.md](../specs/platform_support.md#lessons-learned). The "Output buffer geometry" bullet in [next_todo.md](../next_todo.md#unverified) is now a bullet for macOS alone.
+
+The first Linux and Windows rounds were discarded. A wait loop of this session's own had been spinning one vCPU in the container the whole time, and the WSL VM shares the host's CPUs, so the Windows floods ran 10–25% slower under it on every capacity. The container also held unreaped children. The rounds above ran in a fresh container started with `--init`, and on Windows after it, with nothing else running.
+
+Not measured: the ring on macOS. A run per capacity there needs a pushed branch per capacity on CI, or a Mac. A macOS master hands out at most 1,024 bytes per read.
 
 ### Phase 5: Decisions (I7, I8, I9)
 

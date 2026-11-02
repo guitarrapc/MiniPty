@@ -67,7 +67,7 @@ The numbers below are from [run 41106916265](https://github.com/guitarrapc/MiniP
 
 Each table names the report it comes from, the methods it compares, and the columns it quotes, and every value is copied from that report as written, units included. On the run's page, each runner's job summary lists the reports by those names. CI rewrites these tables after every full benchmark run.
 
-Hosted runners get a different CPU from run to run, and the gap between the libraries, even their order, can change with it. Compare the libraries within one run only.
+Hosted runners get a different CPU from run to run, and the gap between the libraries, even their order, can change with it. Compare the libraries within one run only. The macOS runner swings even on the same CPU: over 20 runs, Porta.Pty's 1 MiB flood ranged from 32.6 to 81.3 MiB/s and MiniPty's from 38.9 to 64.4, so the macOS order follows the run ([platform lessons](.github/docs/specs/platform_support.md#lessons-learned)).
 
 The keystroke and throughput benchmarks keep one child running with raw input, as a shell or an editor runs, so they measure the PTY path and not process startup. [Porta.Pty](https://www.nuget.org/packages/Porta.Pty) 2.2.3 runs the same child for comparison, in its default mode (method `PortaPty`).
 
