@@ -28,13 +28,21 @@
 #include <dirent.h>
 #if defined(__has_include) && __has_include(<linux/close_range.h>)
 #include <linux/close_range.h>
-#else
-#ifndef CLOSE_RANGE_CLOEXEC
-#define CLOSE_RANGE_CLOEXEC (1U << 2)
-#endif
 #endif
 #include <pty.h>
 #include <sys/syscall.h>
+/*
+ * The shipped library is built against old headers (glibc 2.27's, musl 1.2.3's), which predate close_range (Linux 5.9)
+ * and its CLOEXEC flag (5.11). Without these the call would compile out and every start would scan the descriptor
+ * table instead. A kernel without them fails the call, and the scan in minipty_scrub_inherited_fds takes over.
+ */
+#ifndef SYS_close_range
+/* 436 on every architecture .NET runs on. Only alpha, ia64 and MIPS number it differently. */
+#define SYS_close_range 436
+#endif
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
 #elif defined(__APPLE__)
 #include <dlfcn.h>
 #include <libgen.h>

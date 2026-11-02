@@ -55,10 +55,11 @@ jobs:
       - name: Test
         shell: bash
         run: dotnet test -c Release
+      # The NativeAOT samples below link this archive, so they link the one the package ships, built at its floors.
       - name: Build libminipty_unix
         if: ${{ !startsWith(matrix.rid, 'win') }}
         shell: bash
-        run: bash scripts/build-native.sh "${{ matrix.rid }}"
+        run: bash scripts/build-native-package.sh "${{ matrix.rid }}"
 
       - name: Publish and run samples (NativeAOT)
         shell: bash
@@ -127,9 +128,33 @@ jobs:
             "$exe" --smoke
           fi
 
+  # musl has no hosted runner, so the suite runs once in an Alpine container, on x64, where the runner can run
+  # JavaScript actions inside Alpine. The SDK image is pinned like every other image here (SDK 10.0.403 on Alpine
+  # 3.24 when pinned). build-base compiles the shim; the tests' children need nothing beyond busybox.
+  test-musl:
+    name: Test (linux-musl-x64)
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:cc02b814237a76c4735fb6eeee87181597b5e56f2ce458a435e527674d91f4d7
+    permissions:
+      contents: read
+    steps:
+      - name: Install build tools
+        run: apk add --no-cache bash build-base
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Test
+        shell: bash
+        run: dotnet test tests/MiniPty.Tests/MiniPty.Tests.csproj -c Release
+
+  # Linux files are built in containers at the package's libc floors (glibc 2.27, musl 1.2.3), each on a runner of
+  # its own architecture; macOS files on the runner for macOS 12.0. The script fails a build that misses its floor.
   build-unix-native:
     name: Native (${{ matrix.rid }})
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -138,6 +163,10 @@ jobs:
             rid: linux-x64
           - os: ubuntu-24.04-arm
             rid: linux-arm64
+          - os: ubuntu-24.04
+            rid: linux-musl-x64
+          - os: ubuntu-24.04-arm
+            rid: linux-musl-arm64
           - os: macos-26
             rid: osx-arm64
           - os: macos-26-intel
@@ -152,7 +181,7 @@ jobs:
           persist-credentials: false
       - name: Build libminipty_unix
         shell: bash
-        run: bash scripts/build-native.sh "${{ matrix.rid }}"
+        run: bash scripts/build-native-package.sh "${{ matrix.rid }}"
       - name: Upload native artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -195,25 +224,55 @@ jobs:
           if-no-files-found: error
 
   nuget-smoke:
-    name: NuGet smoke (${{ matrix.os }})
+    name: NuGet smoke (${{ matrix.label }})
     needs: [pack]
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
+            label: ubuntu-24.04
             rid: linux-x64
           - os: ubuntu-24.04-arm
+            label: ubuntu-24.04-arm
             rid: linux-arm64
           - os: windows-2025
+            label: windows-2025
             rid: win-x64
           - os: windows-11-arm
+            label: windows-11-arm
             rid: win-arm64
           - os: macos-26
+            label: macos-26
             rid: osx-arm64
           - os: macos-26-intel
+            label: macos-26-intel
             rid: osx-x64
+          # The oldest macOS .NET 10 supports.
+          - os: macos-15
+            label: macos-15
+            rid: osx-arm64
+          - os: macos-15-intel
+            label: macos-15-intel
+            rid: osx-x64
+          # In containers: the oldest glibc .NET 10 supports (RHEL 8, glibc 2.28), and Alpine for the musl files.
+          - os: ubuntu-24.04
+            label: almalinux-8 x64
+            rid: linux-x64
+            image: almalinux:8@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b
+          - os: ubuntu-24.04-arm
+            label: almalinux-8 arm64
+            rid: linux-arm64
+            image: almalinux:8@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b
+          - os: ubuntu-24.04
+            label: alpine-3.21 x64
+            rid: linux-musl-x64
+            image: alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
+          - os: ubuntu-24.04-arm
+            label: alpine-3.21 arm64
+            rid: linux-musl-arm64
+            image: alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
@@ -226,6 +285,7 @@ jobs:
             samples
             scripts
       - name: Set up .NET
+        if: ${{ !matrix.image }}
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
@@ -235,11 +295,16 @@ jobs:
           name: nuget
           path: ./publish
       - name: Run NuGet smoke sample
+        if: ${{ !matrix.image }}
         shell: bash
         run: bash scripts/run-nuget-smoke.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}"
+      - name: Run NuGet smoke sample in a container
+        if: ${{ matrix.image }}
+        shell: bash
+        run: bash scripts/run-nuget-smoke-in-container.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}" "${{ matrix.image }}"
 
   build-complete:
-    needs: [build, nuget-smoke]
+    needs: [build, test-musl, nuget-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

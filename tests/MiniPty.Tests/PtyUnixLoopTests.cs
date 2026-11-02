@@ -420,13 +420,15 @@ public sealed class PtyUnixLoopTests
         if (!(OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()))
             return;
 
-        const int Burst = 64 * 1024;
+        const int Burst = 64 * 1024; // A power of two, so doubling one byte reaches it exactly.
         const int Bursts = 64;
         using var timeout = new CancellationTokenSource(Timeout);
         var cancellationToken = timeout.Token;
+        // Shell builtins only, besides stty: dash, busybox ash (Alpine), and macOS's sh all run it, and no interpreter
+        // has to be installed. The burst is built once by doubling, and each request line is answered with all of it.
         await using var session = Pty.Start(Shell(
-            "stty -echo; perl -e '$| = 1; print \"ready\"; $s = \"x\" x " + Burst
-            + "; for (1.." + Bursts + ") { scalar <STDIN>; print $s }'"));
+            "stty -echo; s=x; while [ ${#s} -lt " + Burst + " ]; do s=$s$s; done; printf ready; "
+            + "i=0; while [ $i -lt " + Bursts + " ]; do read -r _; printf %s \"$s\"; i=$((i + 1)); done"));
         await using var output = session.ReadOutputAsync(cancellationToken).GetAsyncEnumerator();
 
         // The ready marker proves echo is disabled before any request is sent. It can arrive in multiple chunks.
