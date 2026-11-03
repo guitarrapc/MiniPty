@@ -8,8 +8,8 @@ namespace MiniPty.Internal;
 /// <summary>
 /// Finds the file <c>CreateProcess</c> would start for a <see cref="PtyStartInfo.FileName"/>, searching the same
 /// places in the same order, so that MiniPty can search a <c>PATH</c> of its own choosing: the child's, when
-/// <see cref="PtyStartInfo.Environment"/> sets or removes it, where <c>CreateProcess</c> only ever searches the
-/// host's.
+/// <see cref="PtyStartInfo.Environment"/> sets or removes it or <see cref="PtyStartInfo.InheritEnvironment"/> is
+/// <see langword="false"/>, where <c>CreateProcess</c> only ever searches the host's.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -83,9 +83,9 @@ internal static partial class WindowsProgramLookup
     /// </param>
     /// <param name="WindowsDirectory">The Windows directory.</param>
     /// <param name="Path">
-    /// The <c>PATH</c> whose entries are searched after the fixed locations, or null for none. The child's when the
-    /// overlay sets or removes it; <see cref="ResolveScriptOnHost"/> leaves it null and reads the host's <c>PATH</c>
-    /// only when the fixed locations miss.
+    /// The <c>PATH</c> whose entries are searched after the fixed locations, or null for none. The child's when it
+    /// differs from the host's. <see cref="ResolveScriptOnHost"/> leaves it null and reads the host's <c>PATH</c> only
+    /// when the fixed locations miss.
     /// </param>
     /// <param name="SearchRelativePathEntries">
     /// Whether an empty, <c>.</c>, or other relative <c>PATH</c> entry is searched, against

@@ -35,6 +35,14 @@ Console.CancelKeyPress += (_, e) =>
     e.Cancel = true;
     stop.Cancel();
 };
+// An orchestrator stops a process on Unix with SIGTERM, which would otherwise end it without its cleanup below.
+using var sigterm = OperatingSystem.IsWindows()
+    ? null
+    : System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGTERM, context =>
+    {
+        context.Cancel = true;
+        stop.Cancel();
+    });
 
 var floodFile = FloodFile.Create(floodBytes);
 try
@@ -49,7 +57,8 @@ try
 
             var flood = await Flood.RunAsync(endpoint, token, floodFile, ackDelay, stop.Token);
             Console.WriteLine($"round {round}: {sessions} idle sessions open; flood read {flood.Bytes / 1024} KiB in " +
-                $"{flood.Elapsed.TotalSeconds:F1} s with {flood.Acks} acknowledgements {ackDelay.TotalMilliseconds:F0} ms late");
+                $"{flood.Elapsed.TotalSeconds:F1} s with {flood.Acks} acknowledgements {ackDelay.TotalMilliseconds:F0} ms late" +
+                (flood.Exited ? "" : ", but the connection closed before the shell exited"));
         }
         catch (Exception ex) when (ex is WebSocketException or HttpRequestException)
         {
@@ -159,7 +168,7 @@ static class Flood
 {
     private const int AckChunk = 128 * 1024;
 
-    public static async Task<(long Bytes, int Acks, TimeSpan Elapsed)> RunAsync(Uri endpoint, string token, string file, TimeSpan ackDelay, CancellationToken cancellationToken)
+    public static async Task<(long Bytes, int Acks, TimeSpan Elapsed, bool Exited)> RunAsync(Uri endpoint, string token, string file, TimeSpan ackDelay, CancellationToken cancellationToken)
     {
         using var socket = await Socket.ConnectAsync(endpoint, token, cancellationToken);
         var started = System.Diagnostics.Stopwatch.StartNew();
@@ -170,6 +179,7 @@ static class Flood
         long bytes = 0;
         long unacked = 0;
         var acks = 0;
+        var exited = false;
         try
         {
             while (true)
@@ -177,8 +187,12 @@ static class Flood
                 var result = await socket.ReceiveAsync(buffer, cancellationToken);
                 if (result.MessageType == WebSocketMessageType.Close)
                     break;
-                if (result.MessageType != WebSocketMessageType.Binary)
+                if (result.MessageType == WebSocketMessageType.Text)
+                {
+                    // The bridge's exit message, sent once the shell has exited.
+                    exited |= Encoding.UTF8.GetString(buffer, 0, result.Count).Contains("\"exit\"", StringComparison.Ordinal);
                     continue;
+                }
 
                 bytes += result.Count;
                 unacked += result.Count;
@@ -192,12 +206,12 @@ static class Flood
                 }
             }
         }
-        catch (WebSocketException) when (bytes > 0)
+        catch (WebSocketException) when (exited)
         {
-            // The shell exited and the bridge closed the socket while an acknowledgement was on its way: the flood is over.
+            // The bridge closed the socket after the shell exited, while an acknowledgement was on its way.
         }
 
-        return (bytes, acks, started.Elapsed);
+        return (bytes, acks, started.Elapsed, exited);
     }
 }
 
@@ -206,7 +220,8 @@ static class FloodFile
 {
     public static string Create(int bytes)
     {
-        var path = Path.Combine(Path.GetTempPath(), $"minipty-aspire-load-{Environment.ProcessId}.txt");
+        // One name for every run: a run killed before its cleanup leaves this one file, which the next run overwrites.
+        var path = Path.Combine(Path.GetTempPath(), "minipty-aspire-load.txt");
         using var writer = new StreamWriter(path);
         var line = 0;
         for (long written = 0; written < bytes; line++)

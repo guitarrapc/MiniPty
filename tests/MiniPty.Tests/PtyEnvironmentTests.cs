@@ -359,6 +359,21 @@ public sealed class PtyEnvironmentTests
         await Assert.That(term).IsEqualTo("xterm-test");
     }
 
+    /// <summary>
+    /// Removing <c>TERM</c> from the minimum leaves the child nothing. The result must still be an empty block, not null:
+    /// null makes the start hand the child this process's environment.
+    /// </summary>
+    [Test]
+    public async Task BuildUnix_WithoutInheritanceAndWithoutTermGivesAnEmptyBlock()
+    {
+        var result = PtyEnvironment.BuildUnix(
+            BaseStartInfo() with { InheritEnvironment = false, Environment = new Dictionary<string, string?> { ["TERM"] = null } },
+            new Dictionary<string, string> { ["SECRET"] = "1", ["TERM"] = "screen" });
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(result!.Length).IsEqualTo(0);
+    }
+
     [Test]
     public async Task BuildWindows_WithoutInheritanceStartsFromSystemRootAlone()
     {

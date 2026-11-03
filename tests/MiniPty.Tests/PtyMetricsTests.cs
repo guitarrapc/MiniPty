@@ -37,9 +37,8 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// The histograms record seconds, so each advises bucket boundaries in seconds. OpenTelemetry's default boundaries
-    /// are for milliseconds (0, 5, 10, ... 10000): with them every measurement fell in the first bucket, and the Aspire
-    /// dashboard showed a P50 of 5 s for stalls of about 0.1 s.
+    /// The histograms record seconds, so each must advise ascending boundaries that start below a millisecond. Without
+    /// them an exporter's default boundaries, meant for milliseconds, put every measurement in one bucket.
     /// </summary>
     [Test]
     public async Task HistogramsAdviseBucketBoundariesInSeconds()
@@ -96,6 +95,8 @@ public sealed class PtyMetricsTests
             ? Path.Combine(Path.GetTempPath(), $"minipty-missing-{Guid.NewGuid():N}.exe")
             : $"/minipty-missing-{Guid.NewGuid():N}";
         Assert.Throws<Win32Exception>(() => Pty.Start(new PtyStartInfo { FileName = missing }).Dispose());
+        // Checked only while the start builds the environment, so it reaches the failure filter, which must skip it.
+        Assert.Throws<ArgumentException>(() => Pty.Start(Echo("bad") with { Environment = new Dictionary<string, string?> { ["A=B"] = "x" } }).Dispose());
 
         var starts = metrics.Values("minipty.session.start.duration");
         var failures = metrics.Measurements("minipty.session.start.failures");
@@ -114,14 +115,70 @@ public sealed class PtyMetricsTests
         await using (var session = Pty.Start(Flood()))
             result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false });
 
-        // Every byte delivered was read first; bytes read after the end of output was decided may be discarded.
+        // Counted once per read and only while the session is open, so the total is exactly the output delivered.
         var read = metrics.Values("minipty.output.bytes").Sum();
         await Assert.That(result.Output.Length).IsGreaterThan(16_384);
-        await Assert.That(read).IsGreaterThanOrEqualTo(result.Output.Length);
+        await Assert.That(read).IsEqualTo(result.Output.Length);
     }
 
     /// <summary>
-    /// A flood nobody reads fills the ring and stops reading, which blocks the child; the stop is recorded with its
+    /// A host's listener that throws on the start's duration makes <see cref="Pty.Start"/> throw after the session
+    /// exists. The start must dispose that session, since no caller holds it.
+    /// </summary>
+    [Test]
+    public async Task AListenerThatThrowsOnTheStartLeavesNoSessionOpen()
+    {
+        using var metrics = new MetricsRecorder();
+        using var throwing = new MeterListener
+        {
+            InstrumentPublished = static (instrument, listener) =>
+            {
+                if (instrument.Name == "minipty.session.start.duration")
+                    listener.EnableMeasurementEvents(instrument);
+            },
+        };
+        throwing.SetMeasurementEventCallback<double>(static (_, _, _, _) => throw new InvalidOperationException("listener bug"));
+        throwing.Start();
+
+        var before = metrics.ObserveActiveSessions();
+        Assert.Throws<InvalidOperationException>(() => Pty.Start(Echo("throwing")));
+        var after = metrics.ObserveActiveSessions();
+
+        await Assert.That(after).IsEqualTo(before);
+    }
+
+    /// <summary>
+    /// A start that fails while the session is built, after its child exists, is counted with the exception's type and
+    /// leaves no open session behind.
+    /// </summary>
+    [Test]
+    public async Task AStartThatFailsInsideTheSessionIsCountedAndLeavesNoSessionOpen()
+    {
+        using var metrics = new MetricsRecorder();
+        var before = metrics.ObserveActiveSessions();
+        MiniPty.Internal.PtyStartTestHook.Fault = static (stage, _) =>
+        {
+            if (stage == MiniPty.Internal.PtyStartStage.BackendBuilt)
+                throw new TimeoutException("injected");
+        };
+        try
+        {
+            Assert.Throws<TimeoutException>(() => Pty.Start(Echo("fault")));
+        }
+        finally
+        {
+            MiniPty.Internal.PtyStartTestHook.Fault = null;
+        }
+
+        var after = metrics.ObserveActiveSessions();
+        var failures = metrics.Measurements("minipty.session.start.failures");
+        await Assert.That(after).IsEqualTo(before);
+        await Assert.That(failures.Count).IsEqualTo(1);
+        await Assert.That(failures[0].ErrorType).IsEqualTo(typeof(TimeoutException).FullName);
+    }
+
+    /// <summary>
+    /// A flood nobody reads fills the ring and stops reading, which blocks the child. The stop is recorded with its
     /// length once a reader frees space.
     /// </summary>
     [Test]
@@ -163,7 +220,7 @@ public sealed class PtyMetricsTests
 
         var waits = metrics.Values("minipty.output.consumer_wait.duration");
         await Assert.That(waits.Count).IsGreaterThanOrEqualTo(1);
-        // Bounded by the wait's timeout; a loaded runner can deschedule the thread past it, hence the margin.
+        // Each wait is bounded by its timeout. The margin covers a loaded runner that deschedules the thread past it.
         await Assert.That(waits.Max()).IsLessThan(0.5);
     }
 
@@ -196,7 +253,7 @@ public sealed class PtyMetricsTests
         await Assert.That(listenedTimestamps).IsNotEqualTo(0L);
         await Assert.That(listenedAllocated).IsEqualTo(0L);
 
-        // Every recording call on the output path and at start, once; returns the timestamps taken, OR-ed together.
+        // Every recording call on the output path and at start, once. Returns the timestamps taken, OR-ed together.
         static long RecordAll()
         {
             MiniPty.Internal.PtyMetrics.RecordOutputRead(4096);
@@ -252,8 +309,7 @@ public sealed class PtyMetricsTests
     /// <summary>Listens to this load's <c>MiniPty</c> meter and keeps every measurement it reports.</summary>
     /// <remarks>
     /// The meter is matched by identity, not by name: <see cref="PtyLoadContextTests"/> loads MiniPty a second time, and
-    /// that load has a meter named <c>MiniPty</c> of its own, which keeps counting its own sessions (none). Matched by
-    /// name, the suite read the other load's open sessions, 0 throughout.
+    /// that load has a meter named <c>MiniPty</c> of its own, which counts none of these tests' sessions.
     /// </remarks>
     private sealed class MetricsRecorder : IDisposable
     {

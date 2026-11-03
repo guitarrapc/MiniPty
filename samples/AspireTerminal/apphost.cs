@@ -5,7 +5,7 @@
 //
 //   dotnet run samples/AspireTerminal/apphost.cs
 //
-// Open the dashboard address the AppHost prints, then the "terminal" link on the Resources page; it carries this run's
+// Open the dashboard address the AppHost prints, then the "terminal" link on the Resources page. It carries this run's
 // access token. Flood the terminal (seq 1 2000000, or dir /s C:\Windows), or press Start on the "load" resource, and
 // open Metrics > terminal > MiniPty.
 
@@ -23,8 +23,8 @@ var terminal = builder.AddCSharpApp("terminal", "terminal.cs")
     // The app checks that a request's Host names its own port. Aspire's proxy would put another port in front of it.
     .WithHttpEndpoint(name: "http", isProxied: false)
     .WithEnvironment("MINIPTY_TERMINAL_TOKEN", token)
-    // OpenTelemetry exports metrics once a minute by default; a second keeps the dashboard's charts live while a flood
-    // runs. Started with dotnet run, this AppHost passed no interval of its own.
+    // OpenTelemetry exports metrics once a minute by default. A second keeps the dashboard's charts live while a flood
+    // runs, and Aspire passes that interval itself only when the AppHost runs in the Development environment.
     .WithEnvironment("OTEL_METRIC_EXPORT_INTERVAL", "1000")
     .WithUrlForEndpoint("http", url =>
     {

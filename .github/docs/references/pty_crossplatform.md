@@ -212,7 +212,7 @@ parent: keep the master and the pidfd (from CLONE_PIDFD, else pidfd_open)
 **A child in the host's memory:**
 
 - **It only makes system calls.** It may not allocate, take a lock, or use stdio. Everything it reads (`file`, `argv`, `envp`, `cwd`, the descriptor scan bound) is prepared in the parent before the clone, and the `PATH` lookup uses stack buffers.
-- **Only the calling thread is suspended.** The host's other threads keep running in the same memory, so the child writes nothing but its own stack and the start record.
+- **Only the calling thread is suspended.** The host's other threads keep running in the same memory, so the child writes only its own stack, the start record, and `errno` in the suspended thread's storage.
 - **Signals stay blocked until the child has reset every handler to its default.** They are blocked from before the clone, with `rt_sigprocmask` itself and a mask with every bit set by hand. glibc's own mask calls drop its internal signals from the set, and `sigfillset` leaves them out in glibc and musl alike. Without `CLONE_SIGHAND` the child resets its own copy of the handler table. The program then starts with the calling thread's mask, as it did after a fork.
 - **The reset goes to the kernel too.** The C library refuses to change its internal signals (glibc's 32 and 33, musl's 32 to 34), and an ignored signal stays ignored across exec. A musl host had signal 34 ignored, and with `sigaction` its children started with it ignored. `rt_sigaction` with an all-zero record sets every signal from 1 to 64 to `SIG_DFL`, whatever the architecture's record layout.
 - **The parent never reads `errno` from the child.** The child's `errno` lands in the suspended thread's storage, which is harmless; the parent reads the start record.

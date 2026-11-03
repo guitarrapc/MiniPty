@@ -7,10 +7,11 @@ namespace AvaloniaTerminal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A <see cref="MeterListener"/> gets each measurement on the thread that records it: MiniPty's I/O thread for output
-/// bytes and stalls, the starting thread for a start. Its callbacks therefore only add to interlocked totals, and the
-/// window reads them on a timer of its own, on the UI thread. Each instrument's total is the state the listener hands
-/// back with every measurement, so a measurement costs a cast and three interlocked operations, with no lookup by name.
+/// A <see cref="MeterListener"/> gets each measurement on the thread that records it. Output bytes and stalls arrive on
+/// MiniPty's I/O thread, and on Linux and macOS also on this window's UI thread, which reads output inline. A start
+/// arrives on the starting thread. The callbacks therefore only add to interlocked totals, and the window reads them on
+/// a timer of its own. Each instrument's total is the state the listener hands back with every measurement, so a
+/// measurement costs a cast, two interlocked adds, and a volatile write, with no lookup by name.
 /// </para>
 /// <para>
 /// An application that already exports metrics with OpenTelemetry adds <c>AddMeter("MiniPty")</c> instead.

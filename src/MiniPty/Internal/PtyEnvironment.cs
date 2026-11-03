@@ -96,8 +96,7 @@ internal static class PtyEnvironment
         }
         else
         {
-            // SystemRoot is the one variable a Windows child was measured to need: without it Windows PowerShell failed
-            // to start (8009001d, a cryptographic provider that did not load), while cmd.exe and pwsh started.
+            // Windows PowerShell does not start without SystemRoot, which it needs to load a cryptographic provider.
             entries = new Dictionary<string, EnvironmentEntry>(StringComparer.OrdinalIgnoreCase)
             {
                 ["SystemRoot"] = new EnvironmentEntry("SystemRoot", WindowsProgramLookup.WindowsDirectory),

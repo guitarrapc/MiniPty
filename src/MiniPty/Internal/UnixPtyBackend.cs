@@ -124,8 +124,9 @@ internal static partial class UnixPtyBackend
     /// The exception for a failed start. A child that could not enter its working directory or exec its program
     /// reported the <c>errno</c> before exiting, so the start fails as <c>CreateProcess</c> does on Windows and as
     /// <see cref="System.Diagnostics.Process.Start()"/> does on Unix: a <see cref="System.ComponentModel.Win32Exception"/>
-    /// whose <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is that <c>errno</c>. Anything else failed
-    /// before a child existed (opening the terminal, forking) and stays an <see cref="IOException"/>.
+    /// whose <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is that <c>errno</c>. Anything else stays
+    /// an <see cref="IOException"/>: opening the terminal or starting the child failed, or the Linux child failed to make
+    /// the terminal its own before the exec.
     /// </summary>
     private static Exception CreateStartException(PtyStartInfo startInfo, int startStage, int error) => startStage switch
     {

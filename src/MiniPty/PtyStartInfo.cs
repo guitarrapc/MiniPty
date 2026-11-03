@@ -25,8 +25,9 @@ public sealed record PtyStartInfo
     /// <para>
     /// A name without a root and without a leading <c>.\</c> or <c>..\</c> is searched for. On Unix the child
     /// resolves it against its own <c>PATH</c>. On Windows <c>CreateProcess</c> searches its fixed locations and this
-    /// process's <c>PATH</c>, never the child's, so when <see cref="Environment"/> sets or removes <c>PATH</c>, MiniPty
-    /// runs the same search with the child's <c>PATH</c> instead and starts the file it finds, for a program and for a
+    /// process's <c>PATH</c>, never the child's, so when <see cref="Environment"/> sets or removes <c>PATH</c>, or
+    /// <see cref="InheritEnvironment"/> is <see langword="false"/>, MiniPty runs the same search with the child's
+    /// <c>PATH</c> instead and starts the file it finds, for a program and for a
     /// batch file alike; <c>.exe</c> is appended when the last path component has no <c>.</c>, as <c>CreateProcess</c>
     /// does, and a missing program then fails <see cref="Pty.Start"/> with
     /// <see cref="System.ComponentModel.Win32Exception"/> before anything is created. Only the fully qualified entries
@@ -148,10 +149,15 @@ public sealed record PtyStartInfo
     /// </value>
     /// <remarks>
     /// <para>
-    /// Set it to <see langword="false"/> when this process's environment holds what a child must not see, such as a
-    /// web host's connection strings or cloud credentials. A variable then reaches the child only when
-    /// <see cref="Environment"/> names it, so nothing has to be removed key by key, and a variable added to the host
-    /// later does not leak.
+    /// Set it to <see langword="false"/> when this process's environment holds what a child should not be handed, such
+    /// as a web host's connection strings or cloud credentials. A variable then reaches the child's environment only
+    /// when <see cref="Environment"/> names it, so nothing has to be removed key by key, and a variable added to the host
+    /// later is not passed on.
+    /// </para>
+    /// <para>
+    /// It is not isolation. A child that runs as the same user can still read this process's own environment from the
+    /// operating system, for example from <c>/proc/&lt;pid&gt;/environ</c> on Linux. To keep secrets from a child, run it
+    /// as another user or in a container.
     /// </para>
     /// <para>
     /// Pass the host variables a child should keep through <see cref="Environment"/>, for example
@@ -160,8 +166,9 @@ public sealed record PtyStartInfo
     /// <list type="bullet">
     /// <item><description>
     /// <c>PATH</c>: Unix shells use a built-in default, and MiniPty looks <see cref="FileName"/> up on <c>/bin:/usr/bin</c>.
-    /// On Windows MiniPty looks <see cref="FileName"/> up in the fixed locations only, such as the system directory, and
-    /// <c>cmd.exe</c> finds no external command by name.
+    /// On Windows MiniPty looks <see cref="FileName"/> up in the fixed locations only, such as the system directory,
+    /// except for a batch file started with a raw <see cref="CommandLine"/>, which <c>CreateProcess</c> looks up on this
+    /// process's <c>PATH</c>. <c>cmd.exe</c> finds an external command by name only in its current directory.
     /// </description></item>
     /// <item><description>
     /// <c>TEMP</c> and <c>TMP</c> on Windows: a program that asks Windows for its temporary directory gets the Windows

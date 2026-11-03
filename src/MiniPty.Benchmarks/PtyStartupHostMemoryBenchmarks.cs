@@ -7,15 +7,15 @@ namespace MiniPty.Benchmarks;
 /// <summary>
 /// Session start in a host with a large resident heap, the case of IDE backends and web terminals. A start that forks
 /// copies the host's page tables and marks every resident page copy-on-write before the child can exec, so its cost
-/// grows with the host's resident memory: about 6 ms per GiB on Linux when MiniPty started children with
-/// <c>forkpty</c>. Linux now starts them with <c>clone(CLONE_VM | CLONE_VFORK)</c>, macOS with <c>posix_spawn</c>, and
-/// Windows with <c>CreateProcess</c>, so a start should cost the same at every <see cref="HostResidentMiB"/>.
+/// grows with the host's resident memory. Linux starts children with <c>clone(CLONE_VM | CLONE_VFORK)</c>, macOS with
+/// <c>posix_spawn</c>, and Windows with <c>CreateProcess</c>, so a start should cost the same at every
+/// <see cref="HostResidentMiB"/>.
 /// </summary>
 /// <remarks>
 /// The memory is native, so the GC neither moves nor scans it, and the global setup writes every 4 KiB of it, so it is
 /// resident. Each parameter runs in a process of its own. With transparent huge pages set to <c>always</c> the kernel
-/// may back it with 2 MiB pages, which a fork copies far faster; the measured 6 ms per GiB was with 4 KiB pages
-/// (Ubuntu's default, <c>madvise</c>).
+/// may back it with 2 MiB pages, which a fork copies far faster. Compare forks with 4 KiB pages (Ubuntu's default,
+/// <c>madvise</c>).
 /// </remarks>
 [MemoryDiagnoser]
 [SimpleJob(RuntimeMoniker.Net10_0, warmupCount: 2, iterationCount: 5, launchCount: 1)]

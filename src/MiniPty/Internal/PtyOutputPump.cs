@@ -107,8 +107,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private int _count;
     private int _flags;
     private int _producerWaiting;
-    // When the producer last stopped on a full ring, for minipty.output.stall.duration; 0 when not stopped or when
-    // nothing listened as it stopped. Touched only by the producer, in BeginWaitForFreeSpace and EndWaitForFreeSpace.
+    // When the producer stopped on a full ring, for minipty.output.stall.duration. It is 0 while the producer runs, and
+    // when nothing listened as it stopped. Only the producer touches it, in BeginWaitForFreeSpace and EndWaitForFreeSpace.
     private long _stallStarted;
     // Who produces into the ring now (ProducerHeld), and whether the driver's own pass was turned away meanwhile
     // (ProducerDeferred). See TryEnterProducer.
@@ -318,9 +318,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// </summary>
     internal void Publish(int length, long timestamp)
     {
+        if (IsSessionDisposed)
+            return;
+
         PtyMetrics.RecordOutputRead(length);
-        if (!IsSessionDisposed)
-            Deliver(_tail, length, timestamp);
+        Deliver(_tail, length, timestamp);
     }
 
     /// <summary>Hands an attached sink the output published before it attached. Does nothing without a sink.</summary>

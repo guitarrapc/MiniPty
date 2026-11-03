@@ -313,9 +313,9 @@ static void minipty_scrub_inherited_fds(int scan_limit)
 
 /*
  * Sets every signal to its default action with the system call itself. The C library refuses to change its internal
- * signals (glibc's 32 and 33, musl's 32 to 34), and an ignored signal stays ignored across exec: a musl host had signal
- * 34 ignored, and its children started with it ignored. An all-zero record is SIG_DFL with no flags and an empty mask
- * in every architecture's layout; the kernel refuses SIGKILL and SIGSTOP, which are never anything else.
+ * signals (glibc's 32 and 33, musl's 32 to 34), and an ignored signal stays ignored across exec. An all-zero record is
+ * SIG_DFL with no flags and an empty mask in every architecture's layout. The kernel refuses SIGKILL and SIGSTOP, which
+ * are never anything else.
  */
 static void minipty_reset_child_signals_to_default(void)
 {
@@ -355,8 +355,8 @@ struct minipty_clone_start {
 
 /*
  * Opens both ends of a new terminal close-on-exec and sets MiniPty's termios and the initial window size on the slave.
- * glibc's openpty opened them without O_CLOEXEC, so a process the host started on another thread at that moment kept
- * the terminal open for as long as it ran. Opened this way, no process but the child gets them.
+ * openpty opens them without O_CLOEXEC, so a process the host starts on another thread at that moment would keep the
+ * terminal open for as long as it runs. Opened this way, no process but the child gets them.
  */
 static int minipty_open_terminal(int *master_out, int *slave_out, const struct winsize *winp)
 {
@@ -383,7 +383,7 @@ static int minipty_open_terminal(int *master_out, int *slave_out, const struct w
     /* Opens the slave from the master itself, which a mount namespace with another /dev/pts cannot misdirect. */
     slave = ioctl(master, TIOCGPTPEER, O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (slave < 0) {
-        /* ptsname_r returns the error number; musl's does not set errno. */
+        /* ptsname_r returns the error number. musl's does not set errno. */
         err = ptsname_r(master, name, sizeof(name));
         if (err != 0) {
             close(master);
@@ -414,9 +414,10 @@ static int minipty_open_terminal(int *master_out, int *slave_out, const struct w
 /*
  * The child of a Linux start. It runs on a stack of its own, but in the host's memory, with every signal blocked and
  * the calling thread suspended until the exec, while the host's other threads keep running. So it only makes system
- * calls: no allocation, no lock, no stdio, and no write to memory but its stack and the start record. Everything it
- * reads was prepared before the clone. errno lands in the suspended thread's storage, which is harmless; the parent
- * reads the record, never errno. The library is linked with -z now, so no call here enters the dynamic linker.
+ * calls: no allocation, no lock, and no stdio. It writes to memory only on its stack, in the start record, and in errno,
+ * which lands in the suspended thread's storage. That is harmless, since the parent reads the record and never errno.
+ * Everything it reads was prepared before the clone. The library is linked with -z now, so no call here enters the
+ * dynamic linker.
  */
 static int minipty_clone_child(void *arg)
 {
@@ -434,7 +435,7 @@ static int minipty_clone_child(void *arg)
 
     /*
      * dup2 onto the slave's own descriptor would leave close-on-exec set, so a slave inside the stdio range (the host
-     * had closed one of its own) is first copied above it. The copies dup2 makes onto stdio are inherited; the slave
+     * had closed one of its own) is first copied above it. The copies dup2 makes onto stdio are inherited. The slave
      * itself and the master close at the exec.
      */
     if (slave <= STDERR_FILENO) {
@@ -468,11 +469,10 @@ failed:
 }
 
 /*
- * Starts a Linux child with clone(CLONE_VM | CLONE_VFORK), as glibc's posix_spawn does, instead of forkpty. A fork
- * copies the host's page tables and marks every resident page copy-on-write before the child can exec, which cost
- * about 6 ms per GiB of the host's resident memory; here the child shares the host's memory until its exec, and a
- * start costs the same in any host. posix_spawn itself cannot run MiniPty's PATH lookup with its sh fallback, nor tell
- * a chdir failure from an exec failure.
+ * Starts a Linux child with clone(CLONE_VM | CLONE_VFORK) instead of forkpty. A fork copies the host's page tables and
+ * marks every resident page copy-on-write before the child can exec, so its cost grows with the host's memory. Here
+ * the child shares the host's memory until its exec, and a start costs the same in any host. posix_spawn cannot run
+ * MiniPty's PATH lookup with its sh fallback, nor tell a chdir failure from an exec failure.
  */
 static int spawn_pty_child_linux(
     int *master,
@@ -682,7 +682,7 @@ static int spawn_pty_child_forkpty(
     /*
      * forkpty may open the master without O_CLOEXEC, so every child the host starts later would inherit it and keep the
      * terminal from hanging up. A fork on another thread before this call can still inherit it, and the slave inside
-     * forkpty; the Linux and macOS paths open both ends close-on-exec instead.
+     * forkpty. The Linux and macOS paths open both ends close-on-exec instead.
      */
     if (fcntl(*master, F_SETFD, FD_CLOEXEC) != 0) {
         int err = errno > 0 ? errno : EINVAL;
@@ -698,9 +698,9 @@ static int spawn_pty_child_forkpty(
     }
 
     /*
-     * The child never waits on this pipe, only the parent does. Holding a forked child until the parent signalled it
-     * deadlocked concurrent spawns; here a concurrent spawn's child that inherited the write end closes it at its own
-     * exec, which delays this read but cannot block it.
+     * The child never waits on this pipe, only the parent does, because a forked child held until the parent signals it
+     * can deadlock concurrent spawns. A concurrent spawn's child that inherited the write end closes it at its own exec,
+     * which delays this read but cannot block it.
      */
     if (minipty_await_start_report(report[0], &stage, &child_err)) {
         int exit_code;

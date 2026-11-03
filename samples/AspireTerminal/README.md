@@ -12,7 +12,7 @@ dotnet run samples/AspireTerminal/apphost.cs
    - Or open the **Terminal** link of the `terminal` resource, which carries this run's access token, and flood it yourself (`seq 1 2000000`, or `dir /s /b C:\Windows\WinSxS` on Windows).
 3. Open **Metrics**, choose the `terminal` resource, and pick an instrument under **MiniPty**.
 
-Both files are .NET 10 file-based apps, so no project files are needed. The dashboard and its OTLP endpoint use the HTTPS development certificate; run `dotnet dev-certs https --trust` once if the browser warns about it.
+All three files are .NET 10 file-based apps, so no project files are needed. The dashboard and its OTLP endpoint use the HTTPS development certificate; run `dotnet dev-certs https --trust` once if the browser warns about it.
 
 ## Files
 

@@ -769,7 +769,8 @@ public sealed class PtyTests
     [Arguments(6, 2, 9200, false)]   // Windows Server 2012
     [Arguments(6, 3, 9600, false)]   // Windows Server 2012 R2
     [Arguments(10, 0, 14393, false)] // Windows 10 1607, Windows Server 2016
-    [Arguments(10, 0, 17134, false)] // Windows 10 1803, the last build without ConPTY
+    [Arguments(10, 0, 17134, false)] // Windows 10 1803, the last release without ConPTY
+    [Arguments(10, 0, 17762, false)] // The build just below the threshold
     [Arguments(10, 0, 17763, true)]  // Windows 10 1809, Windows Server 2019
     [Arguments(10, 0, 26200, true)]  // Windows 11 25H2
     public async Task PtyIsSupportedOnlyOnWindowsBuildsWithConPty(int major, int minor, int build, bool expected)

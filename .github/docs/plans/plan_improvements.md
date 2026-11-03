@@ -2,7 +2,7 @@
 
 Goal: MiniPty loads wherever .NET 10 runs on its platforms. A session's start costs the same whatever the host's size. The library reports accurately what it supports and how a child ended. The items below came from a review of the library as a whole. Each is closed by a fix, or by a decision recorded in the specifications, as its section says.
 
-**Status:** closed (2026-11-03). Every phase is closed. Phase 1: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). Phases 3 and 5, the fix to a test race found along the way, and the samples passed every job of [run 41512274422](https://github.com/guitarrapc/MiniPty/actions/runs/41512274422) on `f2a0c18`: 762 of 762 tests on the six RIDs and in the musl container (macOS skips 2–3 bridge frame-size tests it always skips), the NativeAOT samples on every RID, and the NuGet smoke on 14 systems. Phase 4: the macOS flood is not a regression, five runs on `main` are recorded, and the ring stays at 16 KiB; the ring on macOS stays under next_todo's unverified items. The measurements below were taken on 2026-11-02 and 2026-11-03.
+**Status:** closed (2026-11-03). Every phase is closed. Phase 1: CI passed every job on all six RIDs ([run 41405509773](https://github.com/guitarrapc/MiniPty/actions/runs/41405509773)). Phase 2: its gates were met locally, and CI passed every job on all six RIDs ([run 41425428814](https://github.com/guitarrapc/MiniPty/actions/runs/41425428814)). Phases 3 and 5, the fix to a test race found along the way, and the samples passed every job of [run 41512274422](https://github.com/guitarrapc/MiniPty/actions/runs/41512274422) on `f2a0c18`: all 762 tests on the six RIDs and in the musl container, except the bridge frame-size tests macOS always skips (2 on arm64, 3 on Intel), the NativeAOT samples on every RID, and the NuGet smoke on 12 systems. Phase 4: the macOS flood is not a regression, five runs on `main` are recorded, and the ring stays at 16 KiB; the ring on macOS stays under next_todo's unverified items. The measurements below were taken on 2026-11-02 and 2026-11-03.
 
 ## Inventory
 
@@ -101,12 +101,12 @@ A C probe measured the cost: a Ryzen 9 7950X3D, WSL2 with kernel 6.6, and the mi
 | 2 GiB | 12.979 ms | 0.164 ms |
 | 4 GiB | 25.733 ms | 0.161 ms |
 
-- **The cost is about 6 ms per GiB.** The README's start benchmark (1.749 ms) runs in a small benchmark process, so it does not show this.
+- **The cost is about 6 ms per GiB.** The README's start benchmark (1.569 ms) runs in a small benchmark process, so it does not show this.
 - **The terminal's descriptors can leak.** `forkpty` opens both ends of the terminal without `O_CLOEXEC`, and there is no way to ask it for that flag ([minipty_unix.c:375](../../../src/MiniPty/Native/minipty_unix.c)). Another thread of the host may fork in that moment, `Process.Start` included. That process inherits both ends, and they stay open across its `exec`. Either copy lasts as long as that unrelated process:
   - A copy of the slave keeps the terminal open, so output ends only through the post-exit drain.
   - A copy of the master keeps the tty from hanging up when the session closes it.
 
-  This is invariant 9 in [lifecycle.md](../specs/lifecycle.md) and the fork child hygiene paragraph in [pty_crossplatform.md](../references/pty_crossplatform.md#linux--freebsd-forkpty--execve). The macOS path opens both ends close-on-exec and has no such window.
+  This is invariant 9 in [lifecycle.md](../specs/lifecycle.md) and the paragraph on both ends close-on-exec in [pty_crossplatform.md](../references/pty_crossplatform.md#linux-clone--execve). The macOS path opens both ends close-on-exec and has no such window.
 
 ### Why it matters
 
@@ -221,7 +221,7 @@ The output path runs on thresholds that were chosen by measurement. Each is name
 
 - **Hosts pay these costs.** A thread-pool thread can be held in a native wait, and a child can be stalled behind a full ring.
 - **Hosts cannot see them.** They show up only as latency, and only a profiler shows the cause.
-- **Instruments are deferred.** [next_todo.md](../next_todo.md#metrics) leaves them to a separate decision.
+- **Instruments were deferred.** next_todo.md left them to a separate decision, which Phase 5 took ([core_session.md](../specs/core_session.md#metrics)).
 
 ### Decision required
 
@@ -393,7 +393,7 @@ This phase needs Phase 1, for two reasons:
 **Closed when:**
 
 - A start with 2 GiB resident is within 10% of a start with nothing touched. Today it is about 13 ms slower.
-- A start's mean time and allocation, with nothing touched, are no worse than today's: 1.749 ms and 1.26 KB in CI's run.
+- A start's mean time and allocation, with nothing touched, are no worse than today's: 1.569 ms and 1.26 KB in CI's run 41106916265.
 - The descriptor test passes 100 consecutive runs.
 - The Linux library no longer imports `forkpty`.
 
@@ -458,7 +458,7 @@ Not verified locally:
 - **arm64:** there is no arm64 Docker host here. CI builds and tests natively.
 - **macOS:** only preprocessor guards changed there. `unifdef -D__APPLE__ -U__linux__ -U__FreeBSD__` gives the same 587 lines for `minipty_unix.c` before and after, comments aside. CI builds and tests it.
 - **FreeBSD:** the `forkpty` path lost only its Linux branches, and it was not compiled.
-- **CI's start figures:** the Build workflow runs no benchmark, so CI's 1.749 ms from its last benchmark run has no counterpart. The gate is met by the local A/B above.
+- **CI's start figures:** the Build workflow runs no benchmark, so CI's 1.569 ms from its last benchmark run with a start case (41106916265) has no counterpart. The gate is met by the local A/B above.
 - **Kernels before 5.2 or 4.13:** neither the fallback for `CLONE_PIDFD` nor the one for `TIOCGPTPEER` was run.
 
 **macOS, on an Apple M2 with macOS 27.0.1 and .NET 10.0.13, run by hand.** `PtyStartupHostMemoryBenchmarks` took 6.042 ms with nothing touched and 6.134 ms at 2 GiB (+1.5%), with 1.27 KB allocated in both. `posix_spawn` does not copy the host, as its documentation says.

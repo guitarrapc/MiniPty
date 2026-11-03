@@ -10,10 +10,10 @@ namespace MiniPty.Internal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// When nothing listens, an instrument costs a branch on its <see cref="Instrument.Enabled"/> flag and allocates
-/// nothing; no timestamp is taken either. Only <c>minipty.session.active</c> counts always, because a listener that
-/// attaches later must read the number of open sessions, not the starts and disposals since it attached: an
-/// interlocked add at each start and at each disposal.
+/// When nothing listens, an instrument costs a check of its <see cref="Instrument.Enabled"/> flag. It takes no
+/// timestamp and allocates nothing. Only <c>minipty.session.active</c> counts always, with an interlocked add at each
+/// start and at each disposal, because a listener that attaches later must read the number of open sessions, not the
+/// starts and disposals since it attached.
 /// </para>
 /// <para>
 /// No measurement carries a tag that differs per session, so a host with thousands of sessions keeps one series per
@@ -31,11 +31,8 @@ internal static class PtyMetrics
 
     private static readonly Meter s_meter = CreateMeter();
 
-    // Each histogram advises bucket boundaries in seconds, as ASP.NET Core's request duration does. Without advice,
-    // OpenTelemetry buckets a histogram for milliseconds (0, 5, 10, ... 10000), so every value here would fall in the
-    // first bucket: the Aspire dashboard showed a P50 of 5 s for stalls of about 0.1 s. The boundaries cover what was
-    // measured: starts of 0.5 ms (Linux) to 100 ms (Windows), stalls from microseconds to seconds, and consumer waits
-    // bounded at 200 μs (Linux) and 1 ms (macOS), with room above for a thread descheduled past its bound.
+    // Each histogram advises bucket boundaries in seconds that span the range its instrument records. Without advice an
+    // exporter falls back to boundaries meant for milliseconds, and every value here would land in the first bucket.
 
     private static readonly Histogram<double> s_startDuration = s_meter.CreateHistogram(
         "minipty.session.start.duration",
@@ -47,17 +44,17 @@ internal static class PtyMetrics
     private static readonly Counter<long> s_startFailures = s_meter.CreateCounter<long>(
         "minipty.session.start.failures",
         "{failure}",
-        "Starts that failed after their arguments were accepted, tagged with error.type.");
+        "Starts that failed, tagged with error.type. An ArgumentException, a mistake in what to start, is not counted.");
 
     private static readonly Counter<long> s_outputBytes = s_meter.CreateCounter<long>(
         "minipty.output.bytes",
         "By",
-        "Bytes read from the terminals' output.");
+        "Bytes read from the terminals' output while their sessions were open.");
 
     private static readonly Histogram<double> s_outputStallDuration = s_meter.CreateHistogram(
         "minipty.output.stall.duration",
         "s",
-        "Time a session's reading stood still because its output ring was full and nobody drained it; the child stays blocked meanwhile.",
+        "Time a session's reading stood still because its output ring was full and nobody drained it. The child stays blocked meanwhile.",
         tags: null,
         advice: new InstrumentAdvice<double> { HistogramBucketBoundaries = [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30] });
 
@@ -103,15 +100,22 @@ internal static class PtyMetrics
     /// Counts a failed start. Meant for an exception filter, so it returns <see langword="false"/> and the exception
     /// propagates untouched.
     /// </summary>
+    /// <remarks>
+    /// An <see cref="ArgumentException"/> is the caller's mistake in what to start, not a start that failed, so it is
+    /// not counted. Some arguments are checked only while the start builds the environment or the command line.
+    /// </remarks>
     internal static bool RecordStartFailure(Exception error)
     {
+        if (error is ArgumentException)
+            return false;
+
         if (s_startFailures.Enabled)
             s_startFailures.Add(1, new KeyValuePair<string, object?>("error.type", error.GetType().FullName));
 
         return false;
     }
 
-    /// <summary>Counts <paramref name="bytes"/> read from a terminal's output.</summary>
+    /// <summary>Counts <paramref name="bytes"/> read from an open session's terminal.</summary>
     internal static void RecordOutputRead(int bytes)
     {
         if (s_outputBytes.Enabled)

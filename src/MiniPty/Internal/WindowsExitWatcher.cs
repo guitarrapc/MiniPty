@@ -11,12 +11,10 @@ namespace MiniPty.Internal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A thread-pool wait holds no thread while it waits. With 2,000 waits pending the process gained no thread (Windows 11,
-/// build 26200), where threads that each wait on 63 handles with <c>WaitForMultipleObjects</c>, this watcher's earlier
-/// design and also how .NET's own <c>RegisterWaitForSingleObject</c> waits, gained 32. That is how the Windows thread
-/// pool has waited since Windows 8, not a documented guarantee; a pool that waited on threads of its own would cost what
-/// the earlier design did. The time from the child's exit to the callback measured the same in both designs: about 7 μs
-/// at the median and 20 μs at the 99th percentile.
+/// A thread-pool wait holds no thread while it waits, unlike threads that each wait on 63 handles with
+/// <c>WaitForMultipleObjects</c>. That is how the Windows thread pool was measured to wait, not a documented guarantee.
+/// A pool that waited on threads of its own would add threads as the waits grow. The measurements are in
+/// pty_crossplatform.md, under Child exit observation.
 /// </para>
 /// <para>
 /// The callback runs on a worker of the process's native thread pool, not on .NET's. It only records exit
@@ -30,9 +28,7 @@ namespace MiniPty.Internal;
 /// </para>
 /// <para>
 /// Registration allocates nothing on the managed heap: the observer travels to the callback as a
-/// <see cref="GCHandle"/> in a two-pointer native block. <c>RegisterWaitForSingleObject</c> was measured at roughly
-/// 270 bytes per session (wait handle wrappers, the registration object, its lock, a callback wrapper, and a completion
-/// work item).
+/// <see cref="GCHandle"/> in a two-pointer native block.
 /// </para>
 /// </remarks>
 internal static unsafe partial class WindowsExitWatcher
@@ -40,7 +36,7 @@ internal static unsafe partial class WindowsExitWatcher
     private const uint DuplicateSameAccess = 0x00000002;
 
     /// <summary>
-    /// Starts watching <paramref name="processHandle"/>; <paramref name="onExited"/> runs on a native thread-pool
+    /// Starts watching <paramref name="processHandle"/>. <paramref name="onExited"/> runs on a native thread-pool
     /// worker once the process exits. The caller keeps ownership of its own handle.
     /// </summary>
     internal static void Register(IntPtr processHandle, IWindowsExitObserver onExited)
@@ -67,11 +63,10 @@ internal static unsafe partial class WindowsExitWatcher
 
     /// <summary>
     /// The wait's callback. With no timeout, a process handle reports only its exit, so <paramref name="waitResult"/>
-    /// is always <c>WAIT_OBJECT_0</c>; the observer reads the exit itself.
+    /// is always <c>WAIT_OBJECT_0</c>. The observer reads the exit itself.
     /// </summary>
     /// <remarks>
-    /// An exception that left this method would end the process, as one that left the earlier design's watcher thread
-    /// did. The observer only records exit and does not throw.
+    /// An exception that left this method would end the process. The observer only records exit and does not throw.
     /// </remarks>
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     private static void OnProcessSignaled(IntPtr instance, IntPtr context, IntPtr wait, uint waitResult)

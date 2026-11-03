@@ -121,7 +121,17 @@ public static class Pty
             throw;
         }
 
-        PtyMetrics.RecordStart(started);
+        try
+        {
+            PtyMetrics.RecordStart(started);
+        }
+        catch
+        {
+            // A listener that throws here would otherwise leave a running child that no caller holds.
+            session.Dispose();
+            throw;
+        }
+
         return session;
     }
 

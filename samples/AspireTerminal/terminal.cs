@@ -29,8 +29,11 @@ if (!Pty.IsSupported)
     return 1;
 }
 
-var token = Environment.GetEnvironmentVariable("MINIPTY_TERMINAL_TOKEN") is { Length: 64 } given ? given : LocalAccess.CreateToken();
-var underAspire = Environment.GetEnvironmentVariable("ASPNETCORE_URLS") is not null;
+// The AppHost passes the token, so the token, not ASPNETCORE_URLS, which other environments set too, says whether the
+// app runs under it.
+var givenToken = Environment.GetEnvironmentVariable("MINIPTY_TERMINAL_TOKEN");
+var underAspire = givenToken is { Length: 64 };
+var token = underAspire ? givenToken! : LocalAccess.CreateToken();
 
 var builder = WebApplication.CreateSlimBuilder(args);
 if (!underAspire)
@@ -89,22 +92,53 @@ static async Task HandleTerminalAsync(HttpContext context, string token)
     {
         await PtyWebSocketBridge.RunAsync(Shell.StartInfo(), socket, cancellationToken: context.RequestAborted);
     }
-    catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException)
+    catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException or TimeoutException)
     {
-        // The browser went away; the bridge has already ended its shell.
+        // The browser went away, or the shell outlived the hang-up. The bridge has already ended the shell.
+    }
+    catch (Exception ex)
+    {
+        // A malformed control message, or a shell that could not start: reported here rather than as an unhandled request.
+        Console.Error.WriteLine($"session failed: {ex}");
     }
 }
 
 static class Shell
 {
+    // The AppHost's variables configure this app, not the shell. Left in, an OpenTelemetry app started in the shell
+    // would export to the dashboard as this resource, and a web app started there would try to take this app's address.
+    private static readonly Dictionary<string, string?>? s_appHostVariables = AppHostVariables();
+
     public static PtyStartInfo StartInfo()
     {
         if (OperatingSystem.IsWindows())
-            return new PtyStartInfo { FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe" };
+        {
+            return new PtyStartInfo
+            {
+                FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+                Environment = s_appHostVariables,
+            };
+        }
 
         // TERM describes the frontend, xterm.js, not the terminal this server was started from.
         var shell = Environment.GetEnvironmentVariable("SHELL") is { Length: > 0 } user ? user : "/bin/sh";
-        return new PtyStartInfo { FileName = shell, Arguments = ["-i"], TerminalName = "xterm-256color" };
+        return new PtyStartInfo { FileName = shell, Arguments = ["-i"], TerminalName = "xterm-256color", Environment = s_appHostVariables };
+    }
+
+    /// <summary>An overlay that removes the variables the AppHost set, or null when there are none.</summary>
+    private static Dictionary<string, string?>? AppHostVariables()
+    {
+        var removed = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            if (entry.Key is string key
+                && (key.StartsWith("OTEL_", StringComparison.OrdinalIgnoreCase) || key is "ASPNETCORE_URLS" or "MINIPTY_TERMINAL_TOKEN"))
+            {
+                removed[key] = null;
+            }
+        }
+
+        return removed.Count == 0 ? null : removed;
     }
 }
 

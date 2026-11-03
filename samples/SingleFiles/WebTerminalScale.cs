@@ -481,7 +481,7 @@ static class Bench
             var kbPerSession = (stats.WorkingSet - baseline.WorkingSet) / 1024.0 / sessions;
             var startMs = (stats.MiniPty - previous.MiniPty).AverageStartMs;
             Console.WriteLine($"| {sessions} | {stats.Threads} | {stats.PoolThreads} | {otherThreads / (double)sessions:F2} | {Mb(stats.WorkingSet)} | " +
-                $"{kbPerSession:F0} | {Mb(stats.PrivateBytes)} | {stats.Handles} | {startMs:F1} | {Percentile(echo, 0.50):F2} | {Percentile(echo, 0.99):F2} |");
+                $"{kbPerSession:F0} | {Mb(stats.PrivateBytes)} | {stats.Handles} | {(double.IsNaN(startMs) ? "-" : startMs.ToString("F1"))} | {Percentile(echo, 0.50):F2} | {Percentile(echo, 0.99):F2} |");
             previous = stats;
         }
 
@@ -1101,9 +1101,8 @@ setInterval(refresh, 1000);
 /// <para>
 /// A <see cref="MeterListener"/> gets each measurement on the thread that records it: MiniPty's I/O thread for output
 /// bytes and stalls, the starting thread for a start. Its callbacks therefore only add to interlocked totals, and
-/// <c>/stats</c> reads them when asked. Each instrument's total
-/// is the state the listener hands back with every measurement, so a measurement costs a cast and three interlocked
-/// operations, with no lookup by name.
+/// <c>/stats</c> reads them when asked. Each instrument's total is the state the listener hands back with every
+/// measurement, so a measurement costs a cast, two interlocked adds, and a volatile write, with no lookup by name.
 /// </para>
 /// <para>
 /// An application that already exports metrics with OpenTelemetry adds <c>AddMeter("MiniPty")</c> instead.

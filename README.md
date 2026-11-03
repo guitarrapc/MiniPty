@@ -20,8 +20,8 @@ I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries d
 - Idle sessions cost nothing: an idle session holds no thread and no output buffer ([how each OS reads output](#backends))
 - Bounded memory with backpressure: output goes into a 16 KiB buffer per session, and a slow consumer pauses the child instead of growing memory
 - Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call
-- Signals the right process: on Linux 5.2 and later, signals go through a pidfd that `clone` returns with the child, so a reused PID is never hit
-- Observable: a `MiniPty` meter reports open sessions, start time, output bytes, and stalls, at no cost while nobody listens ([Metrics](#metrics))
+- Signals the right process: on Linux 5.2 and later, `clone` returns a pidfd with the child, and signals go through it rather than through a PID that another process can reuse ([details](.github/docs/references/pty_crossplatform.md#child-exit-observation))
+- Observable: a `MiniPty` meter reports open sessions, start time, output bytes, and stalls, and takes no timestamps and allocates nothing while nobody listens ([Metrics](#metrics))
 
 **Not supported**
 
@@ -318,7 +318,9 @@ await using var session = Pty.Start(new PtyStartInfo
 
 ### Environment for shared hosts
 
-A web host's environment holds connection strings and cloud credentials that its shells must not see. `InheritEnvironment = false` starts the child from the minimum it needs (`SystemRoot` on Windows, nothing on Unix besides `TERM`), so a variable reaches it only when `Environment` names it. Pass what your shells need yourself ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
+A web host's environment holds connection strings and cloud credentials that its shells should not be handed. `InheritEnvironment = false` starts the child from the minimum it needs (`SystemRoot` on Windows, nothing on Unix besides `TERM`), so a variable reaches the child's environment only when `Environment` names it. Pass what your shells need yourself ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
+
+It is not isolation. A child that runs as the same user can still read your process's environment from the operating system, for example from `/proc/<pid>/environ` on Linux. Run shells for untrusted users as another user or in a container.
 
 ```csharp
 await using var session = Pty.Start(new PtyStartInfo
@@ -336,7 +338,7 @@ await using var session = Pty.Start(new PtyStartInfo
 
 ### Metrics
 
-MiniPty reports what a host pays on the output path on a meter named `MiniPty`: open sessions, start time and failures, output bytes, stalls on a full output buffer, and (Unix) a consumer's native waits for output. Nothing is measured, timed, or allocated while nobody listens ([Metrics](.github/docs/specs/core_session.md#metrics)).
+MiniPty reports what a host pays on the output path on a meter named `MiniPty`: open sessions, start time and failures, output bytes, stalls on a full output buffer, and (Unix) a consumer's native waits for output. While nobody listens, MiniPty only keeps the count of open sessions: it takes no timestamps and allocates nothing ([Metrics](.github/docs/specs/core_session.md#metrics)).
 
 With OpenTelemetry, add the meter; [AspireTerminal](samples/AspireTerminal) exports it this way to the Aspire dashboard:
 
