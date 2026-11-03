@@ -1,7 +1,7 @@
 #:sdk Aspire.AppHost.Sdk@13.6.4
 
-// AspireTerminal: a shell in the browser (terminal.cs) under an Aspire AppHost, so the Aspire dashboard charts MiniPty's
-// meter: open sessions, start time and failures, output read, and stalls on a full output buffer.
+// AspireTerminal: a shell in the browser (terminal.cs) under an Aspire AppHost, so the Aspire dashboard charts
+// MiniPty's meter: open sessions, start time and failures, output read, and stalls on a full output buffer.
 //
 //   dotnet run samples/AspireTerminal/apphost.cs
 //

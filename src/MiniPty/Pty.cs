@@ -26,8 +26,6 @@ public static class Pty
 {
     /// <summary>
     /// The first Windows version with ConPTY: Windows 10 version 1809 and Windows Server 2019 (build 17763).
-    /// .NET also runs on earlier builds, such as Windows 10 1607 and Windows Server 2016, where
-    /// <c>CreatePseudoConsole</c> does not exist.
     /// </summary>
     private static readonly Version MinimumWindowsVersion = new(10, 0, 17763);
 
@@ -36,13 +34,11 @@ public static class Pty
     /// </summary>
     /// <value>
     /// <see langword="true"/> on Windows 10 version 1809 (build 17763) or later, Windows Server 2019 or later, Linux,
-    /// macOS, and FreeBSD; otherwise <see langword="false"/>.
+    /// macOS, and FreeBSD. Otherwise <see langword="false"/>.
     /// </value>
     /// <remarks>
     /// <para>
-    /// On Windows this checks the build, because ConPTY first shipped in build 17763 and .NET also runs on earlier
-    /// builds. An out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>) does not change the answer: whether one runs on
-    /// an earlier build is not verified.
+    /// An out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>) does not change the answer.
     /// </para>
     /// <para>
     /// FreeBSD support is experimental: it is not tested, and the package ships no FreeBSD native library, so
@@ -55,44 +51,41 @@ public static class Pty
             ? IsSupportedWindowsVersion(Environment.OSVersion.Version)
             : OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsFreeBSD();
 
-    /// <summary>Whether a Windows version has ConPTY. Separate from <see cref="IsSupported"/> so tests can pin the build.</summary>
+    /// <summary>
+    /// Whether a Windows version has ConPTY. Separate from <see cref="IsSupported"/> so tests can pin the build.
+    /// </summary>
     internal static bool IsSupportedWindowsVersion(Version version) => version >= MinimumWindowsVersion;
 
     /// <summary>
     /// Spawns a child process attached to a new pseudo-terminal.
     /// </summary>
     /// <param name="startInfo">Executable, arguments, working directory, and initial terminal size.</param>
-    /// <returns>A <see cref="PtySession"/> that owns the child process and PTY handles. Does not wait for exit.</returns>
+    /// <returns>
+    /// A <see cref="PtySession"/> that owns the child process and PTY handles. Does not wait for exit.
+    /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="startInfo"/> is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentException">
-    /// Both <see cref="PtyStartInfo.CommandLine"/> and <see cref="PtyStartInfo.Arguments"/> are set. On every platform,
+    /// Both <see cref="PtyStartInfo.CommandLine"/> and <see cref="PtyStartInfo.Arguments"/> are set.
     /// <see cref="PtyStartInfo.FileName"/>, an element of <see cref="PtyStartInfo.Arguments"/>, or
-    /// <see cref="PtyStartInfo.WorkingDirectory"/> contains a NUL. On Windows, also when
-    /// <see cref="PtyStartInfo.CommandLine"/> contains a NUL, and for a batch file started without a raw
-    /// <see cref="PtyStartInfo.CommandLine"/>: when its name contains a quote, a carriage return, a line feed, or a
-    /// NUL, when one of its arguments contains a carriage return, a line feed, or a NUL, or when its <c>cmd.exe</c>
-    /// command line would exceed 8191 characters.
+    /// <see cref="PtyStartInfo.WorkingDirectory"/> contains a NUL, or on Windows <see cref="PtyStartInfo.CommandLine"/>
+    /// does. On Windows, a batch file started without a raw <see cref="PtyStartInfo.CommandLine"/> has a carriage
+    /// return or a line feed in its name or an argument, a quote in its name, or a <c>cmd.exe</c> command line over
+    /// 8191 characters. See Batch Files (Windows), <c>.github/docs/specs/core_session.md</c>.
     /// </exception>
     /// <exception cref="PlatformNotSupportedException">
-    /// The current operating system is not supported (<see cref="IsSupported"/> is <see langword="false"/>), including
-    /// Windows builds before Windows 10 version 1809, which have no ConPTY. Also when
+    /// <see cref="IsSupported"/> is <see langword="false"/>, as on Windows before Windows 10 version 1809. Also when
     /// <see cref="PtyStartInfo.CommandLine"/> is not <see langword="null"/> on an operating system other than Windows,
-    /// even when it is empty.
+    /// even when it is empty or contains a NUL.
     /// </exception>
     /// <exception cref="System.ComponentModel.Win32Exception">
-    /// Windows: process or ConPTY creation failed. MiniPty checks some files itself before anything is created, and
-    /// fails there when no file of the name is found (<c>ERROR_FILE_NOT_FOUND</c>) or a directory of the name is found
-    /// first (<c>ERROR_ACCESS_DENIED</c>). It checks a batch file started without a raw
-    /// <see cref="PtyStartInfo.CommandLine"/>, a program whose name is searched for when
-    /// <see cref="PtyStartInfo.Environment"/> sets or removes <c>PATH</c> or
-    /// <see cref="PtyStartInfo.InheritEnvironment"/> is <see langword="false"/>
-    /// (see <see cref="PtyStartInfo.FileName"/>), and a rooted or dot-relative program path of 260 characters
-    /// (<c>MAX_PATH</c>) or more. It also opens such a batch file, which fails there when it cannot be opened, with the
-    /// error <c>CreateProcess</c> would report, or when it is empty (<c>ERROR_BAD_EXE_FORMAT</c>).
-    /// Unix: the child could not enter <see cref="PtyStartInfo.WorkingDirectory"/> or execute the program, for example
-    /// because it does not exist (<c>ENOENT</c>) or may not be executed (<c>EACCES</c>).
-    /// <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is the <c>errno</c>. The child has already
-    /// been reaped, and nothing the start created remains.
+    /// The program cannot be executed, or <see cref="PtyStartInfo.WorkingDirectory"/> cannot be entered. On Windows,
+    /// also when ConPTY or the process cannot be created. When MiniPty looks a name up itself and finds no file, or a
+    /// directory first, the start fails before anything is created, with <c>ERROR_FILE_NOT_FOUND</c> or
+    /// <c>ERROR_ACCESS_DENIED</c>. A batch file that MiniPty cannot open, or an empty one, fails there too, with the
+    /// error <c>CreateProcess</c> would report for it. Program Lookup (Windows) and Batch Files (Windows) in
+    /// <c>.github/docs/specs/core_session.md</c> say which names MiniPty looks up. On Unix,
+    /// <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is the <c>errno</c>, such as <c>ENOENT</c> or
+    /// <c>EACCES</c>, and the child has already been reaped, so nothing the start created remains.
     /// </exception>
     /// <exception cref="IOException">
     /// Unix: the pseudo-terminal could not be opened or set up, or the child could not be started for a reason other

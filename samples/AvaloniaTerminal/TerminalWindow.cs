@@ -111,11 +111,11 @@ internal sealed class TerminalWindow : Window
     }
 
     /// <summary>
-    /// What MiniPty measured for this window's session: how long the start took, how much output was read, and how often
-    /// and for how long reading stood still because the output buffer was full. The buffer fills when the screen falls
-    /// behind a flood (<c>seq 1 2000000</c>, <c>dir /s C:\Windows</c>), and the child waits meanwhile: that is
-    /// backpressure, not lost output. A consumer on the UI thread never waits for output in native code, so the
-    /// consumer-wait instrument stays at 0 here and is left out.
+    /// What MiniPty measured for this window's session: how long the start took, how much output was read, and how
+    /// often and for how long reading stood still because the output buffer was full. The buffer fills when the screen
+    /// falls behind a flood (<c>seq 1 2000000</c>, <c>dir /s C:\Windows</c>), and the child waits meanwhile: that is
+    /// backpressure, not lost output. The consumer-wait instrument stays at 0 for a consumer on the UI thread, so it is
+    /// left out.
     /// </summary>
     private string MetricsText()
     {
@@ -140,7 +140,8 @@ internal sealed class TerminalWindow : Window
         _statusCommand = startInfo.Arguments.Count == 0 ? startInfo.FileName : startInfo.FileName + " " + string.Join(' ', startInfo.Arguments);
         _statusState = "running";
         UpdateStatus();
-        // The metrics change while output flows, which raises no event of its own, so the status line reads them once a second.
+        // The metrics change while output flows, which raises no event of its own, so the status line reads them
+        // once a second.
         _metricsTimer = new Avalonia.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _metricsTimer.Tick += (_, _) => UpdateStatus();
         _metricsTimer.Start();

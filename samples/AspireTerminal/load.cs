@@ -4,17 +4,13 @@
 #:property ImplicitUsings=enable
 #:property PublishAot=false
 
-// AspireTerminal's load: browser-like clients of terminal.cs that make the dashboard's MiniPty charts move without anyone
-// at the keyboard. The AppHost starts it when you press Start on the "load" resource, and Stop ends it.
+// AspireTerminal's load: browser-like clients of terminal.cs that make the dashboard's MiniPty charts move without
+// anyone at the keyboard. The AppHost starts it when you press Start on the "load" resource, and Stop ends it.
 //
-// Each round opens LOAD_SESSIONS idle shells (minipty.session.active and minipty.session.start.duration), floods one more
-// session with LOAD_FLOOD_BYTES read by a client that acknowledges slowly (minipty.output.bytes, and
-// minipty.output.stall.duration), closes them all, and rests. The slow client is what a browser tab that cannot draw
-// fast enough looks like to the server: the bridge stops delivering once 384 KiB are unacknowledged, MiniPty's output
-// buffer fills, and reading stops, which blocks the shell until the client catches up. Nothing is lost while the shell
-// runs. Once it has exited and the bridge has sent the rest of the output, the exit message, and its close, the bridge
-// waits only its CloseTimeout, 5 s by default, for the client to close. A client still reading then, as this one is
-// with a long LOAD_ACK_DELAY_MS, loses what it has not read.
+// Each round opens LOAD_SESSIONS idle shells (minipty.session.active and minipty.session.start.duration), floods one
+// more session with LOAD_FLOOD_BYTES read by a client that acknowledges LOAD_ACK_DELAY_MS late (minipty.output.bytes
+// and minipty.output.stall.duration), closes them all, and rests. The slow client is what a browser tab that cannot
+// draw fast enough looks like to the server.
 //
 // TERMINAL_URL and MINIPTY_TERMINAL_TOKEN come from the AppHost.
 
@@ -29,7 +25,7 @@ var token = Environment.GetEnvironmentVariable("MINIPTY_TERMINAL_TOKEN")
 var sessions = EnvInt("LOAD_SESSIONS", 8);
 var floodBytes = EnvInt("LOAD_FLOOD_BYTES", 4 * 1024 * 1024);
 var ackDelay = TimeSpan.FromMilliseconds(EnvInt("LOAD_ACK_DELAY_MS", 100));
-// The AppHost passes the endpoint as http://; ClientWebSocket takes ws:// only.
+// The AppHost passes the endpoint as http://, which ClientWebSocket does not take.
 var endpoint = new UriBuilder(terminal) { Scheme = terminal.Scheme == Uri.UriSchemeHttps ? "wss" : "ws", Path = "/ws" }.Uri;
 
 using var stop = new CancellationTokenSource();
@@ -98,7 +94,7 @@ return 0;
 static int EnvInt(string name, int fallback) =>
     int.TryParse(Environment.GetEnvironmentVariable(name), out var value) && value > 0 ? value : fallback;
 
-/// <summary>The WebSocket a browser tab would open: this run's token offered as a subprotocol, as the page does.</summary>
+/// <summary>The WebSocket a browser tab would open: this run's token offered as a subprotocol.</summary>
 static class Socket
 {
     public static async Task<ClientWebSocket> ConnectAsync(Uri endpoint, string token, CancellationToken cancellationToken)
@@ -120,7 +116,9 @@ static class Socket
         SendTextAsync(socket, $$"""{"type":"ack","bytes":{{bytes}}}""", cancellationToken);
 }
 
-/// <summary>An open tab nobody types into: it acknowledges whatever the shell prints at once, so it never holds output back.</summary>
+/// <summary>
+/// An open tab nobody types into: it acknowledges whatever the shell prints at once, so it never holds output back.
+/// </summary>
 sealed class IdleClient : IAsyncDisposable
 {
     private readonly ClientWebSocket _socket;
@@ -219,11 +217,9 @@ static class Flood
         }
         catch (WebSocketException)
         {
-            // The connection ended before this client read the bridge's close. After the shell exits, the bridge sends
-            // the rest of the output, which it still holds back while 384 KiB are unacknowledged, then the exit message
-            // and its close. It then waits its CloseTimeout, 5 s by default, for this client to close, and aborts the
-            // connection if it has not. With a long LOAD_ACK_DELAY_MS this client is still reading the last output
-            // then. What was read still counts.
+            // The connection ended before this client read the bridge's close. Once the bridge has sent the rest of the
+            // output and its close, it waits only its CloseTimeout for this client to close, and with a long
+            // LOAD_ACK_DELAY_MS this client is still reading then. What was read still counts.
         }
 
         return (bytes, acks, started.Elapsed, exited);
@@ -257,10 +253,9 @@ static class FloodFile
     }
 
     /// <summary>
-    /// Deletes the files of runs that ended without their cleanup, such as a run killed by the orchestrator. A file whose
-    /// process ID is in use stays: it may belong to a concurrent run, or to an ended one whose ID another process now
-    /// has, and a later run deletes it once the ID is free. One named by this process's ID is a leftover of an earlier
-    /// run that had the same ID.
+    /// Deletes the files of runs that ended without their cleanup, such as a run killed by the orchestrator. A file
+    /// whose process ID is in use stays, and a later run deletes it once the ID is free. One named by this process's ID
+    /// is a leftover of an earlier run that had the same ID.
     /// </summary>
     private static void DeleteLeftovers()
     {

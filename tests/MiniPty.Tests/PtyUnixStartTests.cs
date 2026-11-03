@@ -5,10 +5,9 @@ using System.Globalization;
 namespace MiniPty.Tests;
 
 /// <summary>
-/// How a Unix session's child starts. Linux starts it with <c>clone(CLONE_VM | CLONE_VFORK)</c> in the host's memory
-/// rather than with <c>forkpty</c>, so these pin what the child must still get: a session of its own on the session's
-/// terminal, default signal handling with the calling thread's mask, a failure report of its own, and no terminal
-/// descriptor reaching any other process. Tests that read <c>/proc</c> run on Linux only.
+/// How a Unix session's child starts: a session of its own on the session's terminal, default signal handling with the
+/// calling thread's mask, a failure report of its own, and no terminal descriptor reaching any other process. Tests
+/// that read <c>/proc</c> run on Linux only.
 /// </summary>
 public sealed class PtyUnixStartTests
 {
@@ -21,10 +20,8 @@ public sealed class PtyUnixStartTests
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// The child leads a new session and its own process group, and the session's terminal is its controlling
-    /// terminal with that group in the foreground: what a shell needs for job control, Ctrl+C, and
-    /// <see cref="PtySession.ActiveProcessName"/>. The fields come from <c>/proc/&lt;pid&gt;/stat</c> after the
-    /// command name: state, ppid, pgrp, session, tty_nr, tpgid.
+    /// The fields come from <c>/proc/&lt;pid&gt;/stat</c> after the command name: state, ppid, pgrp, session, tty_nr,
+    /// tpgid.
     /// </summary>
     [Test]
     public async Task TheChildLeadsASessionOnTheSessionsTerminal()
@@ -49,12 +46,9 @@ public sealed class PtyUnixStartTests
     }
 
     /// <summary>
-    /// The child starts with every signal at its default action, and with the signal mask of the thread that called
-    /// <see cref="Pty.Start"/>. The .NET host ignores <c>SIGPIPE</c>, and a child that kept that would not end when it
-    /// wrote to a closed pipe. The start blocks every signal while the child runs in the host's memory, and the child
-    /// must exec with the caller's mask instead. .NET threads block nothing, and a child that dropped the caller's mask
-    /// would match an empty one, so the calling thread blocks <c>SIGRTMAX</c> first. <c>cat</c> changes neither, so
-    /// its status shows what the start gave it.
+    /// The .NET host ignores <c>SIGPIPE</c>, and its threads block nothing. A child that dropped the caller's mask
+    /// would then match an empty one, so the calling thread blocks <c>SIGRTMAX</c> first. <c>cat</c> changes neither
+    /// its signal handling nor its mask, so its status shows what the start gave it.
     /// </summary>
     [Test]
     public async Task TheChildStartsWithDefaultSignalHandlingAndTheCallersMask()
@@ -66,9 +60,8 @@ public sealed class PtyUnixStartTests
         await Assert.That(hostIgnored & SigpipeBit).IsEqualTo(SigpipeBit).Because("the .NET host ignores SIGPIPE");
 
         // A thread of its own, not the test's, which goes back to the thread pool. Threads created on it meanwhile keep
-        // the block after it ends, such as the child watcher on the process's first start, or a pool worker. So the
-        // signal is SIGRTMAX, which no test sends and PtySignal cannot name. Pty.Start is synchronous, so nothing runs
-        // between the read of the caller's mask and the start.
+        // the block after it ends, so the signal is SIGRTMAX, which no test sends and PtySignal cannot name. Pty.Start
+        // is synchronous, so nothing runs between the read of the caller's mask and the start.
         ulong callerBlocked = 0;
         string[] lines = [];
         Exception? failure = null;
@@ -101,10 +94,8 @@ public sealed class PtyUnixStartTests
     }
 
     /// <summary>
-    /// A process the host starts on another thread while a session starts gets none of the session's terminal
-    /// descriptors. Both ends are opened close-on-exec before the child exists, so a process started elsewhere at any
-    /// moment of the start inherits neither. Four threads start probes around every start. Each probe lists the
-    /// terminals among its descriptors above stdio, which must be what a probe started before any session found.
+    /// Four threads start probes around every start. Each probe lists the terminals among its descriptors above stdio,
+    /// which must be what a probe started before any session found.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -156,7 +147,7 @@ public sealed class PtyUnixStartTests
             .Because($"{leaks.Count} of {probes} probes found terminal descriptors [{string.Join("], [", leaks)}] where the first found [{baseline}]");
 
         // The descriptors above stdio that are terminals, in a process started with Process, as the host's other code
-        // starts processes. The probe reads no input, and its output is a pipe.
+        // starts processes.
         static string RunProbe()
         {
             using var probe = Process.Start(new ProcessStartInfo("sh", ["-c", "i=3; while [ $i -lt 1024 ]; do if [ -t $i ]; then printf '%s ' $i; fi; i=$((i+1)); done"])
@@ -171,9 +162,7 @@ public sealed class PtyUnixStartTests
     }
 
     /// <summary>
-    /// Starts that fail at the same time each report their own failure. A Linux child reports in a record on its own
-    /// start's stack, a macOS or FreeBSD child on a pipe of its own start, so no start sees another's stage or error. A
-    /// missing working directory fails at <c>chdir</c> and a missing program at exec, both with <c>ENOENT</c>, which
+    /// A missing working directory fails at <c>chdir</c> and a missing program at exec, both with <c>ENOENT</c>, which
     /// only the stage tells apart. Starts that succeed run between them.
     /// </summary>
     [Test]
@@ -262,7 +251,9 @@ public sealed class PtyUnixStartTests
     [System.Runtime.InteropServices.DllImport("libc")]
     private static extern int pthread_sigmask(int how, ulong[] set, ulong[]? oldSet);
 
-    /// <summary>A signal mask from a <c>/proc</c> status file: the hexadecimal value of the line named <paramref name="name"/>.</summary>
+    /// <summary>
+    /// A signal mask from a <c>/proc</c> status file: the hexadecimal value of the line named <paramref name="name"/>.
+    /// </summary>
     private static ulong StatusMask(string[] lines, string name)
     {
         foreach (var line in lines)

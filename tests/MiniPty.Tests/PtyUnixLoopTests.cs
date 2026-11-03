@@ -90,9 +90,8 @@ public sealed class PtyUnixLoopTests
     /// </summary>
     /// <remarks>
     /// The failing session is read only once the loop has failed it. The failure is injected only when the loop serves
-    /// the session, and a Unix consumer reads inline, so a consumer reading from the start could take the echo first.
-    /// The loop drops a report of output alone while the consumer holds the producer's turn. The consumer then reads all
-    /// of it and waits, the loop never serves the session again, and the read would wait for good.
+    /// the session, and a Unix consumer reads inline, so a consumer reading from the start could take the echo first
+    /// and then wait for good. See Platform-specific Test Constraints in <c>.github/docs/specs/platform_support.md</c>.
     /// </remarks>
     [Test]
     [NotInParallel]

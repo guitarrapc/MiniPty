@@ -360,8 +360,8 @@ public sealed class PtyEnvironmentTests
     }
 
     /// <summary>
-    /// Removing <c>TERM</c> from the minimum leaves the child nothing. The result must still be an empty block, not null:
-    /// null makes the start hand the child this process's environment.
+    /// Removing <c>TERM</c> from the minimum leaves the child nothing. The result must still be an empty block, not
+    /// null: null makes the start hand the child this process's environment.
     /// </summary>
     [Test]
     public async Task BuildUnix_WithoutInheritanceAndWithoutTermGivesAnEmptyBlock()
@@ -412,10 +412,6 @@ public sealed class PtyEnvironmentTests
         await Assert.That(childPath).IsEqualTo("C:\\tools");
     }
 
-    /// <summary>
-    /// A variable set in the host reaches a child that inherits and not one that does not; the overlay still does, and so
-    /// does the minimum (<c>SystemRoot</c> on Windows, <c>TERM</c> on Unix).
-    /// </summary>
     [Test]
     public async Task AHostVariableReachesOnlyAChildThatInherits()
     {
@@ -454,8 +450,8 @@ public sealed class PtyEnvironmentTests
     }
 
     /// <summary>
-    /// The Windows minimum starts the shells a host runs. Windows PowerShell is the one that needs it: without
-    /// <c>SystemRoot</c> it failed with 8009001d, a cryptographic provider that did not load.
+    /// Of these shells, Windows PowerShell is the one that needs the minimum. It does not start without
+    /// <c>SystemRoot</c>.
     /// </summary>
     [Test]
     public async Task WindowsShellsStartFromTheMinimumEnvironment()

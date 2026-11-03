@@ -10,26 +10,10 @@ namespace MiniPty.Internal;
 /// worker.
 /// </summary>
 /// <remarks>
-/// <para>
-/// A thread-pool wait holds no thread while it waits, unlike threads that each wait on 63 handles with
-/// <c>WaitForMultipleObjects</c>. Windows does not document that, so <c>PtyScaleTests</c> checks it: a pool that waited
-/// on threads of its own would add threads as the waits grow. The measurements are in pty_crossplatform.md, under Child
-/// exit observation.
-/// </para>
-/// <para>
-/// The callback runs on a worker of the process's native thread pool, not on .NET's. It only records exit
-/// (<see cref="IWindowsExitObserver"/>), so it holds that worker for microseconds.
-/// </para>
-/// <para>
 /// Each watched child is tracked through a duplicate of its process handle that the watcher owns and closes when the
-/// child exits. The session can therefore close its own handle at any time without unregistering first: closing a
-/// handle that a wait is pending on is undefined behavior, and the duplicate rules that out. A disposed session's child
-/// is killed, so its wait always completes.
-/// </para>
-/// <para>
-/// Registration allocates nothing on the managed heap: the observer travels to the callback as a
-/// <see cref="GCHandle"/> in a two-pointer native block.
-/// </para>
+/// child exits. The session can therefore close its own handle at any time without unregistering first. A disposed
+/// session's child is killed, so its wait always completes. The reasons and measurements are in Child exit
+/// observation, <c>.github/docs/references/pty_crossplatform.md</c>.
 /// </remarks>
 internal static unsafe partial class WindowsExitWatcher
 {

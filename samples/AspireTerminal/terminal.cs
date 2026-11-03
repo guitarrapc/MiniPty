@@ -30,8 +30,7 @@ if (!Pty.IsSupported)
     return 1;
 }
 
-// The AppHost passes a 64-character token. ASPNETCORE_URLS cannot tell whether the app runs under the AppHost, since
-// other launchers set it too.
+// The AppHost passes a 64-character token.
 var givenToken = Environment.GetEnvironmentVariable("MINIPTY_TERMINAL_TOKEN");
 var underAspire = givenToken is { Length: 64 };
 var token = underAspire ? givenToken! : LocalAccess.CreateToken();
@@ -65,7 +64,7 @@ if (!underAspire)
 await app.RunAsync();
 return 0;
 
-// One shell per WebSocket. The request's abort token stops the bridge, which ends the shell, when the browser goes away.
+// One shell per WebSocket. The request's abort token stops the bridge when the browser goes away.
 static async Task HandleTerminalAsync(HttpContext context, string token)
 {
     if (!context.WebSockets.IsWebSocketRequest)
@@ -99,17 +98,17 @@ static async Task HandleTerminalAsync(HttpContext context, string token)
     }
     catch (Exception ex)
     {
-        // Anything else, such as a malformed control message or a terminal that failed to start or to be read, is reported
-        // here rather than as an unhandled request. An IOException comes from the terminal, not from the socket.
+        // Anything else, such as a terminal that failed to start, is reported here rather than as an unhandled request.
+        // An IOException comes from the terminal, not from the socket.
         Console.Error.WriteLine($"session failed: {ex}");
     }
 }
 
 static class Shell
 {
-    // The shell gets none of OTEL_*, ASPNETCORE_URLS, and MINIPTY_TERMINAL_TOKEN, whoever set them. Under the AppHost
-    // they configure this app: left in, an OpenTelemetry app started in the shell would export to the dashboard as this
-    // resource, and a web app started there would try to take this app's address.
+    // Under the AppHost the variables AppVariables removes configure this app. Left in, an OpenTelemetry app started in
+    // the shell would export to the dashboard as this resource, and a web app started there would try to take this
+    // app's address.
     private static readonly Dictionary<string, string?>? s_appVariables = AppVariables();
 
     public static PtyStartInfo StartInfo()
@@ -131,8 +130,7 @@ static class Shell
     /// <summary>
     /// An overlay that removes every <c>OTEL_*</c> variable, <c>ASPNETCORE_URLS</c>, and <c>MINIPTY_TERMINAL_TOKEN</c>,
     /// or null when none is set. Names match ignoring case: .NET configuration reads <c>OTEL_*</c> and
-    /// <c>ASPNETCORE_URLS</c> that way on every platform. On Unix, where each spelling is a variable of its own, each
-    /// one is removed.
+    /// <c>ASPNETCORE_URLS</c> that way on every platform.
     /// </summary>
     private static Dictionary<string, string?>? AppVariables()
     {
@@ -153,9 +151,10 @@ static class Shell
 }
 
 /// <summary>
-/// Who may open a shell: a request to this server's own loopback address, from this server's own page or from a client
-/// that is not a browser, that offers this run's token as the subprotocol <c>minipty-token.&lt;hex&gt;</c>. The page reads
-/// the token from its URL fragment, which browsers never send to a server. WebTerminalScale.cs explains each check.
+/// Who may open a shell: a request to this server's own loopback address, from this server's own page or from a
+/// client that is not a browser, that offers this run's token as the subprotocol <c>minipty-token.&lt;hex&gt;</c>. The
+/// page reads the token from its URL fragment, which browsers never send to a server. WebTerminalScale.cs explains
+/// each check.
 /// </summary>
 static class LocalAccess
 {
@@ -165,7 +164,9 @@ static class LocalAccess
 
     public static string CreateToken() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
 
-    /// <summary>Returns why the request is refused, or null when it may open a shell. The reason never holds the token.</summary>
+    /// <summary>
+    /// Returns why the request is refused, or null when it may open a shell. The reason never holds the token.
+    /// </summary>
     public static string? Check(string? host, string? origin, string? protocols, int port, string token)
     {
         if (!IsLoopbackHost(host, port))
@@ -211,9 +212,9 @@ static class LocalAccess
 }
 
 /// <summary>
-/// The terminal page: xterm.js speaking the <c>PtyWebSocketBridge</c> protocol (binary frames for data, JSON text frames for
-/// resize, ack, and exit). It acknowledges output as xterm.js renders it, so a flood the browser cannot draw fast enough
-/// fills the session's output buffer, and the dashboard shows the stalls.
+/// The terminal page: xterm.js speaking the <c>PtyWebSocketBridge</c> protocol (binary frames for data, JSON text
+/// frames for resize, ack, and exit). It acknowledges output as xterm.js renders it, so a flood the browser cannot draw
+/// fast enough fills the session's output buffer, and the dashboard shows the stalls.
 /// </summary>
 static class Page
 {

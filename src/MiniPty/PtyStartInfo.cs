@@ -10,47 +10,33 @@ public sealed record PtyStartInfo
     /// </summary>
     /// <remarks>
     /// <para>
-    /// On Windows, a batch file (<c>.bat</c> or <c>.cmd</c>, judged by the name Windows opens, after <c>.</c> and
-    /// <c>..</c> segments and trailing spaces and dots) runs through the system directory's <c>cmd.exe</c> with AutoRun
-    /// commands skipped, delayed expansion off, and command extensions on (<c>/d /v:OFF /e:ON</c>).
-    /// <see cref="Arguments"/> are escaped for <c>cmd.exe</c> instead of quoted with the MSVCRT rules, so
-    /// <c>cmd.exe</c> reads each one as data. A script can still run what an argument holds, for example with
-    /// <c>cmd /c %1</c> or <c>echo %~1</c>. The script is looked up as a program name is (see below), and
-    /// <c>cmd.exe</c> receives its full path, so it does not search the child's <see cref="WorkingDirectory"/> for it.
-    /// A file that starts with the <c>MZ</c> header runs as a program, from that same file. Without a raw
-    /// <see cref="CommandLine"/>, a batch file name, and the full path found for it, cannot contain a quote, a carriage
-    /// return, a line feed, or a NUL. With one, <c>CreateProcess</c> starts <c>cmd.exe</c> with its own defaults
-    /// instead.
+    /// On Unix a name without a <c>/</c> is searched for on the child's <c>PATH</c>. On Windows a name that is not
+    /// rooted and does not start with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is searched for in
+    /// <c>CreateProcess</c>'s order, which puts fixed locations such as the system directory before the child's
+    /// <c>PATH</c>. When <see cref="Environment"/> sets or removes <c>PATH</c>, or <see cref="InheritEnvironment"/> is
+    /// <see langword="false"/>, MiniPty makes that search itself and skips the <c>PATH</c> entries that are not fully
+    /// qualified, such as an empty or relative one. A name Windows searches for gets <c>.exe</c> appended when its last
+    /// component has no <c>.</c>, and no other <c>PATHEXT</c> extension is tried, so a batch shim is written as
+    /// <c>npm.cmd</c>, not <c>npm</c>. A batch file started with a raw <see cref="CommandLine"/> is searched for on
+    /// this process's <c>PATH</c> instead. See Program Lookup (Windows), <c>.github/docs/specs/core_session.md</c>.
     /// </para>
     /// <para>
-    /// A name without a root and without a leading <c>.\</c> or <c>..\</c> is searched for. On Unix the child
-    /// resolves it against its own <c>PATH</c>. On Windows <c>CreateProcess</c> searches its fixed locations and this
-    /// process's <c>PATH</c>, never the child's. So when <see cref="Environment"/> sets or removes <c>PATH</c>, or
-    /// <see cref="InheritEnvironment"/> is <see langword="false"/>, MiniPty runs the same search with the child's
-    /// <c>PATH</c> instead and starts the file it finds. <c>.exe</c> is appended when the last path component has no
-    /// <c>.</c>, as <c>CreateProcess</c> does, and a file MiniPty does not find fails <see cref="Pty.Start"/> with
-    /// <see cref="System.ComponentModel.Win32Exception"/> before anything is created. A batch file started with a raw
-    /// <see cref="CommandLine"/> is the exception: it is left to <c>CreateProcess</c>. Only the fully qualified entries
-    /// of the child's <c>PATH</c> are searched: an empty, <c>.</c>, or relative entry would point at this process's
-    /// current directory, which <c>CreateProcess</c> searches through such entries even when
-    /// <c>NoDefaultCurrentDirectoryInExePath</c> is set. No extension from <c>PATHEXT</c> is tried, so a batch shim is
-    /// written with its extension, as <c>npm.cmd</c>, not <c>npm</c>.
+    /// The <c>PATH</c> in <see cref="Environment"/> therefore chooses the program, apart from that batch file. Build it
+    /// only from sources you trust, or pass a full path here to pin the program.
     /// </para>
     /// <para>
-    /// The <c>PATH</c> in <see cref="Environment"/> therefore chooses the program on every platform, apart from a batch
-    /// file started with a raw <see cref="CommandLine"/>. Build it only from sources you trust, as you would the
-    /// program itself, or pass a full path here to pin the program.
+    /// On Windows a name that starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is relative to this
+    /// process's current directory. On Unix a relative name with a <c>/</c> is relative to
+    /// <see cref="WorkingDirectory"/> when it is set. When any part of the name comes from input you do not control,
+    /// resolve it to a full path, check that path against the programs you allow, and pass that path here. See
+    /// Untrusted Program Names and Paths, <c>.github/docs/specs/core_session.md</c>. The name cannot contain a NUL.
     /// </para>
     /// <para>
-    /// A name that starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is relative to this process's current
-    /// directory, which every thread shares, not to <see cref="WorkingDirectory"/>. When any part of the name comes from
-    /// input you do not control, resolve it with <see cref="System.IO.Path.GetFullPath(string)"/> and check the result,
-    /// not the input, against the programs you allow. Windows starts the program that full path names: it resolves
-    /// <c>..</c> and drops trailing dots and spaces as <c>GetFullPath</c> does. A name that starts with <c>\\?\</c> is
-    /// taken without that normalization, by Windows and by <c>GetFullPath</c> alike. A UNC name makes this process
-    /// connect, and authenticate, to that server. This name, <see cref="Arguments"/>, and
-    /// <see cref="WorkingDirectory"/> cannot contain a NUL, which would end the string the operating system reads
-    /// early. <see cref="Pty.Start"/> throws <see cref="ArgumentException"/> for one.
+    /// On Windows a batch file (<c>.bat</c> or <c>.cmd</c>) runs through the system directory's <c>cmd.exe</c> with
+    /// AutoRun commands skipped, delayed expansion off, and command extensions on. <see cref="Arguments"/> are escaped
+    /// so that <c>cmd.exe</c> reads each one as data, but the script can still run what an argument holds, for example
+    /// with <c>cmd /c %1</c>. With a raw <see cref="CommandLine"/>, <c>CreateProcess</c> starts <c>cmd.exe</c> with its
+    /// own defaults instead. See Batch Files (Windows), <c>.github/docs/specs/core_session.md</c>.
     /// </para>
     /// <para>
     /// On Windows a program under a path of 260 characters (<c>MAX_PATH</c>) or more starts only when this process
@@ -95,7 +81,7 @@ public sealed record PtyStartInfo
     /// No quoting or escaping is applied to this value. The caller must follow the parsing rules of the target
     /// executable. For a batch file those are <c>cmd.exe</c>'s rules, and <c>CreateProcess</c> starts <c>cmd.exe</c>
     /// with its defaults, AutoRun commands included. Use <see cref="Arguments"/> to have MiniPty escape for it. It
-    /// cannot contain a NUL, which would end the command line early.
+    /// cannot contain a NUL.
     /// </remarks>
     public string? CommandLine { get; init; }
 
@@ -129,15 +115,14 @@ public sealed record PtyStartInfo
     /// <value>
     /// <see langword="null"/> to leave the environment the child starts from unchanged: the parent environment, or the
     /// minimum when <see cref="InheritEnvironment"/> is <see langword="false"/>. A non-null dictionary overlays that
-    /// environment; null values remove variables and empty strings set empty values on platforms that preserve empty
+    /// environment. Null values remove variables, and empty strings set empty values on platforms that preserve empty
     /// environment variables.
     /// </value>
     /// <remarks>
     /// On Windows, setting or removing <c>PATH</c> here also makes the search for <see cref="FileName"/>, when it is
-    /// searched for, use the child's <c>PATH</c>: MiniPty searches the fixed locations <c>CreateProcess</c> searches,
-    /// then the fully qualified entries of the child's <c>PATH</c>, as on Unix the child searches its own. A batch file
-    /// started with a raw <see cref="CommandLine"/> is the exception. A <c>PATH</c> taken from an untrusted source thus
-    /// chooses the program that starts. See <see cref="FileName"/>.
+    /// searched for, use the child's <c>PATH</c>, and only its fully qualified entries. A batch file started with a
+    /// raw <see cref="CommandLine"/> is the exception. A <c>PATH</c> taken from an untrusted source thus chooses the
+    /// program that starts. See <see cref="FileName"/>.
     /// </remarks>
     public IReadOnlyDictionary<string, string?>? Environment { get; init; }
 
@@ -146,40 +131,27 @@ public sealed record PtyStartInfo
     /// </summary>
     /// <value>
     /// <see langword="true"/> (the default) to start from this process's environment. <see langword="false"/> to start
-    /// from the minimum a child needs to start: on Windows, <c>SystemRoot</c> set to the Windows directory; on Unix,
-    /// nothing. Either way <see cref="Environment"/> is applied on top, and on Unix <c>TERM</c> follows
+    /// from the minimum a child needs to start: <c>SystemRoot</c> set to the Windows directory on Windows, and nothing
+    /// on Unix. Either way <see cref="Environment"/> is applied on top, and on Unix <c>TERM</c> follows
     /// <see cref="TerminalName"/>.
     /// </value>
     /// <remarks>
     /// <para>
     /// Set it to <see langword="false"/> when this process's environment holds what a child should not be handed, such
     /// as a web host's connection strings or cloud credentials. A variable then reaches the child's environment only
-    /// when <see cref="Environment"/> names it, so nothing has to be removed key by key, and a variable added to the host
-    /// later is not passed on.
+    /// when <see cref="Environment"/> names it.
     /// </para>
     /// <para>
     /// It is not isolation. A child that runs as the same user can still read this process's own environment from the
-    /// operating system, for example from <c>/proc/&lt;pid&gt;/environ</c> on Linux. To keep secrets from a child, run it
-    /// as another user or in a container.
+    /// operating system. To keep secrets from a child, run it as another user or in a container.
     /// </para>
     /// <para>
     /// Pass the host variables a child should keep through <see cref="Environment"/>, for example
-    /// <c>["PATH"] = System.Environment.GetEnvironmentVariable("PATH")</c>. What a shell misses without them:
+    /// <c>["PATH"] = System.Environment.GetEnvironmentVariable("PATH")</c>. Without a <c>PATH</c>, MiniPty looks
+    /// <see cref="FileName"/> up on <c>/bin:/usr/bin</c> on Unix. On Windows it looks it up in the fixed locations
+    /// only, such as the system directory, apart from a batch file started with a raw <see cref="CommandLine"/>. The
+    /// other variables a shell misses are in Starting from the minimum, <c>.github/docs/specs/core_session.md</c>.
     /// </para>
-    /// <list type="bullet">
-    /// <item><description>
-    /// <c>PATH</c>: Unix shells use a built-in default, and MiniPty looks <see cref="FileName"/> up on <c>/bin:/usr/bin</c>.
-    /// On Windows MiniPty looks <see cref="FileName"/> up in the fixed locations only, such as the system directory,
-    /// except for a batch file started with a raw <see cref="CommandLine"/>, which <c>CreateProcess</c> looks up on this
-    /// process's <c>PATH</c>. <c>cmd.exe</c> finds an external command by name only in its current directory.
-    /// </description></item>
-    /// <item><description>
-    /// <c>TEMP</c> and <c>TMP</c> on Windows: a program that asks Windows for its temporary directory gets the Windows
-    /// directory, which a standard user cannot write to.
-    /// </description></item>
-    /// <item><description><c>HOME</c> on Unix, <c>USERPROFILE</c> and <c>APPDATA</c> on Windows: where programs keep their settings.</description></item>
-    /// <item><description><c>LANG</c> on Unix: without it programs use the C locale, which does not treat text as UTF-8.</description></item>
-    /// </list>
     /// </remarks>
     public bool InheritEnvironment { get; init; } = true;
 

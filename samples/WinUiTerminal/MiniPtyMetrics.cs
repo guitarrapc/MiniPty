@@ -7,11 +7,10 @@ namespace WinUiTerminal;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A <see cref="MeterListener"/> gets each measurement on the thread that records it: MiniPty's I/O thread for output
-/// bytes and stalls, the starting thread for a start. Its callbacks therefore only add to interlocked totals, and the
-/// window reads them on a timer of its own, on the UI thread. Each instrument's total is the state the listener hands
-/// back with every measurement, so a measurement costs a cast, two interlocked adds, and a volatile write, with no
-/// lookup by name.
+/// A <see cref="MeterListener"/> gets each measurement on the thread that records it, such as MiniPty's I/O thread, so
+/// the callbacks only add to interlocked totals, and the window reads them on a timer of its own. Each instrument's
+/// total is the state the listener hands back with every measurement, so a measurement needs no lookup by name. See
+/// Metrics, <c>.github/docs/specs/core_session.md</c>.
 /// </para>
 /// <para>
 /// An application that already exports metrics with OpenTelemetry adds <c>AddMeter("MiniPty")</c> instead.
@@ -48,7 +47,7 @@ internal sealed class MiniPtyMetrics : IDisposable
                 listener.EnableMeasurementEvents(instrument, total);
         };
         _listener.SetMeasurementEventCallback<long>(static (_, value, _, state) => ((Total)state!).Add(value));
-        // Durations arrive in seconds; the totals keep microseconds, so they stay integers.
+        // Durations arrive in seconds. The totals keep microseconds, so they stay integers.
         _listener.SetMeasurementEventCallback<double>(static (_, seconds, _, state) => ((Total)state!).Add((long)(seconds * 1_000_000)));
         _listener.Start();
     }
@@ -71,7 +70,7 @@ internal sealed class MiniPtyMetrics : IDisposable
 
     public void Dispose() => _listener.Dispose();
 
-    /// <summary>Totals since this listener started; <see cref="StartTime"/> and the other times are summed.</summary>
+    /// <summary>Totals since this listener started. <see cref="StartTime"/> and the other times are summed.</summary>
     internal readonly record struct Snapshot(
         long ActiveSessions,
         long Starts,

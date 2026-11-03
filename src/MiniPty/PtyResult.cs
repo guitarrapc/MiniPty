@@ -8,13 +8,13 @@ namespace MiniPty;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="Output"/> is the canonical raw byte stream from the PTY. Text is not stored as a property;
-/// call <see cref="GetText"/> or <see cref="GetTextString"/> when decoded text is needed.
+/// <see cref="Output"/> is the canonical raw byte stream from the PTY. Text is not stored as a property.
+/// Call <see cref="GetText"/> or <see cref="GetTextString"/> when decoded text is needed.
 /// </para>
 /// <para>
 /// When completion used <see cref="PtyCompleteOptions.DecodeOutput"/> = <see langword="true"/> (default),
 /// <see cref="GetText"/> returns a slice of memory decoded during the pump without extra allocation.
-/// When decoding was skipped, <see cref="GetText"/> decodes on every call — cache the returned
+/// When decoding was skipped, <see cref="GetText"/> decodes on every call. Cache the returned
 /// <see cref="ReadOnlyMemory{Char}"/> locally if you need text more than once.
 /// </para>
 /// </remarks>
@@ -44,8 +44,8 @@ public sealed class PtyResult
     /// child was terminated by a signal.
     /// </summary>
     /// <remarks>
-    /// Same value as <see cref="ExitStatus"/>'s <see cref="PtyExitStatus.ExitCode"/>. A child killed by
-    /// <c>SIGTERM</c> and a child that called <c>exit(143)</c> both report 143; <see cref="ExitStatus"/> tells them apart.
+    /// A child killed by <c>SIGTERM</c> and a child that called <c>exit(143)</c> both report 143.
+    /// <see cref="ExitStatus"/> tells them apart.
     /// </remarks>
     public int ExitCode => ExitStatus.ExitCode;
 

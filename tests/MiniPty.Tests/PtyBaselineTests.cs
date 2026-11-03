@@ -573,11 +573,11 @@ public sealed class PtyBaselineTests
     }
 
     /// <summary>
-    /// A session adds no handle or descriptor that the host's other children would inherit. Every one MiniPty keeps is
-    /// non-inheritable on Windows and close-on-exec on Unix, the PTY master included. On Unix a child the host starts
-    /// itself also finds no terminal descriptor of the session; one it starts while a session starts is probed by
-    /// <see cref="PtyUnixStartTests.ProcessesTheHostStartsDuringAStartGetNoTerminalDescriptor"/>. Not covered: the moment
-    /// inside <c>CreatePseudoConsole</c> when ConPTY briefly holds inheritable pipe ends, too short to hit on purpose.
+    /// A session adds no handle or descriptor that the host's other children would inherit. On Unix a child the host
+    /// starts itself also finds no terminal descriptor of the session. One it starts while a session starts is probed
+    /// by <see cref="PtyUnixStartTests.ProcessesTheHostStartsDuringAStartGetNoTerminalDescriptor"/>. Not covered: the
+    /// moment inside <c>CreatePseudoConsole</c> when ConPTY briefly holds inheritable pipe ends, too short to hit on
+    /// purpose.
     /// </summary>
     [Test]
     [NotInParallel]

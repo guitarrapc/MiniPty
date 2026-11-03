@@ -87,8 +87,8 @@ internal static partial class UnixPtyBackend
             spawnError = ForkPtyExec(&master, &winsize, exec.WorkingDirectory, exec.Executable, exec.Argv, exec.Envp, &pid, &pidfd, &slave, &startStage);
         }
 
-        // Freed as soon as the spawn returns, which is only once the child has exec'd or reported a failure. The Linux
-        // child reads these strings in this process's memory until its exec; posix_spawn on macOS copies them first.
+        // Freed as soon as the spawn returns. A Linux child reads these strings in this process's memory until its
+        // exec, which the spawn waits for. A macOS or FreeBSD child works on its own copy.
         exec.Dispose();
         if (spawnError != 0)
             throw CreateStartException(startInfo, startStage, spawnError);
@@ -121,12 +121,10 @@ internal static partial class UnixPtyBackend
     private const int StartStageExec = 2;
 
     /// <summary>
-    /// The exception for a failed start. A child that could not enter its working directory or exec its program
-    /// reported the <c>errno</c> before exiting, so the start fails as <c>CreateProcess</c> does on Windows and as
-    /// <see cref="System.Diagnostics.Process.Start()"/> does on Unix: a <see cref="System.ComponentModel.Win32Exception"/>
-    /// whose <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is that <c>errno</c>. Anything else stays
-    /// an <see cref="IOException"/>: opening the terminal or starting the child failed, or the Linux child failed to make
-    /// the terminal its own before the exec.
+    /// The exception for a failed start: a <see cref="System.ComponentModel.Win32Exception"/> whose
+    /// <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is the <c>errno</c> a child reported when it
+    /// could not enter its working directory or exec its program, and an <see cref="IOException"/> otherwise. The
+    /// reasons are in Start failure report, <c>.github/docs/references/pty_crossplatform.md</c>.
     /// </summary>
     private static Exception CreateStartException(PtyStartInfo startInfo, int startStage, int error) => startStage switch
     {
@@ -242,7 +240,7 @@ internal static partial class UnixPtyBackend
         // Serializes the child's reap with signal delivery, so Kill can never reach a pid the watcher has
         // already released for reuse.
         private readonly Lock _pidLock = new();
-        // The child's pidfd on Linux, from the spawn, or -1 when there is none. The child's signals go through it, and
+        // The child's pidfd on Linux, or -1 when there is none. The child's signals go through it, and
         // so does its reap where the kernel supports that. The watcher closes it once the child is reaped.
         // Written only by the constructor and, under _pidLock, by ClosePidfd.
         private int _pidfd = -1;

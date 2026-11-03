@@ -11,10 +11,7 @@
 /// </remarks>
 internal static class PtyCompletion
 {
-    /// <returns>
-    /// The child's exit status. The signal is read from the session once the exit wait has completed, because the
-    /// session's allocation-free exit wait carries the exit code alone.
-    /// </returns>
+    /// <returns>The child's exit status.</returns>
     internal static async Task<PtyExitStatus> RunAsync(
         PtySession session,
         PtyCompleteOptions options,

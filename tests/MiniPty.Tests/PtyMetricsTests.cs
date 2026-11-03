@@ -7,8 +7,8 @@ namespace MiniPty.Tests;
 /// MiniPty's meter: each instrument moves when what it measures happens, as a <see cref="MeterListener"/> sees it.
 /// </summary>
 /// <remarks>
-/// Instruments are process-wide, so these tests run alone (<c>[NotInParallel]</c> without a key) and read differences
-/// or their own sessions' measurements, never a total that another test's sessions could share.
+/// Instruments are process-wide, so these tests run alone and read differences or their own sessions' measurements,
+/// never a total that another test's sessions could share.
 /// </remarks>
 [NotInParallel]
 public sealed class PtyMetricsTests
@@ -37,8 +37,7 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// The histograms record seconds, so each must advise ascending boundaries that start below a millisecond. Without
-    /// them an exporter's default boundaries, meant for milliseconds, put every measurement in one bucket.
+    /// The histograms record seconds, so each must advise ascending boundaries that start below a millisecond.
     /// </summary>
     [Test]
     public async Task HistogramsAdviseBucketBoundariesInSeconds()
@@ -126,11 +125,10 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// A flood nobody reads parks the reading on a full ring, with output still to come from the transport. What the
-    /// platform's driver reads after the disposal must not count. On Windows the driver reads then only to let the
-    /// transport end, and only if it reaches the output pipe before the disposal closes it. When the close comes first,
-    /// nothing is read, and the test passes either way.
-    /// <see cref="ReadsPublishedDuringAndAfterTheDisposalAreNotCounted"/> makes those reads every time. On Unix the
+    /// A flood nobody reads parks the reading on a full ring, with output still to come from the transport. On Windows
+    /// the driver reads more of it during the backend's disposal, and only if it reaches the output pipe before the
+    /// disposal closes it. When the close comes first, nothing is read, and the test passes either way.
+    /// <see cref="ReadsPublishedDuringAndAfterTheDisposalAreNotCounted"/> makes that read every time. On Unix the
     /// reads after the disposal are discarded without being published.
     /// </summary>
     [Test]
@@ -154,11 +152,10 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// What the driver publishes once the disposal has begun is not counted: a read during the backend's disposal,
-    /// which the Windows driver can make while the pseudo-console closes, and a read after. The test is the session's
-    /// output driver and publishes at both points, so both reads happen whatever the timing. The backend also records
-    /// whether the session marked itself disposed before disposing it, which is what keeps the first read from
-    /// counting.
+    /// The test drives the session's output, so each read happens whatever the timing: one before
+    /// <see cref="PtySession.Dispose"/>, which counts, and one during the backend's disposal and one after it, which do
+    /// not. The backend records whether the session marked itself disposed before disposing it, since that mark is what
+    /// keeps the read during the backend's disposal from counting.
     /// </summary>
     [Test]
     public async Task ReadsPublishedDuringAndAfterTheDisposalAreNotCounted()
@@ -182,7 +179,7 @@ public sealed class PtyMetricsTests
 
     /// <summary>
     /// A host's listener that throws on the start's duration makes <see cref="Pty.Start"/> throw after the session
-    /// exists. The start must dispose that session, since no caller holds it.
+    /// exists.
     /// </summary>
     [Test]
     public async Task AListenerThatThrowsOnTheStartLeavesNoSessionOpen()
@@ -207,9 +204,9 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// A start that fails while the session is built, after its child exists, is counted with the exception's type and
-    /// is not timed. The open-session count moves only once a session is built, so it stays where it was. That such a
-    /// start also ends its child is checked by <c>PtyStartFaultTests</c>.
+    /// The injected fault fails the start while the session is built, after its child exists. The open-session count
+    /// moves only once a session is built. That such a start also ends its child is checked by
+    /// <c>PtyStartFaultTests</c>.
     /// </summary>
     [Test]
     public async Task AStartThatFailsInsideTheSessionIsCountedAsAFailureOnly()
@@ -239,8 +236,8 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// A flood nobody reads fills the ring and stops reading, which blocks the child. The stop is recorded with its
-    /// length once a reader frees space.
+    /// A flood nobody reads fills the ring and stops reading. The stop is recorded with its length once a reader frees
+    /// space.
     /// </summary>
     [Test]
     public async Task AStallOnAFullRingIsTimed()
@@ -261,8 +258,8 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// A plain consumer of a Unix flood waits for the master on its own thread, each wait bounded at 200 μs on Linux and
-    /// 1 ms on macOS (<c>PtyUnixLoopTests.AConsumerWaitsForTheMasterOnItsOwnThread</c>). Windows has no such wait.
+    /// A plain consumer of a Unix flood waits for the master on its own thread
+    /// (<c>PtyUnixLoopTests.AConsumerWaitsForTheMasterOnItsOwnThread</c>). Windows has no such wait.
     /// </summary>
     [Test]
     public async Task AConsumersWaitInNativeCodeIsTimedOnUnix()
@@ -286,8 +283,8 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// The recording calls on the output path allocate nothing, also with a listener: no measurement there carries a tag
-    /// to box. Without a listener they take no timestamp either.
+    /// The recording calls on the output path allocate nothing, also with a listener: no measurement there carries a
+    /// tag to box. Without a listener they take no timestamp either.
     /// </summary>
     [Test]
     public async Task RecordingAllocatesNothingWithOrWithoutAListener()
@@ -314,8 +311,7 @@ public sealed class PtyMetricsTests
         await Assert.That(listenedTimestamps).IsNotEqualTo(0L);
         await Assert.That(listenedAllocated).IsEqualTo(0L);
 
-        // Each recording call on the output path, and the one for the start's duration, once. Returns the timestamps
-        // taken, OR-ed together.
+        // Each recording call on the output path, and the one for the start's duration, once.
         static long RecordAll()
         {
             MiniPty.Internal.PtyMetrics.RecordOutputRead(4096);
@@ -407,8 +403,8 @@ public sealed class PtyMetricsTests
 
     /// <summary>Listens to this load's <c>MiniPty</c> meter and keeps every measurement it reports.</summary>
     /// <remarks>
-    /// The meter is matched by identity, not by name: <see cref="PtyLoadContextTests"/> loads MiniPty a second time, and
-    /// that load has a meter named <c>MiniPty</c> of its own, which counts none of these tests' sessions.
+    /// The meter is matched by identity, not by name: <see cref="PtyLoadContextTests"/> loads MiniPty a second time,
+    /// and that load has a meter named <c>MiniPty</c> of its own.
     /// </remarks>
     private sealed class MetricsRecorder : IDisposable
     {

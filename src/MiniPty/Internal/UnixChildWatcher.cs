@@ -15,63 +15,28 @@ internal static partial class UnixPtyBackend
     internal static void StopCoalesceTicks() => ChildWatcher.StopCoalesceTicks();
 
     /// <summary>
-    /// Observer of the exits of every child this load of MiniPty starts, and the I/O loop of every session: one dedicated
-    /// background thread for every Unix session, so neither observing exit nor reading output adds a per-session thread,
-    /// and neither occupies a thread-pool worker.
+    /// Observer of the exits of every child this load of MiniPty starts, and the I/O loop of every session, on one
+    /// dedicated background thread.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>I/O loop.</b> Each session's non-blocking master is registered on the same epoll (Linux) or kqueue (macOS,
-    /// FreeBSD) that reports the children's exits, with the interest its state needs: output while its ring has room,
-    /// input while some is queued (<see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). A registration reports once and is
-    /// armed again after each pass, by the pass's next wait in one system call (<see cref="SetInterestOnLoop"/>), and a
-    /// consumer that reads the master on its own thread arms it only when it is about to wait, so a flood that the
-    /// consumer keeps up with wakes this thread about once per wait. On macOS and Linux such a consumer also waits for the
-    /// master on its own thread while the child streams (<c>UnixPtyBackendInstance.TryReadInline</c>), so a flood wakes
-    /// this thread only for its millisecond check of inline readers. kqueue keeps the
-    /// two interests as two filters of the master, and the native wait joins their events into one report per master, as
-    /// epoll gives. A master's token names its slot and the slot's
-    /// generation, so a report that arrives after the session's registration was removed never reaches the session that
-    /// took the slot next. Each pass reads every reporting session a bounded amount and publishes each read at once (no
-    /// coalescing window, as on Windows: a consumer that is busy takes what arrived meanwhile as one chunk), writes its
-    /// queued input, and looks at every session that asked (a consumer freed space, input was queued, a sink attached, the
-    /// close or disposal began). A session's failure ends that session's output alone. Reading needs no thread-pool worker,
-    /// so output keeps flowing into rings while the host's pool is starved; only the consumers' continuations wait for it.
-    /// A session whose master this thread cannot register (no epoll or kqueue) fails to start: nothing else reads it.
+    /// Each session's non-blocking master is registered on the same epoll (Linux) or kqueue (macOS, FreeBSD) that
+    /// reports the children's exits, with the interest its state needs
+    /// (<see cref="UnixPtyBackendInstance.ServiceOnLoop"/>). While a bridge's reader waits to coalesce a burst, this
+    /// thread also serves the deadlines' tick (<see cref="PtyOutputCoalesceScheduler"/>). A tick only checks deadlines
+    /// and signals consumers, so it never blocks this thread.
     /// </para>
     /// <para>
-    /// While a bridge's reader waits to coalesce a burst, this thread also serves the deadlines' tick
-    /// (<see cref="PtyOutputCoalesceScheduler"/>). The tick joins this thread's wait timeout, as the hang-up deadlines do,
-    /// so the wait ends about every millisecond on the precise clock, which a .NET timer on Linux does not keep. A tick
-    /// only checks deadlines and signals consumers, so it never blocks this thread.
+    /// A child the shim cannot register joins a polling set that the same thread checks every
+    /// <see cref="PollIntervalMs"/>. When the watcher's descriptors could not be opened, every child is polled, and
+    /// each later registration tries to open them again (see <see cref="EnsureStarted"/>). The epoll or kqueue and its
+    /// wake descriptors belong to this class, not to the shim, which a second load of MiniPty shares.
     /// </para>
     /// <para>
-    /// The native shim reports exits through pidfd + epoll (Linux 5.3+) or <c>kqueue</c>
-    /// <c>EVFILT_PROC</c> (macOS, FreeBSD). A child the shim cannot register joins a polling set that the same
-    /// thread checks every <see cref="PollIntervalMs"/>. On Linux that is a child without a pidfd that epoll can watch.
-    /// With <c>kqueue</c> it is a child that exited before its registration. When the watcher's descriptors could not be
-    /// opened, every child is polled, and each later registration tries to open them again
-    /// (see <see cref="EnsureStarted"/>).
-    /// </para>
-    /// <para>
-    /// The epoll or kqueue and its wake descriptors belong to this class, not to the shim. A second
-    /// <see cref="System.Runtime.Loader.AssemblyLoadContext"/> that loads MiniPty gets its own watcher but shares the
-    /// shim, and a watcher kept in the shim handed one load's exits to the other load's thread.
-    /// </para>
-    /// <para>
-    /// This thread is the only code that reaps a session's child. A single reaper reads each wait status
-    /// exactly once, and reaping a disposed session's child prevents zombies without blocking the
-    /// thread that disposed it. On Linux it also closes each reaped child's pidfd, which the session signals through.
-    /// </para>
-    /// <para>
-    /// It also sends the kill that follows a disposal's hang-up. The deadline joins this thread's wait timeout
-    /// rather than getting a timer of its own, so disposal allocates no timer. Until the child is reaped or killed, this
-    /// thread also discards its output, because the session's reading has stopped and the master stays open for the
-    /// hang-up: a session read on this loop keeps its registration and discards there, and one this loop no longer reads
-    /// (its service failed, or its start failed before it was registered) has its master watched for output as follows. The master's output wakes the wait, and the polling interval backs that up. A macOS master buffers
-    /// about 1 KiB, so discarding on the interval alone held a writing child to about 100 KiB/s. When the process exits
-    /// normally, hung-up children are killed at once, and so is a child disposed after that, because the process may
-    /// end before any deadline passes.
+    /// This thread is the only code that reaps a session's child, and on Linux it closes each reaped child's pidfd. It
+    /// also sends the kill that follows a disposal's hang-up, and discards the child's output until the child is
+    /// reaped or killed. The design is in Output pump, Disposal, and Child exit observation,
+    /// <c>.github/docs/references/pty_crossplatform.md</c>.
     /// </para>
     /// </remarks>
     private static partial class ChildWatcher

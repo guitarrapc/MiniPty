@@ -201,8 +201,8 @@ static class Server
             writer.WriteNumber("outputBytes", pty.OutputBytes);
             writer.WriteNumber("stalls", pty.Stalls);
             writer.WriteNumber("stallMs", pty.StallTime.TotalMilliseconds);
-            // minipty.output.consumer_wait.duration is left out: the bridge coalesces bursts on a timer and never reads
-            // inline, so its sessions never wait for output in native code, and the count would stay 0.
+            // minipty.output.consumer_wait.duration is left out: the bridge's sessions never wait for output in native
+            // code, so the count would stay 0.
             writer.WriteEndObject();
         }
 
@@ -470,9 +470,9 @@ static class Bench
             $"{baseline.Handles} handles");
         Console.WriteLine();
         // Thread-pool threads grow and shrink with load on their own (a burst of connections injects workers), so the
-        // per-session column counts only the other threads: MiniPty's reader and exit-watcher threads among them.
-        // Start (ms) is MiniPty's own figure for the sessions this step opened (minipty.session.start.duration): the time
-        // Pty.Start took, without the WebSocket handshake or the shell's first prompt.
+        // per-session column counts only the other threads.
+        // Start (ms) is MiniPty's own figure for the sessions this step opened (minipty.session.start.duration): the
+        // time Pty.Start took, without the WebSocket handshake or the shell's first prompt.
         Console.WriteLine("| Sessions | Threads | Pool threads | +Other threads per session | Working set (MB) | +KB per session | Private (MB) | Handles | Start (ms) | Echo p50 (ms) | Echo p99 (ms) |");
         Console.WriteLine("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
         var previous = baseline;
@@ -1100,10 +1100,10 @@ setInterval(refresh, 1000);
 /// </summary>
 /// <remarks>
 /// <para>
-/// A <see cref="MeterListener"/> gets each measurement on the thread that records it: MiniPty's I/O thread for output
-/// bytes and stalls, the starting thread for a start. Its callbacks therefore only add to interlocked totals, and
-/// <c>/stats</c> reads them when asked. Each instrument's total is the state the listener hands back with every
-/// measurement, so a measurement costs a cast, two interlocked adds, and a volatile write, with no lookup by name.
+/// A <see cref="MeterListener"/> gets each measurement on the thread that records it, such as MiniPty's I/O thread, so
+/// the callbacks only add to interlocked totals, and <c>/stats</c> reads them when asked. Each instrument's total is
+/// the state the listener hands back with every measurement, so a measurement needs no lookup by name. See Metrics,
+/// <c>.github/docs/specs/core_session.md</c>.
 /// </para>
 /// <para>
 /// An application that already exports metrics with OpenTelemetry adds <c>AddMeter("MiniPty")</c> instead.
@@ -1140,7 +1140,7 @@ internal sealed class MiniPtyMetrics : IDisposable
                 listener.EnableMeasurementEvents(instrument, total);
         };
         _listener.SetMeasurementEventCallback<long>(static (_, value, _, state) => ((Total)state!).Add(value));
-        // Durations arrive in seconds; the totals keep microseconds, so they stay integers.
+        // Durations arrive in seconds. The totals keep microseconds, so they stay integers.
         _listener.SetMeasurementEventCallback<double>(static (_, seconds, _, state) => ((Total)state!).Add((long)(seconds * 1_000_000)));
         _listener.Start();
     }
@@ -1163,7 +1163,7 @@ internal sealed class MiniPtyMetrics : IDisposable
 
     public void Dispose() => _listener.Dispose();
 
-    /// <summary>Totals since this listener started; <see cref="StartTime"/> and the other times are summed.</summary>
+    /// <summary>Totals since this listener started. <see cref="StartTime"/> and the other times are summed.</summary>
     internal readonly record struct Snapshot(
         long ActiveSessions,
         long Starts,

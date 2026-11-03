@@ -737,7 +737,7 @@ public sealed class PtyTests
 
     /// <summary>
     /// A child that exits with 143 itself was not signaled, although its exit code is the one <c>SIGTERM</c> maps to.
-    /// Only the exit status tells the two apart. On Windows the signal is never reported.
+    /// On Windows the signal is never reported.
     /// </summary>
     [Test]
     public async Task PtyCompleteAsyncHasNoSignalWhenTheChildExitsWithASignalsExitCode()
@@ -753,7 +753,7 @@ public sealed class PtyTests
         await Assert.That(session.ExitStatus).IsEqualTo(result.ExitStatus);
     }
 
-    /// <summary>CI's Windows runners (Windows Server 2025, Windows 11) are later than ConPTY's first build.</summary>
+    /// <summary>CI's Windows runners are later than ConPTY's first build.</summary>
     [Test]
     public async Task PtyIsSupportedOnEveryPlatformTheSuiteRunsOn()
     {
@@ -761,9 +761,8 @@ public sealed class PtyTests
     }
 
     /// <summary>
-    /// ConPTY first shipped in Windows 10 version 1809 (build 17763). .NET also runs on earlier builds, where
-    /// <c>CreatePseudoConsole</c> does not exist, and hosted runners cannot run them, so the build is pinned here.
-    /// The version has a revision, as <see cref="Environment.OSVersion"/> reports it.
+    /// ConPTY first shipped in Windows 10 version 1809 (build 17763). Hosted runners cannot run earlier builds, so the
+    /// build is pinned here. The version has a revision, as <see cref="Environment.OSVersion"/> reports it.
     /// </summary>
     [Test]
     [Arguments(6, 2, 9200, false)]   // Windows Server 2012

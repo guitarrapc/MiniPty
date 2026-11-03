@@ -125,9 +125,9 @@ public sealed class PtyScaleTests
     }
 
     /// <summary>
-    /// The Windows exit watcher waits on every child without a thread of its own: 1,000 pending waits add none. A design
-    /// that waited on 63 handles per thread, as the earlier watcher and .NET's <c>RegisterWaitForSingleObject</c> do,
-    /// would add 16. Events stand in for children, since the watcher waits on any handle that signals once.
+    /// The Windows exit watcher waits on every child without a thread of its own: 1,000 pending waits add none. A
+    /// design that waited on 63 handles per thread would add 16. Events stand in for children, since the watcher waits
+    /// on any handle that signals once.
     /// </summary>
     [Test]
     [NotInParallel]
@@ -165,8 +165,7 @@ public sealed class PtyScaleTests
     }
 
     /// <summary>
-    /// 200 open sessions whose children all exit at once each report their own exit, and holding them open added no
-    /// thread outside the pool: exit is observed through the watcher alone, since nothing else asks the child.
+    /// Exit is observed through the watcher alone, since nothing else asks the child.
     /// </summary>
     [Test]
     [NotInParallel]

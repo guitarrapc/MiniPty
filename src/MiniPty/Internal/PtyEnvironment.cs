@@ -42,8 +42,7 @@ internal static class PtyEnvironment
         }
         else
         {
-            // A Unix child needs no variable to start: the program is looked up on /bin:/usr/bin when PATH is missing,
-            // and shells set a PATH of their own. Only TERM is added, below.
+            // A Unix child needs no variable to start: the program is looked up on /bin:/usr/bin when PATH is missing.
             entries = new Dictionary<string, EnvironmentEntry>(StringComparer.Ordinal);
         }
 
@@ -69,9 +68,7 @@ internal static class PtyEnvironment
     /// <param name="startInfo">Spawn options containing the overlay.</param>
     /// <param name="pathOverridden">
     /// Whether the overlay sets or removes <c>PATH</c> (compared ignoring case, as Windows does), or the child does not
-    /// inherit the host's environment. A name that is searched for is then looked up on the child's <c>PATH</c>
-    /// (<see cref="WindowsProgramLookup"/>), unless it is a batch file started with a raw command line. When neither
-    /// holds, the child's <c>PATH</c> is the host's.
+    /// inherit the host's environment. When neither holds, the child's <c>PATH</c> is the host's.
     /// </param>
     /// <param name="childPath">The child's <c>PATH</c>, or <see langword="null"/> when the child has none.</param>
     /// <param name="parentEnvironment">
@@ -96,7 +93,8 @@ internal static class PtyEnvironment
         }
         else
         {
-            // Windows PowerShell does not start without SystemRoot, which it needs to load a cryptographic provider.
+            // Some programs do not start without SystemRoot. See Starting from the minimum in
+            // .github/docs/specs/core_session.md.
             entries = new Dictionary<string, EnvironmentEntry>(StringComparer.OrdinalIgnoreCase)
             {
                 ["SystemRoot"] = new EnvironmentEntry("SystemRoot", WindowsProgramLookup.WindowsDirectory),

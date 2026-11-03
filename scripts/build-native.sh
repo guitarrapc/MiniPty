@@ -47,8 +47,7 @@ case "$rid" in
   linux-*)
     cflags=(-O2 -fPIC -pthread)
     # -z now binds every symbol at load: a start's child runs in the host's memory until its exec, and its calls must
-    # not enter the dynamic linker. NativeAOT links its executables with -z now too. No libutil: Linux starts the child
-    # with clone, not forkpty.
+    # not enter the dynamic linker. No libutil: Linux starts the child with clone, not forkpty.
     cc -shared "${cflags[@]}" -Wl,-z,now -o "$out_dir/libminipty_unix.so" "${sources[@]}"
     build_static_archive "$out_dir/libminipty_unix.a" "${sources[@]}"
     ;;

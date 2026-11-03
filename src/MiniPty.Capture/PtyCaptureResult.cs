@@ -52,8 +52,7 @@ public sealed class PtyCaptureResult
     /// </summary>
     /// <value>
     /// <see cref="PtyExitStatus.Signal"/> is <see langword="null"/> when the child exited normally, and always on
-    /// Windows. <see cref="PtyCapture.RunAsync"/> disposes the session it starts, so this is the only place the signal
-    /// is reported.
+    /// Windows.
     /// </value>
     public PtyExitStatus ExitStatus { get; }
 

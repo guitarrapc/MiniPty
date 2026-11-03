@@ -4,24 +4,12 @@ using System.Diagnostics.Metrics;
 namespace MiniPty.Internal;
 
 /// <summary>
-/// MiniPty's instruments, on the <see cref="Meter"/> named <c>MiniPty</c>: what a host pays on the output path and at
-/// start, which otherwise shows only as latency. A host collects them with OpenTelemetry (<c>AddMeter("MiniPty")</c>),
-/// <c>dotnet-counters monitor --counters MiniPty</c>, or a <see cref="MeterListener"/>.
+/// MiniPty's instruments, on the <see cref="Meter"/> named <c>MiniPty</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// When nothing listens, an instrument costs a check of its <see cref="Instrument.Enabled"/> flag. It takes no
-/// timestamp and allocates nothing. Only <c>minipty.session.active</c> counts always, with an interlocked add at each
-/// start and at each disposal, because a listener that attaches later must read the number of open sessions, not the
-/// starts and disposals since it attached.
-/// </para>
-/// <para>
-/// No measurement carries a tag that differs per session, so a host with thousands of sessions keeps one series per
-/// instrument. Start failures carry <c>error.type</c>, the exception's type, which takes a handful of values.
-/// </para>
-/// <para>
-/// Names follow the OpenTelemetry conventions: dot-separated, durations in seconds, and sizes in bytes.
-/// </para>
+/// When nothing listens, an instrument costs a check of its <see cref="Instrument.Enabled"/> flag, and only
+/// <c>minipty.session.active</c> counts always. No measurement carries a tag that differs per session. The instruments
+/// and the reasons are in Metrics, <c>.github/docs/specs/core_session.md</c>.
 /// </remarks>
 internal static class PtyMetrics
 {
@@ -31,8 +19,7 @@ internal static class PtyMetrics
 
     private static readonly Meter s_meter = CreateMeter();
 
-    // Each histogram advises bucket boundaries in seconds that span the range its instrument records. Without advice an
-    // exporter falls back to boundaries meant for milliseconds, and every value here would land in the first bucket.
+    // Each histogram advises bucket boundaries in seconds: without advice an exporter uses ones meant for milliseconds.
 
     private static readonly Histogram<double> s_startDuration = s_meter.CreateHistogram(
         "minipty.session.start.duration",
@@ -65,7 +52,9 @@ internal static class PtyMetrics
         tags: null,
         advice: new InstrumentAdvice<double> { HistogramBucketBoundaries = [0.00001, 0.000025, 0.00005, 0.0001, 0.00015, 0.0002, 0.0003, 0.0005, 0.00075, 0.001, 0.0015, 0.002, 0.005, 0.01] });
 
-    /// <summary>This load's meter. Another load of MiniPty, in another <c>AssemblyLoadContext</c>, has one of the same name.</summary>
+    /// <summary>
+    /// This load's meter. Another load of MiniPty, in another <c>AssemblyLoadContext</c>, has one of the same name.
+    /// </summary>
     internal static Meter MeterForTests => s_meter;
 
     /// <summary>The meter, with the one instrument that is read, not recorded: the number of open sessions.</summary>
@@ -132,7 +121,9 @@ internal static class PtyMetrics
             s_outputStallDuration.Record(Stopwatch.GetElapsedTime(started).TotalSeconds);
     }
 
-    /// <summary>A timestamp for <see cref="RecordConsumerWait"/>, or 0 when nothing listens to consumer waits.</summary>
+    /// <summary>
+    /// A timestamp for <see cref="RecordConsumerWait"/>, or 0 when nothing listens to consumer waits.
+    /// </summary>
     internal static long ConsumerWaitTimestamp() => s_consumerWaitDuration.Enabled ? Stopwatch.GetTimestamp() : 0;
 
     /// <summary>Records a consumer's native wait that began at <paramref name="started"/>, unless that is 0.</summary>

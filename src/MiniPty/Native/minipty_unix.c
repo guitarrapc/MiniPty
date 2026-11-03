@@ -32,7 +32,7 @@
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
-/* Linux 5.2, newer than the headers the shipped library is built against. Older kernels ignore the flag. */
+/* Linux 5.2, newer than the headers the shipped library is built against. */
 #ifndef CLONE_PIDFD
 #define CLONE_PIDFD 0x00001000
 #endif
@@ -248,7 +248,7 @@ static int minipty_await_start_report(int fd, int *stage_out, int *err_out)
 #define NSIG 32
 #endif
 
-/* FreeBSD's forkpty child. The Linux child resets with the system call instead (minipty_reset_child_signals_to_default). */
+/* FreeBSD's forkpty child. The Linux child resets with the system call instead. */
 static void minipty_reset_child_signals(void)
 {
     struct sigaction sa;
@@ -301,8 +301,8 @@ static void minipty_scrub_inherited_fds(int scan_limit)
 #endif
 
     /*
-     * Where close_range fails, before Linux 5.11 or under a seccomp filter that refuses it: set FD_CLOEXEC on fds >= 3
-     * (does not close(2)). scan_limit is computed in the parent, so the child makes no libc query.
+     * Where close_range fails, before Linux 5.11 or under a seccomp filter that refuses it: set FD_CLOEXEC on fds >= 3.
+     * scan_limit is computed in the parent, so the child makes no libc query.
      */
     for (int fd = 3; fd < scan_limit; fd++)
         minipty_set_close_on_exec(fd);
@@ -313,9 +313,8 @@ static void minipty_scrub_inherited_fds(int scan_limit)
 
 /*
  * Sets every signal to its default action with the system call itself. The C library refuses to change its internal
- * signals (glibc's 32 and 33, musl's 32 to 34), and an ignored signal stays ignored across exec. An all-zero record is
- * SIG_DFL with no flags and an empty mask in every architecture's layout. The kernel refuses SIGKILL and SIGSTOP, which
- * are never anything else.
+ * signals, and an ignored signal stays ignored across exec. An all-zero record is SIG_DFL with no flags and an empty
+ * mask in every architecture's layout. The kernel refuses SIGKILL and SIGSTOP, which are never anything else.
  */
 static void minipty_reset_child_signals_to_default(void)
 {
@@ -356,7 +355,7 @@ struct minipty_clone_start {
 /*
  * Opens both ends of a new terminal close-on-exec and sets MiniPty's termios and the initial window size on the slave.
  * openpty opens them without O_CLOEXEC, so a process the host starts on another thread at that moment would keep the
- * terminal open for as long as it runs. Opened this way, no process but the child gets them.
+ * terminal open for as long as it runs.
  */
 static int minipty_open_terminal(int *master_out, int *slave_out, const struct winsize *winp)
 {
@@ -414,10 +413,10 @@ static int minipty_open_terminal(int *master_out, int *slave_out, const struct w
 /*
  * The child of a Linux start. It runs on a stack of its own, but in the host's memory, with every signal blocked and
  * the calling thread suspended until the exec, while the host's other threads keep running. So it only makes system
- * calls: no allocation, no lock, and no stdio. It writes to memory only on its stack, in the start record, and in errno,
- * which lands in the suspended thread's storage. That is harmless, since the parent reads the record and never errno.
- * Everything it reads was prepared before the clone. The library is linked with -z now, so no call here enters the
- * dynamic linker.
+ * calls: no allocation, no lock, and no stdio. It writes to memory only on its stack, in the start record, and in
+ * errno, which lands in the suspended thread's storage. That is harmless, since the parent reads the record and never
+ * errno. Everything it reads was prepared before the clone. The library is linked with -z now, so no call here enters
+ * the dynamic linker.
  */
 static int minipty_clone_child(void *arg)
 {
@@ -435,8 +434,7 @@ static int minipty_clone_child(void *arg)
 
     /*
      * dup2 onto the slave's own descriptor would leave close-on-exec set, so a slave inside the stdio range (the host
-     * had closed one of its own) is first copied above it. The copies dup2 makes onto stdio are inherited. The slave
-     * itself and the master close at the exec.
+     * had closed one of its own) is first copied above it. The slave itself and the master close at the exec.
      */
     if (slave <= STDERR_FILENO) {
         slave = fcntl(slave, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
@@ -469,10 +467,8 @@ failed:
 }
 
 /*
- * Starts a Linux child with clone(CLONE_VM | CLONE_VFORK) instead of forkpty. A fork copies the host's page tables and
- * marks every resident page copy-on-write before the child can exec, so its cost grows with the host's memory. Here
- * the child shares the host's memory until its exec, and a start costs the same in any host. posix_spawn cannot run
- * MiniPty's PATH lookup with its sh fallback, nor tell a chdir failure from an exec failure.
+ * Starts a Linux child with clone(CLONE_VM | CLONE_VFORK) instead of forkpty. See Child setup in
+ * .github/docs/references/pty_crossplatform.md.
  */
 static int spawn_pty_child_linux(
     int *master,
@@ -571,10 +567,7 @@ static int spawn_pty_child_linux(
         goto done;
     }
 
-    /*
-     * clone gave no pidfd: the kernel predates CLONE_PIDFD, or clone ran again without it. A pidfd opened by pid can
-     * name another process that got a reused pid, so minipty_pidfd_open checks that it names a child of this one.
-     */
+    /* clone gave no pidfd: the kernel predates CLONE_PIDFD, or clone ran again without it. */
     if (pidfd < 0)
         pidfd = minipty_pidfd_open((int)pid);
 
@@ -682,7 +675,7 @@ static int spawn_pty_child_forkpty(
     /*
      * forkpty may open the master without O_CLOEXEC, so every child the host starts later would inherit it and keep the
      * terminal from hanging up. A fork on another thread before this call can still inherit it, and the slave inside
-     * forkpty. The Linux and macOS paths open both ends close-on-exec instead.
+     * forkpty.
      */
     if (fcntl(*master, F_SETFD, FD_CLOEXEC) != 0) {
         int err = errno > 0 ? errno : EINVAL;
@@ -699,8 +692,7 @@ static int spawn_pty_child_forkpty(
 
     /*
      * The child never waits on this pipe, only the parent does, because a forked child held until the parent signals it
-     * can deadlock concurrent spawns. A concurrent spawn's child that inherited the write end closes it at its own exec,
-     * which delays this read but cannot block it.
+     * can deadlock concurrent spawns. See Start failure report in .github/docs/references/pty_crossplatform.md.
      */
     if (minipty_await_start_report(report[0], &stage, &child_err)) {
         int exit_code;

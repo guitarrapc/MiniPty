@@ -7,44 +7,13 @@ namespace MiniPty.Internal;
 
 /// <summary>
 /// Finds the file <c>CreateProcess</c> would start for a <see cref="PtyStartInfo.FileName"/>, searching the same
-/// places in the same order, so that MiniPty can search a <c>PATH</c> of its own choosing: the child's, when
-/// <see cref="PtyStartInfo.Environment"/> sets or removes it or <see cref="PtyStartInfo.InheritEnvironment"/> is
-/// <see langword="false"/>, where <c>CreateProcess</c> only ever searches the host's.
+/// places in the same order, so that MiniPty can search a <c>PATH</c> of its own choosing, where <c>CreateProcess</c>
+/// only ever searches the host's.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <c>CreateProcess</c> looks a name up from the calling process: the directory of its executable, its current
-/// directory (unless <c>NeedCurrentDirectoryForExePath</c> says not to), the system directory, the 16-bit system
-/// directory, the Windows directory, and the entries of the calling process's <c>PATH</c>. The environment block
-/// passed for the child plays no part in it, so a host that sets the child's <c>PATH</c> to find a tool cannot
-/// start that tool by name, while a Unix child resolves its name against its own <c>PATH</c>. The same search run
-/// here with the child's <c>PATH</c> closes that gap; the file found is passed to <c>CreateProcessW</c> as the
-/// application name, so it makes no lookup of its own.
-/// </para>
-/// <para>
-/// A program name gets <c>.exe</c> appended when its last path component has no <c>.</c>, which is what
-/// <c>CreateProcess</c> does, measured on Windows 11: <c>tool</c> found only <c>tool.exe</c>, also when an
-/// extensionless <c>tool</c> sat beside it; <c>sub\tool</c> and <c>sub.d\tool</c> found only <c>sub\tool.exe</c> and
-/// <c>sub.d\tool.exe</c>, although the documentation says a name with a path gets no extension; <c>tool.</c> and
-/// <c>tool.foo</c> were taken as written, and Windows opens <c>tool.</c> as <c>tool</c>. A batch script's name
-/// always carries its extension, so a script gets nothing appended.
-/// </para>
-/// <para>
-/// A rooted name, and one that starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c>, is not searched for at
-/// all. Such a name is left to <c>CreateProcess</c> for a program, and taken as it is for a script. Any other name,
-/// with a directory part or without, is searched for.
-/// </para>
-/// <para>
 /// The child's <c>PATH</c> differs from <c>CreateProcess</c> in one rule (<see cref="ChildLocations"/>): only its
-/// fully qualified entries are searched. <c>CreateProcess</c> reads an empty entry, <c>.</c>, and any relative entry
-/// against the current directory, and does so also when <c>NoDefaultCurrentDirectoryInExePath</c> is set (measured on
-/// Windows 11: a program planted in the current directory ran for <c>;dir</c>, <c>.;dir</c>, <c>dir;;x</c>, and
-/// <c>dir\..</c> with the variable set). Applied to a <c>PATH</c> that the host's caller wrote, that would start a
-/// program from the host's current directory, which is neither the child's <see cref="PtyStartInfo.WorkingDirectory"/>
-/// nor anything the caller can see, and would undo the opt-out that protects the host's own lookups. An entry such as
-/// <c>extra + ";" + path</c> with an empty <c>extra</c> produces such an entry by accident. The child still receives its
-/// <c>PATH</c> unchanged and resolves its own commands by its own rules.
-/// </para>
+/// fully qualified entries are searched. The rules and their reasons are in Program Lookup (Windows),
+/// <c>.github/docs/specs/core_session.md</c>.
 /// </remarks>
 internal static partial class WindowsProgramLookup
 {
@@ -83,9 +52,9 @@ internal static partial class WindowsProgramLookup
     /// </param>
     /// <param name="WindowsDirectory">The Windows directory.</param>
     /// <param name="Path">
-    /// The <c>PATH</c> whose entries are searched after the fixed locations, or null for none. The child's, from
-    /// <see cref="ChildLocations"/>. <see cref="ResolveScriptOnHost"/> leaves it null and reads the host's <c>PATH</c>
-    /// only when the fixed locations miss.
+    /// The <c>PATH</c> whose entries are searched after the fixed locations, or null for none.
+    /// <see cref="ChildLocations"/> sets the child's. <see cref="ResolveScriptOnHost"/> leaves it null and reads the
+    /// host's <c>PATH</c> itself when the fixed locations miss.
     /// </param>
     /// <param name="SearchRelativePathEntries">
     /// Whether an empty, <c>.</c>, or other relative <c>PATH</c> entry is searched, against
@@ -163,13 +132,7 @@ internal static partial class WindowsProgramLookup
 
     /// <summary>
     /// Locates a batch script as <c>CreateProcess</c> locates a program. A rooted name is taken as it is, and a name
-    /// that starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is relative to the current directory. Any
-    /// other name, with a directory part or without, is searched for in the host executable's directory, the current
-    /// directory when it is searched, the system directory, the 16-bit system directory, the Windows directory, and
-    /// then each <c>PATH</c> entry as written. With <see cref="SearchLocations.SearchRelativePathEntries"/>, an empty
-    /// entry stands for the current directory, except one after the last semicolon, and a relative entry is relative to
-    /// the current directory. Without it, as for the child's <c>PATH</c>, only fully qualified entries are searched.
-    /// The first match decides, and a directory there fails the launch.
+    /// that starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is relative to the current directory.
     /// </summary>
     /// <returns>The script's full path.</returns>
     /// <exception cref="Win32Exception">

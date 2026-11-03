@@ -108,7 +108,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private int _flags;
     private int _producerWaiting;
     // When the producer stopped on a full ring, for minipty.output.stall.duration. It is 0 while the producer runs, and
-    // when nothing listened as it stopped. Only the producer touches it, in BeginWaitForFreeSpace and EndWaitForFreeSpace.
+    // when nothing listened as it stopped. Only the producer touches it.
     private long _stallStarted;
     // Who produces into the ring now (ProducerHeld), and whether the driver's own pass was turned away meanwhile
     // (ProducerDeferred). See TryEnterProducer.
@@ -314,7 +314,8 @@ internal sealed class PtyOutputPump : IValueTaskSource
 
     /// <summary>
     /// Publishes the first <paramref name="length"/> bytes of <see cref="NextReadSpan"/>, read at
-    /// <paramref name="timestamp"/>: to an attached sink, or to the ring for the consumer. Discarded after disposal.
+    /// <paramref name="timestamp"/>: to an attached sink, or to the ring for the consumer. Discarded, and not counted,
+    /// once the session's disposal has begun.
     /// </summary>
     internal void Publish(int length, long timestamp)
     {
