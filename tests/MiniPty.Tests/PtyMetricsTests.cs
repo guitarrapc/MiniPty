@@ -129,8 +129,9 @@ public sealed class PtyMetricsTests
     /// A flood nobody reads parks the reading on a full ring, with output still to come from the transport. What the
     /// platform's driver reads after the disposal must not count. On Windows the driver reads then only to let the
     /// transport end, and only if it reaches the output pipe before the disposal closes it. When the close comes first,
-    /// nothing is read, and the test passes either way. <see cref="AReadPublishedAfterTheDisposalIsNotCounted"/> makes
-    /// that read every time. On Unix the reads after the disposal are discarded without being published.
+    /// nothing is read, and the test passes either way.
+    /// <see cref="ReadsPublishedDuringAndAfterTheDisposalAreNotCounted"/> makes those reads every time. On Unix the
+    /// reads after the disposal are discarded without being published.
     /// </summary>
     [Test]
     public async Task ReadsAfterTheDisposalAreNotCounted()
@@ -153,14 +154,18 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// A read published after the disposal is not counted. The test is the session's output driver and publishes as the
-    /// Windows driver does when it reads after the disposal, so that read happens whatever the timing.
+    /// What the driver publishes once the disposal has begun is not counted: a read during the backend's disposal,
+    /// which the Windows driver can make while the pseudo-console closes, and a read after. The test is the session's
+    /// output driver and publishes at both points, so both reads happen whatever the timing. The backend also records
+    /// whether the session marked itself disposed before disposing it, which is what keeps the first read from
+    /// counting.
     /// </summary>
     [Test]
-    public async Task AReadPublishedAfterTheDisposalIsNotCounted()
+    public async Task ReadsPublishedDuringAndAfterTheDisposalAreNotCounted()
     {
         using var metrics = new MetricsRecorder();
-        var session = new PtySession(new SelfDrivenBackend());
+        var backend = new SelfDrivenBackend();
+        var session = new PtySession(backend);
         var pump = session.OutputPump;
 
         pump.HoldRing();
@@ -171,6 +176,7 @@ public sealed class PtyMetricsTests
         pump.Finish(null);
         await session.DisposeAsync();
 
+        await Assert.That(backend.WasSessionDisposedFirst).IsTrue();
         await Assert.That(metrics.Values("minipty.output.bytes").Sum()).IsEqualTo(100.0);
     }
 
@@ -349,11 +355,28 @@ public sealed class PtyMetricsTests
             : new PtyStartInfo { FileName = "sh", Arguments = ["-c", "dd if=/dev/zero bs=131072 count=1 2>/dev/null"] };
 
     /// <summary>
-    /// A backend whose output the test publishes itself: it is the session's output driver and never reads.
+    /// A backend whose output the test publishes itself: it is the session's output driver and never reads. Its
+    /// disposal publishes one read of 100 bytes, as a driver can while the transport closes.
     /// </summary>
     private sealed class SelfDrivenBackend : PtyOutputPumpTests.FakeBackend, MiniPty.Internal.IPtyOutputDriver
     {
-        public override void StartOutput(MiniPty.Internal.PtyOutputPump pump) => pump.AttachDriver(this);
+        private MiniPty.Internal.PtyOutputPump? _pump;
+
+        /// <summary>Whether the session had marked itself disposed when it disposed this backend.</summary>
+        public bool WasSessionDisposedFirst { get; private set; }
+
+        public override void StartOutput(MiniPty.Internal.PtyOutputPump pump)
+        {
+            _pump = pump;
+            pump.AttachDriver(this);
+        }
+
+        public override void Dispose()
+        {
+            WasSessionDisposedFirst = _pump!.IsSessionDisposed;
+            _pump.Publish(100, 0);
+            base.Dispose();
+        }
 
         void MiniPty.Internal.IPtyOutputDriver.Wake(MiniPty.Internal.PtyOutputPump pump)
         {

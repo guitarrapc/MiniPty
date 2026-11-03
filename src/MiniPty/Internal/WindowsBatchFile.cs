@@ -46,8 +46,10 @@ namespace MiniPty.Internal;
 /// <see cref="WindowsProgramLookup"/> finds for the name in <c>CreateProcess</c>'s search order, and <c>cmd.exe</c>
 /// gets its full path. So <c>cmd.exe</c>'s own lookup, which starts in the child's working directory, never picks
 /// another file. A file that starts with the <c>MZ</c> header is a program image, which <c>CreateProcess</c> runs or
-/// refuses itself, from that same full path: a second lookup by <c>CreateProcess</c> could find another file, and the
-/// file could change between the header check and the start.
+/// refuses itself. It gets that same full path, since a second lookup by <c>CreateProcess</c> could find another file.
+/// A file replaced by a script between the header check and the start still reaches <c>cmd.exe</c>, with the arguments
+/// quoted for a program. Replacing it takes write access to the file or to a directory on its path, which already
+/// decides what runs.
 /// </para>
 /// <para>
 /// What the script does with its arguments is up to the script. One that hands an argument to <c>cmd /c</c>, or uses

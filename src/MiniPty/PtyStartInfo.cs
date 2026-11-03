@@ -48,9 +48,9 @@ public sealed record PtyStartInfo
     /// not the input, against the programs you allow. Windows starts the program that full path names: it resolves
     /// <c>..</c> and drops trailing dots and spaces as <c>GetFullPath</c> does. A name that starts with <c>\\?\</c> is
     /// taken without that normalization, by Windows and by <c>GetFullPath</c> alike. A UNC name makes this process
-    /// connect, and authenticate, to that server. This name, <see cref="Arguments"/>, <see cref="WorkingDirectory"/>,
-    /// and <see cref="CommandLine"/> cannot contain a NUL, which would end the string the operating system reads early;
-    /// <see cref="Pty.Start"/> throws <see cref="ArgumentException"/> for one.
+    /// connect, and authenticate, to that server. This name, <see cref="Arguments"/>, and
+    /// <see cref="WorkingDirectory"/> cannot contain a NUL, which would end the string the operating system reads
+    /// early. <see cref="Pty.Start"/> throws <see cref="ArgumentException"/> for one.
     /// </para>
     /// <para>
     /// On Windows a program under a path of 260 characters (<c>MAX_PATH</c>) or more starts only when this process

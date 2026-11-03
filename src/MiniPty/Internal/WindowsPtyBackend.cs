@@ -1466,8 +1466,9 @@ internal static class WindowsPtyBackend
                 return (WindowsBatchFile.CommandInterpreterPath, WindowsBatchFile.BuildCommandLine(script, startInfo.Arguments));
 
             // A program named like a batch file runs as itself, from the file whose header was read. Left to its own
-            // lookup, CreateProcess could find another file of the name, or the file could have become a script in
-            // the meantime, and either would reach cmd.exe with the arguments quoted for a program instead.
+            // lookup, CreateProcess could find another file of the name, which as a script would reach cmd.exe with the
+            // arguments quoted for a program. The file found can still be replaced by a script before the start. That
+            // takes write access to it or to a directory on its path, which already decides what runs.
             return (script, BuildCommandLine(startInfo));
         }
 
