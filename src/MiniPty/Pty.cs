@@ -77,16 +77,21 @@ public static class Pty
     /// Windows builds before Windows 10 version 1809, which have no ConPTY.
     /// </exception>
     /// <exception cref="System.ComponentModel.Win32Exception">
-    /// Windows: process or ConPTY creation failed. For a batch file this includes a script that MiniPty's lookup does
-    /// not find, or cannot open, before anything is created, with the error <c>CreateProcess</c> would report; the
-    /// same holds for a program MiniPty looks up itself, when <see cref="PtyStartInfo.Environment"/> sets or removes
-    /// <c>PATH</c>.
+    /// Windows: process or ConPTY creation failed. This includes a file that MiniPty looks up itself and does not find,
+    /// or cannot open, before anything is created, with the error <c>CreateProcess</c> would report. It looks up a
+    /// batch file started without a raw <see cref="PtyStartInfo.CommandLine"/>, and a program whose name is searched
+    /// for when <see cref="PtyStartInfo.Environment"/> sets or removes <c>PATH</c> or
+    /// <see cref="PtyStartInfo.InheritEnvironment"/> is <see langword="false"/>
+    /// (see <see cref="PtyStartInfo.FileName"/>).
     /// Unix: the child could not enter <see cref="PtyStartInfo.WorkingDirectory"/> or execute the program, for example
     /// because it does not exist (<c>ENOENT</c>) or may not be executed (<c>EACCES</c>).
     /// <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is the <c>errno</c>. The child has already
     /// been reaped, and nothing the start created remains.
     /// </exception>
-    /// <exception cref="IOException">Unix: opening the pseudo-terminal or forking failed.</exception>
+    /// <exception cref="IOException">
+    /// Unix: the pseudo-terminal could not be opened or set up, or the child could not be started for a reason other
+    /// than those above.
+    /// </exception>
     public static PtySession Start(PtyStartInfo startInfo)
     {
         ArgumentNullException.ThrowIfNull(startInfo);

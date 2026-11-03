@@ -29,8 +29,8 @@ if (!Pty.IsSupported)
     return 1;
 }
 
-// The AppHost passes the token, so the token, not ASPNETCORE_URLS, which other environments set too, says whether the
-// app runs under it.
+// The AppHost passes a 64-character token. ASPNETCORE_URLS cannot tell whether the app runs under the AppHost, since
+// other launchers set it too.
 var givenToken = Environment.GetEnvironmentVariable("MINIPTY_TERMINAL_TOKEN");
 var underAspire = givenToken is { Length: 64 };
 var token = underAspire ? givenToken! : LocalAccess.CreateToken();
@@ -92,22 +92,24 @@ static async Task HandleTerminalAsync(HttpContext context, string token)
     {
         await PtyWebSocketBridge.RunAsync(Shell.StartInfo(), socket, cancellationToken: context.RequestAborted);
     }
-    catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException or TimeoutException)
+    catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or TimeoutException)
     {
         // The browser went away, or the shell outlived the hang-up. The bridge has already ended the shell.
     }
     catch (Exception ex)
     {
-        // A malformed control message, or a shell that could not start: reported here rather than as an unhandled request.
+        // Anything else, such as a malformed control message or a terminal that failed to start or to be read, is reported
+        // here rather than as an unhandled request. An IOException comes from the terminal, not from the socket.
         Console.Error.WriteLine($"session failed: {ex}");
     }
 }
 
 static class Shell
 {
-    // The AppHost's variables configure this app, not the shell. Left in, an OpenTelemetry app started in the shell
-    // would export to the dashboard as this resource, and a web app started there would try to take this app's address.
-    private static readonly Dictionary<string, string?>? s_appHostVariables = AppHostVariables();
+    // OTEL_*, ASPNETCORE_URLS, and MINIPTY_TERMINAL_TOKEN configure this app, not the shell, whoever set them. Left in,
+    // an OpenTelemetry app started in the shell would export to the dashboard as this resource, and a web app started
+    // there would try to take this app's address.
+    private static readonly Dictionary<string, string?>? s_appVariables = AppVariables();
 
     public static PtyStartInfo StartInfo()
     {
@@ -116,23 +118,29 @@ static class Shell
             return new PtyStartInfo
             {
                 FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
-                Environment = s_appHostVariables,
+                Environment = s_appVariables,
             };
         }
 
         // TERM describes the frontend, xterm.js, not the terminal this server was started from.
         var shell = Environment.GetEnvironmentVariable("SHELL") is { Length: > 0 } user ? user : "/bin/sh";
-        return new PtyStartInfo { FileName = shell, Arguments = ["-i"], TerminalName = "xterm-256color", Environment = s_appHostVariables };
+        return new PtyStartInfo { FileName = shell, Arguments = ["-i"], TerminalName = "xterm-256color", Environment = s_appVariables };
     }
 
-    /// <summary>An overlay that removes the variables the AppHost set, or null when there are none.</summary>
-    private static Dictionary<string, string?>? AppHostVariables()
+    /// <summary>
+    /// An overlay that removes every <c>OTEL_*</c> variable, <c>ASPNETCORE_URLS</c>, and <c>MINIPTY_TERMINAL_TOKEN</c>,
+    /// or null when none is set. Names match ignoring case on Windows only, as the platforms compare them.
+    /// </summary>
+    private static Dictionary<string, string?>? AppVariables()
     {
-        var removed = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var removed = new Dictionary<string, string?>(StringComparer.FromComparison(comparison));
         foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
         {
             if (entry.Key is string key
-                && (key.StartsWith("OTEL_", StringComparison.OrdinalIgnoreCase) || key is "ASPNETCORE_URLS" or "MINIPTY_TERMINAL_TOKEN"))
+                && (key.StartsWith("OTEL_", comparison)
+                    || key.Equals("ASPNETCORE_URLS", comparison)
+                    || key.Equals("MINIPTY_TERMINAL_TOKEN", comparison)))
             {
                 removed[key] = null;
             }

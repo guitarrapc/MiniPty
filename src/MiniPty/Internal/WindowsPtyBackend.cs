@@ -148,8 +148,9 @@ internal static class WindowsPtyBackend
     {
         ArgumentNullException.ThrowIfNull(startInfo);
         // Decided before any handle exists, so an invalid environment entry, a batch file's rejected argument, or a
-        // missing program or script fails without cleanup. The environment comes first because the launch depends on
-        // it: a child PATH that differs from the host's is where a program name is looked up.
+        // missing file that MiniPty looks up fails without cleanup. The environment comes first because the launch
+        // depends on it: with the start's other options, it decides whether a name is looked up on the child's PATH, and
+        // it holds that PATH.
         var environment = PtyEnvironment.BuildWindows(startInfo, out var pathOverridden, out var childPath);
         var (applicationName, commandLine) = BuildLaunch(startInfo, pathOverridden, childPath);
 
@@ -1433,18 +1434,19 @@ internal static class WindowsPtyBackend
     /// without a raw <see cref="PtyStartInfo.CommandLine"/> runs through <c>cmd.exe</c> with its arguments escaped for
     /// it (<see cref="WindowsBatchFile"/>). A program image named like a batch file runs as a program from the file
     /// the same lookup found, with the file name quoted by the MSVCRT rules and the quoted arguments after it. A
-    /// program name that <c>CreateProcess</c> would search for is looked up here when the child's <c>PATH</c> differs
-    /// from the host's (<paramref name="pathOverridden"/>), since <c>CreateProcess</c> searches only the host's
-    /// <c>PATH</c>. The file found becomes the application name, so it makes no lookup of its own. A rooted or
-    /// dot-relative program path of <c>MAX_PATH</c> or more becomes the application name too, since
+    /// program name that <c>CreateProcess</c> would search for is looked up here when the overlay sets or removes
+    /// <c>PATH</c> or the child does not inherit the host's environment (<paramref name="pathOverridden"/>), since
+    /// <c>CreateProcess</c> searches only the host's <c>PATH</c>. The file found becomes the application name, so it
+    /// makes no lookup of its own. A rooted or dot-relative program path of <c>MAX_PATH</c> or more becomes the application name too, since
     /// <c>CreateProcess</c>'s own lookup fails there (<see cref="WindowsProgramLookup.TryResolveLongProgramPath"/>).
     /// Anything else is left to <c>CreateProcessW</c>'s own lookup, with the quoted arguments or the raw command line
     /// after the quoted file name.
     /// </summary>
     /// <param name="startInfo">The spawn options.</param>
     /// <param name="pathOverridden">
-    /// Whether the child's <c>PATH</c> differs from the host's: the overlay sets or removes it, or the child does not
-    /// inherit the host's environment.
+    /// Whether the overlay sets or removes <c>PATH</c>, or the child does not inherit the host's environment. A name
+    /// that is searched for, of a program or of a batch file without a raw command line, is then looked up on the
+    /// child's <c>PATH</c>.
     /// </param>
     /// <param name="childPath">The child's <c>PATH</c>, or null when it has none; read only when overridden.</param>
     internal static (string? ApplicationName, char[] CommandLine) BuildLaunch(PtyStartInfo startInfo, bool pathOverridden, string? childPath)

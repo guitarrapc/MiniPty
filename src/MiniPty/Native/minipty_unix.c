@@ -301,8 +301,8 @@ static void minipty_scrub_inherited_fds(int scan_limit)
 #endif
 
     /*
-     * Kernels before 5.11: set FD_CLOEXEC on fds >= 3 (does not close(2)). scan_limit is computed in the parent, so
-     * the child makes no libc query.
+     * Where close_range fails, before Linux 5.11 or under a seccomp filter that refuses it: set FD_CLOEXEC on fds >= 3
+     * (does not close(2)). scan_limit is computed in the parent, so the child makes no libc query.
      */
     for (int fd = 3; fd < scan_limit; fd++)
         minipty_set_close_on_exec(fd);

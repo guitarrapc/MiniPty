@@ -83,9 +83,9 @@ internal static partial class WindowsProgramLookup
     /// </param>
     /// <param name="WindowsDirectory">The Windows directory.</param>
     /// <param name="Path">
-    /// The <c>PATH</c> whose entries are searched after the fixed locations, or null for none. The child's when it
-    /// differs from the host's. <see cref="ResolveScriptOnHost"/> leaves it null and reads the host's <c>PATH</c> only
-    /// when the fixed locations miss.
+    /// The <c>PATH</c> whose entries are searched after the fixed locations, or null for none. The child's, from
+    /// <see cref="ChildLocations"/>. <see cref="ResolveScriptOnHost"/> leaves it null and reads the host's <c>PATH</c>
+    /// only when the fixed locations miss.
     /// </param>
     /// <param name="SearchRelativePathEntries">
     /// Whether an empty, <c>.</c>, or other relative <c>PATH</c> entry is searched, against

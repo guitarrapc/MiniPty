@@ -251,7 +251,7 @@ When the shim fails, the child reports the `errno` to the parent and exits with 
 
 ### Start failure report
 
-A Unix start that cannot enter `WorkingDirectory` or exec the program fails `Pty.Start` with `Win32Exception`, whose `NativeErrorCode` is the `errno`: `ENOENT` for a missing program, directory, or interpreter, `EACCES` for a file that may not be executed. Windows throws the same type from `CreateProcess`, and .NET's `Process.Start` throws it on Unix. Failures before a child exists (opening the terminal, starting the child), and a Linux child's failure to take the terminal (`setsid`, `TIOCSCTTY`, `dup2`), stay `IOException`.
+A Unix start that cannot enter `WorkingDirectory` or exec the program fails `Pty.Start` with `Win32Exception`, whose `NativeErrorCode` is the `errno`: `ENOENT` for a missing program, directory, or interpreter, `EACCES` for a file that may not be executed. Windows throws the same type from `CreateProcess`, and .NET's `Process.Start` throws it on Unix. Failures before a child exists (opening the terminal, starting the child), and a Linux child's failure to take the terminal (`setsid`, `TIOCSCTTY`, `F_DUPFD_CLOEXEC`, `dup2`), stay `IOException`.
 
 **Why:** the `chdir` and the exec run in the child, after the start has created it. Before this, the session started and the child exited 127 or 126, so a caller could not tell a missing program from a program that exits 127 itself, and the same `PtyStartInfo` failed differently per platform.
 

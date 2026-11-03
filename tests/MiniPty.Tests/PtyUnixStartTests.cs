@@ -15,8 +15,8 @@ public sealed class PtyUnixStartTests
     private const int ENOENT = 2;
     // Bit 13 - 1 of a /proc status signal mask.
     private const ulong SigpipeBit = 1UL << 12;
-    // SIGUSR1 is 10 on Linux, so bit 10 - 1.
-    private const ulong Sigusr1Bit = 1UL << 9;
+    // SIGRTMAX is 64 on Linux, the last of the kernel's signals, so bit 64 - 1.
+    private const ulong SigrtmaxBit = 1UL << 63;
     private const int SigBlock = 0;
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
@@ -53,7 +53,7 @@ public sealed class PtyUnixStartTests
     /// <see cref="Pty.Start"/>. The .NET host ignores <c>SIGPIPE</c>, and a child that kept that would not end when it
     /// wrote to a closed pipe. The start blocks every signal while the child runs in the host's memory, and the child
     /// must exec with the caller's mask instead. .NET threads block nothing, and a child that dropped the caller's mask
-    /// would match an empty one, so the calling thread blocks <c>SIGUSR1</c> first. <c>cat</c> changes neither, so
+    /// would match an empty one, so the calling thread blocks <c>SIGRTMAX</c> first. <c>cat</c> changes neither, so
     /// its status shows what the start gave it.
     /// </summary>
     [Test]
@@ -65,8 +65,10 @@ public sealed class PtyUnixStartTests
         var hostIgnored = StatusMask(File.ReadAllLines("/proc/self/status"), "SigIgn");
         await Assert.That(hostIgnored & SigpipeBit).IsEqualTo(SigpipeBit).Because("the .NET host ignores SIGPIPE");
 
-        // A thread of its own, so the blocked signal ends with it. Pty.Start is synchronous, so nothing runs between the
-        // read of the caller's mask and the start.
+        // A thread of its own, not the test's, which goes back to the thread pool. Threads created on it meanwhile keep
+        // the block after it ends, such as the child watcher on the process's first start, or a pool worker. So the
+        // signal is SIGRTMAX, which no test sends and PtySignal cannot name. Pty.Start is synchronous, so nothing runs
+        // between the read of the caller's mask and the start.
         ulong callerBlocked = 0;
         string[] lines = [];
         Exception? failure = null;
@@ -75,7 +77,7 @@ public sealed class PtyUnixStartTests
             try
             {
                 var set = new ulong[16];
-                set[0] = Sigusr1Bit;
+                set[0] = SigrtmaxBit;
                 var error = pthread_sigmask(SigBlock, set, null);
                 if (error != 0)
                     throw new Win32Exception(error, "pthread_sigmask failed");
@@ -93,7 +95,7 @@ public sealed class PtyUnixStartTests
         starter.Join();
 
         await Assert.That(failure).IsNull();
-        await Assert.That(callerBlocked & Sigusr1Bit).IsEqualTo(Sigusr1Bit);
+        await Assert.That(callerBlocked & SigrtmaxBit).IsEqualTo(SigrtmaxBit);
         await Assert.That(StatusMask(lines, "SigIgn")).IsEqualTo(0UL);
         await Assert.That(StatusMask(lines, "SigBlk")).IsEqualTo(callerBlocked);
     }
@@ -256,11 +258,11 @@ public sealed class PtyUnixStartTests
         return fields;
     }
 
-    /// <summary>A signal mask from a <c>/proc</c> status file: the hexadecimal value of the line named <paramref name="name"/>.</summary>
     /// <summary>Changes the calling thread's signal mask. <c>sigset_t</c> is 1,024 bits in glibc and musl.</summary>
     [System.Runtime.InteropServices.DllImport("libc")]
     private static extern int pthread_sigmask(int how, ulong[] set, ulong[]? oldSet);
 
+    /// <summary>A signal mask from a <c>/proc</c> status file: the hexadecimal value of the line named <paramref name="name"/>.</summary>
     private static ulong StatusMask(string[] lines, string name)
     {
         foreach (var line in lines)

@@ -12,9 +12,9 @@ namespace MiniPty.Internal;
 /// <remarks>
 /// <para>
 /// A thread-pool wait holds no thread while it waits, unlike threads that each wait on 63 handles with
-/// <c>WaitForMultipleObjects</c>. That is how the Windows thread pool was measured to wait, not a documented guarantee.
-/// A pool that waited on threads of its own would add threads as the waits grow. The measurements are in
-/// pty_crossplatform.md, under Child exit observation.
+/// <c>WaitForMultipleObjects</c>. Windows does not document that, so <c>PtyScaleTests</c> checks it: a pool that waited
+/// on threads of its own would add threads as the waits grow. The measurements are in pty_crossplatform.md, under Child
+/// exit observation.
 /// </para>
 /// <para>
 /// The callback runs on a worker of the process's native thread pool, not on .NET's. It only records exit

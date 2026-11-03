@@ -97,6 +97,9 @@ public sealed class PtyMetricsTests
         Assert.Throws<Win32Exception>(() => Pty.Start(new PtyStartInfo { FileName = missing }).Dispose());
         // Checked only while the start builds the environment, so it reaches the failure filter, which must skip it.
         Assert.Throws<ArgumentException>(() => Pty.Start(Echo("bad") with { Environment = new Dictionary<string, string?> { ["A=B"] = "x" } }).Dispose());
+        // Refused before the counted part of the start, so it must not count either.
+        if (!OperatingSystem.IsWindows())
+            Assert.Throws<PlatformNotSupportedException>(() => Pty.Start(new PtyStartInfo { FileName = "sh", CommandLine = "-c true" }).Dispose());
 
         var starts = metrics.Values("minipty.session.start.duration");
         var failures = metrics.Measurements("minipty.session.start.failures");
@@ -115,10 +118,36 @@ public sealed class PtyMetricsTests
         await using (var session = Pty.Start(Flood()))
             result = await session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false });
 
-        // Counted once per read and only while the session is open, so the total is exactly the output delivered.
+        // CompleteAsync returns after the last read, before the disposal, so each read counts once and the total is the
+        // output delivered.
         var read = metrics.Values("minipty.output.bytes").Sum();
         await Assert.That(result.Output.Length).IsGreaterThan(16_384);
         await Assert.That(read).IsEqualTo(result.Output.Length);
+    }
+
+    /// <summary>
+    /// A flood nobody reads parks the reading on a full ring, with output still to come from the transport. On Windows
+    /// the disposal reads that output only to let the transport end, and those reads must not count. On Unix the
+    /// disposal stops publishing at once and discards what it reads afterwards, so there the count must not move either.
+    /// </summary>
+    [Test]
+    public async Task ReadsAfterTheDisposalAreNotCounted()
+    {
+        using var metrics = new MetricsRecorder();
+        var session = Pty.Start(Flood());
+        double beforeDisposal;
+        try
+        {
+            await Assert.That(await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace)).IsTrue();
+            beforeDisposal = metrics.Values("minipty.output.bytes").Sum();
+        }
+        finally
+        {
+            await session.DisposeAsync();
+        }
+
+        await Assert.That(beforeDisposal).IsGreaterThan(0.0);
+        await Assert.That(metrics.Values("minipty.output.bytes").Sum()).IsEqualTo(beforeDisposal);
     }
 
     /// <summary>
@@ -148,11 +177,12 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// A start that fails while the session is built, after its child exists, is counted with the exception's type and
-    /// leaves no open session behind.
+    /// A start that fails while the session is built, after its child exists, is counted with the exception's type.
+    /// The open-session count moves only once a session is built, so it stays where it was. That such a start also ends
+    /// its child is checked by <c>PtyStartFaultTests</c>.
     /// </summary>
     [Test]
-    public async Task AStartThatFailsInsideTheSessionIsCountedAndLeavesNoSessionOpen()
+    public async Task AStartThatFailsInsideTheSessionIsCountedAsAFailureOnly()
     {
         using var metrics = new MetricsRecorder();
         var before = metrics.ObserveActiveSessions();
@@ -253,7 +283,8 @@ public sealed class PtyMetricsTests
         await Assert.That(listenedTimestamps).IsNotEqualTo(0L);
         await Assert.That(listenedAllocated).IsEqualTo(0L);
 
-        // Every recording call on the output path and at start, once. Returns the timestamps taken, OR-ed together.
+        // Each recording call on the output path, and the one for the start's duration, once. Returns the timestamps
+        // taken, OR-ed together.
         static long RecordAll()
         {
             MiniPty.Internal.PtyMetrics.RecordOutputRead(4096);

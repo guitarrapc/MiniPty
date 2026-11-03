@@ -69,9 +69,9 @@ internal static class PtyEnvironment
     /// <param name="startInfo">Spawn options containing the overlay.</param>
     /// <param name="pathOverridden">
     /// Whether the overlay sets or removes <c>PATH</c> (compared ignoring case, as Windows does), or the child does not
-    /// inherit the host's environment. The child's <c>PATH</c> then differs from the host's, which is what decides
-    /// whether MiniPty looks a program name up itself (<see cref="WindowsProgramLookup"/>); otherwise
-    /// <c>CreateProcess</c> searches the host's, which is the same one.
+    /// inherit the host's environment. A name that is searched for is then looked up on the child's <c>PATH</c>
+    /// (<see cref="WindowsProgramLookup"/>), unless it is a batch file started with a raw command line. When neither
+    /// holds, the child's <c>PATH</c> is the host's.
     /// </param>
     /// <param name="childPath">The child's <c>PATH</c>, or <see langword="null"/> when the child has none.</param>
     /// <param name="parentEnvironment">

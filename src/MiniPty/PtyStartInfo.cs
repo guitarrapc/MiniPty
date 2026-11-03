@@ -15,30 +15,31 @@ public sealed record PtyStartInfo
     /// commands skipped, delayed expansion off, and command extensions on (<c>/d /v:OFF /e:ON</c>).
     /// <see cref="Arguments"/> are escaped for <c>cmd.exe</c> instead of quoted with the MSVCRT rules, so
     /// <c>cmd.exe</c> reads each one as data. A script can still run what an argument holds, for example with
-    /// <c>cmd /c %1</c> or <c>echo %~1</c>. The script is the file <c>CreateProcess</c> would find for this name,
-    /// looked up from this process's directories and <c>PATH</c> as for a program, and <c>cmd.exe</c> receives its
-    /// full path, so it does not search the child's <see cref="WorkingDirectory"/> for it. A file that starts with
-    /// the <c>MZ</c> header runs as a program, from that same file. Without a raw <see cref="CommandLine"/>, a batch
-    /// file name, and the full path found for it, cannot contain a quote, a carriage return, a line feed, or a NUL.
-    /// With one, <c>CreateProcess</c> starts <c>cmd.exe</c> with its own defaults instead.
+    /// <c>cmd /c %1</c> or <c>echo %~1</c>. The script is looked up as a program name is (see below), and
+    /// <c>cmd.exe</c> receives its full path, so it does not search the child's <see cref="WorkingDirectory"/> for it.
+    /// A file that starts with the <c>MZ</c> header runs as a program, from that same file. Without a raw
+    /// <see cref="CommandLine"/>, a batch file name, and the full path found for it, cannot contain a quote, a carriage
+    /// return, a line feed, or a NUL. With one, <c>CreateProcess</c> starts <c>cmd.exe</c> with its own defaults
+    /// instead.
     /// </para>
     /// <para>
     /// A name without a root and without a leading <c>.\</c> or <c>..\</c> is searched for. On Unix the child
     /// resolves it against its own <c>PATH</c>. On Windows <c>CreateProcess</c> searches its fixed locations and this
-    /// process's <c>PATH</c>, never the child's, so when <see cref="Environment"/> sets or removes <c>PATH</c>, or
+    /// process's <c>PATH</c>, never the child's. So when <see cref="Environment"/> sets or removes <c>PATH</c>, or
     /// <see cref="InheritEnvironment"/> is <see langword="false"/>, MiniPty runs the same search with the child's
-    /// <c>PATH</c> instead and starts the file it finds, for a program and for a
-    /// batch file alike; <c>.exe</c> is appended when the last path component has no <c>.</c>, as <c>CreateProcess</c>
-    /// does, and a missing program then fails <see cref="Pty.Start"/> with
-    /// <see cref="System.ComponentModel.Win32Exception"/> before anything is created. Only the fully qualified entries
+    /// <c>PATH</c> instead and starts the file it finds. <c>.exe</c> is appended when the last path component has no
+    /// <c>.</c>, as <c>CreateProcess</c> does, and a file MiniPty does not find fails <see cref="Pty.Start"/> with
+    /// <see cref="System.ComponentModel.Win32Exception"/> before anything is created. A batch file started with a raw
+    /// <see cref="CommandLine"/> is the exception: it is left to <c>CreateProcess</c>. Only the fully qualified entries
     /// of the child's <c>PATH</c> are searched: an empty, <c>.</c>, or relative entry would point at this process's
     /// current directory, which <c>CreateProcess</c> searches through such entries even when
     /// <c>NoDefaultCurrentDirectoryInExePath</c> is set. No extension from <c>PATHEXT</c> is tried, so a batch shim is
     /// written with its extension, as <c>npm.cmd</c>, not <c>npm</c>.
     /// </para>
     /// <para>
-    /// The <c>PATH</c> in <see cref="Environment"/> therefore chooses the program on every platform. Build it only from
-    /// sources you trust, as you would the program itself, or pass a full path here to pin the program.
+    /// The <c>PATH</c> in <see cref="Environment"/> therefore chooses the program on every platform, apart from a batch
+    /// file started with a raw <see cref="CommandLine"/>. Build it only from sources you trust, as you would the
+    /// program itself, or pass a full path here to pin the program.
     /// </para>
     /// <para>
     /// A name that starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is relative to this process's current
@@ -131,10 +132,11 @@ public sealed record PtyStartInfo
     /// environment variables.
     /// </value>
     /// <remarks>
-    /// On Windows, setting or removing <c>PATH</c> here also decides where a <see cref="FileName"/> without a root is
-    /// looked up: on the fully qualified entries of the child's <c>PATH</c>, as on Unix the child looks it up on its
-    /// own. A <c>PATH</c> taken from an untrusted source thus chooses the program that starts. See
-    /// <see cref="FileName"/>.
+    /// On Windows, setting or removing <c>PATH</c> here also makes the search for <see cref="FileName"/>, when it is
+    /// searched for, use the child's <c>PATH</c>: MiniPty searches the fixed locations <c>CreateProcess</c> searches,
+    /// then the fully qualified entries of the child's <c>PATH</c>, as on Unix the child searches its own. A batch file
+    /// started with a raw <see cref="CommandLine"/> is the exception. A <c>PATH</c> taken from an untrusted source thus
+    /// chooses the program that starts. See <see cref="FileName"/>.
     /// </remarks>
     public IReadOnlyDictionary<string, string?>? Environment { get; init; }
 

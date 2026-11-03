@@ -44,7 +44,7 @@ internal static class PtyMetrics
     private static readonly Counter<long> s_startFailures = s_meter.CreateCounter<long>(
         "minipty.session.start.failures",
         "{failure}",
-        "Starts that failed, tagged with error.type. An ArgumentException, a mistake in what to start, is not counted.");
+        "Starts that failed, tagged with error.type. A request Pty.Start refuses with an ArgumentException or a PlatformNotSupportedException is not counted.");
 
     private static readonly Counter<long> s_outputBytes = s_meter.CreateCounter<long>(
         "minipty.output.bytes",

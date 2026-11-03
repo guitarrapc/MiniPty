@@ -105,8 +105,9 @@ internal sealed class TerminalWindow : Window
             ? $"ConPTY {conPty.FileVersion.ToString(2)} ({(conPty.HasConsoleHost ? "OpenConsole" : "conhost fallback")})"
             : OperatingSystem.IsWindows() ? "ConPTY" : OperatingSystem.IsMacOS() ? "PTY (posix_spawn)" : OperatingSystem.IsLinux() ? "PTY (clone)" : "PTY (forkpty)";
         var pid = _session is { } session ? $" · pid {session.ProcessId}" : string.Empty;
+        var command = _statusCommand.Length == 0 ? string.Empty : $" · {_statusCommand}";
         // The command goes last, so a long one is what the line's trimming cuts, not the state or the metrics.
-        _status.Text = $"MiniPty {MiniPtyVersion} hosting {backend}{pid} · {_terminal.Columns}×{_terminal.Rows} · {_statusState}{MetricsText()} · {_statusCommand}";
+        _status.Text = $"MiniPty {MiniPtyVersion} hosting {backend}{pid} · {_terminal.Columns}×{_terminal.Rows} · {_statusState}{MetricsText()}{command}";
     }
 
     /// <summary>

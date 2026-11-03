@@ -156,9 +156,10 @@ static class Server
             if (context.Request.Query["mode"] == "flood")
                 Console.Error.WriteLine($"flood session ended: exit {status.ExitCode}{(status.Signal is { } signal ? $", signal {signal}" : "")}");
         }
-        catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException or TimeoutException)
+        catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or TimeoutException)
         {
-            // The client went away; the bridge has already ended its child.
+            // The client went away, or the child outlived the hang-up. The bridge has already ended the child. An
+            // IOException comes from the terminal, not from the socket, so it is reported below.
         }
         catch (Exception ex)
         {

@@ -387,7 +387,7 @@ public sealed class PtyEnvironmentTests
         await Assert.That(result!.Length).IsEqualTo(1);
         await Assert.That(TryGetValueIgnoreCase(result, "SystemRoot", out var systemRoot)).IsTrue();
         await Assert.That(systemRoot).IsEqualTo(WindowsProgramLookup.WindowsDirectory);
-        // The child has no PATH, which differs from the host's, so MiniPty looks the program up itself.
+        // Nothing is inherited, so a searched name is looked up on the child's PATH, and the child has none.
         await Assert.That(pathOverridden).IsTrue();
         await Assert.That(childPath).IsNull();
     }

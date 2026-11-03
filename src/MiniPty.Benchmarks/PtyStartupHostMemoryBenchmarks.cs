@@ -14,8 +14,8 @@ namespace MiniPty.Benchmarks;
 /// <remarks>
 /// The memory is native, so the GC neither moves nor scans it, and the global setup writes every 4 KiB of it, so it is
 /// resident. Each parameter runs in a process of its own. With transparent huge pages set to <c>always</c> the kernel
-/// may back it with 2 MiB pages, which a fork copies far faster. Compare forks with 4 KiB pages (Ubuntu's default,
-/// <c>madvise</c>).
+/// may back it with 2 MiB pages, which a fork copies far faster. To compare with a start that forks, run both with
+/// transparent huge pages set to <c>madvise</c> or <c>never</c>, which leave this memory in 4 KiB pages.
 /// </remarks>
 [MemoryDiagnoser]
 [SimpleJob(RuntimeMoniker.Net10_0, warmupCount: 2, iterationCount: 5, launchCount: 1)]

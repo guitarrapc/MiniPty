@@ -58,7 +58,7 @@ try
             var flood = await Flood.RunAsync(endpoint, token, floodFile, ackDelay, stop.Token);
             Console.WriteLine($"round {round}: {sessions} idle sessions open; flood read {flood.Bytes / 1024} KiB in " +
                 $"{flood.Elapsed.TotalSeconds:F1} s with {flood.Acks} acknowledgements {ackDelay.TotalMilliseconds:F0} ms late" +
-                (flood.Exited ? "" : ", but the connection closed before the shell exited"));
+                (flood.Exited ? "" : ", but the connection closed before the exit message arrived"));
         }
         catch (Exception ex) when (ex is WebSocketException or HttpRequestException)
         {
@@ -206,23 +206,31 @@ static class Flood
                 }
             }
         }
-        catch (WebSocketException) when (exited)
+        catch (WebSocketException)
         {
-            // The bridge closed the socket after the shell exited, while an acknowledgement was on its way.
+            // The connection ended before this client read the bridge's close. After the shell exits, the bridge waits its
+            // CloseTimeout, 5 s by default, for the client to close, then aborts the connection. A long LOAD_ACK_DELAY_MS
+            // can keep this client reading the last output until then. What was read still counts.
         }
 
         return (bytes, acks, started.Elapsed, exited);
     }
 }
 
-/// <summary>Lines of text to flood with, written once per run to a temporary file the shell prints.</summary>
+/// <summary>
+/// Lines of text to flood with, written once per run to a temporary file the shell prints. The file is named by the
+/// run's process ID, so concurrent runs never share one.
+/// </summary>
 static class FloodFile
 {
+    private const string Prefix = "minipty-aspire-load-";
+
     public static string Create(int bytes)
     {
-        // One name for every run: a run killed before its cleanup leaves this one file, which the next run overwrites.
-        var path = Path.Combine(Path.GetTempPath(), "minipty-aspire-load.txt");
-        using var writer = new StreamWriter(path);
+        DeleteLeftovers();
+        var path = Path.Combine(Path.GetTempPath(), $"{Prefix}{Environment.ProcessId}.txt");
+        // A new file only: in a temporary directory that other users can write to, an existing name may be theirs.
+        using var writer = new StreamWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write));
         var line = 0;
         for (long written = 0; written < bytes; line++)
         {
@@ -232,5 +240,50 @@ static class FloodFile
         }
 
         return path;
+    }
+
+    /// <summary>
+    /// Deletes the files of runs that ended without their cleanup, such as a run killed by the orchestrator. A file whose
+    /// process still runs belongs to a concurrent run and stays. One named by this process's ID is a leftover of an
+    /// earlier run that had the same ID.
+    /// </summary>
+    private static void DeleteLeftovers()
+    {
+        foreach (var file in Directory.EnumerateFiles(Path.GetTempPath(), Prefix + "*.txt"))
+        {
+            if (!int.TryParse(Path.GetFileNameWithoutExtension(file).AsSpan(Prefix.Length), out var processId)
+                || (processId != Environment.ProcessId && IsRunning(processId)))
+            {
+                continue;
+            }
+
+            try
+            {
+                File.Delete(file);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Another user's file, or one still open: it stays.
+            }
+        }
+    }
+
+    private static bool IsRunning(int processId)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            // No process has this ID.
+            return false;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            // A process this user cannot inspect may still be a run: its file stays.
+            return true;
+        }
     }
 }
