@@ -43,11 +43,11 @@ namespace MiniPty.Internal;
 /// <para>
 /// A file is a batch file by the extension of the name Windows opens (<see cref="IsBatchFile"/>). A check on the name
 /// as given would let <c>script.cmd.</c> or <c>script.cmd\.</c> run unescaped. The script is the file
-/// <c>CreateProcess</c> would find for the name, and <c>cmd.exe</c> gets its full path. So <c>cmd.exe</c>'s own lookup,
-/// which starts in the child's working directory, never picks another file. A file that starts with the <c>MZ</c>
-/// header is a program image, which <c>CreateProcess</c> runs or refuses itself, from that same full path: a second
-/// lookup by <c>CreateProcess</c> could find another file, and the file could change between the header check and
-/// the start.
+/// <see cref="WindowsProgramLookup"/> finds for the name in <c>CreateProcess</c>'s search order, and <c>cmd.exe</c>
+/// gets its full path. So <c>cmd.exe</c>'s own lookup, which starts in the child's working directory, never picks
+/// another file. A file that starts with the <c>MZ</c> header is a program image, which <c>CreateProcess</c> runs or
+/// refuses itself, from that same full path: a second lookup by <c>CreateProcess</c> could find another file, and the
+/// file could change between the header check and the start.
 /// </para>
 /// <para>
 /// What the script does with its arguments is up to the script. One that hands an argument to <c>cmd /c</c>, or uses

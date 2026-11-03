@@ -66,23 +66,29 @@ public static class Pty
     /// <exception cref="ArgumentNullException"><paramref name="startInfo"/> is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentException">
     /// Both <see cref="PtyStartInfo.CommandLine"/> and <see cref="PtyStartInfo.Arguments"/> are set. On every platform,
-    /// <see cref="PtyStartInfo.FileName"/>, an element of <see cref="PtyStartInfo.Arguments"/>,
-    /// <see cref="PtyStartInfo.WorkingDirectory"/>, or <see cref="PtyStartInfo.CommandLine"/> contains a NUL. On Windows,
-    /// also for a batch file started without a raw <see cref="PtyStartInfo.CommandLine"/>: when its name contains a quote,
-    /// a carriage return, a line feed, or a NUL, when one of its arguments contains a carriage return, a line feed, or
-    /// a NUL, or when its <c>cmd.exe</c> command line would exceed 8191 characters.
+    /// <see cref="PtyStartInfo.FileName"/>, an element of <see cref="PtyStartInfo.Arguments"/>, or
+    /// <see cref="PtyStartInfo.WorkingDirectory"/> contains a NUL. On Windows, also when
+    /// <see cref="PtyStartInfo.CommandLine"/> contains a NUL, and for a batch file started without a raw
+    /// <see cref="PtyStartInfo.CommandLine"/>: when its name contains a quote, a carriage return, a line feed, or a
+    /// NUL, when one of its arguments contains a carriage return, a line feed, or a NUL, or when its <c>cmd.exe</c>
+    /// command line would exceed 8191 characters.
     /// </exception>
     /// <exception cref="PlatformNotSupportedException">
     /// The current operating system is not supported (<see cref="IsSupported"/> is <see langword="false"/>), including
-    /// Windows builds before Windows 10 version 1809, which have no ConPTY.
+    /// Windows builds before Windows 10 version 1809, which have no ConPTY. Also when
+    /// <see cref="PtyStartInfo.CommandLine"/> is not <see langword="null"/> on an operating system other than Windows,
+    /// even when it is empty.
     /// </exception>
     /// <exception cref="System.ComponentModel.Win32Exception">
-    /// Windows: process or ConPTY creation failed. This includes a file that MiniPty looks up itself and does not find,
-    /// or cannot open, before anything is created, with the error <c>CreateProcess</c> would report. It looks up a
-    /// batch file started without a raw <see cref="PtyStartInfo.CommandLine"/>, and a program whose name is searched
-    /// for when <see cref="PtyStartInfo.Environment"/> sets or removes <c>PATH</c> or
+    /// Windows: process or ConPTY creation failed. MiniPty checks some files itself before anything is created, and
+    /// fails there when no file of the name is found (<c>ERROR_FILE_NOT_FOUND</c>) or a directory of the name is found
+    /// first (<c>ERROR_ACCESS_DENIED</c>). It checks a batch file started without a raw
+    /// <see cref="PtyStartInfo.CommandLine"/>, a program whose name is searched for when
+    /// <see cref="PtyStartInfo.Environment"/> sets or removes <c>PATH</c> or
     /// <see cref="PtyStartInfo.InheritEnvironment"/> is <see langword="false"/>
-    /// (see <see cref="PtyStartInfo.FileName"/>).
+    /// (see <see cref="PtyStartInfo.FileName"/>), and a rooted or dot-relative program path of 260 characters
+    /// (<c>MAX_PATH</c>) or more. It also opens such a batch file, which fails there when it cannot be opened, with the
+    /// error <c>CreateProcess</c> would report, or when it is empty (<c>ERROR_BAD_EXE_FORMAT</c>).
     /// Unix: the child could not enter <see cref="PtyStartInfo.WorkingDirectory"/> or execute the program, for example
     /// because it does not exist (<c>ENOENT</c>) or may not be executed (<c>EACCES</c>).
     /// <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is the <c>errno</c>. The child has already

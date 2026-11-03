@@ -13,7 +13,8 @@
 // Under the Aspire AppHost (apphost.cs beside this file), Aspire sets OTEL_EXPORTER_OTLP_ENDPOINT to its dashboard and
 // MINIPTY_TERMINAL_TOKEN to the access token in the dashboard's link to this app, and the dashboard charts the MiniPty
 // meter beside ASP.NET Core's and the runtime's. Run alone (dotnet run samples/AspireTerminal/terminal.cs), it serves
-// http://localhost:5172/, prints its address with a fresh token, and exports nothing.
+// http://localhost:5172/, prints its address with a fresh token, and exports only when OTEL_EXPORTER_OTLP_ENDPOINT is
+// set.
 
 using System.Net.WebSockets;
 using System.Security.Cryptography;
@@ -106,9 +107,9 @@ static async Task HandleTerminalAsync(HttpContext context, string token)
 
 static class Shell
 {
-    // OTEL_*, ASPNETCORE_URLS, and MINIPTY_TERMINAL_TOKEN configure this app, not the shell, whoever set them. Left in,
-    // an OpenTelemetry app started in the shell would export to the dashboard as this resource, and a web app started
-    // there would try to take this app's address.
+    // The shell gets none of OTEL_*, ASPNETCORE_URLS, and MINIPTY_TERMINAL_TOKEN, whoever set them. Under the AppHost
+    // they configure this app: left in, an OpenTelemetry app started in the shell would export to the dashboard as this
+    // resource, and a web app started there would try to take this app's address.
     private static readonly Dictionary<string, string?>? s_appVariables = AppVariables();
 
     public static PtyStartInfo StartInfo()
@@ -129,18 +130,19 @@ static class Shell
 
     /// <summary>
     /// An overlay that removes every <c>OTEL_*</c> variable, <c>ASPNETCORE_URLS</c>, and <c>MINIPTY_TERMINAL_TOKEN</c>,
-    /// or null when none is set. Names match ignoring case on Windows only, as the platforms compare them.
+    /// or null when none is set. Names match ignoring case: .NET configuration reads <c>OTEL_*</c> and
+    /// <c>ASPNETCORE_URLS</c> that way on every platform. On Unix, where each spelling is a variable of its own, each
+    /// one is removed.
     /// </summary>
     private static Dictionary<string, string?>? AppVariables()
     {
-        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        var removed = new Dictionary<string, string?>(StringComparer.FromComparison(comparison));
+        var removed = new Dictionary<string, string?>();
         foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
         {
             if (entry.Key is string key
-                && (key.StartsWith("OTEL_", comparison)
-                    || key.Equals("ASPNETCORE_URLS", comparison)
-                    || key.Equals("MINIPTY_TERMINAL_TOKEN", comparison)))
+                && (key.StartsWith("OTEL_", StringComparison.OrdinalIgnoreCase)
+                    || key.Equals("ASPNETCORE_URLS", StringComparison.OrdinalIgnoreCase)
+                    || key.Equals("MINIPTY_TERMINAL_TOKEN", StringComparison.OrdinalIgnoreCase)))
             {
                 removed[key] = null;
             }

@@ -31,7 +31,10 @@ public static class PtyCapture
     /// pump-decoded text.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="startInfo"/> is <see langword="null"/>.</exception>
-    /// <exception cref="PlatformNotSupportedException">The current operating system is not supported.</exception>
+    /// <exception cref="PlatformNotSupportedException">
+    /// The current operating system is not supported, or <see cref="PtyStartInfo.CommandLine"/> is not
+    /// <see langword="null"/> on an operating system other than Windows.
+    /// </exception>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">Exit or output drain timeout was exceeded.</exception>
     public static async Task<PtyCaptureResult> RunAsync(

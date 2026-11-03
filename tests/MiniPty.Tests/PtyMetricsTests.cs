@@ -126,9 +126,11 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// A flood nobody reads parks the reading on a full ring, with output still to come from the transport. On Windows
-    /// the disposal reads that output only to let the transport end, and those reads must not count. On Unix the
-    /// disposal stops publishing at once and discards what it reads afterwards, so there the count must not move either.
+    /// A flood nobody reads parks the reading on a full ring, with output still to come from the transport. What the
+    /// platform's driver reads after the disposal must not count. On Windows the driver reads then only to let the
+    /// transport end, and only if it reaches the output pipe before the disposal closes it. When the close comes first,
+    /// nothing is read, and the test passes either way. <see cref="AReadPublishedAfterTheDisposalIsNotCounted"/> makes
+    /// that read every time. On Unix the reads after the disposal are discarded without being published.
     /// </summary>
     [Test]
     public async Task ReadsAfterTheDisposalAreNotCounted()
@@ -148,6 +150,28 @@ public sealed class PtyMetricsTests
 
         await Assert.That(beforeDisposal).IsGreaterThan(0.0);
         await Assert.That(metrics.Values("minipty.output.bytes").Sum()).IsEqualTo(beforeDisposal);
+    }
+
+    /// <summary>
+    /// A read published after the disposal is not counted. The test is the session's output driver and publishes as the
+    /// Windows driver does when it reads after the disposal, so that read happens whatever the timing.
+    /// </summary>
+    [Test]
+    public async Task AReadPublishedAfterTheDisposalIsNotCounted()
+    {
+        using var metrics = new MetricsRecorder();
+        var session = new PtySession(new SelfDrivenBackend());
+        var pump = session.OutputPump;
+
+        pump.HoldRing();
+        pump.Publish(100, 0);
+        session.Dispose();
+        pump.Publish(100, 0);
+        pump.LetGoOfRing();
+        pump.Finish(null);
+        await session.DisposeAsync();
+
+        await Assert.That(metrics.Values("minipty.output.bytes").Sum()).IsEqualTo(100.0);
     }
 
     /// <summary>
@@ -177,9 +201,9 @@ public sealed class PtyMetricsTests
     }
 
     /// <summary>
-    /// A start that fails while the session is built, after its child exists, is counted with the exception's type.
-    /// The open-session count moves only once a session is built, so it stays where it was. That such a start also ends
-    /// its child is checked by <c>PtyStartFaultTests</c>.
+    /// A start that fails while the session is built, after its child exists, is counted with the exception's type and
+    /// is not timed. The open-session count moves only once a session is built, so it stays where it was. That such a
+    /// start also ends its child is checked by <c>PtyStartFaultTests</c>.
     /// </summary>
     [Test]
     public async Task AStartThatFailsInsideTheSessionIsCountedAsAFailureOnly()
@@ -205,6 +229,7 @@ public sealed class PtyMetricsTests
         await Assert.That(after).IsEqualTo(before);
         await Assert.That(failures.Count).IsEqualTo(1);
         await Assert.That(failures[0].ErrorType).IsEqualTo(typeof(TimeoutException).FullName);
+        await Assert.That(metrics.Values("minipty.session.start.duration").Count).IsEqualTo(0);
     }
 
     /// <summary>
@@ -322,6 +347,26 @@ public sealed class PtyMetricsTests
                 Size = new PtySize(220, 24),
             }
             : new PtyStartInfo { FileName = "sh", Arguments = ["-c", "dd if=/dev/zero bs=131072 count=1 2>/dev/null"] };
+
+    /// <summary>
+    /// A backend whose output the test publishes itself: it is the session's output driver and never reads.
+    /// </summary>
+    private sealed class SelfDrivenBackend : PtyOutputPumpTests.FakeBackend, MiniPty.Internal.IPtyOutputDriver
+    {
+        public override void StartOutput(MiniPty.Internal.PtyOutputPump pump) => pump.AttachDriver(this);
+
+        void MiniPty.Internal.IPtyOutputDriver.Wake(MiniPty.Internal.PtyOutputPump pump)
+        {
+        }
+
+        void MiniPty.Internal.IPtyOutputDriver.CancelRead(MiniPty.Internal.PtyOutputPump pump)
+        {
+        }
+
+        void MiniPty.Internal.IPtyOutputDriver.OnPumpFinished(MiniPty.Internal.PtyOutputPump pump)
+        {
+        }
+    }
 
     private static async Task<bool> WaitUntilAsync(Func<bool> condition)
     {

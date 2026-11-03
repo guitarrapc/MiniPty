@@ -88,7 +88,8 @@ public sealed record PtyStartInfo
     /// </summary>
     /// <value>
     /// <see langword="null"/> to build the command line from <see cref="Arguments"/>. When set,
-    /// <see cref="Arguments"/> must be empty. Unsupported on Unix.
+    /// <see cref="Arguments"/> must be empty. Unsupported on Unix, where <see cref="Pty.Start"/> throws
+    /// <see cref="PlatformNotSupportedException"/> when it is not <see langword="null"/>.
     /// </value>
     /// <remarks>
     /// No quoting or escaping is applied to this value. The caller must follow the parsing rules of the target

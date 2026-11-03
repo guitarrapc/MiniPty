@@ -11,7 +11,10 @@
 // session with LOAD_FLOOD_BYTES read by a client that acknowledges slowly (minipty.output.bytes, and
 // minipty.output.stall.duration), closes them all, and rests. The slow client is what a browser tab that cannot draw
 // fast enough looks like to the server: the bridge stops delivering once 384 KiB are unacknowledged, MiniPty's output
-// buffer fills, and reading stops, which blocks the shell until the client catches up. Nothing is lost.
+// buffer fills, and reading stops, which blocks the shell until the client catches up. Nothing is lost while the shell
+// runs. Once it has exited and the bridge has sent the rest of the output, the exit message, and its close, the bridge
+// waits only its CloseTimeout, 5 s by default, for the client to close. A client still reading then, as this one is
+// with a long LOAD_ACK_DELAY_MS, loses what it has not read.
 //
 // TERMINAL_URL and MINIPTY_TERMINAL_TOKEN come from the AppHost.
 
@@ -79,7 +82,15 @@ catch (OperationCanceledException) when (stop.IsCancellationRequested)
 }
 finally
 {
-    File.Delete(floodFile);
+    try
+    {
+        File.Delete(floodFile);
+    }
+    catch (IOException)
+    {
+        // On Windows the shell of a flood cut short by the stop may still be printing the file, which keeps it from
+        // being deleted. A later run deletes it.
+    }
 }
 
 return 0;
@@ -208,9 +219,11 @@ static class Flood
         }
         catch (WebSocketException)
         {
-            // The connection ended before this client read the bridge's close. After the shell exits, the bridge waits its
-            // CloseTimeout, 5 s by default, for the client to close, then aborts the connection. A long LOAD_ACK_DELAY_MS
-            // can keep this client reading the last output until then. What was read still counts.
+            // The connection ended before this client read the bridge's close. After the shell exits, the bridge sends
+            // the rest of the output, which it still holds back while 384 KiB are unacknowledged, then the exit message
+            // and its close. It then waits its CloseTimeout, 5 s by default, for this client to close, and aborts the
+            // connection if it has not. With a long LOAD_ACK_DELAY_MS this client is still reading the last output
+            // then. What was read still counts.
         }
 
         return (bytes, acks, started.Elapsed, exited);
@@ -218,8 +231,9 @@ static class Flood
 }
 
 /// <summary>
-/// Lines of text to flood with, written once per run to a temporary file the shell prints. The file is named by the
-/// run's process ID, so concurrent runs never share one.
+/// Lines of text to flood with, written once per run to a temporary file the shell prints. The name holds the run's
+/// process ID, which the cleanup of leftovers reads, and a random part, so a leftover that could not be deleted does
+/// not take the name.
 /// </summary>
 static class FloodFile
 {
@@ -228,7 +242,7 @@ static class FloodFile
     public static string Create(int bytes)
     {
         DeleteLeftovers();
-        var path = Path.Combine(Path.GetTempPath(), $"{Prefix}{Environment.ProcessId}.txt");
+        var path = Path.Combine(Path.GetTempPath(), $"{Prefix}{Environment.ProcessId}-{Guid.NewGuid():N}.txt");
         // A new file only: in a temporary directory that other users can write to, an existing name may be theirs.
         using var writer = new StreamWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write));
         var line = 0;
@@ -244,14 +258,17 @@ static class FloodFile
 
     /// <summary>
     /// Deletes the files of runs that ended without their cleanup, such as a run killed by the orchestrator. A file whose
-    /// process still runs belongs to a concurrent run and stays. One named by this process's ID is a leftover of an
-    /// earlier run that had the same ID.
+    /// process ID is in use stays: it may belong to a concurrent run, or to an ended one whose ID another process now
+    /// has, and a later run deletes it once the ID is free. One named by this process's ID is a leftover of an earlier
+    /// run that had the same ID.
     /// </summary>
     private static void DeleteLeftovers()
     {
         foreach (var file in Directory.EnumerateFiles(Path.GetTempPath(), Prefix + "*.txt"))
         {
-            if (!int.TryParse(Path.GetFileNameWithoutExtension(file).AsSpan(Prefix.Length), out var processId)
+            var name = Path.GetFileNameWithoutExtension(file).AsSpan(Prefix.Length);
+            var end = name.IndexOf('-');
+            if (!int.TryParse(end < 0 ? name : name[..end], out var processId)
                 || (processId != Environment.ProcessId && IsRunning(processId)))
             {
                 continue;

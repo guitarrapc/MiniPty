@@ -19,7 +19,7 @@ All three files are .NET 10 file-based apps, so no project files are needed. The
 | File | What it is |
 |---|---|
 | [apphost.cs](apphost.cs) | The Aspire AppHost. It runs `terminal.cs` with `AddCSharpApp`, hands it a fresh access token, and puts the token in the dashboard's link. |
-| [terminal.cs](terminal.cs) | An ASP.NET Core app: an xterm.js page and one shell per WebSocket through `PtyWebSocketBridge`, with OpenTelemetry exporting metrics to the dashboard. Run alone, it serves `http://localhost:5172/` and exports nothing. |
+| [terminal.cs](terminal.cs) | An ASP.NET Core app: an xterm.js page and one shell per WebSocket through `PtyWebSocketBridge`, with OpenTelemetry exporting metrics to the dashboard. Run alone, it serves `http://localhost:5172/` and exports only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. |
 | [load.cs](load.cs) | Browser-like clients of `terminal.cs`, started from the dashboard. Each round opens `LOAD_SESSIONS` idle sessions (8), floods one more with `LOAD_FLOOD_BYTES` (4 MiB) read by a client that acknowledges each 128 KiB `LOAD_ACK_DELAY_MS` late (100 ms), closes them all, and rests 5 s. Its console log reports each round. |
 
 ## How the app exports MiniPty's metrics
@@ -45,7 +45,7 @@ Aspire passes the dashboard's OTLP endpoint in `OTEL_EXPORTER_OTLP_ENDPOINT`, an
 ## Points to get right
 
 - **Keep the access check.** `PtyWebSocketBridge` authenticates nothing: whoever holds the socket types into the shell. The app accepts a WebSocket only on its own loopback address, from its own page, with this run's token, as WebTerminal.cs does. The AppHost turns off Aspire's proxy for the endpoint (`isProxied: false`), because the check compares the request's port with the port the app listens on.
-- **A slow client is backpressure, not loss.** The bridge stops delivering once 384 KiB are unacknowledged. MiniPty's output buffer then fills and reading stops, which blocks the shell until the client acknowledges. That is what `load`'s slow reader shows, and what a browser tab that cannot draw fast enough causes.
+- **A slow client is backpressure, not loss, while the shell runs.** The bridge stops delivering once 384 KiB are unacknowledged. MiniPty's output buffer then fills and reading stops, which blocks the shell until the client acknowledges. That is what `load`'s slow reader shows, and what a browser tab that cannot draw fast enough causes. Once the shell has exited and the bridge has sent the rest of the output, the exit message, and its close, it waits only its `CloseTimeout`, 5 s by default, for the client to close, and aborts the connection if the client has not. A client still reading then, such as `load` with a long `LOAD_ACK_DELAY_MS`, loses what it has not read.
 - **Export often enough to see a flood.** OpenTelemetry exports metrics once a minute by default. The AppHost sets `OTEL_METRIC_EXPORT_INTERVAL=1000` so the charts follow a flood as it runs.
 - **Dependencies stay in the sample.** Aspire and OpenTelemetry are this sample's packages, not MiniPty's: MiniPty itself only creates the meter, with `System.Diagnostics.Metrics` from the runtime.
 

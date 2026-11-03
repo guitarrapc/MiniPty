@@ -166,9 +166,10 @@ internal static partial class WindowsProgramLookup
     /// that starts with <c>.\</c>, <c>..\</c>, <c>./</c>, or <c>../</c> is relative to the current directory. Any
     /// other name, with a directory part or without, is searched for in the host executable's directory, the current
     /// directory when it is searched, the system directory, the 16-bit system directory, the Windows directory, and
-    /// then each <c>PATH</c> entry as written. An empty entry stands for the current directory, except one after the
-    /// last semicolon, and a relative entry is relative to the current directory. The first match decides, and a
-    /// directory there fails the launch.
+    /// then each <c>PATH</c> entry as written. With <see cref="SearchLocations.SearchRelativePathEntries"/>, an empty
+    /// entry stands for the current directory, except one after the last semicolon, and a relative entry is relative to
+    /// the current directory. Without it, as for the child's <c>PATH</c>, only fully qualified entries are searched.
+    /// The first match decides, and a directory there fails the launch.
     /// </summary>
     /// <returns>The script's full path.</returns>
     /// <exception cref="Win32Exception">
