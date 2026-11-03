@@ -19,7 +19,7 @@ Implemented public platform support, verification constraints, and platform-leve
 
 The Linux minimums are the .NET 10 runtime's own. The macOS one is the target that NativeAOT links applications for, so linking the archive does not warn. It is also below the oldest macOS that .NET 10 supports (15). Each Linux build runs in a container on a runner of its own architecture, never under emulation.
 
-**FreeBSD is experimental.** The backend is implemented and compiles when MiniPty is built on FreeBSD, but:
+**FreeBSD is experimental.** The backend is implemented, but:
 
 - It is tested neither locally nor in CI. Its termios, its hang-up behavior when the session leader exits, and its `kqueue` readiness follow from source only ([next_todo.md](../next_todo.md#unverified)).
 - The package ships no FreeBSD binary. Through the package, `Pty.Start` fails because the shim cannot be loaded, so MiniPty works there only when built from source.
