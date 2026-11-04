@@ -186,6 +186,9 @@ public sealed class PtyUnixLoopTests
         await using var session = Pty.Start(Shell($"head -c {Size} /dev/zero | tr '\\0' x"));
         await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace);
 
+        // A spin makes thousands of passes. A live child that epoll cannot watch through a pidfd, as on Linux before
+        // 5.3, is also polled every 10 ms, which adds about 50.
+        var limit = OperatingSystem.IsLinux() && !PtyUnixChildSignalTests.PidfdsWork ? 100L : 50L;
         var before = UnixPtyBackend.LoopPassesForTests;
         await Task.Delay(500);
         var passes = UnixPtyBackend.LoopPassesForTests - before;
@@ -194,7 +197,7 @@ public sealed class PtyUnixLoopTests
         await foreach (var chunk in session.ReadOutputAsync().WithCancellation(default))
             received += chunk.Data.Span.Count((byte)'x');
 
-        await Assert.That(passes).IsLessThan(50L);
+        await Assert.That(passes).IsLessThan(limit);
         await Assert.That(received).IsEqualTo(Size);
     }
 
