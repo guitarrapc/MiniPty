@@ -35,7 +35,7 @@ MiniPty does not use winpty or third-party PTY binaries. Backends are in-process
 
 ## Verification
 
-CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows. The packed packages are smoke-tested (`samples/SingleFiles/NuGetSmoke.cs`, under `dotnet run` and as a NativeAOT executable) on every test runner, plus these, each on x64 and arm64:
+CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows. On Windows that includes Windows Server 2022 (build 20348), the only hosted build before Windows 11 24H2 (26100), so the in-box paths for a `kernel32.dll` without `ReleasePseudoConsole` run there. Build 17763, the minimum, has no hosted runner. The packed packages are smoke-tested (`samples/SingleFiles/NuGetSmoke.cs`, under `dotnet run` and as a NativeAOT executable) on every test runner, plus these, each on x64 and arm64:
 
 - macOS 15, the oldest macOS .NET 10 supports.
 - An AlmaLinux 8 container: glibc 2.28, the oldest glibc .NET 10 supports.
