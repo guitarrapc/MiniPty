@@ -237,39 +237,6 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
-    /// Before Windows 11 24H2, <c>ClosePseudoConsole</c> waits until every client of the pseudo-console has gone. One
-    /// session's close that waits must not hold up the post-exit drain of another, whose output ends only once the drain
-    /// has closed its transport and seen it stay quiet.
-    /// </summary>
-    [Test]
-    public async Task ABlockedCloseDoesNotHoldUpAnotherSessionsEndOfOutput()
-    {
-        var blocked = new BlockingCloseBackend();
-        await using var blockedSession = new PtySession(blocked);
-        try
-        {
-            await blocked.Reading.WaitAsync(Timeout);
-            blocked.Exit(0);
-            await blocked.CloseEntered.WaitAsync(Timeout);
-
-            var backend = new HeldOpenBackend();
-            await using var session = new PtySession(backend);
-            await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
-            var next = enumerator.MoveNextAsync().AsTask();
-            await backend.Reading.WaitAsync(Timeout);
-
-            backend.Exit(0);
-
-            await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
-            await Assert.That(backend.IsOutputClosed).IsTrue();
-        }
-        finally
-        {
-            blocked.ReleaseClose();
-        }
-    }
-
-    /// <summary>
     /// Output still draining out of the transport after the close is not quiet. Each read restarts the interval, so
     /// a slow final flush is delivered in full before the pump ends output on its own; measured from the close alone,
     /// the forced end would cut it short.
@@ -745,42 +712,6 @@ public sealed class PtyOutputPumpTests
             _reading.TrySetResult();
             driver.WaitForWake(System.Threading.Timeout.Infinite);
             return -1;
-        }
-    }
-
-    /// <summary>
-    /// Held open like <see cref="HeldOpenBackend"/>, and its close waits until <see cref="ReleaseClose"/>, as
-    /// <c>ClosePseudoConsole</c> waits for the pseudo-console's clients before Windows 11 24H2.
-    /// </summary>
-    private sealed class BlockingCloseBackend : FakeBackend
-    {
-        private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly TaskCompletionSource _closeEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly ManualResetEventSlim _closeReleased = new();
-
-        /// <summary>Completes once the driver thread is inside <see cref="ReadOutput"/>.</summary>
-        public Task Reading => _reading.Task;
-
-        /// <summary>Completes once a close has started and is waiting.</summary>
-        public Task CloseEntered => _closeEntered.Task;
-
-        public void ReleaseClose() => _closeReleased.Set();
-
-        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
-        {
-            if (IsDisposed)
-                return 0;
-
-            _reading.TrySetResult();
-            driver.WaitForWake(System.Threading.Timeout.Infinite);
-            return -1;
-        }
-
-        public override void CloseOutputTransport()
-        {
-            _closeEntered.TrySetResult();
-            _closeReleased.Wait();
-            base.CloseOutputTransport();
         }
     }
 

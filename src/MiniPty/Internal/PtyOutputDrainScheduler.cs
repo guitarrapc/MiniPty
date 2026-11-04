@@ -12,6 +12,8 @@ namespace MiniPty.Internal;
 /// transport once output has gone quiet. One shared
 /// timer does that for every session: no session holds a thread or a timer of its own for it, and the timer
 /// stops while no session is draining. Ticks run on the thread pool and only check state or close a transport.
+/// A close must not wait (<see cref="IPtyBackend.CloseOutputTransport"/>): ticks run one at a time, so a close that
+/// waited would hold up the end of output of every draining session.
 /// </para>
 /// <para>
 /// Registration allocates nothing per session after the pump array has grown to the peak number of draining
@@ -70,7 +72,7 @@ internal static class PtyOutputDrainScheduler
 
     private static void Tick()
     {
-        // A slow tick (a pseudo-console close can take a moment) must not overlap the next one.
+        // A tick that runs late must not overlap the next one: the snapshot is shared.
         if (Interlocked.Exchange(ref s_ticking, 1) != 0)
             return;
 

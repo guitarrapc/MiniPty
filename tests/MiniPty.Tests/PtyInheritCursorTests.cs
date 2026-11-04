@@ -92,6 +92,13 @@ public sealed class PtyInheritCursorTests
                 output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
 
             await Assert.That(output.ToString()).DoesNotContain("NEVER_SHOWN");
+
+            // Before Windows 11 24H2, output ends only after the post-exit drain, which every session shares, has closed
+            // the pseudo-console, and the close waits until the console host exits. This host was still waiting for its
+            // answer when the child was killed, and another session's output must end all the same.
+            await using var other = Pty.Start(WindowsCommand("echo OTHER_MARKER"));
+            var result = await other.CompleteAsync().WaitAsync(Timeout);
+            await Assert.That(result.Contains("OTHER_MARKER")).IsTrue();
         }
         finally
         {
