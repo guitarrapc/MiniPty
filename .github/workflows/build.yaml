@@ -54,6 +54,12 @@ jobs:
       - name: Build (JIT)
         shell: bash
         run: dotnet build -c Release
+      # Temporary: how the in-box ConPTY closes and resizes before and after Windows 11 24H2, without MiniPty.
+      - name: Probe the in-box ConPTY
+        if: ${{ matrix.os == 'windows-2022' || matrix.os == 'windows-2025' }}
+        timeout-minutes: 8
+        shell: bash
+        run: dotnet run scripts/conpty-close-probe.cs
       - name: Test
         shell: bash
         run: dotnet test -c Release
