@@ -4,17 +4,17 @@ using MiniPty.Internal;
 namespace MiniPty;
 
 /// <summary>
-/// Merged PTY output and child exit code returned by <see cref="PtySession.CompleteAsync"/>.
+/// Merged PTY output and child exit status returned by <see cref="PtySession.CompleteAsync"/>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="Output"/> is the canonical raw byte stream from the PTY. Text is not stored as a property;
-/// call <see cref="GetText"/> or <see cref="GetTextString"/> when decoded text is needed.
+/// <see cref="Output"/> is the canonical raw byte stream from the PTY. Text is not stored as a property.
+/// Call <see cref="GetText"/> or <see cref="GetTextString"/> when decoded text is needed.
 /// </para>
 /// <para>
 /// When completion used <see cref="PtyCompleteOptions.DecodeOutput"/> = <see langword="true"/> (default),
 /// <see cref="GetText"/> returns a slice of memory decoded during the pump without extra allocation.
-/// When decoding was skipped, <see cref="GetText"/> decodes on every call — cache the returned
+/// When decoding was skipped, <see cref="GetText"/> decodes on every call. Cache the returned
 /// <see cref="ReadOnlyMemory{Char}"/> locally if you need text more than once.
 /// </para>
 /// </remarks>
@@ -24,13 +24,13 @@ public sealed class PtyResult
     private readonly char[]? pumpDecodedChars;
     private readonly Encoding outputEncoding;
 
-    internal PtyResult(PtyPumpPayload payload, int exitCode)
+    internal PtyResult(PtyPumpPayload payload, PtyExitStatus exitStatus)
     {
         ArgumentNullException.ThrowIfNull(payload);
         outputBytes = payload.Bytes;
         pumpDecodedChars = payload.Chars;
         outputEncoding = payload.Encoding;
-        ExitCode = exitCode;
+        ExitStatus = exitStatus;
     }
 
     /// <summary>
@@ -40,9 +40,24 @@ public sealed class PtyResult
     public ReadOnlyMemory<byte> Output => outputBytes;
 
     /// <summary>
-    /// Gets the operating-system exit code of the child process.
+    /// Gets the operating-system exit code of the child process: its own exit code, or <c>128 + signal</c> when a Unix
+    /// child was terminated by a signal.
     /// </summary>
-    public int ExitCode { get; }
+    /// <remarks>
+    /// A child killed by <c>SIGTERM</c> and a child that called <c>exit(143)</c> both report 143.
+    /// <see cref="ExitStatus"/> tells them apart.
+    /// </remarks>
+    public int ExitCode => ExitStatus.ExitCode;
+
+    /// <summary>
+    /// Gets the exit status of the child process: the exit code plus, on Unix, the signal that terminated it.
+    /// </summary>
+    /// <value>
+    /// The same status <see cref="PtySession.WaitForExitAsync"/> and <see cref="PtySession.ExitStatus"/> report.
+    /// <see cref="PtyExitStatus.Signal"/> is <see langword="null"/> when the child exited normally, and always on
+    /// Windows.
+    /// </value>
+    public PtyExitStatus ExitStatus { get; }
 
     /// <summary>
     /// Gets decoded text from <see cref="Output"/>.

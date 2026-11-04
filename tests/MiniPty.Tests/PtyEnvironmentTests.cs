@@ -327,6 +327,178 @@ public sealed class PtyEnvironmentTests
         });
     }
 
+    [Test]
+    public async Task BuildUnix_WithoutInheritanceStartsFromTermAlone()
+    {
+        var result = PtyEnvironment.BuildUnix(
+            BaseStartInfo() with { InheritEnvironment = false },
+            new Dictionary<string, string> { ["SECRET"] = "1", ["PATH"] = "/bin", ["TERM"] = "screen" });
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(result!.Length).IsEqualTo(1);
+        await Assert.That(TryGetValue(result, "TERM", out var term)).IsTrue();
+        await Assert.That(term).IsEqualTo("xterm-256color");
+    }
+
+    [Test]
+    public async Task BuildUnix_WithoutInheritanceAppliesTheOverlayAndTerminalName()
+    {
+        var result = PtyEnvironment.BuildUnix(
+            BaseStartInfo() with
+            {
+                InheritEnvironment = false,
+                Environment = new Dictionary<string, string?> { ["HOME"] = "/home/tenant", ["SECRET"] = null },
+                TerminalName = "xterm-test",
+            },
+            new Dictionary<string, string> { ["SECRET"] = "1", ["HOME"] = "/root" });
+
+        await Assert.That(result!.Length).IsEqualTo(2);
+        await Assert.That(TryGetValue(result, "HOME", out var home)).IsTrue();
+        await Assert.That(home).IsEqualTo("/home/tenant");
+        await Assert.That(TryGetValue(result, "TERM", out var term)).IsTrue();
+        await Assert.That(term).IsEqualTo("xterm-test");
+    }
+
+    /// <summary>
+    /// Removing <c>TERM</c> from the minimum leaves the child nothing. The result must still be an empty block, not
+    /// null: null makes the start hand the child this process's environment.
+    /// </summary>
+    [Test]
+    public async Task BuildUnix_WithoutInheritanceAndWithoutTermGivesAnEmptyBlock()
+    {
+        var result = PtyEnvironment.BuildUnix(
+            BaseStartInfo() with { InheritEnvironment = false, Environment = new Dictionary<string, string?> { ["TERM"] = null } },
+            new Dictionary<string, string> { ["SECRET"] = "1", ["TERM"] = "screen" });
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(result!.Length).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task BuildWindows_WithoutInheritanceStartsFromSystemRootAlone()
+    {
+        var result = PtyEnvironment.BuildWindows(
+            BaseStartInfo() with { InheritEnvironment = false },
+            out var pathOverridden,
+            out var childPath,
+            new Dictionary<string, string> { ["SECRET"] = "1", ["PATH"] = "C:\\Windows", ["SystemRoot"] = "D:\\Elsewhere" });
+
+        await Assert.That(result).IsNotNull();
+        await Assert.That(result!.Length).IsEqualTo(1);
+        await Assert.That(TryGetValueIgnoreCase(result, "SystemRoot", out var systemRoot)).IsTrue();
+        await Assert.That(systemRoot).IsEqualTo(WindowsProgramLookup.WindowsDirectory);
+        // Nothing is inherited, so a searched name is looked up on the child's PATH, and the child has none.
+        await Assert.That(pathOverridden).IsTrue();
+        await Assert.That(childPath).IsNull();
+    }
+
+    [Test]
+    public async Task BuildWindows_WithoutInheritanceTakesPathAndOverridesFromTheOverlay()
+    {
+        var result = PtyEnvironment.BuildWindows(
+            BaseStartInfo() with
+            {
+                InheritEnvironment = false,
+                Environment = new Dictionary<string, string?> { ["Path"] = "C:\\tools", ["SYSTEMROOT"] = null },
+            },
+            out var pathOverridden,
+            out var childPath,
+            WindowsParent);
+
+        await Assert.That(result!.Length).IsEqualTo(1);
+        await Assert.That(TryGetValueIgnoreCase(result, "PATH", out var path)).IsTrue();
+        await Assert.That(path).IsEqualTo("C:\\tools");
+        await Assert.That(pathOverridden).IsTrue();
+        await Assert.That(childPath).IsEqualTo("C:\\tools");
+    }
+
+    [Test]
+    public async Task AHostVariableReachesOnlyAChildThatInherits()
+    {
+        var secretKey = "MINIPTY_TEST_HOST_SECRET_" + Guid.NewGuid().ToString("N");
+        Environment.SetEnvironmentVariable(secretKey, "host-secret");
+        try
+        {
+            var inherited = await PrintEnvironmentAsync(inherit: true);
+            var minimal = await PrintEnvironmentAsync(inherit: false);
+
+            await Assert.That(inherited.Contains($"{secretKey}=host-secret")).IsTrue();
+            await Assert.That(minimal.Contains(secretKey)).IsFalse();
+            await Assert.That(minimal.Contains("MINIPTY_TEST_KEPT=kept")).IsTrue();
+            await Assert.That(minimal.Contains(OperatingSystem.IsWindows() ? "SystemRoot=" : "TERM=xterm-256color")).IsTrue();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(secretKey, null);
+        }
+
+        static async Task<PtyResult> PrintEnvironmentAsync(bool inherit)
+        {
+            var startInfo = OperatingSystem.IsWindows()
+                ? new PtyStartInfo { FileName = "cmd.exe", Arguments = ["/c", "set"] }
+                : new PtyStartInfo { FileName = "env" };
+            await using var session = Pty.Start(startInfo with
+            {
+                InheritEnvironment = inherit,
+                Environment = new Dictionary<string, string?> { ["MINIPTY_TEST_KEPT"] = "kept" },
+                Size = new PtySize(400, 50),
+            });
+            var result = await session.CompleteAsync();
+            await Assert.That(result.ExitCode).IsEqualTo(0);
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Of these shells, Windows PowerShell is the one that needs the minimum. It does not start without
+    /// <c>SystemRoot</c>.
+    /// </summary>
+    [Test]
+    public async Task WindowsShellsStartFromTheMinimumEnvironment()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var shells = new List<PtyStartInfo>
+        {
+            new() { FileName = "cmd.exe", Arguments = ["/c", "echo MINIPTY_MARK"] },
+            new()
+            {
+                FileName = Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"),
+                Arguments = ["-NoProfile", "-NonInteractive", "-Command", "Get-Date | Out-Null; Write-Output MINIPTY_MARK"],
+            },
+        };
+        if (FindOnHostPath("pwsh.exe") is { } pwsh)
+        {
+            shells.Add(new PtyStartInfo
+            {
+                FileName = pwsh,
+                Arguments = ["-NoProfile", "-NonInteractive", "-Command", "Get-Date | Out-Null; Write-Output MINIPTY_MARK"],
+            });
+        }
+
+        foreach (var shell in shells)
+        {
+            await using var session = Pty.Start(shell with { InheritEnvironment = false });
+            var result = await session.CompleteAsync();
+
+            await Assert.That(result.ExitCode).IsEqualTo(0).Because(shell.FileName);
+            await Assert.That(result.Contains("MINIPTY_MARK")).IsTrue().Because(shell.FileName);
+        }
+
+        static string? FindOnHostPath(string fileName)
+        {
+            foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var candidate = Path.Combine(directory, fileName);
+                if (Path.IsPathFullyQualified(candidate) && File.Exists(candidate))
+                    return candidate;
+            }
+
+            return null;
+        }
+    }
+
     private static bool ContainsKey(KeyValuePair<string, string>[] environment, string key)
     {
         for (var i = 0; i < environment.Length; i++)

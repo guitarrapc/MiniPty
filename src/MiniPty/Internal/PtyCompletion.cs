@@ -11,7 +11,8 @@
 /// </remarks>
 internal static class PtyCompletion
 {
-    internal static async Task<int> RunAsync(
+    /// <returns>The child's exit status.</returns>
+    internal static async Task<PtyExitStatus> RunAsync(
         PtySession session,
         PtyCompleteOptions options,
         PtyOutputSink sink,
@@ -27,11 +28,13 @@ internal static class PtyCompletion
         {
             await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
             var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
+            // The exit has been observed, so the session's status is set, and it stays readable after disposal.
+            var exitStatus = new PtyExitStatus(exitCode, session.ExitStatus?.Signal);
             while (!await sink.WaitForDrainAsync(pump, options.OutputDrainGrace, options.OutputReaderCloseTimeout, cancellationToken).ConfigureAwait(false))
             {
             }
 
-            return exitCode;
+            return exitStatus;
         }
         catch
         {

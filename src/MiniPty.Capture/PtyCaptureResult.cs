@@ -26,7 +26,7 @@ public sealed class PtyCaptureResult
 
     internal PtyCaptureResult(
         PtyPumpPayload payload,
-        int exitCode,
+        PtyExitStatus exitStatus,
         PtyCaptureChunk[] chunks,
         PtyCaptureTextChunk[]? textChunks)
     {
@@ -34,7 +34,7 @@ public sealed class PtyCaptureResult
         outputBytes = payload.Bytes;
         pumpDecodedChars = payload.Chars;
         outputEncoding = payload.Encoding;
-        ExitCode = exitCode;
+        ExitStatus = exitStatus;
         this.chunks = chunks;
         pumpTextChunks = textChunks;
     }
@@ -44,10 +44,17 @@ public sealed class PtyCaptureResult
     /// </summary>
     public ReadOnlyMemory<byte> Output => outputBytes;
 
+    /// <inheritdoc cref="PtyResult.ExitCode"/>
+    public int ExitCode => ExitStatus.ExitCode;
+
     /// <summary>
-    /// Gets the operating-system exit code of the child process.
+    /// Gets the exit status of the child process: the exit code plus, on Unix, the signal that terminated it.
     /// </summary>
-    public int ExitCode { get; }
+    /// <value>
+    /// <see cref="PtyExitStatus.Signal"/> is <see langword="null"/> when the child exited normally, and always on
+    /// Windows.
+    /// </value>
+    public PtyExitStatus ExitStatus { get; }
 
     /// <summary>
     /// Gets timestamped raw byte slices observed during the session (one per read from the PTY output stream).

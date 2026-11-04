@@ -88,6 +88,11 @@ public sealed class PtyUnixLoopTests
     /// A failure while the loop serves one session ends that session's output with the failure; another session keeps
     /// its output, and the loop keeps running.
     /// </summary>
+    /// <remarks>
+    /// The failing session is read only once the loop has failed it. The failure is injected only when the loop serves
+    /// the session, and a Unix consumer reads inline, so a consumer reading from the start could take the echo first
+    /// and then wait for good. See Platform-specific Test Constraints in <c>.github/docs/specs/platform_support.md</c>.
+    /// </remarks>
     [Test]
     [NotInParallel]
     public async Task AFailureInOneSessionEndsOnlyThatSession()
@@ -103,9 +108,11 @@ public sealed class PtyUnixLoopTests
         try
         {
             await failing.WriteInputAsync("trigger\n");
+            await WaitUntilAsync(() => failing.OutputPump.IsProducerFinished);
+            using var timeout = new CancellationTokenSource(Timeout);
             var failure = await Assert.That(async () =>
             {
-                await foreach (var _ in failing.ReadOutputAsync())
+                await foreach (var _ in failing.ReadOutputAsync(timeout.Token))
                 {
                 }
             }).Throws<IOException>();

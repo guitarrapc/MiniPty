@@ -27,10 +27,14 @@ public static class PtyCapture
     /// <see langword="true"/> (default).
     /// </param>
     /// <returns>
-    /// A <see cref="PtyCaptureResult"/> containing merged bytes, per-read byte chunks, exit code, and optional pump-decoded text.
+    /// A <see cref="PtyCaptureResult"/> containing merged bytes, per-read byte chunks, the exit status, and optional
+    /// pump-decoded text.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="startInfo"/> is <see langword="null"/>.</exception>
-    /// <exception cref="PlatformNotSupportedException">The current operating system is not supported.</exception>
+    /// <exception cref="PlatformNotSupportedException">
+    /// The current operating system is not supported, or <see cref="PtyStartInfo.CommandLine"/> is not
+    /// <see langword="null"/> on an operating system other than Windows.
+    /// </exception>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">Exit or output drain timeout was exceeded.</exception>
     public static async Task<PtyCaptureResult> RunAsync(
@@ -45,7 +49,7 @@ public static class PtyCapture
         await using var session = Pty.Start(startInfo);
         var originTimestamp = timeProvider.GetTimestamp();
         var sink = new PtyCaptureSink(originTimestamp, timeProvider, completion.OutputEncoding, completion.DecodeOutput);
-        var exitCode = await PtyCompletion.RunAsync(session, completion, sink, cancellationToken).ConfigureAwait(false);
-        return sink.ToResult(exitCode);
+        var exitStatus = await PtyCompletion.RunAsync(session, completion, sink, cancellationToken).ConfigureAwait(false);
+        return sink.ToResult(exitStatus);
     }
 }

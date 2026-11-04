@@ -36,6 +36,9 @@ internal sealed class TerminalWindow : Window
     private ConPtyLibrary? _conPty;
     private bool _exited;
     private readonly TerminalRun _run = new();
+    // Listens before the start, so the start itself is timed.
+    private readonly MiniPtyMetrics _metrics = new();
+    private Avalonia.Threading.DispatcherTimer? _metricsTimer;
 
     public TerminalWindow(IClassicDesktopStyleApplicationLifetime lifetime, bool smoke, string[] command, string? dumpPath, string? screenshotPath)
     {
@@ -100,9 +103,28 @@ internal sealed class TerminalWindow : Window
     {
         var backend = _conPty is { } conPty
             ? $"ConPTY {conPty.FileVersion.ToString(2)} ({(conPty.HasConsoleHost ? "OpenConsole" : "conhost fallback")})"
-            : OperatingSystem.IsWindows() ? "ConPTY" : OperatingSystem.IsMacOS() ? "PTY (posix_spawn)" : "PTY (forkpty)";
+            : OperatingSystem.IsWindows() ? "ConPTY" : OperatingSystem.IsMacOS() ? "PTY (posix_spawn)" : OperatingSystem.IsLinux() ? "PTY (clone)" : "PTY (forkpty)";
         var pid = _session is { } session ? $" · pid {session.ProcessId}" : string.Empty;
-        _status.Text = $"MiniPty {MiniPtyVersion} hosting {backend}{pid} · {_terminal.Columns}×{_terminal.Rows} · {_statusCommand} · {_statusState}";
+        var command = _statusCommand.Length == 0 ? string.Empty : $" · {_statusCommand}";
+        // The command goes last, so a long one is what the line's trimming cuts, not the state or the metrics.
+        _status.Text = $"MiniPty {MiniPtyVersion} hosting {backend}{pid} · {_terminal.Columns}×{_terminal.Rows} · {_statusState}{MetricsText()}{command}";
+    }
+
+    /// <summary>
+    /// What MiniPty measured for this window's session: how long the start took, how much output was read, and how
+    /// often and for how long reading stood still because the output buffer was full. The buffer fills when the screen
+    /// falls behind a flood (<c>seq 1 2000000</c>, <c>dir /s C:\Windows</c>), and the child waits meanwhile: that is
+    /// backpressure, not lost output. The consumer-wait instrument stays at 0 for a consumer on the UI thread, so it is
+    /// left out.
+    /// </summary>
+    private string MetricsText()
+    {
+        var metrics = _metrics.Read();
+        if (metrics.Starts == 0)
+            return string.Empty;
+
+        return $" · start {metrics.StartTime.TotalMilliseconds:F0} ms · read {metrics.OutputBytes / (1024.0 * 1024.0):F1} MiB" +
+            $" · stalled {metrics.Stalls}× for {metrics.StallTime.TotalMilliseconds:F0} ms";
     }
 
     private async void OnLoaded(object? sender, RoutedEventArgs e)
@@ -118,6 +140,11 @@ internal sealed class TerminalWindow : Window
         _statusCommand = startInfo.Arguments.Count == 0 ? startInfo.FileName : startInfo.FileName + " " + string.Join(' ', startInfo.Arguments);
         _statusState = "running";
         UpdateStatus();
+        // The metrics change while output flows, which raises no event of its own, so the status line reads them
+        // once a second.
+        _metricsTimer = new Avalonia.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _metricsTimer.Tick += (_, _) => UpdateStatus();
+        _metricsTimer.Start();
         var pump = PumpOutputAsync(_session);
         var exit = _session.WaitForExitAsync();
         if (!await _run.WaitAsync(exit, pump))
@@ -255,6 +282,7 @@ internal sealed class TerminalWindow : Window
     private async void OnClosed(object? sender, EventArgs e)
     {
         _run.BeginClose();
+        _metricsTimer?.Stop();
         if (_session is { } session)
         {
             _session = null;
@@ -262,5 +290,7 @@ internal sealed class TerminalWindow : Window
             // reader has stopped.
             await session.DisposeAsync();
         }
+
+        _metrics.Dispose();
     }
 }

@@ -30,6 +30,9 @@ internal sealed class TerminalWindow : Window
     private string _statusState = "starting";
     private bool _exited;
     private readonly TerminalRun _run = new();
+    // Listens before the start, so the start itself is timed.
+    private readonly MiniPtyMetrics _metrics = new();
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _metricsTimer;
 
     public TerminalWindow(bool smoke, string[] command, string? dumpPath)
     {
@@ -91,7 +94,25 @@ internal sealed class TerminalWindow : Window
     {
         var backend = _conPty is null ? "ConPTY" : $"ConPTY {_conPty.FileVersion.ToString(2)} ({(_conPty.HasConsoleHost ? "OpenConsole" : "conhost fallback")})";
         var pid = _session is { } session ? $" · pid {session.ProcessId}" : string.Empty;
-        _status.Text = $"MiniPty {MiniPtyVersion} hosting {backend}{pid} · {_terminal.Columns}×{_terminal.Rows} · {_statusCommand} · {_statusState}";
+        var command = _statusCommand.Length == 0 ? string.Empty : $" · {_statusCommand}";
+        // The command goes last, so a long one is what the line's trimming cuts, not the state or the metrics.
+        _status.Text = $"MiniPty {MiniPtyVersion} hosting {backend}{pid} · {_terminal.Columns}×{_terminal.Rows} · {_statusState}{MetricsText()}{command}";
+    }
+
+    /// <summary>
+    /// What MiniPty measured for this window's session: how long the start took, how much output was read, and how
+    /// often and for how long reading stood still because the output buffer was full. The buffer fills when the screen
+    /// falls behind a flood (<c>dir /s C:\Windows</c>), and the child waits meanwhile: that is backpressure, not lost
+    /// output.
+    /// </summary>
+    private string MetricsText()
+    {
+        var metrics = _metrics.Read();
+        if (metrics.Starts == 0)
+            return string.Empty;
+
+        return $" · start {metrics.StartTime.TotalMilliseconds:F0} ms · read {metrics.OutputBytes / (1024.0 * 1024.0):F1} MiB" +
+            $" · stalled {metrics.Stalls}× for {metrics.StallTime.TotalMilliseconds:F0} ms";
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -118,6 +139,12 @@ internal sealed class TerminalWindow : Window
         _statusCommand = startInfo.Arguments.Count == 0 ? startInfo.FileName : startInfo.FileName + " " + string.Join(' ', startInfo.Arguments);
         _statusState = "running";
         UpdateStatus();
+        // The metrics change while output flows, which raises no event of its own, so the status line reads them
+        // once a second.
+        _metricsTimer = DispatcherQueue.CreateTimer();
+        _metricsTimer.Interval = TimeSpan.FromSeconds(1);
+        _metricsTimer.Tick += (_, _) => UpdateStatus();
+        _metricsTimer.Start();
         var pump = PumpOutputAsync(_session);
         var exit = _session.WaitForExitAsync();
         if (!await _run.WaitAsync(exit, pump))
@@ -190,6 +217,7 @@ internal sealed class TerminalWindow : Window
     private async void OnClosed(object sender, WindowEventArgs args)
     {
         _run.BeginClose();
+        _metricsTimer?.Stop();
         _terminal.Dispose();
         if (_session is { } session)
         {
@@ -197,5 +225,7 @@ internal sealed class TerminalWindow : Window
             // Kills the child if it is still running. Does not block; completes once the reader has stopped.
             await session.DisposeAsync();
         }
+
+        _metrics.Dispose();
     }
 }

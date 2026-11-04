@@ -44,7 +44,7 @@ What differs by OS is only what MiniPty does underneath:
 | OS | `Pty.Start` creates | `DisposeAsync` on a running child |
 |---|---|---|
 | Windows | a ConPTY session (out-of-band when `conpty.dll` is beside the app) | terminates it |
-| Linux | a `forkpty` child | hangs it up (`SIGHUP`, so the shell can save its history), then kills it if it is still running a second later |
+| Linux | a child started with `clone`, as `posix_spawn` does | hangs it up (`SIGHUP`, so the shell can save its history), then kills it if it is still running a second later |
 | macOS | a child started through `posix_spawn` and `minipty_spawn_helper` | same as Linux |
 
 Points to get right:
@@ -59,6 +59,7 @@ Points to get right:
 
   MiniPty's build targets copy `OpenConsole.exe` beside `conpty.dll`. Without them the session uses the in-box ConPTY, which withholds graphics, some terminal queries, and mouse tracking from some programs ([details](../../README.md#out-of-band-conpty-for-windows)).
 - **Expect a closing window.** Catch `ObjectDisposedException` and `IOException` from `WriteInputAsync`, mark the run as closing before `DisposeAsync`, and treat disposal exceptions as expected only then ([TerminalRun.cs](../TerminalEmulator/TerminalRun.cs)).
+- **Read MiniPty's metrics on the UI thread's own timer.** The status line shows what MiniPty's `MiniPty` meter reports for the session: start time, output read, and how often and how long reading stood still because the output buffer was full. The buffer fills when the screen falls behind a flood (`seq 1 2000000`; on Windows `dir /s /b C:\Windows\System32` read 2.5 MiB and stalled 17 times for 80 ms), while the child waits and nothing is lost. A `MeterListener` gets measurements on the thread that records them: MiniPty's I/O thread, and on Linux and macOS also the UI thread, which reads output inline. So [MiniPtyMetrics.cs](MiniPtyMetrics.cs) only adds them to interlocked totals, and a `DispatcherTimer` reads them once a second ([Metrics](../../.github/docs/specs/core_session.md#metrics)).
 
 ## What the sample adds on top
 

@@ -10,8 +10,8 @@
 #define MINIPTY_SPAWN_RETRY_BASE_US 25000
 
 /*
- * A child that cannot chdir or exec reports the stage and errno on a close-on-exec pipe before it exits, so the start
- * fails in the parent. A successful exec closes the pipe without a report. The values cross into managed code.
+ * A child that cannot chdir or exec reports the stage and errno before it exits, so the start fails in the parent. The
+ * values cross into managed code. See Start failure report in .github/docs/references/pty_crossplatform.md.
  */
 #define MINIPTY_START_STAGE_NONE 0
 #define MINIPTY_START_STAGE_CHDIR 1

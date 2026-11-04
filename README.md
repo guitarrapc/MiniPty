@@ -20,7 +20,8 @@ I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries d
 - Idle sessions cost nothing: an idle session holds no thread and no output buffer ([how each OS reads output](#backends))
 - Bounded memory with backpressure: output goes into a 16 KiB buffer per session, and a slow consumer pauses the child instead of growing memory
 - Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call
-- Signals the right process: on Linux, signals go through a pidfd, so a reused PID is never hit
+- Signals the right process: on Linux 5.2 and later, `clone` returns a pidfd with the child, and signals go through it rather than through a PID that another process can reuse ([details](.github/docs/references/pty_crossplatform.md#child-exit-observation))
+- Observable: a `MiniPty` meter reports open sessions, start time, output bytes, and stalls, and takes no timestamps and allocates nothing while nobody listens ([Metrics](#metrics))
 
 **Not supported**
 
@@ -34,13 +35,13 @@ MiniPty creates a real PTY on each supported OS. See [Backends](#backends) for h
 
 | OS | Architectures | Status |
 |----|---------------|--------|
-| Windows 10 1809+ / Windows 11 | x64, arm64 | Supported |
+| Windows 10 1809+ / Windows 11 / Windows Server 2019+ | x64, arm64 | Supported |
 | Linux, glibc 2.27+ | x64, arm64 | Supported |
 | Linux, musl 1.2.3+ (Alpine) | x64, arm64 | Supported |
 | macOS 12.0+ | x64, arm64 | Supported |
 | FreeBSD | — | Experimental: tested neither locally nor in CI, and the package ships no FreeBSD binary, so MiniPty works there only when built from source |
 
-The minimums are those of the native files. They reach at least as far back as .NET 10 itself runs.
+The Linux and macOS minimums are those of the native files. They reach at least as far back as .NET 10 itself runs. Windows needs ConPTY, which first shipped in Windows 10 1809 and Windows Server 2019. .NET 10 also runs on earlier builds, such as Windows 10 1607 and Windows Server 2016; there `Pty.IsSupported` is `false` and `Pty.Start` throws `PlatformNotSupportedException`.
 
 ### Native files
 
@@ -67,7 +68,7 @@ The numbers below are from [run 41106916265](https://github.com/guitarrapc/MiniP
 
 Each table names the report it comes from, the methods it compares, and the columns it quotes, and every value is copied from that report as written, units included. On the run's page, each runner's job summary lists the reports by those names. CI rewrites these tables after every full benchmark run.
 
-Hosted runners get a different CPU from run to run, and the gap between the libraries, even their order, can change with it. Compare the libraries within one run only.
+Hosted runners get a different CPU from run to run, and the gap between the libraries, even their order, can change with it. Compare the libraries within one run only. The macOS runner swings even on the same CPU: over 20 runs, Porta.Pty's 1 MiB flood ranged from 32.6 to 81.3 MiB/s and MiniPty's from 38.9 to 64.4, so the macOS order follows the run ([platform lessons](.github/docs/specs/platform_support.md#lessons-learned)).
 
 The keystroke and throughput benchmarks keep one child running with raw input, as a shell or an editor runs, so they measure the PTY path and not process startup. [Porta.Pty](https://www.nuget.org/packages/Porta.Pty) 2.2.3 runs the same child for comparison, in its default mode (method `PortaPty`).
 
@@ -250,9 +251,9 @@ Each OS has its own backend behind the same API. None of them uses winpty, and n
 
 MiniPty calls Win32 ConPTY (`CreatePseudoConsole`) directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. One background loop waits on an I/O completion port of MiniPty's own and reads every session's output, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty-for-windows).
 
-### Linux: `forkpty`
+### Linux: `clone`
 
-MiniPty uses the small `libminipty_unix` native shim to call the platform PTY API, then `execve` the child inside the PTY. Resize uses `TIOCSWINSZ`. One background loop (the exit watcher's thread, on epoll) reads every session's output and writes its queued input, so an idle session holds no thread and no output buffer.
+MiniPty uses the small `libminipty_unix` native shim to open the PTY, start the child with `clone(CLONE_VM | CLONE_VFORK)` as `posix_spawn` does, and `execve` it inside the PTY. The host is not copied as a `fork` would copy it, so a start costs the same in a host with a large heap. Resize uses `TIOCSWINSZ`. One background loop (the exit watcher's thread, on epoll) reads every session's output and writes its queued input, so an idle session holds no thread and no output buffer.
 
 ### macOS: `posix_spawn` + launcher
 
@@ -270,7 +271,7 @@ To use MiniPty effectively, keep the following points in mind.
 
 - **Keep reading output.** A PTY nobody reads fills up and blocks the child. `ReadOutputAsync`, `CompleteAsync`, and the `Output` stream all drain it.
 - **Disposing ends the child.** Windows terminates it. Unix hangs it up (`SIGHUP`, so a shell saves its history) and kills it if it has not exited a second later ([Session contract](.github/docs/specs/core_session.md#session-contract)).
-- **`Environment` overlays the parent's.** A null value removes a variable. On Unix, `TerminalName` sets `TERM`, which defaults to `xterm-256color` ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
+- **`Environment` overlays the parent's.** A null value removes a variable. On Unix, `TerminalName` sets `TERM`, which defaults to `xterm-256color` ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)). To keep your process's variables out of the child, see [Environment for shared hosts](#environment-for-shared-hosts).
 - **MiniPty is not a sandbox.** The child runs with your permissions. If a program name, path, or argument comes from untrusted input, read [Untrusted program names and paths](.github/docs/specs/core_session.md#untrusted-program-names-and-paths) and [Batch files](.github/docs/specs/core_session.md#batch-files-windows) first.
 
 ### Out-of-band ConPTY for Windows
@@ -315,6 +316,44 @@ await using var session = Pty.Start(new PtyStartInfo
 });
 ```
 
+### Environment for shared hosts
+
+A web host's environment holds connection strings and cloud credentials that its shells should not be handed. `InheritEnvironment = false` starts the child from the minimum it needs (`SystemRoot` on Windows, nothing on Unix besides `TERM`), so a variable reaches the child's environment only when `Environment` names it. Pass what your shells need yourself ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
+
+It is not isolation. A child that runs as the same user can still read your process's environment from the operating system, for example from `/proc/<pid>/environ` on Linux. Run shells for untrusted users as another user or in a container.
+
+```csharp
+await using var session = Pty.Start(new PtyStartInfo
+{
+    FileName = "bash",
+    InheritEnvironment = false,
+    Environment = new Dictionary<string, string?>
+    {
+        ["PATH"] = Environment.GetEnvironmentVariable("PATH"),
+        ["HOME"] = "/home/tenant",
+        ["LANG"] = "C.UTF-8",
+    },
+});
+```
+
+### Metrics
+
+MiniPty reports what a host pays on the output path on a meter named `MiniPty`: open sessions, start time and failures, output bytes, stalls on a full output buffer, and (Unix) a consumer's native waits for output. While nobody listens, MiniPty only keeps the count of open sessions: it takes no timestamps and allocates nothing ([Metrics](.github/docs/specs/core_session.md#metrics)).
+
+With OpenTelemetry, add the meter; [AspireTerminal](samples/AspireTerminal) exports it this way to the Aspire dashboard:
+
+```csharp
+builder.Services.AddOpenTelemetry().WithMetrics(metrics => metrics.AddMeter("MiniPty"));
+```
+
+Without any setup, `dotnet-counters` reads it from a running process:
+
+```shell
+dotnet-counters monitor --counters MiniPty --process-id <pid>
+```
+
+In code without OpenTelemetry, a `MeterListener` reads it: [WebTerminalScale](samples/SingleFiles/WebTerminalScale.cs) shows them beside its host's threads and memory, and [WinUiTerminal](samples/WinUiTerminal) and [AvaloniaTerminal](samples/AvaloniaTerminal) on their status line.
+
 ### GUI hosts
 
 WinUI, WPF, WinForms, and Avalonia can call every MiniPty API on the UI thread. Nothing blocks it, and no marshaling is needed. Full terminal emulators built this way: [samples/WinUiTerminal](samples/WinUiTerminal) (Windows) and [samples/AvaloniaTerminal](samples/AvaloniaTerminal) (Windows, Linux, macOS). See also [GUI hosts](.github/docs/specs/core_session.md#gui-hosts).
@@ -349,6 +388,7 @@ Each guide shows how to build that kind of application with MiniPty.
 | A terminal window on Windows | [WinUiTerminal](samples/WinUiTerminal) | MiniPty |
 | A terminal window on Windows, Linux, and macOS | [AvaloniaTerminal](samples/AvaloniaTerminal) | MiniPty |
 | A terminal in the browser (xterm.js) | [Web terminal](samples/SingleFiles/README.md#web-terminal) | MiniPty.Terminal |
+| A browser terminal whose metrics the Aspire dashboard charts | [AspireTerminal](samples/AspireTerminal) | MiniPty.Terminal |
 | A VS Code terminal backend | [VsCodeExtension](samples/VsCodeExtension) | MiniPty.Terminal |
 
 Run them locally (JIT):
@@ -363,6 +403,8 @@ dotnet run --project samples/TuiDemo -c Release
 dotnet run --project samples/WinUiTerminal
 # Windows, Linux, macOS GUI terminal
 dotnet run --project samples/AvaloniaTerminal
+# browser terminal and the Aspire dashboard with MiniPty's metrics
+dotnet run samples/AspireTerminal/apphost.cs
 ```
 
 NativeAOT publish, with the same flags as CI (on Linux and macOS, run `bash scripts/build-native.sh <rid>` first):
@@ -379,7 +421,7 @@ Use `dotnet` for local development, debugging, or publishing.
 
 - [Specification](.github/docs/spec.md) — API contracts, scope, document map, lessons learned
 - [Lifecycle](.github/docs/specs/lifecycle.md) — responsibility split, session flow diagram, cancellation, EOF, drain, disposal
-- [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, `forkpty`, EOF staging
+- [Implementation reference](.github/docs/references/pty_crossplatform.md) — ConPTY, Unix process start, EOF staging
 
 ### Build
 

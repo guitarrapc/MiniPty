@@ -7,53 +7,11 @@ namespace MiniPty.Internal;
 /// Starts a batch file (<c>.bat</c>, <c>.cmd</c>) so that <c>cmd.exe</c> reads its arguments as data, not as commands.
 /// </summary>
 /// <remarks>
-/// <para>
 /// <c>CreateProcess</c> runs a batch file by starting <c>cmd.exe</c> on the command line it was given, and
-/// <c>cmd.exe</c> does not parse arguments by the MSVCRT rules. An argument quoted by those rules can close
-/// <c>cmd.exe</c>'s quoting and run a command of its own: <c>x" &amp; calc &amp; "</c>, quoted as
-/// <c>"x\" &amp; calc &amp; \""</c>, runs <c>calc</c>. A host that passes user input as an argument to a batch file,
-/// such as a tool's <c>.cmd</c> shim, would run that user's commands.
-/// </para>
-/// <para>
-/// MiniPty therefore starts the interpreter itself, from the system directory (never through <c>ComSpec</c>, which
-/// the environment controls), as <c>cmd.exe /e:ON /v:OFF /d /c ""script" args"</c>:
-/// </para>
-/// <list type="bullet">
-/// <item><c>/d</c> skips the AutoRun commands from the registry, <c>/v:OFF</c> turns delayed expansion off so
-/// <c>!name!</c> is not expanded, and <c>/e:ON</c> turns on the command extensions the percent escape relies on.
-/// The registry can add AutoRun commands and change the other two defaults, so all three switches are explicit.</item>
-/// <item><c>cmd.exe /c</c> strips the first and last quote of a line that starts with a quote and holds more than
-/// two. The outer pair is there to be stripped, so the script path and every argument keep their own.</item>
-/// <item>An argument is quoted when it is empty, ends with a backslash, or holds any character other than an ASCII
-/// letter, an ASCII digit, or one of <c>#$*+-./:?@\_</c>. Every character <c>cmd.exe</c> treats specially is then
-/// inside quotes, and so is every non-ASCII space it splits parameters on.</item>
-/// <item>A quote inside an argument is doubled, so <c>cmd.exe</c>'s quoting closes and reopens around it with nothing
-/// in between. A program the script forwards <c>%*</c> to reads the pair as one quote when it parses its command line
-/// with the UCRT. The pre-2008 rules, which <c>CommandLineToArgvW</c> and <c>msvcrt.dll</c> follow, read the pair as
-/// a quote that also ends the quoting, so the argument boundaries after it move. Backslashes before a quote, and
-/// before the closing quote, are doubled for the program's parser.</item>
-/// <item>Each <c>%</c>, also in the script path, is written as <c>%%cd:~,%</c>. <c>%cd:~,%</c> is an empty substring
-/// of the current directory, so the first <c>%</c> survives and no <c>%name%</c> can expand.</item>
-/// <item>A carriage return, a line feed, or a NUL in an argument is rejected, and so is any of them or a quote in the
-/// file name and again in the full path the lookup produces. <c>cmd.exe</c> drops a carriage return and ends its
-/// command line at a line feed or a NUL, so no quoting can deliver them.</item>
-/// <item>A command line longer than <see cref="CommandLineLimit"/> characters is rejected. Otherwise the session would
-/// start and <c>cmd.exe</c> would fail with "The command line is too long", with nothing pointing at the cause.</item>
-/// </list>
-/// <para>
-/// A file is a batch file by the extension of the name Windows opens (<see cref="IsBatchFile"/>). A check on the name
-/// as given would let <c>script.cmd.</c> or <c>script.cmd\.</c> run unescaped. The script is the file
-/// <c>CreateProcess</c> would find for the name, and <c>cmd.exe</c> gets its full path. So <c>cmd.exe</c>'s own lookup,
-/// which starts in the child's working directory, never picks another file. A file that starts with the <c>MZ</c>
-/// header is a program image, which <c>CreateProcess</c> runs or refuses itself, from that same full path: a second
-/// lookup by <c>CreateProcess</c> could find another file, and the file could change between the header check and
-/// the start.
-/// </para>
-/// <para>
-/// What the script does with its arguments is up to the script. One that hands an argument to <c>cmd /c</c>, or uses
-/// it without its quotes as <c>%~1</c>, can still be made to run something, and no caller can prevent that. A raw
-/// <see cref="PtyStartInfo.CommandLine"/> is passed unchanged, as its contract says.
-/// </para>
+/// <c>cmd.exe</c> does not parse arguments by the MSVCRT rules, so an argument quoted by those rules can run a command
+/// of its own. MiniPty therefore starts <c>cmd.exe</c> itself, as <c>cmd.exe /e:ON /v:OFF /d /c ""script" args"</c>,
+/// with the script's full path and each argument escaped for <c>cmd.exe</c>. The rules and their reasons are in Batch
+/// Files (Windows), <c>.github/docs/specs/core_session.md</c>.
 /// </remarks>
 internal static class WindowsBatchFile
 {
@@ -64,7 +22,13 @@ internal static class WindowsBatchFile
     internal const int CommandLineLimit = 8191;
 
     private const int ErrorBadExeFormat = 193;
+
+    // /d skips the registry's AutoRun commands, /v:OFF keeps !name! from expanding, and /e:ON enables the substring
+    // syntax of the percent escape. The registry can change the defaults of the last two, so both are explicit. /c
+    // strips the outer pair of quotes, so the script path and each argument keep their own.
     private const string CommandPrefix = "cmd.exe /e:ON /v:OFF /d /c \"";
+
+    // %cd:~,% is an empty substring of the current directory, so the % before it survives and no %name% can expand.
     private const string PercentEscape = "%%cd:~,";
 
     // An argument made only of these needs no quotes: cmd.exe treats none of them specially or as a separator.
@@ -73,7 +37,10 @@ internal static class WindowsBatchFile
 
     private static string? s_commandInterpreterPath;
 
-    /// <summary>Gets the interpreter that runs a batch file: <c>cmd.exe</c> in the system directory.</summary>
+    /// <summary>
+    /// Gets the interpreter that runs a batch file: <c>cmd.exe</c> in the system directory, never <c>ComSpec</c>, which
+    /// the environment controls.
+    /// </summary>
     internal static string CommandInterpreterPath => s_commandInterpreterPath ??= Path.Combine(WindowsProgramLookup.SystemDirectory, "cmd.exe");
 
     /// <summary>
@@ -81,11 +48,8 @@ internal static class WindowsBatchFile
     /// <c>..</c> segments, with its trailing spaces and dots dropped, ends in <c>.bat</c> or <c>.cmd</c>.
     /// </summary>
     /// <remarks>
-    /// Windows removes those segments and trailing characters before it opens a name, and <c>CreateProcess</c> starts
-    /// <c>cmd.exe</c> for <c>x.cmd\.</c>, <c>x.cmd\sub\..</c> and <c>x.cmd\. </c>. <c>GetFullPathNameW</c> turns the
-    /// last one into <c>x.cmd\</c>, so it cannot decide this, and the rule is lexical instead. It also counts a name
-    /// such as <c>x.cmd\</c>, which no file can match. The lookup then fails, where the name taken as a program could
-    /// have reached <c>cmd.exe</c> unescaped.
+    /// The rule is lexical because <c>GetFullPathNameW</c> turns some names that <c>CreateProcess</c> starts as batch
+    /// files, such as <c>x.cmd\. </c>, into names that end with a backslash.
     /// </remarks>
     internal static bool IsBatchFile(string fileName)
     {
@@ -137,11 +101,9 @@ internal static class WindowsBatchFile
     /// Whether the script at <paramref name="path"/> is a program image rather than a script, by its <c>MZ</c> header.
     /// </summary>
     /// <remarks>
-    /// <c>CreateProcess</c> hands a <c>.bat</c> or <c>.cmd</c> file to <c>cmd.exe</c> only when the file is not empty
-    /// and does not start with this header. It runs a file that does as a program, or refuses it when it is not a
-    /// valid one. It fails when another handle denies reading the file or holds it for writing, so the file is opened
-    /// the same way here. A file that cannot be opened, or an empty one, then fails before the session starts, where
-    /// <c>cmd.exe</c> would report it only in its output.
+    /// <c>CreateProcess</c> runs a file with this header as a program, or refuses it, and never hands it to
+    /// <c>cmd.exe</c>. The file is opened as <c>CreateProcess</c> opens it, so a file it cannot open, or an empty one,
+    /// fails here rather than only in <c>cmd.exe</c>'s output.
     /// </remarks>
     /// <exception cref="Win32Exception">
     /// The file cannot be opened, with the error <c>CreateProcess</c> would report, or it is empty
@@ -174,9 +136,8 @@ internal static class WindowsBatchFile
     /// <paramref name="arguments"/> delivered as data (see the type remarks).
     /// </summary>
     /// <remarks>
-    /// The script path is checked here as well as in <see cref="ValidateName"/>: the lookup
-    /// (<see cref="WindowsProgramLookup"/>) joins the name with directories from a <c>PATH</c> and the current
-    /// directory, so this is the one place that sees every character <c>cmd.exe</c> receives.
+    /// The path is checked again here because the lookup joins the name with a <c>PATH</c> entry or the current
+    /// directory, which <see cref="ValidateName"/> never saw.
     /// </remarks>
     /// <exception cref="ArgumentException">
     /// The script path contains a quote, a carriage return, a line feed, or a NUL, or ends with a backslash, an

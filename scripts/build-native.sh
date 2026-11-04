@@ -46,9 +46,9 @@ build_static_archive() {
 case "$rid" in
   linux-*)
     cflags=(-O2 -fPIC -pthread)
-    # -lutil follows the sources: glibc before 2.34 keeps forkpty in libutil, and with --as-needed (the default on
-    # Ubuntu) a library named before the objects that need it is dropped, leaving forkpty unresolved at load time.
-    cc -shared "${cflags[@]}" -o "$out_dir/libminipty_unix.so" "${sources[@]}" -lutil
+    # -z now binds every symbol at load: a start's child runs in the host's memory until its exec, and its calls must
+    # not enter the dynamic linker. No libutil: Linux starts the child with clone, not forkpty.
+    cc -shared "${cflags[@]}" -Wl,-z,now -o "$out_dir/libminipty_unix.so" "${sources[@]}"
     build_static_archive "$out_dir/libminipty_unix.a" "${sources[@]}"
     ;;
   osx-*)

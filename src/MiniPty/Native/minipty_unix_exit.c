@@ -45,23 +45,21 @@
  * Child exit watcher, child signaling and reaping.
  *
  * One managed thread blocks in minipty_watch_wait for every child that one load of the managed assembly
- * starts, so observing exit adds no thread per session. The watcher keeps no state here: the caller holds its
- * descriptors and passes them back. Two loads in one process, such as two AssemblyLoadContexts, share this library,
- * and one shared epoll or kqueue handed one load's exits to the other load's thread. Linux watches pidfds with epoll.
- * macOS and FreeBSD watch EVFILT_PROC NOTE_EXIT with kqueue.
+ * starts, so observing exit adds no thread per session. The watcher keeps no state here, because two loads in one
+ * process, such as two AssemblyLoadContexts, share this library. The caller holds its descriptors and passes them
+ * back.
+ * Linux watches pidfds with epoll. macOS and FreeBSD watch EVFILT_PROC NOTE_EXIT with kqueue.
  *
  * The watcher only reports that a child exited. Reaping stays with the managed caller so the wait status is read
- * exactly once, by one owner. On Linux the caller also owns each child's pidfd, which the spawn opens right after the
- * fork. It signals and reaps the child through it, and once the child is reaped it removes the registration and then
- * closes the pidfd. A child that cannot be registered makes minipty_child_watch_add fail, and the caller polls that
- * child instead. On Linux that is a child without a pidfd, which the kernel did not give or the spawn refused. With
- * kqueue it is a child that already exited before its registration.
+ * exactly once, by one owner. On Linux the caller also owns each child's pidfd, from the spawn, and signals and reaps
+ * the child through it where the kernel supports that. A child that cannot be registered makes minipty_child_watch_add
+ * fail, and the caller polls that child instead.
  *
  * A self-pipe wakes the wait when the caller's polling set changes. On macOS an EVFILT_USER event on the kqueue
  * does instead. Every descriptor is opened close-on-exec, so no later child ever keeps the watcher's descriptors
- * past exec: the pipe with pipe2 (macOS has none, hence the event there). Until a concurrently forked child execs,
- * though, it holds duplicates of them. epoll drops a registration only when every descriptor for the open file
- * description is closed, so pidfd registrations are one-shot and are removed explicitly before the pidfd closes.
+ * past exec. Until a concurrently forked child execs, though, it holds duplicates of them. epoll drops a registration
+ * only when every descriptor for the open file description is closed, so pidfd registrations are one-shot and are
+ * removed explicitly before the pidfd closes.
  *
  * A PTY master that a disposal keeps open for its hang-up can also wake the wait when it has output, so the caller
  * discards a hung-up child's output as fast as the child writes it (minipty_child_watch_add_output). Such a wake reports
@@ -792,7 +790,7 @@ int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_
             return 1;
         }
 
-        /* Linux 5.3 has pidfd_open but not P_PIDFD, and reaps by pid. */
+        /* Kernels before 5.4 have no P_PIDFD and reap by pid. */
         if (errno != EINVAL)
             return -1;
     }

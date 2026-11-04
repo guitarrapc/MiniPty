@@ -17,10 +17,11 @@ Before a NativeAOT publish on Linux or macOS, build the native shim for the RID:
 | Record output with the time of each read | [Capture.cs](Capture.cs), [Observe.cs](Observe.cs) | `PtyCapture.RunAsync` |
 | Hand your terminal to a shell or an editor | [ConsoleAttach.cs](ConsoleAttach.cs) | `PtyConsoleInput.Attach` |
 | Serve a terminal to a browser | [WebTerminal.cs](WebTerminal.cs), [WebTerminalScale.cs](WebTerminalScale.cs) | `PtyWebSocketBridge` |
+| Watch what sessions cost: start time, output, stalls on a full buffer | [WebTerminalScale.cs](WebTerminalScale.cs) | the `MiniPty` meter |
 | Back a VS Code terminal | [VsCodeTerminalHelper.cs](VsCodeTerminalHelper.cs), [VsCodePersistentBridge.cs](VsCodePersistentBridge.cs) | `PtyStdioBridge`, `PtyWebSocketSessionManager` |
 | See what `InheritCursor` waits for, measure the bridges, check the packages | [InheritCursorWait.cs](InheritCursorWait.cs), [BridgeTraffic.cs](BridgeTraffic.cs), [NuGetSmoke.cs](NuGetSmoke.cs) | tools for MiniPty's own development |
 
-Full-screen TUIs and GUI terminal windows have their own projects: [TuiDemo](../TuiDemo), [WinUiTerminal](../WinUiTerminal), [AvaloniaTerminal](../AvaloniaTerminal).
+Full-screen TUIs and GUI terminal windows have their own projects: [TuiDemo](../TuiDemo), [WinUiTerminal](../WinUiTerminal), [AvaloniaTerminal](../AvaloniaTerminal). [AspireTerminal](../AspireTerminal) runs a browser terminal under an Aspire AppHost, whose dashboard charts MiniPty's metrics.
 
 ## README snippets
 
@@ -211,7 +212,7 @@ The bridge authenticates nothing: whoever holds the WebSocket types into the she
 
 The server prints the token in the URL fragment (`#token=...`), which browsers never send to a server, and the page sends it back as a subprotocol rather than in the URL, so request logs never record it. Copy `LocalAccess`, or put your own authentication in front of `RunAsync`.
 
-The page is embedded in the executable and loads xterm.js from a CDN, so `WebTerminal.cs` publishes with NativeAOT as one file. `WebTerminalScale.cs` also shows what each session costs the host (threads, memory, handles), and `-- bench --sessions 16,64,256` measures it. Protocol and options: [terminal.md](../../.github/docs/specs/terminal.md#ptywebsocketbridge--frontend-bridge).
+The page is embedded in the executable and loads xterm.js from a CDN, so `WebTerminal.cs` publishes with NativeAOT as one file. `WebTerminalScale.cs` also shows what each session costs the host (threads, memory, handles), and `-- bench --sessions 16,64,256` measures it. It reads MiniPty's `MiniPty` meter with a `MeterListener` as well: the page shows open sessions, the average start time, output read, and stalls on a full output buffer, and the bench prints each step's start time and the stalls during its flood ([Metrics](../../.github/docs/specs/core_session.md#metrics)). The bridge coalesces bursts on a timer and never waits for output in native code, so the consumer-wait instrument is left out. Protocol and options: [terminal.md](../../.github/docs/specs/terminal.md#ptywebsocketbridge--frontend-bridge).
 
 ## VS Code terminal backend
 

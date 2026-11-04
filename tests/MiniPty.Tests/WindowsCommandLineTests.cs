@@ -357,8 +357,7 @@ public sealed class WindowsCommandLineTests
             return;
 
         // CreateProcess loads a file that starts with MZ as an image, or refuses it, and never hands it to cmd.exe.
-        // It gets the file whose header was read as the application name, so no second lookup can pick another
-        // file, and a file that becomes a script after the check cannot reach cmd.exe with program quoting.
+        // It gets the file whose header was read as the application name, so no second lookup can pick another file.
         using var image = new TemporaryFile("x.cmd", "MZ"u8);
         var startInfo = new PtyStartInfo { FileName = image.Path, Arguments = ["a b"] };
 

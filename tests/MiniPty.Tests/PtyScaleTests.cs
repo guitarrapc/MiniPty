@@ -52,10 +52,8 @@ public sealed class PtyScaleTests
             await StartIdleSessionsAsync(sessions, ManySessions);
             var many = await SettledThreadCountsAsync();
 
-            // Windows exit watchers each wait on up to 63 children, so 64 sessions may take one watcher thread more.
-            var watcherThreads = OperatingSystem.IsWindows() ? WatcherThreads(ManySessions) - WatcherThreads(FewSessions) : 0;
             var counts = $"{FewSessions} sessions: {few}; {ManySessions} sessions: {many}";
-            await Assert.That(many.OutsidePool - few.OutsidePool - watcherThreads).IsLessThanOrEqualTo(RuntimeThreadTolerance).Because(counts);
+            await Assert.That(many.OutsidePool - few.OutsidePool).IsLessThanOrEqualTo(RuntimeThreadTolerance).Because(counts);
             await Assert.That(many.PoolWorkers - few.PoolWorkers).IsLessThanOrEqualTo(PoolThreadTolerance).Because(counts);
         }
         finally
@@ -126,7 +124,110 @@ public sealed class PtyScaleTests
         }
     }
 
-    private static int WatcherThreads(int sessions) => (sessions + 62) / 63;
+    /// <summary>
+    /// The Windows exit watcher waits on every child without a thread of its own: 1,000 pending waits add none. A
+    /// design that waited on 63 handles per thread would add 16. Events stand in for children, since the watcher waits
+    /// on any handle that signals once.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task WindowsExitWatcherWaitsWithoutAThreadPerHandle()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        const int Handles = 1000;
+        var events = new EventWaitHandle[Handles];
+        var observer = new CountingExitObserver(Handles);
+        try
+        {
+            for (var i = 0; i < Handles; i++)
+                events[i] = new EventWaitHandle(false, EventResetMode.ManualReset);
+
+            var before = await SettledThreadCountsAsync();
+            for (var i = 0; i < Handles; i++)
+                MiniPty.Internal.WindowsExitWatcher.Register(events[i].SafeWaitHandle.DangerousGetHandle(), observer);
+            var waiting = await SettledThreadCountsAsync();
+
+            for (var i = 0; i < Handles; i++)
+                events[i].Set();
+            await observer.AllExited.WaitAsync(TimeSpan.FromSeconds(30));
+
+            var counts = $"before: {before}; {Handles} waits: {waiting}";
+            await Assert.That(waiting.OutsidePool - before.OutsidePool).IsLessThanOrEqualTo(RuntimeThreadTolerance).Because(counts);
+            await Assert.That(observer.Exits).IsEqualTo(Handles);
+        }
+        finally
+        {
+            foreach (var handle in events)
+                handle?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Exit is observed through the watcher alone, since nothing else asks the child.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task EveryExitOfManyOpenSessionsIsObserved()
+    {
+        const int Sessions = 200;
+        const int ExitCode = 3;
+        var sessions = new List<IdleSession>(Sessions);
+        try
+        {
+            var before = await SettledThreadCountsAsync();
+            while (sessions.Count < Sessions)
+                sessions.Add(new IdleSession(Pty.Start(ExitOnLineChild(ExitCode))));
+            foreach (var session in sessions)
+                await session.Ready.WaitAsync(StartTimeout);
+            var open = await SettledThreadCountsAsync();
+
+            foreach (var session in sessions)
+                await session.Session.WriteInputAsync("\r"u8.ToArray());
+
+            var exits = new Task<PtyExitStatus>[Sessions];
+            for (var i = 0; i < Sessions; i++)
+                exits[i] = sessions[i].Session.WaitForExitAsync();
+            var statuses = await Task.WhenAll(exits).WaitAsync(TimeSpan.FromSeconds(60));
+
+            var counts = $"before: {before}; {Sessions} sessions: {open}";
+            await Assert.That(open.OutsidePool - before.OutsidePool).IsLessThanOrEqualTo(RuntimeThreadTolerance).Because(counts);
+            foreach (var status in statuses)
+                await Assert.That(status.ExitCode).IsEqualTo(ExitCode);
+        }
+        finally
+        {
+            await DisposeAllAsync(sessions);
+        }
+    }
+
+    /// <summary>Prints READY, waits for a line, then exits with <paramref name="exitCode"/>.</summary>
+    private static PtyStartInfo ExitOnLineChild(int exitCode) =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? new PtyStartInfo
+            {
+                FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+                Arguments = ["/c", $"echo READY & set /p DUMMY= & exit {exitCode}"],
+            }
+            : new PtyStartInfo { FileName = "sh", Arguments = ["-c", $"printf 'READY\\n'; IFS= read -r _; exit {exitCode}"] };
+
+    /// <summary>Counts exits reported by <see cref="MiniPty.Internal.WindowsExitWatcher"/>.</summary>
+    private sealed class CountingExitObserver(int expected) : MiniPty.Internal.IWindowsExitObserver
+    {
+        private readonly TaskCompletionSource _allExited = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _exits;
+
+        public int Exits => Volatile.Read(ref _exits);
+
+        public Task AllExited => _allExited.Task;
+
+        public void OnProcessExited()
+        {
+            if (Interlocked.Increment(ref _exits) == expected)
+                _allExited.TrySetResult();
+        }
+    }
 
     /// <summary>
     /// Starts sessions until <paramref name="target"/> are open, each with a consumer that reads its output as a web host

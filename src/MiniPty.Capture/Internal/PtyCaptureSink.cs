@@ -130,7 +130,7 @@ internal sealed class PtyCaptureSink : PtyOutputSink
     /// Builds the result: merges the segments into one array each and turns the chunk metadata into chunks over them.
     /// Called once, after the drain wait reported end of output.
     /// </summary>
-    internal PtyCaptureResult ToResult(int exitCode)
+    internal PtyCaptureResult ToResult(PtyExitStatus exitStatus)
     {
         PtySinkStates.Take(ref _state);
         var outputBytes = _bytes.ToArray();
@@ -154,7 +154,7 @@ internal sealed class PtyCaptureSink : PtyOutputSink
             }
         }
 
-        return new PtyCaptureResult(new PtyPumpPayload(outputBytes, outputChars, _encoding), exitCode, chunks, textChunks);
+        return new PtyCaptureResult(new PtyPumpPayload(outputBytes, outputChars, _encoding), exitStatus, chunks, textChunks);
     }
 
     private TimeSpan ElapsedSinceStart(long timestamp)

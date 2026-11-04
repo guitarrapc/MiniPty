@@ -33,7 +33,7 @@ public class PtyCaptureDisplayBenchmarks
         manyTextChunks = manyTextChunkArr;
         captureResult = new PtyCaptureResult(
             new PtyPumpPayload(mergedBytes, mergedChars, Encoding.UTF8),
-            0,
+            exitStatus: default,
             [],
             manyTextChunkArr);
     }

@@ -30,12 +30,21 @@ internal static class PtyEnvironment
     {
         ValidateTerminalName(startInfo.TerminalName);
 
-        if (startInfo.Environment is null && string.IsNullOrEmpty(startInfo.TerminalName))
+        if (startInfo.InheritEnvironment && startInfo.Environment is null && string.IsNullOrEmpty(startInfo.TerminalName))
             return null;
 
-        var entries = CreateParentMap(StringComparer.Ordinal, parentEnvironment);
-        for (var i = 0; i < UnixSanitizedKeys.Length; i++)
-            entries.Remove(UnixSanitizedKeys[i]);
+        Dictionary<string, EnvironmentEntry> entries;
+        if (startInfo.InheritEnvironment)
+        {
+            entries = CreateParentMap(StringComparer.Ordinal, parentEnvironment);
+            for (var i = 0; i < UnixSanitizedKeys.Length; i++)
+                entries.Remove(UnixSanitizedKeys[i]);
+        }
+        else
+        {
+            // A Unix child needs no variable to start: the program is looked up on /bin:/usr/bin when PATH is missing.
+            entries = new Dictionary<string, EnvironmentEntry>(StringComparer.Ordinal);
+        }
 
         var termTouched = ApplyOverlay(entries, startInfo.Environment, StringComparer.Ordinal, "TERM");
         if (!string.IsNullOrEmpty(startInfo.TerminalName))
@@ -58,9 +67,8 @@ internal static class PtyEnvironment
     /// <summary>Builds the Windows child environment from <paramref name="startInfo"/> and an optional parent snapshot.</summary>
     /// <param name="startInfo">Spawn options containing the overlay.</param>
     /// <param name="pathOverridden">
-    /// Whether the overlay sets or removes <c>PATH</c> (compared ignoring case, as Windows does). The child's
-    /// <c>PATH</c> then differs from the host's, which is what decides whether MiniPty looks a program name up itself
-    /// (<see cref="WindowsProgramLookup"/>); otherwise <c>CreateProcess</c> searches the host's, which is the same one.
+    /// Whether the overlay sets or removes <c>PATH</c> (compared ignoring case, as Windows does), or the child does not
+    /// inherit the host's environment. When neither holds, the child's <c>PATH</c> is the host's.
     /// </param>
     /// <param name="childPath">The child's <c>PATH</c>, or <see langword="null"/> when the child has none.</param>
     /// <param name="parentEnvironment">
@@ -75,11 +83,26 @@ internal static class PtyEnvironment
         ValidateTerminalName(startInfo.TerminalName);
         pathOverridden = false;
         childPath = null;
-        if (startInfo.Environment is null)
+        if (startInfo.InheritEnvironment && startInfo.Environment is null)
             return null;
 
-        var entries = CreateParentMap(StringComparer.OrdinalIgnoreCase, parentEnvironment);
-        pathOverridden = ApplyOverlay(entries, startInfo.Environment, StringComparer.OrdinalIgnoreCase, "PATH");
+        Dictionary<string, EnvironmentEntry> entries;
+        if (startInfo.InheritEnvironment)
+        {
+            entries = CreateParentMap(StringComparer.OrdinalIgnoreCase, parentEnvironment);
+        }
+        else
+        {
+            // Some programs do not start without SystemRoot. See Starting from the minimum in
+            // .github/docs/specs/core_session.md.
+            entries = new Dictionary<string, EnvironmentEntry>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["SystemRoot"] = new EnvironmentEntry("SystemRoot", WindowsProgramLookup.WindowsDirectory),
+            };
+        }
+
+        var pathTouched = ApplyOverlay(entries, startInfo.Environment, StringComparer.OrdinalIgnoreCase, "PATH");
+        pathOverridden = pathTouched || !startInfo.InheritEnvironment;
         if (entries.TryGetValue("PATH", out var path))
             childPath = path.Value;
 

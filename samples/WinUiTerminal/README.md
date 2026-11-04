@@ -55,6 +55,7 @@ Points to get right:
 - **Use a chunk before the next iteration.** `chunk.Data` is valid until the loop asks for the next chunk. Parse it in place, or copy it to keep it.
 - **Expect a closing window.** A key can still be in flight when the window closes, so `WriteInputAsync` catches `ObjectDisposedException` (session disposed) and `IOException` (the child closed its input). Mark the run as closing before `DisposeAsync`, and treat `ObjectDisposedException` from the pump and the exit wait as expected only then ([TerminalRun.cs](../TerminalEmulator/TerminalRun.cs)).
 - **Show the status outside the grid.** ConPTY clears the screen when the shell starts, so a banner written into the terminal would be erased. The sample puts the PTY host, PID, size, and state in a status line below the grid.
+- **Read MiniPty's metrics on the UI thread's own timer.** The status line also shows what MiniPty's `MiniPty` meter reports for the session: start time, output read, and how often and how long reading stood still because the output buffer was full. The buffer fills when the screen falls behind a flood: `dir /s /b C:\Windows\System32` read 2.5 MiB here and stalled 3 times for 15 ms, while the child waited and nothing was lost. A `MeterListener` gets measurements on MiniPty's I/O thread, so [MiniPtyMetrics.cs](MiniPtyMetrics.cs) only adds them to interlocked totals, and a `DispatcherQueueTimer` reads them once a second ([Metrics](../../.github/docs/specs/core_session.md#metrics)).
 
 ## Out-of-band ConPTY
 

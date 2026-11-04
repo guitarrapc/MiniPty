@@ -11,21 +11,24 @@
 //
 // Serve:  dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs
 //   Opens http://localhost:5171/ with an xterm.js terminal, buttons that open and close idle sessions from the browser,
-//   and the host's session count, thread count, and memory, refreshed every second. Open the address the server
-//   prints: its #token=... fragment is this run's access token (see LocalAccess).
+//   and the host's session count, thread count, and memory, with what MiniPty's meter reports (open sessions, start
+//   time, output read, and stalls on a full output buffer), refreshed every second. Open the address the
+//   server prints: its #token=... fragment is this run's access token (see LocalAccess).
 //
 // Bench:  dotnet run -c Release samples/SingleFiles/WebTerminalScale.cs -- bench [--sessions 16,64] [--echo 200]
 //                                                                             [--flood-bytes 4194304]
 //   Starts the server as a child process and opens idle shell sessions over WebSockets in steps. For each step it
-//   prints the server's threads and memory and the keystroke echo latency. Then it floods one session and prints
-//   throughput, WebSocket frames per 32 KiB, and the server's CPU time per MiB. Run it before and after a change to
-//   MiniPty to compare.
+//   prints the server's threads and memory, the sessions' average start time, and the keystroke echo latency. Then it
+//   floods one session and prints throughput, WebSocket frames per 32 KiB, the server's CPU time per MiB, and what
+//   MiniPty's meter saw meanwhile: the output it read and its stalls on a full output buffer. Run it before and after a
+//   change to MiniPty to compare.
 //
 // Smoke (CI): the published executable with --smoke runs a small bench and exits 0 when every step succeeded.
 //
 // The numbers it prints are recorded in .github/docs/references/pty_crossplatform.md (Output pump).
 
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
@@ -75,9 +78,13 @@ static class Server
     private static int s_sessions;
     private static int s_port;
     private static string s_token = "";
+    private static MiniPtyMetrics? s_metrics;
 
     public static async Task<int> RunAsync(string[] args)
     {
+        // Listens from the start, so the totals cover every session this server runs.
+        using var metrics = new MiniPtyMetrics();
+        s_metrics = metrics;
         var port = Args.GetInt(args, "--port", 5171);
         var quiet = args.Contains("--quiet");
         s_port = port;
@@ -149,9 +156,10 @@ static class Server
             if (context.Request.Query["mode"] == "flood")
                 Console.Error.WriteLine($"flood session ended: exit {status.ExitCode}{(status.Signal is { } signal ? $", signal {signal}" : "")}");
         }
-        catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException or TimeoutException)
+        catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or TimeoutException)
         {
-            // The client went away; the bridge has already ended its child.
+            // The client went away, or the child outlived the hang-up. The bridge has already ended the child. An
+            // IOException comes from the terminal, not from the socket, so it is reported below.
         }
         catch (Exception ex)
         {
@@ -182,6 +190,22 @@ static class Server
         writer.WriteNumber("handles", HandleCount(process));
         writer.WriteString("os", RuntimeInformation.OSDescription);
         writer.WriteString("runtime", RuntimeInformation.FrameworkDescription);
+        if (s_metrics?.Read() is { } pty)
+        {
+            // MiniPty's own view: its sessions (the bridge's), and totals since the server started.
+            writer.WriteStartObject("miniPty");
+            writer.WriteNumber("sessions", pty.ActiveSessions);
+            writer.WriteNumber("starts", pty.Starts);
+            writer.WriteNumber("startMs", pty.StartTime.TotalMilliseconds);
+            writer.WriteNumber("startFailures", pty.StartFailures);
+            writer.WriteNumber("outputBytes", pty.OutputBytes);
+            writer.WriteNumber("stalls", pty.Stalls);
+            writer.WriteNumber("stallMs", pty.StallTime.TotalMilliseconds);
+            // minipty.output.consumer_wait.duration is left out: the bridge's sessions never wait for output in native
+            // code, so the count would stay 0.
+            writer.WriteEndObject();
+        }
+
         writer.WriteEndObject();
         await writer.FlushAsync();
     }
@@ -351,7 +375,7 @@ static class Bench
         await client.Closed.WaitAsync(TimeSpan.FromMinutes(5));
         var after = await GetStatsAsync(http);
         // Only the bridge's exit message means the child finished; a connection that just closed may have lost output.
-        return new FloodResult(client.Bytes, client.Frames, client.OutputSeconds, client.ExitMessage is not null, after.CpuMs - before.CpuMs);
+        return new FloodResult(client.Bytes, client.Frames, client.OutputSeconds, client.ExitMessage is not null, after.CpuMs - before.CpuMs, after.MiniPty - before.MiniPty);
     }
 
     private static async Task CloseAllAsync(List<Client> clients)
@@ -426,7 +450,15 @@ static class Bench
             root.GetProperty("handles").GetInt32(),
             root.GetProperty("os").GetString() ?? "",
             root.GetProperty("runtime").GetString() ?? "",
-            root.TryGetProperty("cpuMs", out var cpu) ? cpu.GetDouble() : 0);
+            root.TryGetProperty("cpuMs", out var cpu) ? cpu.GetDouble() : 0,
+            root.TryGetProperty("miniPty", out var pty)
+                ? new PtyStats(
+                    pty.GetProperty("starts").GetInt64(),
+                    pty.GetProperty("startMs").GetDouble(),
+                    pty.GetProperty("outputBytes").GetInt64(),
+                    pty.GetProperty("stalls").GetInt64(),
+                    pty.GetProperty("stallMs").GetDouble())
+                : default);
     }
 
     private static void Report(Stats baseline, List<(int Sessions, Stats Stats, double[] Echo)> rows, FloodResult flood)
@@ -438,15 +470,20 @@ static class Bench
             $"{baseline.Handles} handles");
         Console.WriteLine();
         // Thread-pool threads grow and shrink with load on their own (a burst of connections injects workers), so the
-        // per-session column counts only the other threads: MiniPty's reader and exit-watcher threads among them.
-        Console.WriteLine("| Sessions | Threads | Pool threads | +Other threads per session | Working set (MB) | +KB per session | Private (MB) | Handles | Echo p50 (ms) | Echo p99 (ms) |");
-        Console.WriteLine("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+        // per-session column counts only the other threads.
+        // Start (ms) is MiniPty's own figure for the sessions this step opened (minipty.session.start.duration): the
+        // time Pty.Start took, without the WebSocket handshake or the shell's first prompt.
+        Console.WriteLine("| Sessions | Threads | Pool threads | +Other threads per session | Working set (MB) | +KB per session | Private (MB) | Handles | Start (ms) | Echo p50 (ms) | Echo p99 (ms) |");
+        Console.WriteLine("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+        var previous = baseline;
         foreach (var (sessions, stats, echo) in rows)
         {
             var otherThreads = stats.Threads - stats.PoolThreads - (baseline.Threads - baseline.PoolThreads);
             var kbPerSession = (stats.WorkingSet - baseline.WorkingSet) / 1024.0 / sessions;
+            var startMs = (stats.MiniPty - previous.MiniPty).AverageStartMs;
             Console.WriteLine($"| {sessions} | {stats.Threads} | {stats.PoolThreads} | {otherThreads / (double)sessions:F2} | {Mb(stats.WorkingSet)} | " +
-                $"{kbPerSession:F0} | {Mb(stats.PrivateBytes)} | {stats.Handles} | {Percentile(echo, 0.50):F2} | {Percentile(echo, 0.99):F2} |");
+                $"{kbPerSession:F0} | {Mb(stats.PrivateBytes)} | {stats.Handles} | {(double.IsNaN(startMs) ? "-" : startMs.ToString("F1"))} | {Percentile(echo, 0.50):F2} | {Percentile(echo, 0.99):F2} |");
+            previous = stats;
         }
 
         Console.WriteLine();
@@ -456,6 +493,10 @@ static class Bench
         Console.WriteLine($"Flood: {flood.Bytes / 1024.0:F0} KiB in {flood.Frames} frames (average {flood.Bytes / 1024.0 / Math.Max(1, flood.Frames):F1} KiB), " +
             $"{framesPer32KiB:F1} frames per 32 KiB, {mbPerSecond:F1} MB/s, host CPU {cpuMsPerMiB:F1} ms per MiB" +
             $"{(flood.Exited ? "" : " (no exit message)")}");
+        // A stall is MiniPty's reading standing still on a full output buffer while the WebSocket client had not taken
+        // what came before: backpressure, which blocks the child, not lost output.
+        var pty = flood.MiniPty;
+        Console.WriteLine($"MiniPty during the flood: read {pty.OutputBytes / 1024.0:F0} KiB, {pty.Stalls} stalls on a full buffer for {pty.StallMs:F1} ms");
     }
 
     private static double Percentile(double[] sorted, double p) =>
@@ -470,9 +511,22 @@ static class Bench
         return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
-    private sealed record Stats(int Sessions, int Threads, int PoolThreads, long WorkingSet, long PrivateBytes, long GcHeap, int Handles, string Os, string Runtime, double CpuMs);
+    private sealed record Stats(int Sessions, int Threads, int PoolThreads, long WorkingSet, long PrivateBytes, long GcHeap, int Handles, string Os, string Runtime, double CpuMs, PtyStats MiniPty);
 
-    private sealed record FloodResult(long Bytes, int Frames, double Seconds, bool Exited, double HostCpuMs);
+    /// <summary>MiniPty's meter as the server reports it: totals since the server started.</summary>
+    private readonly record struct PtyStats(long Starts, double StartMs, long OutputBytes, long Stalls, double StallMs)
+    {
+        public static PtyStats operator -(PtyStats after, PtyStats before) => new(
+            after.Starts - before.Starts,
+            after.StartMs - before.StartMs,
+            after.OutputBytes - before.OutputBytes,
+            after.Stalls - before.Stalls,
+            after.StallMs - before.StallMs);
+
+        public double AverageStartMs => Starts == 0 ? double.NaN : StartMs / Starts;
+    }
+
+    private sealed record FloodResult(long Bytes, int Frames, double Seconds, bool Exited, double HostCpuMs, PtyStats MiniPty);
 }
 
 /// <summary>
@@ -895,6 +949,11 @@ static class Page
     <table id="stats"></table>
     <canvas id="chart" width="640" height="280"></canvas>
     <div class="legend"><span style="color:#4fc3f7">&#9632; sessions</span><span style="color:#ffb74d">&#9632; threads</span></div>
+    <h1 style="margin-top:12px">MiniPty meter</h1>
+    <table id="pty"></table>
+    <p class="note">What MiniPty reports on its <code>MiniPty</code> meter, totals since the server started. A stall is
+    reading standing still because a session's output buffer is full while its client has not taken the output yet:
+    the child waits, nothing is lost. Try <code>seq 1 2000000</code> or <code>dir /s C:\Windows</code>.</p>
     <h1 style="margin-top:12px">Idle sessions from this page</h1>
     <div><button data-open="10">+10</button><button data-open="50">+50</button><button id="close">Close all</button></div>
     <p id="idle">0 idle sessions open</p>
@@ -1000,7 +1059,15 @@ async function refresh() {
       ['Sessions', s.sessions], ['Threads', s.threads], ['Thread-pool threads', s.poolThreads],
       ['Working set', mb(s.workingSet)], ['Private bytes', mb(s.privateBytes)], ['GC heap', mb(s.gcHeap)],
       ['Handles', s.handles], ['OS', s.os], ['Runtime', s.runtime]];
+    const p = s.miniPty;
+    const ptyRows = p ? [
+      ['Open sessions', p.sessions],
+      ['Average start', p.starts ? (p.startMs / p.starts).toFixed(1) + ' ms' : '-'],
+      ['Start failures', p.startFailures],
+      ['Output read', mb(p.outputBytes)],
+      ['Stalls on a full buffer', `${p.stalls} (${p.stallMs.toFixed(0)} ms)`]] : [];
     document.getElementById('stats').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    document.getElementById('pty').innerHTML = ptyRows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     history.push(s);
     if (history.length > 120) history.shift();
     draw();
@@ -1026,4 +1093,106 @@ setInterval(refresh, 1000);
 </body>
 </html>
 """;
+}
+
+/// <summary>
+/// Running totals of MiniPty's instruments (the meter named <c>MiniPty</c>), for <c>/stats</c>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A <see cref="MeterListener"/> gets each measurement on the thread that records it, such as MiniPty's I/O thread, so
+/// the callbacks only add to interlocked totals, and <c>/stats</c> reads them when asked. Each instrument's total is
+/// the state the listener hands back with every measurement, so a measurement needs no lookup by name. See Metrics,
+/// <c>.github/docs/specs/core_session.md</c>.
+/// </para>
+/// <para>
+/// An application that already exports metrics with OpenTelemetry adds <c>AddMeter("MiniPty")</c> instead.
+/// </para>
+/// </remarks>
+internal sealed class MiniPtyMetrics : IDisposable
+{
+    private readonly MeterListener _listener = new();
+    private readonly Total _activeSessions = new();
+    private readonly Total _startDuration = new();
+    private readonly Total _startFailures = new();
+    private readonly Total _outputBytes = new();
+    private readonly Total _stallDuration = new();
+    private readonly Total _consumerWaitDuration = new();
+
+    public MiniPtyMetrics()
+    {
+        _listener.InstrumentPublished = (instrument, listener) =>
+        {
+            if (instrument.Meter.Name != "MiniPty")
+                return;
+
+            Total? total = instrument.Name switch
+            {
+                "minipty.session.active" => _activeSessions,
+                "minipty.session.start.duration" => _startDuration,
+                "minipty.session.start.failures" => _startFailures,
+                "minipty.output.bytes" => _outputBytes,
+                "minipty.output.stall.duration" => _stallDuration,
+                "minipty.output.consumer_wait.duration" => _consumerWaitDuration,
+                _ => null,
+            };
+            if (total is not null)
+                listener.EnableMeasurementEvents(instrument, total);
+        };
+        _listener.SetMeasurementEventCallback<long>(static (_, value, _, state) => ((Total)state!).Add(value));
+        // Durations arrive in seconds. The totals keep microseconds, so they stay integers.
+        _listener.SetMeasurementEventCallback<double>(static (_, seconds, _, state) => ((Total)state!).Add((long)(seconds * 1_000_000)));
+        _listener.Start();
+    }
+
+    /// <summary>The totals now. The open-session count is read at this call.</summary>
+    public Snapshot Read()
+    {
+        _listener.RecordObservableInstruments();
+        return new Snapshot(
+            ActiveSessions: _activeSessions.Last,
+            Starts: _startDuration.Count,
+            StartTime: TimeSpan.FromMicroseconds(_startDuration.Sum),
+            StartFailures: _startFailures.Sum,
+            OutputBytes: _outputBytes.Sum,
+            Stalls: _stallDuration.Count,
+            StallTime: TimeSpan.FromMicroseconds(_stallDuration.Sum),
+            ConsumerWaits: _consumerWaitDuration.Count,
+            ConsumerWaitTime: TimeSpan.FromMicroseconds(_consumerWaitDuration.Sum));
+    }
+
+    public void Dispose() => _listener.Dispose();
+
+    /// <summary>Totals since this listener started. <see cref="StartTime"/> and the other times are summed.</summary>
+    internal readonly record struct Snapshot(
+        long ActiveSessions,
+        long Starts,
+        TimeSpan StartTime,
+        long StartFailures,
+        long OutputBytes,
+        long Stalls,
+        TimeSpan StallTime,
+        long ConsumerWaits,
+        TimeSpan ConsumerWaitTime);
+
+    /// <summary>One instrument's measurements: how many, their sum, and the last one.</summary>
+    private sealed class Total
+    {
+        private long _count;
+        private long _sum;
+        private long _last;
+
+        public long Count => Volatile.Read(ref _count);
+
+        public long Sum => Volatile.Read(ref _sum);
+
+        public long Last => Volatile.Read(ref _last);
+
+        public void Add(long value)
+        {
+            Interlocked.Increment(ref _count);
+            Interlocked.Add(ref _sum, value);
+            Volatile.Write(ref _last, value);
+        }
+    }
 }

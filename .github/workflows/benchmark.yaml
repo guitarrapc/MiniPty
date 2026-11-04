@@ -13,11 +13,13 @@ on:
           - "*categories*Binary*"
           - "*categories*Text*"
           - "*PtyStartupBenchmarks*"
+          - "*PtyStartupHostMemoryBenchmarks*"
           - "*PtyThroughputBenchmarks*"
           - "*PtyLatencyBenchmarks*"
           - "*PtyConPtyBenchmarks*"
           - "*PtyOutputBenchmarks*"
           - "*PtyCaptureDisplayBenchmarks*"
+          - "*PtyMetricsBenchmarks*"
 
 jobs:
   benchmark:
