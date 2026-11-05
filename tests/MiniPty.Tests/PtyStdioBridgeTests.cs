@@ -74,6 +74,38 @@ public sealed class PtyStdioBridgeTests
         await PtyWebSocketBridgeTests.AssertFloodFramesAreLargeAsync(flood);
     }
 
+    /// <summary>
+    /// An acknowledgement that the bridge handles before its write of that output returns is not lost, as through the
+    /// WebSocket bridge. Here every output frame's write returns only once the bridge has handled the peer's
+    /// acknowledgement of it. Bytes counted after the write then stayed unacknowledged for good, and the first frame
+    /// above the high watermark paused the bridge until the timeout.
+    /// </summary>
+    [Test]
+    public async Task AnAcknowledgementHandledBeforeItsWriteReturnsIsNotLost()
+    {
+        var peer = new AcknowledgingPeer();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        // Every frame of output is above the high watermark, so one lost acknowledgement pauses the bridge.
+        var options = new PtyBridgeOptions { HighWatermark = 64, LowWatermark = 0 };
+        var bridgeTask = PtyStdioBridge.RunAsync(
+            PtyWebSocketBridgeTests.BulkOutputChild(lineCount: 256),
+            peer.Input,
+            peer.Output,
+            options,
+            cts.Token);
+
+        try
+        {
+            var status = await bridgeTask.WaitAsync(TimeSpan.FromSeconds(20));
+
+            await Assert.That(status.ExitCode).IsEqualTo(0);
+        }
+        finally
+        {
+            await cts.CancelAsync();
+        }
+    }
+
     [Test]
     public async Task BridgeExitJsonUsesNodePtySignalShape()
     {
@@ -206,6 +238,124 @@ public sealed class PtyStdioBridgeTests
             }
 
             return frames;
+        }
+    }
+
+    /// <summary>
+    /// A peer that acknowledges each output frame as it arrives. The write that completes an output frame returns only
+    /// once the bridge has read the acknowledgement and asked for its next frame, or after 2 s without that. The bridge
+    /// handles a control frame before it reads the next header, so that read marks the acknowledgement handled.
+    /// </summary>
+    private sealed class AcknowledgingPeer
+    {
+        private readonly Lock _lock = new();
+        private readonly List<byte> _written = [];
+        private readonly Queue<byte> _toBridge = new();
+        private readonly SemaphoreSlim _toBridgeAvailable = new(0);
+        private readonly SemaphoreSlim _handled = new(0);
+        private int _nextFrame;
+        private bool _acknowledgementDelivered;
+
+        public AcknowledgingPeer()
+        {
+            Input = new InputSide(this);
+            Output = new OutputSide(this);
+        }
+
+        public Stream Input { get; }
+
+        public Stream Output { get; }
+
+        private async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
+        {
+            var acknowledged = false;
+            lock (_lock)
+            {
+                _written.AddRange(buffer.Span);
+                while (_written.Count - _nextFrame >= 5)
+                {
+                    var length = BinaryPrimitives.ReadInt32LittleEndian(CollectionsMarshal.AsSpan(_written).Slice(_nextFrame + 1, 4));
+                    if (_written.Count - _nextFrame - 5 < length)
+                        break;
+
+                    if ((PtyStdioFrameType)_written[_nextFrame] == PtyStdioFrameType.Output && length > 0)
+                    {
+                        foreach (var b in CreateFrame(PtyStdioFrameType.Control, Encoding.UTF8.GetBytes($"{{\"type\":\"ack\",\"bytes\":{length}}}")))
+                            _toBridge.Enqueue(b);
+
+                        acknowledged = true;
+                    }
+
+                    _nextFrame += 5 + length;
+                }
+            }
+
+            if (!acknowledged)
+                return;
+
+            _toBridgeAvailable.Release();
+            await _handled.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken);
+        }
+
+        private async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                lock (_lock)
+                {
+                    if (_toBridge.Count > 0)
+                    {
+                        var count = Math.Min(buffer.Length, _toBridge.Count);
+                        for (var i = 0; i < count; i++)
+                            buffer.Span[i] = _toBridge.Dequeue();
+
+                        _acknowledgementDelivered = _toBridge.Count == 0;
+                        return count;
+                    }
+
+                    if (_acknowledgementDelivered)
+                    {
+                        _acknowledgementDelivered = false;
+                        _handled.Release();
+                    }
+                }
+
+                await _toBridgeAvailable.WaitAsync(cancellationToken);
+            }
+        }
+
+        private sealed class InputSide(AcknowledgingPeer peer) : Stream
+        {
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+            public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+                peer.ReadAsync(buffer, cancellationToken);
+        }
+
+        private sealed class OutputSide(AcknowledgingPeer peer) : Stream
+        {
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+            public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+                peer.WriteAsync(buffer, cancellationToken);
         }
     }
 

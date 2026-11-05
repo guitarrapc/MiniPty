@@ -246,6 +246,42 @@ public sealed class PtyWebSocketBridgeTests
         await Assert.That(client.BinaryByteCount).IsGreaterThan(stalledAt);
     }
 
+    /// <summary>
+    /// An acknowledgement that the bridge handles before its send of that output returns is not lost. A sending
+    /// thread can be preempted right after the bytes went out, and the client can acknowledge them meanwhile. Here every
+    /// output send returns only once the bridge has handled the client's acknowledgement of it. Bytes counted after the
+    /// send then stayed unacknowledged for good, and the first chunk above the high watermark paused the bridge until
+    /// the timeout.
+    /// </summary>
+    [Test]
+    public async Task AnAcknowledgementHandledBeforeItsSendReturnsIsNotLost()
+    {
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        // Every chunk of output is above the high watermark, so one lost acknowledgement pauses the bridge.
+        var options = new PtyBridgeOptions { HighWatermark = 64, LowWatermark = 0 };
+        var bridgeTask = PtyWebSocketBridge.RunAsync(
+            BulkOutputChild(lineCount: 256),
+            new AcknowledgedSendWebSocket(serverSocket),
+            options,
+            cts.Token);
+        var client = new BridgeTestClient(clientSocket);
+        var clientTask = client.RunToCloseAsync(ackEverything: true, cts.Token);
+
+        try
+        {
+            var status = await bridgeTask.WaitAsync(TimeSpan.FromSeconds(20));
+            await clientTask.WaitAsync(TimeSpan.FromSeconds(20));
+
+            await Assert.That(status.ExitCode).IsEqualTo(0);
+            await Assert.That(client.ExitMessage).IsNotNull();
+        }
+        finally
+        {
+            await cts.CancelAsync();
+        }
+    }
+
     [Test]
     public async Task BridgeFlowControlAppliesPauseRequestedBeforeAttach()
     {
@@ -807,6 +843,66 @@ public sealed class PtyWebSocketBridgeTests
     }
 
     /// <summary>
+    /// The bridge's end of the socket, whose binary sends return only once the bridge has handled the client's next
+    /// control message, or after 2 s without one. The bridge handles a control message before it asks for the next
+    /// frame, so the next receive marks that message handled.
+    /// </summary>
+    private sealed class AcknowledgedSendWebSocket(WebSocket inner) : WebSocket
+    {
+        private readonly SemaphoreSlim _handled = new(0);
+        private bool _controlReceived;
+
+        public override WebSocketCloseStatus? CloseStatus => inner.CloseStatus;
+        public override string? CloseStatusDescription => inner.CloseStatusDescription;
+        public override WebSocketState State => inner.State;
+        public override string? SubProtocol => inner.SubProtocol;
+
+        public override async ValueTask SendAsync(
+            ReadOnlyMemory<byte> buffer,
+            WebSocketMessageType messageType,
+            bool endOfMessage,
+            CancellationToken cancellationToken)
+        {
+            await inner.SendAsync(buffer, messageType, endOfMessage, cancellationToken);
+            if (messageType == WebSocketMessageType.Binary)
+                await _handled.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken);
+        }
+
+        public override async ValueTask<ValueWebSocketReceiveResult> ReceiveAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+        {
+            if (_controlReceived)
+            {
+                _controlReceived = false;
+                _handled.Release();
+            }
+
+            var result = await inner.ReceiveAsync(buffer, cancellationToken);
+            _controlReceived = result.MessageType == WebSocketMessageType.Text && result.EndOfMessage;
+            return result;
+        }
+
+        public override Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken) =>
+            SendAsync(buffer.AsMemory(), messageType, endOfMessage, cancellationToken).AsTask();
+
+        public override async Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken)
+        {
+            var result = await ReceiveAsync(buffer.AsMemory(), cancellationToken);
+            return new WebSocketReceiveResult(result.Count, result.MessageType, result.EndOfMessage, inner.CloseStatus, inner.CloseStatusDescription);
+        }
+
+        public override Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
+            inner.CloseAsync(closeStatus, statusDescription, cancellationToken);
+
+        public override Task CloseOutputAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
+            inner.CloseOutputAsync(closeStatus, statusDescription, cancellationToken);
+
+        public override void Abort() => inner.Abort();
+
+        // The semaphore is left to the collector: a send can still be waiting on it.
+        public override void Dispose() => inner.Dispose();
+    }
+
+    /// <summary>
     /// In-memory duplex stream pair carrying the raw WebSocket protocol between
     /// <see cref="WebSocket.CreateFromStream(Stream, WebSocketCreationOptions)"/> endpoints.
     /// Unbounded, so transport buffering never interferes with flow-control assertions.
@@ -1017,7 +1113,7 @@ public sealed class PtyWebSocketBridgeTests
             : Spawn("sh", ["-c", "IFS= read -r _"]);
 
     /// <summary>Child that emits a configurable amount of bulk output (256 KiB by default) then exits 0.</summary>
-    private static PtyStartInfo BulkOutputChild(int lineCount = 2048) =>
+    internal static PtyStartInfo BulkOutputChild(int lineCount = 2048) =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(WindowsComSpec(), ["/c", $"for /l %i in (1,1,{lineCount}) do @echo 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567"])
             : Spawn("sh", ["-c", $"i=0; while [ $i -lt {lineCount} ]; do printf '%0128d\\n' \"$i\"; i=$((i+1)); done"]);
