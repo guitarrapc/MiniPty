@@ -11,6 +11,12 @@ using TerminalEmulator;
 /// </summary>
 internal static class Smoke
 {
+    // The in-box console host of build 20348 does not forward the switch to the alternate screen, so there the TUI
+    // draws on the main screen. Other builds before 26100 are unmeasured, so the smoke checks which screen shows
+    // only from 26100.
+    private static readonly bool s_alternateScreenForwarded =
+        !OperatingSystem.IsWindows() || OperatingSystem.IsWindowsVersionAtLeast(10, 0, 26100);
+
     internal static async Task<int> RunAsync()
     {
         try
@@ -403,7 +409,7 @@ internal static class Smoke
             WaitUntilAsync(() =>
             {
                 lock (gate)
-                    return screen.IsAlternateScreen == alternate && ScreenContains(expected);
+                    return (screen.IsAlternateScreen == alternate || !s_alternateScreenForwarded) && ScreenContains(expected);
             }, $"screen to contain '{expected}' (alternate={alternate})");
 
         async Task WaitUntilAsync(Func<bool> condition, string what)
@@ -421,6 +427,7 @@ internal static class Smoke
                     var dump = new StringBuilder();
                     lock (gate)
                     {
+                        dump.AppendLine(screen.IsAlternateScreen ? "(alternate screen)" : "(main screen)");
                         for (var row = 0; row < screen.Rows; row++)
                             dump.AppendLine(screen.ViewLine(row).ToText());
                     }

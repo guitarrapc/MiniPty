@@ -63,6 +63,8 @@ Tests use property assertions, not golden byte captures, to reduce OS and timing
 
 MiniPty applies the first three to every in-box ConPTY without `ReleasePseudoConsole`, so Windows 10 and Windows 11 before 24H2 get them too, unmeasured.
 
+Once the tests passed on windows-2022, the TUI sample's smoke ran there for the first time and found a fifth difference. The 20348 host does not forward the switch to the alternate screen (`ESC[?1049h`). When the smoke timed out waiting for that screen, its emulator showed the TUI's frame on the main screen. So a program that switches to the alternate screen draws on the frontend's main screen there, and MiniPty cannot change that. The smoke checks which screen shows only from build 26100.
+
 **MiniPty's fallbacks for older Linux kernels are tested outside CI.** CI's Linux jobs, the containers included, run on the hosted Ubuntu 24.04 runners, whose kernels (6.8 or later) have every call MiniPty uses. A container runs on its host's kernel, so an old distribution's image does not test an old kernel. On 2026-11-04 the fallbacks ran two ways:
 
 - **seccomp in Docker**, with glibc and with musl. A profile refused the calls and the flag that a kernel before 4.13 lacks: `TIOCGPTPEER` failed with `ENOTTY`, `clone` with `CLONE_PIDFD` with `EINVAL`, and `pidfd_open`, `pidfd_send_signal`, `close_range`, and `clone3` with `ENOSYS`. The suite passed. In the 126 starts of `PtyUnixStartTests`, `strace` saw no `TIOCGPTPEER`, `pidfd_open`, or `close_range` call succeed, and every child came from the `clone` run again without the flag. A profile that refused only the flag passed too, and there the start opened the pidfd by pid.
