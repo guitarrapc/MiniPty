@@ -5,9 +5,10 @@ using System.Text;
 namespace MiniPty.Tests;
 
 /// <summary>
-/// The console host behind a Windows session ends with the session, and disposal does not wait for a host that does
-/// not. Before Windows 11 24H2 the in-box ConPTY closes a pseudo-console only once its host exits, and a host whose
-/// write finds MiniPty's end of the output closed can wait for good. From build 26100 the host exits with its child.
+/// The console host behind a Windows session ends with the session, and disposal neither waits for a host that does
+/// not nor holds a thread-pool thread for it. Before Windows 11 24H2 the in-box ConPTY closes a pseudo-console only
+/// once its host exits, and a host whose write finds MiniPty's end of the output closed can wait for good. From build
+/// 26100 the host exits with its child.
 /// </summary>
 /// <remarks>
 /// A session's in-box console host is a conhost.exe child of the process that creates the pseudo-console. The tests
@@ -101,6 +102,55 @@ public sealed class PtyConsoleHostTests
     }
 
     /// <summary>
+    /// Disposal holds no thread-pool thread while console hosts are slow to exit, as the post-exit drain's ticks and
+    /// callers' continuations need that pool. Before Windows 11 24H2 the in-box close waits until the host exits, and a
+    /// suspended host does not exit, so a close on the pool would stay running or queued there until the test ends the
+    /// hosts. From build 26100 the close does not wait, and the test shows nothing there.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task DisposalHoldsNoPoolThreadWhileConsoleHostsAreSuspended()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        const int Sessions = 8;
+        var sessions = new List<PtySession>(Sessions);
+        var hosts = new List<IntPtr>(Sessions);
+        try
+        {
+            for (var i = 0; i < Sessions; i++)
+            {
+                var before = ConsoleHostChildren();
+                var session = Pty.Start(WindowsCommand("echo READY& set /p LINE="));
+                sessions.Add(session);
+                await ReadUntilAsync(session, "READY");
+                hosts.Add(OpenConsoleHostStartedSince(before, Synchronize | QueryLimitedInformation | SuspendResume | Terminate));
+                await Assert.That(NtSuspendProcess(hosts[^1])).IsEqualTo(0);
+            }
+
+            var idle = await HeldPoolWorkAsync();
+            foreach (var session in sessions)
+                session.Dispose();
+
+            // Each close on the pool would add one. Half leaves room for a work item or two of something else.
+            await Assert.That(await HeldPoolWorkAsync() - idle).IsLessThan(Sessions / 2);
+        }
+        finally
+        {
+            // Ending the hosts lets the closes that wait for them return.
+            foreach (var host in hosts)
+                TerminateProcess(host, 1);
+
+            foreach (var session in sessions)
+                await session.DisposeAsync();
+
+            foreach (var host in hosts)
+                Close(host);
+        }
+    }
+
+    /// <summary>
     /// The conhost.exe processes whose parent is this process: the in-box ConPTY starts a session's console host from
     /// the process that creates the pseudo-console.
     /// </summary>
@@ -166,6 +216,36 @@ public sealed class PtyConsoleHostTests
     {
         if (host != IntPtr.Zero)
             CloseHandle(host);
+    }
+
+    private static async Task ReadUntilAsync(PtySession session, string marker)
+    {
+        var output = new StringBuilder();
+        using var cts = new CancellationTokenSource(Timeout);
+        await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
+        while (output.ToString().IndexOf(marker, StringComparison.Ordinal) < 0)
+        {
+            await Assert.That(await reader.MoveNextAsync()).IsTrue();
+            output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
+        }
+    }
+
+    /// <summary>
+    /// The thread-pool threads running work plus the work items waiting for one, at the fewest of ten samples 10 ms
+    /// apart, so that work which only passes through is left out.
+    /// </summary>
+    private static async Task<long> HeldPoolWorkAsync()
+    {
+        ThreadPool.GetMaxThreads(out var max, out _);
+        var fewest = long.MaxValue;
+        for (var i = 0; i < 10; i++)
+        {
+            ThreadPool.GetAvailableThreads(out var available, out _);
+            fewest = Math.Min(fewest, max - available + ThreadPool.PendingWorkItemCount);
+            await Task.Delay(10);
+        }
+
+        return fewest;
     }
 
     /// <summary>The CPU time, in milliseconds, that <paramref name="process"/> uses over the next second, or -1.</summary>

@@ -444,7 +444,7 @@ Rejected:
 
 Rules the engines keep:
 
-- **Nothing that can block runs on the loop, on a completion, or on the post-exit drain's timer.** Spawning, consumer continuations, and growing a sink stay off them. `ClosePseudoConsole` runs on the thread pool, because a pseudo-console's last reference can drop on the drain's timer, on a thread disposing the session, or under a caller's resize.
+- **Nothing that can block runs on the loop, on a completion, or on the post-exit drain's timer.** Spawning, consumer continuations, and growing a sink stay off them. `ClosePseudoConsole` runs off the thread that drops a pseudo-console's last reference, which can be the drain's timer, a thread disposing the session, or a caller's resize. A close that waits for its host, as the in-box one does before Windows 11 24H2, runs on a thread of its own, so it holds no thread-pool thread while it waits. The others run on the thread pool.
 - **Faults stay with their session.** A failure in one session's work ends that session's output with the error; the loop goes on.
 - **No lock is shared across sessions while a slow call runs.** node-pty holds a global mutex across `ClosePseudoConsole`. The post-exit drain's ticks run one at a time, which shares them the same way, so a transport close there must not wait.
 - **Memory is bounded per session** by its ring, the pipe or tty buffer, and a persistent session's replay buffer. A slow client throttles its own child, never the loop.

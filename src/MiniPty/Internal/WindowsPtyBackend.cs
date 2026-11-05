@@ -1245,9 +1245,9 @@ internal static class WindowsPtyBackend
         }
 
         /// <summary>
-        /// Closes the pseudo-console, on the thread pool (see <see cref="SafePseudoConsoleHandle"/>). ConPTY then flushes
-        /// what it has rendered and closes its end of the output pipe, so the output driver drains the rest and sees end
-        /// of output. The output pipe itself stays open for that drain and closes with <see cref="Dispose"/>.
+        /// Closes the pseudo-console, off the calling thread (see <see cref="SafePseudoConsoleHandle"/>). ConPTY then
+        /// flushes what it has rendered and closes its end of the output pipe, so the output driver drains the rest and
+        /// sees end of output. The output pipe itself stays open for that drain and closes with <see cref="Dispose"/>.
         /// </summary>
         public void CloseOutputTransport()
         {
@@ -1791,12 +1791,13 @@ internal static class WindowsPtyBackend
     /// the other implementation.
     /// </summary>
     /// <remarks>
-    /// The close runs on the thread pool, not on the thread that releases the handle. Before Windows 11 24H2 the
-    /// in-box <c>ClosePseudoConsole</c> waits until the console host exits. The last reference can drop on the post-exit
+    /// The close runs off the thread that releases the handle. Before Windows 11 24H2 the in-box
+    /// <c>ClosePseudoConsole</c> waits until the console host exits. The last reference can drop on the post-exit
     /// drain's timer, which every session shares, on a thread disposing the session, or on a caller's resize, and none
-    /// of them may wait for a host. Nothing waits for the queued close either: the out-of-band close and the in-box one
-    /// from build 26100 return without waiting for the host, so waiting for the close would add a wait only on older
-    /// builds.
+    /// of them may wait for a host. A close that waits gets a thread of its own: on the thread pool it would hold a
+    /// worker for as long as the host takes to exit, and the drain's ticks and callers' continuations run there. The
+    /// out-of-band close and the in-box one from build 26100 return without waiting for the host, so they run on the
+    /// thread pool. Nothing waits for the close either, as that would add a wait only on older builds.
     /// </remarks>
     private class SafePseudoConsoleHandle : SafeHandle, IThreadPoolWorkItem
     {
@@ -1819,15 +1820,43 @@ internal static class WindowsPtyBackend
         public virtual int ReleaseServerReference() =>
             WindowsInterop.CanReleasePseudoConsole ? WindowsInterop.ReleasePseudoConsole(handle) : 0;
 
+        /// <summary>
+        /// Whether the close waits until the console host exits, as the in-box one does before build 26100.
+        /// </summary>
+        protected virtual bool CloseWaitsForHost => !WindowsInterop.CanReleasePseudoConsole;
+
         protected virtual void ClosePseudoConsole() => WindowsInterop.ClosePseudoConsole(handle);
 
         protected override bool ReleaseHandle()
         {
-            ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+            if (!CloseWaitsForHost || !TryStartCloseThread())
+                ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+
             return true;
         }
 
         void IThreadPoolWorkItem.Execute() => ClosePseudoConsole();
+
+        /// <summary>
+        /// Closes on a new thread, or returns false when the system cannot create one. The thread pool then takes the
+        /// close, as a held pool worker costs less than a console host that never closes.
+        /// </summary>
+        private bool TryStartCloseThread()
+        {
+            try
+            {
+                new Thread(static state => ((SafePseudoConsoleHandle)state!).ClosePseudoConsole())
+                {
+                    IsBackground = true,
+                    Name = "MiniPty console close",
+                }.UnsafeStart(this);
+                return true;
+            }
+            catch (OutOfMemoryException)
+            {
+                return false;
+            }
+        }
     }
 
     /// <summary>A pseudo-console created by an out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>).</summary>
@@ -1845,6 +1874,8 @@ internal static class WindowsPtyBackend
         public override int Clear() => _library.ClearPseudoConsole(handle, keepCursorRow: false);
 
         public override int ReleaseServerReference() => _library.ReleasePseudoConsole(handle);
+
+        protected override bool CloseWaitsForHost => false;
 
         protected override void ClosePseudoConsole() => _library.ClosePseudoConsole(handle);
     }
