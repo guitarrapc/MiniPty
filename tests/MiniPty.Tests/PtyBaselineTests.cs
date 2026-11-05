@@ -969,13 +969,75 @@ public sealed class PtyBaselineTests
         return count;
     }
 
-    /// <summary>Handles on Windows, descriptors on Unix, of this process.</summary>
+    /// <summary>
+    /// Handles on Windows, descriptors on Unix, of this process. Before Windows 11 24H2 (a <c>kernel32.dll</c> without
+    /// <c>ReleasePseudoConsole</c>) every pseudo-console leaves the process that created it a handle to its console
+    /// host, still open after the host exits, which MiniPty cannot close; handles to exited console hosts are not counted
+    /// there. MiniPty itself never opens a console host, so a handle it leaks, such as the child's, still counts.
+    /// </summary>
     internal static int CountOpenHandles()
     {
         if (OperatingSystem.IsWindows())
-            return GetProcessHandleCount(new IntPtr(-1), out var count) ? (int)count : throw new Win32Exception();
+        {
+            var count = GetProcessHandleCount(new IntPtr(-1), out var handles) ? (int)handles : throw new Win32Exception();
+            return MiniPty.Internal.WindowsInterop.CanReleasePseudoConsole ? count : count - CountExitedConsoleHostHandles();
+        }
 
         return Directory.GetFileSystemEntries(OperatingSystem.IsLinux() ? "/proc/self/fd" : "/dev/fd").Length;
+    }
+
+    /// <summary>This process's handles to <c>conhost.exe</c> processes that have exited.</summary>
+    private static int CountExitedConsoleHostHandles()
+    {
+        if (SnapshotHandleTable() is not { } table)
+            return 0;
+
+        var count = 0;
+        foreach (var (value, typeIndex) in table)
+        {
+            var handle = new IntPtr(value);
+            if (IsProcessHandle(handle, typeIndex)
+                && GetExitCodeProcess(handle, out var code) && code != StillActive
+                && string.Equals(ImageFileName(handle), "conhost.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    // The object type index of a process, found on the first process handle seen; 0 until then. Fixed until reboot.
+    private static uint s_processTypeIndex;
+
+    private static bool IsProcessHandle(IntPtr handle, uint typeIndex)
+    {
+        var known = Volatile.Read(ref s_processTypeIndex);
+        if (known != 0)
+            return typeIndex == known;
+
+        if (QueryObjectString(handle, infoClass: 2) != "Process")
+            return false;
+
+        Volatile.Write(ref s_processTypeIndex, typeIndex);
+        return true;
+    }
+
+    [ThreadStatic]
+    private static char[]? t_imageName;
+
+    /// <summary>
+    /// The file name of a process's image, or null. From its native path: the Win32 one fails with ERROR_GEN_FAILURE
+    /// once the process has exited.
+    /// </summary>
+    private static string? ImageFileName(IntPtr process)
+    {
+        const uint ProcessNameNative = 1;
+        var image = t_imageName ??= new char[1024];
+        var length = image.Length;
+        return QueryFullProcessImageNameW(process, ProcessNameNative, image, ref length)
+            ? Path.GetFileName(new string(image, 0, length))
+            : null;
     }
 
     /// <summary>This process's handles on Windows, each value with its object type index; null elsewhere or on failure.</summary>
@@ -1049,13 +1111,8 @@ public sealed class PtyBaselineTests
         var type = QueryObjectString(handle, ObjectTypeInformation);
         if (type == "Process")
         {
-            // The native path: the Win32 one fails with ERROR_GEN_FAILURE once the process has exited.
-            const uint ProcessNameNative = 1;
-            var image = new char[1024];
-            var length = image.Length;
-            var name = QueryFullProcessImageNameW(handle, ProcessNameNative, image, ref length) ? Path.GetFileName(new string(image, 0, length)) : "?";
             var state = GetExitCodeProcess(handle, out var code) ? code == StillActive ? "running" : "exited" : "?";
-            return $"Process({name},{state})";
+            return $"Process({ImageFileName(handle) ?? "?"},{state})";
         }
 
         if (type != "File" || namesBlock)

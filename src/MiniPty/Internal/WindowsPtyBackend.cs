@@ -125,12 +125,6 @@ internal static class WindowsPtyBackend
 
     /// <summary>The report MiniPty answers an unanswered query with at teardown: row 1, column 1.</summary>
     private static ReadOnlySpan<byte> CursorPositionReport => "\e[1;1R"u8;
-
-    /// <summary>
-    /// Temporary: told the steps of a session's teardown on a legacy host, for the test that such a host waiting for its
-    /// cursor report exits. Null outside that test, which runs alone. Remove before the PR.
-    /// </summary>
-    internal static Action<string>? TeardownTraceForTests; // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
     private const int ErrorBrokenPipe = 109;
     private const int ErrorNoData = WindowsInterop.ErrorNoData;
     private const int ErrorOperationAborted = 995;
@@ -1053,7 +1047,6 @@ internal static class WindowsPtyBackend
         bool IWindowsOutputObserver.OnOutput(ReadOnlySpan<byte> bytes)
         {
             var phase = Volatile.Read(ref _hostPhase);
-            TeardownTraceForTests?.Invoke($"read {bytes.Length} bytes phase={phase} starts_with_query={bytes.StartsWith(CursorPositionQuery)}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
             if (_inheritCursor && phase == HostStarting && bytes.StartsWith(CursorPositionQuery))
             {
                 Volatile.Write(ref _hostPhase, HostAwaitingCursorReport);
@@ -1296,15 +1289,9 @@ internal static class WindowsPtyBackend
             CloseTransport(InputDisposed);
             var deferOutput = Volatile.Read(ref _cursorReportWritten);
             if (deferOutput)
-            {
                 DeferOutputClose();
-                TeardownTraceForTests?.Invoke("output close deferred"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
-            }
             else
-            {
                 CloseOutputPipe();
-                TeardownTraceForTests?.Invoke("output closed"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
-            }
 
             // Closes at once, or when a concurrent exit query or kill unpins it.
             _process.Dispose();
@@ -1334,17 +1321,11 @@ internal static class WindowsPtyBackend
         {
             var stopped = _pump is null ? Task.CompletedTask : _pump.WaitForStopAsync().AsTask();
             _ = Task.WhenAny(stopped, Task.Delay(DeferredOutputCloseMs)).ContinueWith(
-                static (_, state) => ((WindowsPtyBackendInstance)state!).CloseDeferredOutput(),
+                static (_, state) => ((WindowsPtyBackendInstance)state!).CloseOutputPipe(),
                 this,
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
-        }
-
-        private void CloseDeferredOutput()
-        {
-            CloseOutputPipe();
-            TeardownTraceForTests?.Invoke("deferred output closed"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
         }
 
         /// <summary>
@@ -1466,22 +1447,17 @@ internal static class WindowsPtyBackend
                     // Behind queued input, the report would be failed by the close that follows, so only an idle pipe
                     // gets it. The waiting host reads its input, so a queue is not expected here.
                     if (_inputClosed || !IsInputIdleLocked)
-                    {
-                        TeardownTraceForTests?.Invoke($"report skipped: input_closed={_inputClosed}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
                         return;
-                    }
 
                     var input = EnsureInputLocked();
                     StageLocked(input, CursorPositionReport, owner: null);
-                    var written = WriteStagedLocked(input);
+                    WriteStagedLocked(input);
                     Volatile.Write(ref _cursorReportWritten, true);
-                    TeardownTraceForTests?.Invoke($"report written={written} in_flight={input.WriteInFlight}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 // A failed write leaves the host as it was, and the close that follows must still run.
-                TeardownTraceForTests?.Invoke($"report failed: {ex.GetType().Name}: {ex.Message}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
             }
         }
 
@@ -1500,13 +1476,11 @@ internal static class WindowsPtyBackend
                 AnswerCursorQuery();
 
             CloseInputPipe(inputReason);
-            TeardownTraceForTests?.Invoke("input closed"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
 
             if (!_hpcClosed)
             {
                 _hpc.Dispose();
                 _hpcClosed = true;
-                TeardownTraceForTests?.Invoke("close queued"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
             }
         }
     }
@@ -1841,12 +1815,7 @@ internal static class WindowsPtyBackend
             return true;
         }
 
-        void IThreadPoolWorkItem.Execute()
-        {
-            TeardownTraceForTests?.Invoke("close started"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
-            ClosePseudoConsole();
-            TeardownTraceForTests?.Invoke("close returned"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
-        }
+        void IThreadPoolWorkItem.Execute() => ClosePseudoConsole();
     }
 
     /// <summary>A pseudo-console created by an out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>).</summary>

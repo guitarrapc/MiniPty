@@ -54,12 +54,12 @@ CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows. On Windows that incl
 
 Tests use property assertions, not golden byte captures, to reduce OS and timing flake.
 
-**Windows Server 2022 shows how the in-box ConPTY behaved before Windows 11 24H2.** `scripts/conpty-close-probe.cs` measures that ConPTY through `kernel32.dll` alone, so that a failure there can be told apart from MiniPty's own. A temporary CI step ran it on windows-2022 and windows-2025 on 2026-11-05. Build 20348 differs from 26100 in four ways ([pty_crossplatform.md](../references/pty_crossplatform.md#out-of-band-conpty), [Terminal size](../references/pty_crossplatform.md#terminal-size)):
+**Windows Server 2022 shows how the in-box ConPTY behaved before Windows 11 24H2.** `scripts/conpty-close-probe.cs` measures that ConPTY through `kernel32.dll` alone, so that a failure there can be told apart from MiniPty's own. A CI step ran it on windows-2022 and windows-2025 on 2026-11-05, and was removed once the findings were in. Build 20348 differs from 26100 in four ways ([pty_crossplatform.md](../references/pty_crossplatform.md#out-of-band-conpty), [Terminal size](../references/pty_crossplatform.md#terminal-size)):
 
 - Closing a pseudo-console waits until its host exits. MiniPty closes on the thread pool and never waits for the close.
 - A resize sent before the host has attached its first client can be dropped. MiniPty sends the size again once the host's first output has been read.
 - A host whose inherit-cursor query goes unanswered never exits. MiniPty answers the query as the transport closes.
-- Every pseudo-console leaves the creating process one handle to its exited host (`conhost.exe`), also when no child ran. MiniPty cannot close it.
+- Every pseudo-console leaves the creating process one handle to its exited host (`conhost.exe`), also when no child ran. MiniPty cannot close it, so there the leak checks do not count handles to console hosts that have exited. MiniPty never opens a console host itself, so a handle it leaks still counts.
 
 MiniPty applies the first three to every in-box ConPTY without `ReleasePseudoConsole`, so Windows 10 and Windows 11 before 24H2 get them too, unmeasured.
 
