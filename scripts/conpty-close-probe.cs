@@ -31,9 +31,10 @@
 // cursor-answered-input-open do the same after writing the report a terminal answers the query with (ESC [1;1R).
 // cursor-answered-silent writes the report while the child, which writes nothing, still runs, then kills it. Each
 // cursor scenario adds before: the host's reads 500 ms after its query, escaped and separated by |. Each answered
-// scenario adds after_report_bytes: what the host wrote in the 500 ms after the report. dispose-order follows MiniPty's
-// disposal of such a session over MiniPty's pipes and start: the child killed without waiting, the report written, and
-// input and output closed right away, then the close; dispose-order-output-open leaves output open. The named-
+// scenario adds after_report_bytes: what the host wrote in the 500 ms after the report. The dispose- scenarios follow
+// MiniPty's disposal of such a session over MiniPty's pipes and start, as soon as the query arrives: the child killed
+// without waiting, the report written, and input closed, then the close and the close of output: dispose-output-first
+// closes output first, dispose-close-first starts the close first, and dispose-output-open leaves output open. The named-
 // scenarios repeat three of them over the pipes MiniPty creates: named pipes whose server end is the probe's, 4 KiB
 // buffers, and the console host's end opened by name. MiniPty also opens its end overlapped, which the probe does not,
 // so that it can read and write with blocking calls.
@@ -99,10 +100,10 @@ foreach (var scenario in closeScenarios)
         Probe.Close(scenario, run);
 }
 
-for (var run = 1; run <= 2; run++)
+for (var run = 1; run <= 3; run++)
 {
-    Probe.DisposeOrder(closeOutput: true, run);
-    Probe.DisposeOrder(closeOutput: false, run);
+    foreach (var order in new[] { "output-first", "close-first", "output-open" })
+        Probe.DisposeOrder(order, run);
 }
 
 foreach (var mode in new[] { "no-client", "exited-drained", "mini-no-client", "mini-exited-drained", "mini-exited-disposed" })
@@ -216,27 +217,38 @@ static class Probe
     }
 
     /// <summary>
-    /// MiniPty's disposal of an inherit-cursor session over its pipes, with the query unanswered: the child killed
-    /// without waiting, a cursor position report written, input closed, and with <paramref name="closeOutput"/> output
-    /// closed, each right after the other, then the close.
+    /// MiniPty's disposal of an inherit-cursor session over its pipes, as soon as the query arrives and with it
+    /// unanswered: the child killed without waiting, a cursor position report written, and input closed, then in
+    /// <paramref name="order"/> the close (on a thread of its own) and the close of output, one right after the other.
+    /// output-first closes output before the close starts, close-first right after it, and output-open not at all.
     /// </summary>
-    public static void DisposeOrder(bool closeOutput, int run)
+    public static void DisposeOrder(string order, int run)
     {
         var hostsBefore = Native.ConhostChildren();
         var pty = PseudoConsole.Create(Native.InheritCursor, 80, 25, named: true);
         var reader = new PipeReader(pty.OutputRead);
         var child = pty.Spawn($"\"{ComSpec}\" /c echo NEVER_SHOWN", mini: true);
         var note = reader.WaitFor("\e[6n", 5_000) ? " query=seen" : " query=missing";
-        Thread.Sleep(200);
-        note += $" before=\"{reader.ChunkText()}\"";
 
         Native.TerminateProcess(child.hProcess, 1);
         pty.Write("\e[1;1R");
         pty.CloseInput();
-        if (closeOutput)
+        if (order == "output-first")
             pty.CloseOutput();
 
-        var close = CloseTimed(pty);
+        var handle = pty.TakeHandle();
+        var started = Stopwatch.GetTimestamp();
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        new Thread(() =>
+        {
+            Native.ClosePseudoConsole(handle);
+            done.SetResult();
+        })
+        { IsBackground = true }.Start();
+        if (order == "close-first")
+            pty.CloseOutput();
+
+        var close = new CloseAttempt(done.Task, done.Task.Wait(CloseTimeoutMs), Stopwatch.GetElapsedTime(started).TotalMilliseconds);
         pty.ReleaseAttributes();
         Thread.Sleep(2_000);
         var stuck = NewHosts(hostsBefore);
@@ -256,7 +268,7 @@ static class Probe
             pty.CloseOutput();
 
         Console.WriteLine(
-            $"close scenario=dispose-order{(closeOutput ? "" : "-output-open")} run={run} returned={close.Returned} " +
+            $"close scenario=dispose-{order} run={run} returned={close.Returned} " +
             $"close_ms={close.Milliseconds:F1} hosts={stuck.Count}{note}");
     }
 

@@ -1271,7 +1271,7 @@ internal static class WindowsPtyBackend
             }
 
             // Queued writes fail now, on the disposing thread, without waiting for a write in flight.
-            CloseTransport(InputDisposed);
+            CloseTransport(InputDisposed, closeOutput: _legacyHost && _inheritCursor);
             CloseOutputPipe();
 
             // Closes at once, or when a concurrent exit query or kill unpins it.
@@ -1423,7 +1423,10 @@ internal static class WindowsPtyBackend
             }
         }
 
-        private void CloseTransport(int inputReason)
+        /// <summary>
+        /// Closes input, then the pseudo-console, and with <paramref name="closeOutput"/> the output pipe between them.
+        /// </summary>
+        private void CloseTransport(int inputReason, bool closeOutput = false)
         {
             try
             {
@@ -1438,6 +1441,12 @@ internal static class WindowsPtyBackend
                 AnswerCursorQuery();
 
             CloseInputPipe(inputReason);
+
+            // A legacy host that the report lets go on starting is to find its output closed before the close tells it
+            // to end: on Windows Server 2022, one whose output closed only after its close was queued stayed for good,
+            // idle.
+            if (closeOutput)
+                CloseOutputPipe();
 
             if (!_hpcClosed)
             {
