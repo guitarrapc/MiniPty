@@ -158,7 +158,7 @@ VT sequences written by a child, through each implementation (a probe set first 
 | OSC 0 title, OSC 8 hyperlink, OSC 52 clipboard, OSC 133, OSC 9;4 | forwarded (OSC 8 re-encoded) | forwarded |
 | DEC modes 1049, 2004, 2026; `CSI > 1 u`; truecolor and `4:3` SGR | forwarded | forwarded |
 
-Build 20348's in-box host did not forward 1049. When the TUI sample's smoke on windows-2022 timed out waiting for the alternate screen, its emulator showed the TUI's frame on the main screen. The other sequences were not measured on that build.
+Build 20348's in-box host forwarded neither 1049 nor the hidden cursor (`ESC[?25l`). In the TUI sample's smoke on windows-2022, the host's output up to the TUI's first frame (3698 bytes) began with the TUI's mouse modes (`ESC[?1002h ESC[?1006h`), then held clears, the title, and the frame, with no `ESC[?1049h` and no `ESC[?25`. The other sequences were not measured on that build.
 
 The forwarded sequences also arrive in their original order relative to text out-of-band, where in-box reorders them. On build 26200, with VT input, a child that wrote text, `ESC[?1000h`, more text, `ESC[?1003h`, and so on had the in-box host send `ESC[?1000h` before even its startup clear, then the first text, then the remaining modes together, and only then the rest of the text. The host's own VT output differs too: a resize repaints the whole screen in-box, with or without the resize-quirk flag, and emits nothing out-of-band when nothing changed.
 
