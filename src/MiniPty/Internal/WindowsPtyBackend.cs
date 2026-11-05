@@ -1821,7 +1821,9 @@ internal static class WindowsPtyBackend
             WindowsInterop.CanReleasePseudoConsole ? WindowsInterop.ReleasePseudoConsole(handle) : 0;
 
         /// <summary>
-        /// Whether the close waits until the console host exits, as the in-box one does before build 26100.
+        /// Whether the close waits until the console host exits, as the in-box one does before build 26100. Such a
+        /// close runs the in-box <c>ClosePseudoConsole</c> on a thread of its own, so a handle that closes through
+        /// another implementation returns false.
         /// </summary>
         protected virtual bool CloseWaitsForHost => !WindowsInterop.CanReleasePseudoConsole;
 
@@ -1838,24 +1840,22 @@ internal static class WindowsPtyBackend
         void IThreadPoolWorkItem.Execute() => ClosePseudoConsole();
 
         /// <summary>
-        /// Closes on a new thread, or returns false when the system cannot create one. The thread pool then takes the
-        /// close, as a held pool worker costs less than a console host that never closes.
+        /// Closes on a new thread that runs no managed code, or returns false when the system cannot create one. The
+        /// thread pool then takes the close, as a held pool worker costs less than a console host that never closes.
         /// </summary>
+        /// <remarks>
+        /// A managed thread keeps its handle and two events after it ends, until a garbage collection, so a close on
+        /// one leaves three handles per session behind. The thread starts in <c>ClosePseudoConsole</c> itself and ends
+        /// when the close returns, and its own handle closes at once.
+        /// </remarks>
         private bool TryStartCloseThread()
         {
-            try
-            {
-                new Thread(static state => ((SafePseudoConsoleHandle)state!).ClosePseudoConsole())
-                {
-                    IsBackground = true,
-                    Name = "MiniPty console close",
-                }.UnsafeStart(this);
-                return true;
-            }
-            catch (OutOfMemoryException)
-            {
+            var thread = WindowsInterop.StartClosePseudoConsoleThread(handle);
+            if (thread == IntPtr.Zero)
                 return false;
-            }
+
+            WindowsInterop.CloseHandle(thread);
+            return true;
         }
     }
 
@@ -1955,17 +1955,42 @@ internal static partial class WindowsInterop
     /// <summary>Calls <c>ReleasePseudoConsole</c>; only when <see cref="CanReleasePseudoConsole"/>.</summary>
     internal static unsafe int ReleasePseudoConsole(IntPtr hPC) => s_releasePseudoConsole(hPC);
 
-    private static unsafe delegate* unmanaged[Stdcall]<IntPtr, int> FindReleasePseudoConsole()
+    private static unsafe delegate* unmanaged[Stdcall]<IntPtr, int> FindReleasePseudoConsole() =>
+        (delegate* unmanaged[Stdcall]<IntPtr, int>)FindKernel32Export("ReleasePseudoConsole");
+
+    /// <summary>
+    /// The address of <c>ClosePseudoConsole</c> in <c>kernel32.dll</c>, or zero where it cannot be found.
+    /// </summary>
+    private static readonly IntPtr s_closePseudoConsole = FindKernel32Export("ClosePseudoConsole");
+
+    /// <summary>
+    /// Starts a thread whose start routine is the in-box <c>ClosePseudoConsole</c>, given <paramref name="hPC"/>, and
+    /// returns the thread's handle, or zero when the thread cannot be created. A start routine takes one pointer-sized
+    /// argument and returns a value, while the close returns none, so the thread's exit code means nothing.
+    /// </summary>
+    internal static IntPtr StartClosePseudoConsoleThread(IntPtr hPC) =>
+        s_closePseudoConsole == IntPtr.Zero
+            ? IntPtr.Zero
+            : CreateThread(IntPtr.Zero, 0, s_closePseudoConsole, hPC, 0, IntPtr.Zero);
+
+    private static IntPtr FindKernel32Export(string name)
     {
         // kernel32.dll is loaded in every Windows process and is a known DLL, so this binds the system copy and only
-        // adds a reference to it. The reference is never dropped, as the function stays in use for the process.
+        // adds a reference to it. The reference is never dropped, as the functions stay in use for the process.
         if (!OperatingSystem.IsWindows() || !NativeLibrary.TryLoad("kernel32.dll", out var kernel32))
-            return null;
+            return IntPtr.Zero;
 
-        return NativeLibrary.TryGetExport(kernel32, "ReleasePseudoConsole", out var address)
-            ? (delegate* unmanaged[Stdcall]<IntPtr, int>)address
-            : null;
+        return NativeLibrary.TryGetExport(kernel32, name, out var address) ? address : IntPtr.Zero;
     }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr CreateThread(
+        IntPtr lpThreadAttributes,
+        nuint dwStackSize,
+        IntPtr lpStartAddress,
+        IntPtr lpParameter,
+        uint dwCreationFlags,
+        IntPtr lpThreadId);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
