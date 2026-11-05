@@ -30,9 +30,13 @@
 // cursor-unanswered then closes input, and cursor-unanswered-input-open leaves it open. cursor-answered-at-close and
 // cursor-answered-input-open do the same after writing the report a terminal answers the query with (ESC [1;1R).
 // cursor-answered-silent writes the report while the child, which writes nothing, still runs, then kills it. Each
-// answered scenario adds after_report_bytes: what the host wrote in the 500 ms after the report. The named- scenarios repeat three of them over the pipes MiniPty creates: named pipes whose server end is the probe's,
-// 4 KiB buffers, and the console host's end opened by name. MiniPty also opens its end overlapped, which the probe
-// does not, so that it can read and write with blocking calls.
+// cursor scenario adds before: the host's reads 500 ms after its query, escaped and separated by |. Each answered
+// scenario adds after_report_bytes: what the host wrote in the 500 ms after the report. dispose-order follows MiniPty's
+// disposal of such a session over MiniPty's pipes and start: the child killed without waiting, the report written, and
+// input and output closed right away, then the close; dispose-order-output-open leaves output open. The named-
+// scenarios repeat three of them over the pipes MiniPty creates: named pipes whose server end is the probe's, 4 KiB
+// buffers, and the console host's end opened by name. MiniPty also opens its end overlapped, which the probe does not,
+// so that it can read and write with blocking calls.
 //
 // A census runs one pattern 3 times to warm up, then 20 times, and prints what this process's handle table gained:
 //
@@ -95,6 +99,12 @@ foreach (var scenario in closeScenarios)
         Probe.Close(scenario, run);
 }
 
+for (var run = 1; run <= 2; run++)
+{
+    Probe.DisposeOrder(closeOutput: true, run);
+    Probe.DisposeOrder(closeOutput: false, run);
+}
+
 foreach (var mode in new[] { "no-client", "exited-drained", "mini-no-client", "mini-exited-drained", "mini-exited-disposed" })
     Census.Run(mode);
 
@@ -142,9 +152,15 @@ static class Probe
             {
                 note = reader!.WaitFor("\e[6n", 5_000) ? " query=seen" : " query=missing";
                 if (shape == "cursor-answered-silent")
-                    note += Answer(pty, reader);
-                else
+                {
                     Thread.Sleep(500);
+                    note += $" before=\"{reader.ChunkText()}\"" + Answer(pty, reader);
+                }
+                else
+                {
+                    Thread.Sleep(500);
+                    note += $" before=\"{reader.ChunkText()}\"";
+                }
 
                 Native.TerminateProcess(child.Value.hProcess, 1);
             }
@@ -197,6 +213,51 @@ static class Probe
         Console.WriteLine(
             $"close scenario={scenario} run={run} returned={close.Returned} close_ms={close.Milliseconds:F1} " +
             $"pipe_end_ms={pipeEndMs:F1} hosts={hostsRightAfter}/{stuck.Count} handle_delta={handleDelta}{note}");
+    }
+
+    /// <summary>
+    /// MiniPty's disposal of an inherit-cursor session over its pipes, with the query unanswered: the child killed
+    /// without waiting, a cursor position report written, input closed, and with <paramref name="closeOutput"/> output
+    /// closed, each right after the other, then the close.
+    /// </summary>
+    public static void DisposeOrder(bool closeOutput, int run)
+    {
+        var hostsBefore = Native.ConhostChildren();
+        var pty = PseudoConsole.Create(Native.InheritCursor, 80, 25, named: true);
+        var reader = new PipeReader(pty.OutputRead);
+        var child = pty.Spawn($"\"{ComSpec}\" /c echo NEVER_SHOWN", mini: true);
+        var note = reader.WaitFor("\e[6n", 5_000) ? " query=seen" : " query=missing";
+        Thread.Sleep(200);
+        note += $" before=\"{reader.ChunkText()}\"";
+
+        Native.TerminateProcess(child.hProcess, 1);
+        pty.Write("\e[1;1R");
+        pty.CloseInput();
+        if (closeOutput)
+            pty.CloseOutput();
+
+        var close = CloseTimed(pty);
+        pty.ReleaseAttributes();
+        Thread.Sleep(2_000);
+        var stuck = NewHosts(hostsBefore);
+        if (stuck.Count > 0)
+        {
+            note += $" host_cpu_ms_per_s={Native.CpuMilliseconds(stuck, 1_000):F0}";
+            foreach (var pid in stuck)
+                Native.Terminate(pid);
+            if (!close.Returned)
+                note += $" returned_after_host_kill={close.Done.Wait(3_000)}";
+        }
+
+        reader.WaitEnd(2_000);
+        Native.CloseHandle(child.hProcess);
+        Native.CloseHandle(child.hThread);
+        if (reader.Ended)
+            pty.CloseOutput();
+
+        Console.WriteLine(
+            $"close scenario=dispose-order{(closeOutput ? "" : "-output-open")} run={run} returned={close.Returned} " +
+            $"close_ms={close.Milliseconds:F1} hosts={stuck.Count}{note}");
     }
 
     /// <summary>Writes the cursor position report, then says how many bytes the host wrote in the next 500 ms.</summary>
@@ -700,6 +761,18 @@ sealed class PipeReader
     public long EndedAt { get; private set; }
 
     public int ByteCount => Volatile.Read(ref _bytes);
+
+    /// <summary>Each read so far, escaped, separated by <c>|</c>.</summary>
+    public string ChunkText()
+    {
+        lock (_text)
+        {
+            var text = string.Join("|", _chunks.Select(chunk => chunk.Chunk
+                .Replace("\e", "\\e", StringComparison.Ordinal).Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal).Replace("\a", "\\a", StringComparison.Ordinal)));
+            return text.Length <= 300 ? text : text[..300] + "...";
+        }
+    }
 
     public bool Ended => _ended.IsSet;
 

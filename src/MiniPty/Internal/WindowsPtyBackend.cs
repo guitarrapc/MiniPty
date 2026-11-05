@@ -107,8 +107,8 @@ internal static class WindowsPtyBackend
     private const byte InputEofCtrlZ = 0x1A;
     private const byte InputEofSubmit = 0x0D;
 
-    // How far a legacy host has got (WindowsPtyBackendInstance.OnOutput): no output yet, its cursor query sent and
-    // unanswered, or started.
+    // How far a legacy host has got (WindowsPtyBackendInstance.OnOutput): no output yet, nothing but its cursor query
+    // yet, or started.
     private const int HostStarting = 0;
     private const int HostAwaitingCursorReport = 1;
     private const int HostStarted = 2;
@@ -1026,16 +1026,17 @@ internal static class WindowsPtyBackend
         }
 
         /// <summary>
-        /// Shown a legacy host's output reads until it has started, on the output loop. Such a host can drop a resize that
-        /// arrives while it attaches its first client: the child then sees the size the session started with. The host's
-        /// first output comes after that attach, as its title names the client's program, so a resize sent before it is
-        /// sent again then, from the thread pool, as nothing on the loop may block. With
+        /// Shown a legacy host's output reads until it has started, on the output loop. Such a host can drop a resize
+        /// that arrives before it has attached its first client: the child then sees the size the session started with.
+        /// The host's first output comes after that attach, as its title names the client's program, so a resize sent
+        /// before it is sent again then, from the thread pool, as nothing on the loop may block. With
         /// <see cref="PtyStartInfo.InheritCursor"/> the first output is the cursor query instead, and the host attaches
         /// the client only once the report arrives (see <see cref="AnswerCursorQuery"/>).
         /// </summary>
         bool IWindowsOutputObserver.OnOutput(ReadOnlySpan<byte> bytes)
         {
-            if (_inheritCursor && Volatile.Read(ref _hostPhase) == HostStarting && bytes.EndsWith(CursorPositionQuery))
+            var phase = Volatile.Read(ref _hostPhase);
+            if (_inheritCursor && phase == HostStarting && bytes.StartsWith(CursorPositionQuery))
             {
                 Volatile.Write(ref _hostPhase, HostAwaitingCursorReport);
                 return true;
@@ -1393,11 +1394,12 @@ internal static class WindowsPtyBackend
         }
 
         /// <summary>
-        /// Answers the cursor query of a legacy host that is still waiting for the report as its transport closes. Such a
-        /// host never exits: <c>ClosePseudoConsole</c> waits for it, once its input is closed it spins on a CPU core, and
-        /// it outlives this process. The report lets it attach the client, see input end, and exit. Written only while
-        /// nothing has followed the query in the host's output: a host that has the frontend's report goes on to attach
-        /// the client and shows it in its output, so a frontend that answered gets no second report.
+        /// Answers a legacy host's cursor query as the transport closes, in case the frontend never did. A host still
+        /// waiting for the report never exits: <c>ClosePseudoConsole</c> waits for it, once its input is closed it
+        /// spins on a CPU core, and it outlives this process. The report lets it attach the client, see input end, and
+        /// exit. It goes to every such session, answered or not. A report the host is not waiting for arrives only as
+        /// the session ends, when the child has exited or is being ended and the close that follows ends whatever else
+        /// is attached, while a missed one leaves a host spinning for good.
         /// </summary>
         private void AnswerCursorQuery()
         {
@@ -1432,7 +1434,7 @@ internal static class WindowsPtyBackend
                 // A failed EOF write must not skip the close below, which disposal and the post-exit drain rely on.
             }
 
-            if (Volatile.Read(ref _hostPhase) == HostAwaitingCursorReport)
+            if (_legacyHost && _inheritCursor)
                 AnswerCursorQuery();
 
             CloseInputPipe(inputReason);

@@ -121,12 +121,12 @@ public sealed class PtyInheritCursorTests
             return;
 
         var before = ConsoleHostChildren();
+        var output = new StringBuilder();
         IntPtr host;
         await using (var session = Pty.Start(WindowsCommand("echo NEVER_SHOWN") with { InheritCursor = true }))
         {
             using var cts = new CancellationTokenSource(Timeout);
             await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
-            var output = new StringBuilder();
             while (output.ToString().IndexOf(CursorPositionQuery, StringComparison.Ordinal) < 0)
             {
                 await Assert.That(await reader.MoveNextAsync()).IsTrue();
@@ -138,18 +138,23 @@ public sealed class PtyInheritCursorTests
             await Assert.That(started.Count).IsEqualTo(1);
 
             // Opened while the host runs, so that the wait below cannot reach a process that reused its id.
-            host = OpenProcess(Synchronize, false, started.Single());
+            host = OpenProcess(Synchronize | QueryLimitedInformation, false, started.Single());
             if (host == IntPtr.Zero)
                 throw new Win32Exception();
         }
 
         try
         {
-            var deadline = Environment.TickCount64 + (long)Timeout.TotalMilliseconds;
+            var deadline = Environment.TickCount64 + 10_000;
             while (WaitForSingleObject(host, 0) != WaitObject0 && Environment.TickCount64 < deadline)
                 await Task.Delay(50);
 
-            await Assert.That(WaitForSingleObject(host, 0)).IsEqualTo(WaitObject0);
+            // A host still waiting for its report spins on a core once its input is closed, so a busy host never got
+            // one, and an idle one is held by something else.
+            var cpu = WaitForSingleObject(host, 0) == WaitObject0 ? 0 : await CpuMillisecondsOverASecondAsync(host);
+            var shown = PtyBaselineTests.Escape(output.ToString());
+            await Assert.That(WaitForSingleObject(host, 0)).IsEqualTo(WaitObject0)
+                .Because($"the host used {cpu} ms of CPU over 1 s; the output before teardown was {shown}");
         }
         finally
         {
@@ -231,8 +236,22 @@ public sealed class PtyInheritCursorTests
         }
     }
 
+    /// <summary>The CPU time, in milliseconds, that <paramref name="process"/> uses over the next second.</summary>
+    private static async Task<long> CpuMillisecondsOverASecondAsync(IntPtr process)
+    {
+        _ = GetProcessTimes(process, out _, out _, out var kernelBefore, out var userBefore);
+        await Task.Delay(1_000);
+        _ = GetProcessTimes(process, out _, out _, out var kernelAfter, out var userAfter);
+        return (kernelAfter + userAfter - kernelBefore - userBefore) / 10_000;
+    }
+
     private const uint Synchronize = 0x00100000;
+    private const uint QueryLimitedInformation = 0x1000;
     private const uint WaitObject0 = 0;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessTimes(IntPtr hProcess, out long lpCreationTime, out long lpExitTime, out long lpKernelTime, out long lpUserTime);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct ProcessEntry
