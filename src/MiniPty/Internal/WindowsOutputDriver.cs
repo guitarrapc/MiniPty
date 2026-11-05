@@ -577,7 +577,7 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
     {
         var timestamp = Stopwatch.GetTimestamp();
         pump.OnOutputRead();
-        if (_observer is { } observer && !observer.OnOutput(pump.NextReadSpan[..length]))
+        if (_observer is { } observer && !observer.OnOutput(pump.UnpublishedRead(length)))
             _observer = null;
 
         pump.Publish(length, timestamp);

@@ -263,6 +263,13 @@ internal sealed class PtyOutputPump : IValueTaskSource
         }
     }
 
+    /// <summary>
+    /// The first <paramref name="length"/> bytes of the last <see cref="NextReadSpan"/>, which the driver has read into
+    /// and not yet published. Not <see cref="NextReadSpan"/> again: once the consumer has released everything since the
+    /// read, that starts the ring over and hands out other bytes.
+    /// </summary>
+    internal ReadOnlySpan<byte> UnpublishedRead(int length) => _ring!.AsSpan(_tail, length);
+
     /// <summary>Whether published output is still unread (or handed out and not released).</summary>
     internal bool HasUnreadOutput => Volatile.Read(ref _count) != 0;
 

@@ -96,7 +96,7 @@ public sealed class PtyWindowsOutputDriverTests
             }
         }
 
-        await Assert.That(received.ToArray().AsSpan().SequenceEqual("ABCDEF"u8)).IsTrue();
+        await Assert.That(System.Text.Encoding.ASCII.GetString(received.ToArray())).IsEqualTo("ABCDEF");
         await Assert.That(string.Join(",", observer.Seen)).IsEqualTo("AB,CD");
     }
 

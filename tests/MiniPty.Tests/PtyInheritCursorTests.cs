@@ -1,6 +1,9 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using MiniPty.Internal;
 
 namespace MiniPty.Tests;
 
@@ -120,45 +123,58 @@ public sealed class PtyInheritCursorTests
         if (!OperatingSystem.IsWindows())
             return;
 
-        var before = ConsoleHostChildren();
-        var output = new StringBuilder();
-        IntPtr host;
-        await using (var session = Pty.Start(WindowsCommand("echo NEVER_SHOWN") with { InheritCursor = true }))
-        {
-            using var cts = new CancellationTokenSource(Timeout);
-            await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
-            while (output.ToString().IndexOf(CursorPositionQuery, StringComparison.Ordinal) < 0)
-            {
-                await Assert.That(await reader.MoveNextAsync()).IsTrue();
-                output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
-            }
-
-            var started = ConsoleHostChildren();
-            started.ExceptWith(before);
-            await Assert.That(started.Count).IsEqualTo(1);
-
-            // Opened while the host runs, so that the wait below cannot reach a process that reused its id.
-            host = OpenProcess(Synchronize | QueryLimitedInformation, false, started.Single());
-            if (host == IntPtr.Zero)
-                throw new Win32Exception();
-        }
-
+        var trace = new ConcurrentQueue<string>();
+        var clock = Stopwatch.StartNew();
+        WindowsPtyBackend.TeardownTraceForTests = step => trace.Enqueue($"{clock.Elapsed.TotalMilliseconds:F1} ms {step}");
         try
         {
-            var deadline = Environment.TickCount64 + 10_000;
-            while (WaitForSingleObject(host, 0) != WaitObject0 && Environment.TickCount64 < deadline)
-                await Task.Delay(50);
+            var before = ConsoleHostChildren();
+            var output = new StringBuilder();
+            IntPtr host;
+            await using (var session = Pty.Start(WindowsCommand("echo NEVER_SHOWN") with { InheritCursor = true }))
+            {
+                using var cts = new CancellationTokenSource(Timeout);
+                await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
+                while (output.ToString().IndexOf(CursorPositionQuery, StringComparison.Ordinal) < 0)
+                {
+                    await Assert.That(await reader.MoveNextAsync()).IsTrue();
+                    output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
+                }
 
-            // A host still waiting for its report spins on a core once its input is closed, so a busy host never got
-            // one, and an idle one is held by something else.
-            var cpu = WaitForSingleObject(host, 0) == WaitObject0 ? 0 : await CpuMillisecondsOverASecondAsync(host);
-            var shown = PtyBaselineTests.Escape(output.ToString());
-            await Assert.That(WaitForSingleObject(host, 0)).IsEqualTo(WaitObject0)
-                .Because($"the host used {cpu} ms of CPU over 1 s; the output before teardown was {shown}");
+                var started = ConsoleHostChildren();
+                started.ExceptWith(before);
+                await Assert.That(started.Count).IsEqualTo(1);
+
+                // Opened while the host runs, so that the wait below cannot reach a process that reused its id.
+                host = OpenProcess(Synchronize | QueryLimitedInformation, false, started.Single());
+                if (host == IntPtr.Zero)
+                    throw new Win32Exception();
+
+                trace.Enqueue($"{clock.Elapsed.TotalMilliseconds:F1} ms dispose");
+            }
+
+            try
+            {
+                var deadline = Environment.TickCount64 + 10_000;
+                while (WaitForSingleObject(host, 0) != WaitObject0 && Environment.TickCount64 < deadline)
+                    await Task.Delay(50);
+
+                // A host still waiting for its report spins on a core once its input is closed, so a busy host never
+                // got one, and an idle one is held by something else.
+                var cpu = WaitForSingleObject(host, 0) == WaitObject0 ? 0 : await CpuMillisecondsOverASecondAsync(host);
+                var shown = PtyBaselineTests.Escape(output.ToString());
+                await Assert.That(WaitForSingleObject(host, 0)).IsEqualTo(WaitObject0)
+                    .Because($"the host used {cpu} ms of CPU over 1 s; the output before teardown was {shown}; " +
+                        $"teardown: {string.Join(", ", trace)}");
+            }
+            finally
+            {
+                CloseHandle(host);
+            }
         }
         finally
         {
-            CloseHandle(host);
+            WindowsPtyBackend.TeardownTraceForTests = null;
         }
     }
 
@@ -236,12 +252,16 @@ public sealed class PtyInheritCursorTests
         }
     }
 
-    /// <summary>The CPU time, in milliseconds, that <paramref name="process"/> uses over the next second.</summary>
+    /// <summary>The CPU time, in milliseconds, that <paramref name="process"/> uses over the next second, or -1.</summary>
     private static async Task<long> CpuMillisecondsOverASecondAsync(IntPtr process)
     {
-        _ = GetProcessTimes(process, out _, out _, out var kernelBefore, out var userBefore);
+        if (!GetProcessTimes(process, out _, out _, out var kernelBefore, out var userBefore))
+            return -1;
+
         await Task.Delay(1_000);
-        _ = GetProcessTimes(process, out _, out _, out var kernelAfter, out var userAfter);
+        if (!GetProcessTimes(process, out _, out _, out var kernelAfter, out var userAfter))
+            return -1;
+
         return (kernelAfter + userAfter - kernelBefore - userBefore) / 10_000;
     }
 

@@ -118,6 +118,12 @@ internal static class WindowsPtyBackend
 
     /// <summary>The report MiniPty answers an unanswered query with at teardown: row 1, column 1.</summary>
     private static ReadOnlySpan<byte> CursorPositionReport => "\e[1;1R"u8;
+
+    /// <summary>
+    /// Told the steps of a session's teardown on a legacy host, for the test that such a host waiting for its cursor
+    /// report exits. Null outside that test, which runs alone.
+    /// </summary>
+    internal static Action<string>? TeardownTraceForTests;
     private const int ErrorBrokenPipe = 109;
     private const int ErrorNoData = WindowsInterop.ErrorNoData;
     private const int ErrorOperationAborted = 995;
@@ -1271,8 +1277,9 @@ internal static class WindowsPtyBackend
             }
 
             // Queued writes fail now, on the disposing thread, without waiting for a write in flight.
-            CloseTransport(InputDisposed, closeOutput: _legacyHost && _inheritCursor);
+            CloseTransport(InputDisposed);
             CloseOutputPipe();
+            TeardownTraceForTests?.Invoke("output closed");
 
             // Closes at once, or when a concurrent exit query or kill unpins it.
             _process.Dispose();
@@ -1410,23 +1417,25 @@ internal static class WindowsPtyBackend
                     // Behind queued input, the report would be failed by the close that follows, so only an idle pipe
                     // gets it. The waiting host reads its input, so a queue is not expected here.
                     if (_inputClosed || !IsInputIdleLocked)
+                    {
+                        TeardownTraceForTests?.Invoke($"report skipped: input_closed={_inputClosed}");
                         return;
+                    }
 
                     var input = EnsureInputLocked();
                     StageLocked(input, CursorPositionReport, owner: null);
-                    WriteStagedLocked(input);
+                    var written = WriteStagedLocked(input);
+                    TeardownTraceForTests?.Invoke($"report written={written} in_flight={input.WriteInFlight}");
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 // A failed write leaves the host as it was, and the close that follows must still run.
+                TeardownTraceForTests?.Invoke($"report failed: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
-        /// <summary>
-        /// Closes input, then the pseudo-console, and with <paramref name="closeOutput"/> the output pipe between them.
-        /// </summary>
-        private void CloseTransport(int inputReason, bool closeOutput = false)
+        private void CloseTransport(int inputReason)
         {
             try
             {
@@ -1441,17 +1450,13 @@ internal static class WindowsPtyBackend
                 AnswerCursorQuery();
 
             CloseInputPipe(inputReason);
-
-            // A legacy host that the report lets go on starting is to find its output closed before the close tells it
-            // to end: on Windows Server 2022, one whose output closed only after its close was queued stayed for good,
-            // idle.
-            if (closeOutput)
-                CloseOutputPipe();
+            TeardownTraceForTests?.Invoke("input closed");
 
             if (!_hpcClosed)
             {
                 _hpc.Dispose();
                 _hpcClosed = true;
+                TeardownTraceForTests?.Invoke("close queued");
             }
         }
     }
@@ -1786,7 +1791,12 @@ internal static class WindowsPtyBackend
             return true;
         }
 
-        void IThreadPoolWorkItem.Execute() => ClosePseudoConsole();
+        void IThreadPoolWorkItem.Execute()
+        {
+            TeardownTraceForTests?.Invoke("close started");
+            ClosePseudoConsole();
+            TeardownTraceForTests?.Invoke("close returned");
+        }
     }
 
     /// <summary>A pseudo-console created by an out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>).</summary>
