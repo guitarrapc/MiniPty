@@ -120,10 +120,10 @@ internal static class WindowsPtyBackend
     private static ReadOnlySpan<byte> CursorPositionReport => "\e[1;1R"u8;
 
     /// <summary>
-    /// Told the steps of a session's teardown on a legacy host, for the test that such a host waiting for its cursor
-    /// report exits. Null outside that test, which runs alone.
+    /// Temporary: told the steps of a session's teardown on a legacy host, for the test that such a host waiting for its
+    /// cursor report exits. Null outside that test, which runs alone. Remove before the PR.
     /// </summary>
-    internal static Action<string>? TeardownTraceForTests;
+    internal static Action<string>? TeardownTraceForTests; // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
     private const int ErrorBrokenPipe = 109;
     private const int ErrorNoData = WindowsInterop.ErrorNoData;
     private const int ErrorOperationAborted = 995;
@@ -1279,7 +1279,7 @@ internal static class WindowsPtyBackend
             // Queued writes fail now, on the disposing thread, without waiting for a write in flight.
             CloseTransport(InputDisposed);
             CloseOutputPipe();
-            TeardownTraceForTests?.Invoke("output closed");
+            TeardownTraceForTests?.Invoke("output closed"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
 
             // Closes at once, or when a concurrent exit query or kill unpins it.
             _process.Dispose();
@@ -1418,20 +1418,20 @@ internal static class WindowsPtyBackend
                     // gets it. The waiting host reads its input, so a queue is not expected here.
                     if (_inputClosed || !IsInputIdleLocked)
                     {
-                        TeardownTraceForTests?.Invoke($"report skipped: input_closed={_inputClosed}");
+                        TeardownTraceForTests?.Invoke($"report skipped: input_closed={_inputClosed}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
                         return;
                     }
 
                     var input = EnsureInputLocked();
                     StageLocked(input, CursorPositionReport, owner: null);
                     var written = WriteStagedLocked(input);
-                    TeardownTraceForTests?.Invoke($"report written={written} in_flight={input.WriteInFlight}");
+                    TeardownTraceForTests?.Invoke($"report written={written} in_flight={input.WriteInFlight}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
                 }
             }
             catch (Exception ex)
             {
                 // A failed write leaves the host as it was, and the close that follows must still run.
-                TeardownTraceForTests?.Invoke($"report failed: {ex.GetType().Name}: {ex.Message}");
+                TeardownTraceForTests?.Invoke($"report failed: {ex.GetType().Name}: {ex.Message}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
             }
         }
 
@@ -1450,13 +1450,13 @@ internal static class WindowsPtyBackend
                 AnswerCursorQuery();
 
             CloseInputPipe(inputReason);
-            TeardownTraceForTests?.Invoke("input closed");
+            TeardownTraceForTests?.Invoke("input closed"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
 
             if (!_hpcClosed)
             {
                 _hpc.Dispose();
                 _hpcClosed = true;
-                TeardownTraceForTests?.Invoke("close queued");
+                TeardownTraceForTests?.Invoke("close queued"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
             }
         }
     }
@@ -1793,9 +1793,9 @@ internal static class WindowsPtyBackend
 
         void IThreadPoolWorkItem.Execute()
         {
-            TeardownTraceForTests?.Invoke("close started");
+            TeardownTraceForTests?.Invoke("close started"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
             ClosePseudoConsole();
-            TeardownTraceForTests?.Invoke("close returned");
+            TeardownTraceForTests?.Invoke("close returned"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
         }
     }
 

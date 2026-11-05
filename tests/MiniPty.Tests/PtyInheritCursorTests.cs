@@ -125,7 +125,7 @@ public sealed class PtyInheritCursorTests
 
         var trace = new ConcurrentQueue<string>();
         var clock = Stopwatch.StartNew();
-        WindowsPtyBackend.TeardownTraceForTests = step => trace.Enqueue($"{clock.Elapsed.TotalMilliseconds:F1} ms {step}");
+        WindowsPtyBackend.TeardownTraceForTests = step => trace.Enqueue($"{clock.Elapsed.TotalMilliseconds:F1} ms {step}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
         try
         {
             var before = ConsoleHostChildren();
@@ -174,7 +174,7 @@ public sealed class PtyInheritCursorTests
         }
         finally
         {
-            WindowsPtyBackend.TeardownTraceForTests = null;
+            WindowsPtyBackend.TeardownTraceForTests = null; // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
         }
     }
 

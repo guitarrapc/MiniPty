@@ -34,10 +34,12 @@
 // scenario adds after_report_bytes: what the host wrote in the 500 ms after the report. The dispose- scenarios follow
 // MiniPty's disposal of such a session over MiniPty's pipes and start, as soon as the query arrives: the child killed
 // without waiting, the report written, and input closed, then the close and the close of output: dispose-output-first
-// closes output first, dispose-close-first starts the close first, and dispose-output-open leaves output open. The named-
-// scenarios repeat three of them over the pipes MiniPty creates: named pipes whose server end is the probe's, 4 KiB
-// buffers, and the console host's end opened by name. MiniPty also opens its end overlapped, which the probe does not,
-// so that it can read and write with blocking calls.
+// closes output first, dispose-close-first starts the close first, and dispose-output-open leaves output open.
+// dispose-pool-overlapped-none, -input, -output, and -both repeat close-first with the close run as a thread-pool work
+// item, and with that server end overlapped and used through the thread pool's completion port, as MiniPty uses its
+// ends. The named- scenarios repeat three of them over the pipes MiniPty creates: named pipes whose server end is the
+// probe's, 4 KiB buffers, and the console host's end opened by name. Elsewhere the probe's end is not overlapped, as
+// MiniPty's is, so that it can read and write with blocking calls.
 //
 // A census runs one pattern 3 times to warm up, then 20 times, and prints what this process's handle table gained:
 //
@@ -104,6 +106,14 @@ for (var run = 1; run <= 3; run++)
 {
     foreach (var order in new[] { "output-first", "close-first", "output-open" })
         Probe.DisposeOrder(order, run);
+}
+
+for (var run = 1; run <= 2; run++)
+{
+    Probe.DisposeOverlapped(overlappedInput: false, overlappedOutput: false, run);
+    Probe.DisposeOverlapped(overlappedInput: true, overlappedOutput: false, run);
+    Probe.DisposeOverlapped(overlappedInput: false, overlappedOutput: true, run);
+    Probe.DisposeOverlapped(overlappedInput: true, overlappedOutput: true, run);
 }
 
 foreach (var mode in new[] { "no-client", "exited-drained", "mini-no-client", "mini-exited-drained", "mini-exited-disposed" })
@@ -270,6 +280,113 @@ static class Probe
         Console.WriteLine(
             $"close scenario=dispose-{order} run={run} returned={close.Returned} " +
             $"close_ms={close.Milliseconds:F1} hosts={stuck.Count}{note}");
+    }
+
+    /// <summary>
+    /// <see cref="DisposeOrder"/> with close-first and the close run as a thread-pool work item, with the input or output
+    /// server end, both, or neither overlapped and used through the thread pool's completion port as MiniPty uses its
+    /// ends.
+    /// </summary>
+    public static void DisposeOverlapped(bool overlappedInput, bool overlappedOutput, int run)
+    {
+        var hostsBefore = Native.ConhostChildren();
+        var pty = PseudoConsole.Create(Native.InheritCursor, 80, 25, named: true, overlappedInput, overlappedOutput);
+        var input = overlappedInput
+            ? new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(pty.TakeInput(), ownsHandle: true), FileAccess.Write, 0, isAsync: true)
+            : null;
+        var output = overlappedOutput
+            ? new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(pty.TakeOutput(), ownsHandle: true), FileAccess.Read, 0, isAsync: true)
+            : null;
+        var reader = overlappedOutput ? null : new PipeReader(pty.OutputRead);
+        var text = new StringBuilder();
+        var readLoop = output is null ? Task.CompletedTask : Task.Run(async () =>
+        {
+            var buffer = new byte[4096];
+            try
+            {
+                int read;
+                while ((read = await output.ReadAsync(buffer)) > 0)
+                {
+                    lock (text)
+                        text.Append(Encoding.UTF8.GetString(buffer, 0, read));
+                }
+            }
+            catch (Exception)
+            {
+                // The close of the stream below ends the read.
+            }
+        });
+
+        var child = pty.Spawn($"\"{ComSpec}\" /c echo NEVER_SHOWN", mini: true);
+        var started = Stopwatch.GetTimestamp();
+        var seen = false;
+        while (!seen && Stopwatch.GetElapsedTime(started).TotalMilliseconds < 5_000)
+        {
+            string sofar;
+            if (reader is not null)
+                sofar = reader.Text;
+            else
+                lock (text)
+                    sofar = text.ToString();
+            seen = sofar.Contains("\e[6n", StringComparison.Ordinal);
+            if (!seen)
+                Thread.Sleep(10);
+        }
+
+        Native.TerminateProcess(child.hProcess, 1);
+        if (input is null)
+        {
+            pty.Write("\e[1;1R");
+            pty.CloseInput();
+        }
+        else
+        {
+            input.Write("\e[1;1R"u8);
+            input.Dispose();
+        }
+
+        var handle = pty.TakeHandle();
+        var closeStarted = Stopwatch.GetTimestamp();
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ThreadPool.UnsafeQueueUserWorkItem(static state =>
+        {
+            Native.ClosePseudoConsole(state.Handle);
+            state.Done.SetResult();
+        }, (Handle: handle, Done: done), preferLocal: false);
+        if (output is null)
+            pty.CloseOutput();
+        else
+            output.Dispose();
+
+        var returned = done.Task.Wait(CloseTimeoutMs);
+        var closeMs = Stopwatch.GetElapsedTime(closeStarted).TotalMilliseconds;
+        pty.ReleaseAttributes();
+        Thread.Sleep(2_000);
+        var note = seen ? " query=seen" : " query=missing";
+        var stuck = NewHosts(hostsBefore);
+        if (stuck.Count > 0)
+        {
+            note += $" host_cpu_ms_per_s={Native.CpuMilliseconds(stuck, 1_000):F0}";
+            foreach (var pid in stuck)
+                Native.Terminate(pid);
+            if (!returned)
+                note += $" returned_after_host_kill={done.Task.Wait(3_000)}";
+        }
+
+        readLoop.Wait(2_000);
+        reader?.WaitEnd(2_000);
+        Native.CloseHandle(child.hProcess);
+        Native.CloseHandle(child.hThread);
+        var name = (overlappedInput, overlappedOutput) switch
+        {
+            (true, true) => "both",
+            (true, false) => "input",
+            (false, true) => "output",
+            _ => "none",
+        };
+        Console.WriteLine(
+            $"close scenario=dispose-pool-overlapped-{name} run={run} returned={returned} close_ms={closeMs:F1} " +
+            $"hosts={stuck.Count}{note}");
     }
 
     /// <summary>Writes the cursor position report, then says how many bytes the host wrote in the next 500 ms.</summary>
@@ -643,13 +760,18 @@ sealed class PseudoConsole
     public IntPtr InputWrite { get; private set; }
     public IntPtr OutputRead { get; private set; }
 
-    public static PseudoConsole Create(uint flags, short columns, short rows, bool named = false)
+    /// <summary>
+    /// A pseudo-console over anonymous pipes, or with <paramref name="named"/> over named pipes, whose server ends are
+    /// overlapped as MiniPty's are where <paramref name="overlappedInput"/> or <paramref name="overlappedOutput"/> says.
+    /// </summary>
+    public static PseudoConsole Create(uint flags, short columns, short rows, bool named = false,
+        bool overlappedInput = false, bool overlappedOutput = false)
     {
         IntPtr inputRead, inputWrite, outputRead, outputWrite;
         if (named)
         {
-            (inputWrite, inputRead) = Native.CreateNamedPipePair(inbound: false);
-            (outputRead, outputWrite) = Native.CreateNamedPipePair(inbound: true);
+            (inputWrite, inputRead) = Native.CreateNamedPipePair(inbound: false, overlappedInput);
+            (outputRead, outputWrite) = Native.CreateNamedPipePair(inbound: true, overlappedOutput);
         }
         else if (!Native.CreatePipe(out inputRead, out inputWrite, IntPtr.Zero, 0) ||
             !Native.CreatePipe(out outputRead, out outputWrite, IntPtr.Zero, 0))
@@ -670,6 +792,22 @@ sealed class PseudoConsole
     {
         var handle = _handle;
         _handle = IntPtr.Zero;
+        return handle;
+    }
+
+    /// <summary>Hands the input pipe's server end to the caller, who closes it.</summary>
+    public IntPtr TakeInput()
+    {
+        var handle = InputWrite;
+        InputWrite = IntPtr.Zero;
+        return handle;
+    }
+
+    /// <summary>Hands the output pipe's server end to the caller, who closes it.</summary>
+    public IntPtr TakeOutput()
+    {
+        var handle = OutputRead;
+        OutputRead = IntPtr.Zero;
         return handle;
     }
 
@@ -1009,18 +1147,20 @@ static class Native
         uint flags, IntPtr template);
 
     /// <summary>
-    /// A named pipe as MiniPty creates one, except that the server end is not overlapped: the server end is the probe's
-    /// (input it writes when <paramref name="inbound"/> is false, output it reads otherwise), the client end the host's.
+    /// A named pipe as MiniPty creates one, with the server end overlapped only when <paramref name="overlapped"/> is
+    /// set: the server end is the probe's (input it writes when <paramref name="inbound"/> is false, output it reads
+    /// otherwise), the client end the host's.
     /// </summary>
-    public static (IntPtr Server, IntPtr Client) CreateNamedPipePair(bool inbound)
+    public static (IntPtr Server, IntPtr Client) CreateNamedPipePair(bool inbound, bool overlapped = false)
     {
         const uint PipeAccessInbound = 0x1, PipeAccessOutbound = 0x2, FirstPipeInstance = 0x00080000;
-        const uint RejectRemoteClients = 0x8, BufferSize = 4096;
+        const uint FlagOverlapped = 0x40000000, RejectRemoteClients = 0x8, BufferSize = 4096;
         const uint GenericRead = 0x80000000, GenericWrite = 0x40000000, OpenExisting = 3;
         const uint SqosPresent = 0x00100000, Identification = 0x00010000;
 
         var name = $@"\\.\pipe\conpty-close-probe-{Guid.NewGuid():N}";
-        var server = CreateNamedPipeW(name, (inbound ? PipeAccessInbound : PipeAccessOutbound) | FirstPipeInstance,
+        var mode = (inbound ? PipeAccessInbound : PipeAccessOutbound) | FirstPipeInstance | (overlapped ? FlagOverlapped : 0);
+        var server = CreateNamedPipeW(name, mode,
             RejectRemoteClients, 1, inbound ? 0 : BufferSize, inbound ? BufferSize : 0, 0, IntPtr.Zero);
         if (server == new IntPtr(-1))
             throw new Win32Exception();
