@@ -32,6 +32,22 @@ internal static class Smoke
         }
     }
 
+    /// <summary>Raw output with its control characters spelled out, so a log shows the exact sequences.</summary>
+    private static string Escape(ReadOnlySpan<byte> bytes)
+    {
+        var text = new StringBuilder(bytes.Length);
+        foreach (var c in Encoding.UTF8.GetString(bytes))
+        {
+            if (c == '\u001b')
+                text.Append("\\e");
+            else if (c < ' ' || c == '\u007f')
+                text.Append("\\x").Append(((int)c).ToString("x2"));
+            else
+                text.Append(c);
+        }
+        return text.ToString();
+    }
+
     private static async Task RunScenarioAsync(bool throughHost, string quit)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -39,6 +55,10 @@ internal static class Smoke
         var screen = new ScreenBuffer(80, 24);
         var parser = new VtParser(screen);
         var gate = new object();
+        // The last raw output, printed on failure: hosts differ in the VT they send, and on a build only CI has,
+        // the log is the only place to see how.
+        var tail = new byte[4096];
+        var tailLength = 0;
         // The outer PTY acts as the user's VT terminal, including answering inherited-cursor queries.
         screen.Response += response => session.Input.Write(Encoding.UTF8.GetBytes(response));
         var output = ReadAsync();
@@ -52,8 +72,10 @@ internal static class Smoke
             await ExpectAsync("Q/Ctrl+C: quit", alternate: true);
             lock (gate)
             {
-                if (screen.CursorVisible || screen.ViewLine(0).Cells[0].Attributes.Background.Kind == ColorKind.Default)
-                    throw new InvalidOperationException("Expected a hidden cursor and a colored header bar.");
+                var header = screen.ViewLine(0).Cells[0].Attributes.Background.Kind;
+                if (screen.CursorVisible || header == ColorKind.Default)
+                    throw new InvalidOperationException(
+                        $"Expected a hidden cursor and a colored header bar: cursor visible={screen.CursorVisible}, header background={header}.");
                 var first = screen.ViewLine(1).Cells[32].Attributes.Background;
                 var last = screen.ViewLine(1).Cells[g.Width - 1].Attributes.Background;
                 if (first.Kind == ColorKind.Default || last.Kind == ColorKind.Default || first == last)
@@ -268,6 +290,12 @@ internal static class Smoke
             }
             Console.WriteLine($"PASS ({(throughHost ? "console host + nested PTY, Ctrl+C" : "direct PTY, Q")}): Unicode, colors, animated spinners/progress/log, pause, keys, mouse click/wheel, dialog, tabs, file tree scroll/fold/wide names, filter box with Japanese input, braille chart/sparklines, dragged chart borders, stretched layout, resize, screen/cursor/mouse restoration, exit=0 (spinner seen: {spinner})");
         }
+        catch
+        {
+            lock (gate)
+                Console.Error.WriteLine($"Last {tailLength} bytes of output ({(throughHost ? "console host" : "direct PTY")}): {Escape(tail.AsSpan(0, tailLength))}");
+            throw;
+        }
         finally
         {
             timeout.Cancel();
@@ -281,8 +309,25 @@ internal static class Smoke
             await foreach (var chunk in session.ReadOutputAsync(timeout.Token))
             {
                 lock (gate)
+                {
                     parser.Feed(chunk.Data.Span);
+                    Remember(chunk.Data.Span);
+                }
             }
+        }
+
+        void Remember(ReadOnlySpan<byte> data)
+        {
+            if (data.Length >= tail.Length)
+            {
+                data[^tail.Length..].CopyTo(tail);
+                tailLength = tail.Length;
+                return;
+            }
+            var keep = Math.Min(tailLength, tail.Length - data.Length);
+            tail.AsSpan(tailLength - keep, keep).CopyTo(tail);
+            data.CopyTo(tail.AsSpan(keep));
+            tailLength = keep + data.Length;
         }
 
         void Resize(int columns, int rows)
