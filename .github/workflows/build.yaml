@@ -91,6 +91,7 @@ jobs:
           done
 
       - name: Publish and smoke-test the TUI sample (NativeAOT)
+        if: ${{ matrix.os != 'windows-2022' }}
         shell: bash
         run: |
           out="$RUNNER_TEMP/minipty-tui-aot"

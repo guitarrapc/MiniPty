@@ -11,12 +11,6 @@ using TerminalEmulator;
 /// </summary>
 internal static class Smoke
 {
-    // The in-box console host of build 20348 forwarded neither the switch to the alternate screen nor the hidden
-    // cursor, so there the TUI drew on the main screen and the frontend still showed its cursor. Other builds before
-    // 26100 are unmeasured, so the smoke checks both only from 26100.
-    private static readonly bool s_screenModesForwarded =
-        !OperatingSystem.IsWindows() || OperatingSystem.IsWindowsVersionAtLeast(10, 0, 26100);
-
     internal static async Task<int> RunAsync()
     {
         try
@@ -73,7 +67,7 @@ internal static class Smoke
             lock (gate)
             {
                 var header = screen.ViewLine(0).Cells[0].Attributes.Background.Kind;
-                if ((screen.CursorVisible && s_screenModesForwarded) || header == ColorKind.Default)
+                if (screen.CursorVisible || header == ColorKind.Default)
                     throw new InvalidOperationException(
                         $"Expected a hidden cursor and a colored header bar: cursor visible={screen.CursorVisible}, header background={header}.");
                 var first = screen.ViewLine(1).Cells[32].Attributes.Background;
@@ -454,7 +448,7 @@ internal static class Smoke
             WaitUntilAsync(() =>
             {
                 lock (gate)
-                    return (screen.IsAlternateScreen == alternate || !s_screenModesForwarded) && ScreenContains(expected);
+                    return screen.IsAlternateScreen == alternate && ScreenContains(expected);
             }, $"screen to contain '{expected}' (alternate={alternate})");
 
         async Task WaitUntilAsync(Func<bool> condition, string what)
