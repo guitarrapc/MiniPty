@@ -1049,9 +1049,11 @@ public sealed class PtyBaselineTests
         var type = QueryObjectString(handle, ObjectTypeInformation);
         if (type == "Process")
         {
+            // The native path: the Win32 one fails with ERROR_GEN_FAILURE once the process has exited.
+            const uint ProcessNameNative = 1;
             var image = new char[1024];
             var length = image.Length;
-            var name = QueryFullProcessImageNameW(handle, 0, image, ref length) ? Path.GetFileName(new string(image, 0, length)) : "?";
+            var name = QueryFullProcessImageNameW(handle, ProcessNameNative, image, ref length) ? Path.GetFileName(new string(image, 0, length)) : "?";
             var state = GetExitCodeProcess(handle, out var code) ? code == StillActive ? "running" : "exited" : "?";
             return $"Process({name},{state})";
         }

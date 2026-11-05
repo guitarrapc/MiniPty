@@ -106,6 +106,18 @@ internal static class WindowsPtyBackend
     private const int EofTickMs = 100;
     private const byte InputEofCtrlZ = 0x1A;
     private const byte InputEofSubmit = 0x0D;
+
+    // How far a legacy host has got (WindowsPtyBackendInstance.OnOutput): no output yet, its cursor query sent and
+    // unanswered, or started.
+    private const int HostStarting = 0;
+    private const int HostAwaitingCursorReport = 1;
+    private const int HostStarted = 2;
+
+    /// <summary>The host's cursor position query with <see cref="PtyStartInfo.InheritCursor"/>.</summary>
+    private static ReadOnlySpan<byte> CursorPositionQuery => "\e[6n"u8;
+
+    /// <summary>The report MiniPty answers an unanswered query with at teardown: row 1, column 1.</summary>
+    private static ReadOnlySpan<byte> CursorPositionReport => "\e[1;1R"u8;
     private const int ErrorBrokenPipe = 109;
     private const int ErrorNoData = WindowsInterop.ErrorNoData;
     private const int ErrorOperationAborted = 995;
@@ -307,7 +319,9 @@ internal static class WindowsPtyBackend
                 process,
                 job,
                 processInfo.dwProcessId,
-                size);
+                size,
+                legacyHost: library is null && !WindowsInterop.CanReleasePseudoConsole,
+                startInfo.InheritCursor);
         }
         catch
         {
@@ -412,7 +426,8 @@ internal static class WindowsPtyBackend
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private sealed unsafe class WindowsPtyBackendInstance : IPtyBackend, IPtyInputQueue, IWindowsExitObserver, IValueTaskSource<int>
+    private sealed unsafe class WindowsPtyBackendInstance
+        : IPtyBackend, IPtyInputQueue, IWindowsExitObserver, IValueTaskSource<int>, IWindowsOutputObserver, IThreadPoolWorkItem
     {
         private static readonly IOCompletionCallback s_inputWriteCompleted = OnInputWriteCompleted;
 
@@ -447,6 +462,15 @@ internal static class WindowsPtyBackend
         private int _exitCode;
         private bool _disposed;
 
+        // The in-box host from before Windows 11 24H2 (no ReleasePseudoConsole), which needs the help described at
+        // OnOutput and AnswerCursorQuery. Its first output reads go through OnOutput; no other session's do.
+        private readonly bool _legacyHost;
+        private readonly bool _inheritCursor;
+        // How far the legacy host has got, as its output shows (HostStarting, HostAwaitingCursorReport, HostStarted).
+        private int _hostPhase;
+        // A resize was sent before the legacy host had started, so OnOutput sends the size again.
+        private bool _resizedBeforeStart;
+
         // Input queue and overlapped write state (see InputState), created on the first write. Guarded by lock (this),
         // which also orders EOF bytes and the pipe's close with writes; locking the instance itself, which is never
         // exposed, adds no object to the session.
@@ -462,7 +486,9 @@ internal static class WindowsPtyBackend
             SafeKernelHandle process,
             SafeKernelHandle? job,
             int processId,
-            PtySize size)
+            PtySize size,
+            bool legacyHost,
+            bool inheritCursor)
         {
             _inputWriteHandle = inputWriteHandle;
             _outputReadHandle = outputReadHandle;
@@ -472,6 +498,8 @@ internal static class WindowsPtyBackend
             _job = job;
             _processId = processId;
             _size = size;
+            _legacyHost = legacyHost;
+            _inheritCursor = inheritCursor;
             Input = new PtyInputStream(this);
 
             // Last, so the watcher never observes a partially constructed instance. Nothing can release the handle yet.
@@ -970,7 +998,17 @@ internal static class WindowsPtyBackend
             int hr;
             try
             {
-                hr = _hpc.Resize(new WindowsCoord((short)columns, (short)rows));
+                // One resize at a time, so the size recorded is the one sent last, which a legacy host's resend sends again.
+                lock (_hpc)
+                {
+                    // Flagged before the send: a resize that OnOutput finds unflagged is sent after the host has started.
+                    if (_legacyHost && Volatile.Read(ref _hostPhase) != HostStarted)
+                        Volatile.Write(ref _resizedBeforeStart, true);
+
+                    hr = _hpc.Resize(new WindowsCoord((short)columns, (short)rows));
+                    if (hr >= 0)
+                        _size = new PtySize(columns, rows);
+                }
             }
             finally
             {
@@ -985,8 +1023,56 @@ internal static class WindowsPtyBackend
 
                 throw new Win32Exception(hr, "ResizePseudoConsole failed");
             }
+        }
 
-            _size = new PtySize(columns, rows);
+        /// <summary>
+        /// Shown a legacy host's output reads until it has started, on the output loop. Such a host can drop a resize that
+        /// arrives while it attaches its first client: the child then sees the size the session started with. The host's
+        /// first output comes after that attach, as its title names the client's program, so a resize sent before it is
+        /// sent again then, from the thread pool, as nothing on the loop may block. With
+        /// <see cref="PtyStartInfo.InheritCursor"/> the first output is the cursor query instead, and the host attaches
+        /// the client only once the report arrives (see <see cref="AnswerCursorQuery"/>).
+        /// </summary>
+        bool IWindowsOutputObserver.OnOutput(ReadOnlySpan<byte> bytes)
+        {
+            if (_inheritCursor && Volatile.Read(ref _hostPhase) == HostStarting && bytes.EndsWith(CursorPositionQuery))
+            {
+                Volatile.Write(ref _hostPhase, HostAwaitingCursorReport);
+                return true;
+            }
+
+            Volatile.Write(ref _hostPhase, HostStarted);
+            if (Volatile.Read(ref _resizedBeforeStart))
+                ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+
+            return false;
+        }
+
+        /// <summary>The resend of <see cref="IWindowsOutputObserver.OnOutput"/>: the size recorded last, sent again. Never throws.</summary>
+        void IThreadPoolWorkItem.Execute()
+        {
+            if (_disposed || _hpc.IsClosed)
+                return;
+
+            var addedRef = false;
+            try
+            {
+                _hpc.DangerousAddRef(ref addedRef);
+                lock (_hpc)
+                {
+                    var size = _size;
+                    _ = _hpc.Resize(new WindowsCoord((short)size.Columns, (short)size.Rows));
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // Closed since the check: there is nothing left to resize.
+            }
+            finally
+            {
+                if (addedRef)
+                    _hpc.DangerousRelease();
+            }
         }
 
         public void Clear()
@@ -1166,7 +1252,7 @@ internal static class WindowsPtyBackend
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
         /// <summary>Reads output on the completion-port loop that every session shares, holding no thread of its own.</summary>
-        public void StartOutput(PtyOutputPump pump) => WindowsOutputDriver.Run(pump, _outputReadHandle);
+        public void StartOutput(PtyOutputPump pump) => WindowsOutputDriver.Run(pump, _outputReadHandle, _legacyHost ? this : null);
 
         public void Dispose()
         {
@@ -1306,6 +1392,35 @@ internal static class WindowsPtyBackend
             _outputClosed = true;
         }
 
+        /// <summary>
+        /// Answers the cursor query of a legacy host that is still waiting for the report as its transport closes. Such a
+        /// host never exits: <c>ClosePseudoConsole</c> waits for it, once its input is closed it spins on a CPU core, and
+        /// it outlives this process. The report lets it attach the client, see input end, and exit. Written only while
+        /// nothing has followed the query in the host's output: a host that has the frontend's report goes on to attach
+        /// the client and shows it in its output, so a frontend that answered gets no second report.
+        /// </summary>
+        private void AnswerCursorQuery()
+        {
+            try
+            {
+                lock (this)
+                {
+                    // Behind queued input, the report would be failed by the close that follows, so only an idle pipe
+                    // gets it. The waiting host reads its input, so a queue is not expected here.
+                    if (_inputClosed || !IsInputIdleLocked)
+                        return;
+
+                    var input = EnsureInputLocked();
+                    StageLocked(input, CursorPositionReport, owner: null);
+                    WriteStagedLocked(input);
+                }
+            }
+            catch (Exception)
+            {
+                // A failed write leaves the host as it was, and the close that follows must still run.
+            }
+        }
+
         private void CloseTransport(int inputReason)
         {
             try
@@ -1316,6 +1431,9 @@ internal static class WindowsPtyBackend
             {
                 // A failed EOF write must not skip the close below, which disposal and the post-exit drain rely on.
             }
+
+            if (Volatile.Read(ref _hostPhase) == HostAwaitingCursorReport)
+                AnswerCursorQuery();
 
             CloseInputPipe(inputReason);
 

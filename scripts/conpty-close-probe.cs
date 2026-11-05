@@ -28,8 +28,9 @@
 // disposal: input and output closed before the close), exited-undrained (output open but not read). The cursor-
 // scenarios use PSEUDOCONSOLE_INHERIT_CURSOR, wait for the host's cursor query, then kill the child:
 // cursor-unanswered then closes input, and cursor-unanswered-input-open leaves it open. cursor-answered-at-close and
-// cursor-answered-input-open do the same after writing the report a terminal answers the query with (ESC [1;1R). The
-// named- scenarios repeat three of them over the pipes MiniPty creates: named pipes whose server end is the probe's,
+// cursor-answered-input-open do the same after writing the report a terminal answers the query with (ESC [1;1R).
+// cursor-answered-silent writes the report while the child, which writes nothing, still runs, then kills it. Each
+// answered scenario adds after_report_bytes: what the host wrote in the 500 ms after the report. The named- scenarios repeat three of them over the pipes MiniPty creates: named pipes whose server end is the probe's,
 // 4 KiB buffers, and the console host's end opened by name. MiniPty also opens its end overlapped, which the probe
 // does not, so that it can read and write with blocking calls.
 //
@@ -45,11 +46,12 @@
 // failed start, mini-exited-drained its post-exit drain, and mini-exited-disposed its disposal.
 //
 // Each resize run starts Windows PowerShell on a 40x8 pseudo-console, resizes it to 100x30, then lets it print the
-// size it sees, as MiniPty's resize tests do. before-spawn resizes before CreateProcess, after-spawn right after it,
-// and resent both right after it and once the first output arrived. after-ready resizes once the child has printed
-// READY, so certainly after it has connected. title_ms: when the host sent the window title, counted from
-// CreateProcess; a host from Windows 11 24H2 sends nothing before a resize or the child's first output. mini- runs use
-// MiniPty's pipes and start, and the parallel- runs start eight at once to load the machine.
+// size it sees, as MiniPty's resize tests do. before-spawn resizes before CreateProcess, after-spawn right after it.
+// resent resizes right after it and again once the probe's 10 ms poll finds the first output; resent-now sends the
+// second from the reading thread right after the first read. after-ready resizes once the child has printed READY, so
+// certainly after it has connected. title_ms: when the host sent the window title, counted from CreateProcess; a host
+// from Windows 11 24H2 sends nothing before a resize or the child's first output. mini- runs use MiniPty's pipes and
+// start, and the parallel- runs start eight at once to load the machine.
 
 using System.ComponentModel;
 using System.Diagnostics;
@@ -80,6 +82,7 @@ string[] closeScenarios =
     "cursor-unanswered-input-open",
     "cursor-answered-at-close",
     "cursor-answered-input-open",
+    "cursor-answered-silent",
     "named-no-client",
     "named-exited-input-closed",
     "named-exited-output-closed",
@@ -133,11 +136,16 @@ static class Probe
         Native.ProcessInformation? child = null;
         if (shape != "no-client")
         {
-            child = pty.Spawn(cursor ? $"\"{ComSpec}\" /c echo NEVER_SHOWN" : $"\"{ComSpec}\" /c exit 0");
+            var command = shape == "cursor-answered-silent" ? "set /p X=" : cursor ? "echo NEVER_SHOWN" : "exit 0";
+            child = pty.Spawn($"\"{ComSpec}\" /c {command}");
             if (cursor)
             {
                 note = reader!.WaitFor("\e[6n", 5_000) ? " query=seen" : " query=missing";
-                Thread.Sleep(500);
+                if (shape == "cursor-answered-silent")
+                    note += Answer(pty, reader);
+                else
+                    Thread.Sleep(500);
+
                 Native.TerminateProcess(child.Value.hProcess, 1);
             }
 
@@ -145,8 +153,8 @@ static class Probe
         }
 
         Thread.Sleep(200);
-        if (answered)
-            pty.Write("\e[1;1R");
+        if (answered && shape != "cursor-answered-silent")
+            note += Answer(pty, reader!);
         if (!inputOpen)
             pty.CloseInput();
         if (shape == "exited-output-closed")
@@ -189,6 +197,15 @@ static class Probe
         Console.WriteLine(
             $"close scenario={scenario} run={run} returned={close.Returned} close_ms={close.Milliseconds:F1} " +
             $"pipe_end_ms={pipeEndMs:F1} hosts={hostsRightAfter}/{stuck.Count} handle_delta={handleDelta}{note}");
+    }
+
+    /// <summary>Writes the cursor position report, then says how many bytes the host wrote in the next 500 ms.</summary>
+    private static string Answer(PseudoConsole pty, PipeReader reader)
+    {
+        var before = reader.ByteCount;
+        pty.Write("\e[1;1R");
+        Thread.Sleep(500);
+        return $" after_report_bytes={reader.ByteCount - before}";
     }
 
     /// <summary>Runs ClosePseudoConsole on a thread of its own and waits for it up to <see cref="CloseTimeoutMs"/>.</summary>
@@ -325,7 +342,8 @@ static class Resizes
         Series("mini-after-spawn", 6);
         Series("after-ready", 2);
         Series("mini-resent", 2);
-        Parallel(["mini-after-spawn", "mini-resent"], perVariant: 4, rounds: 2);
+        Series("mini-resent-now", 10);
+        Parallel(["mini-after-spawn", "mini-resent-now"], perVariant: 4, rounds: 2);
     }
 
     private static void Series(string variant, int runs)
@@ -376,7 +394,7 @@ static class Resizes
         var mini = variant.StartsWith("mini-", StringComparison.Ordinal);
         var shape = mini ? variant["mini-".Length..] : variant;
         var pty = PseudoConsole.Create(0, 40, 8, named: mini);
-        var reader = new PipeReader(pty.OutputRead);
+        var reader = new PipeReader(pty.OutputRead, shape == "resent-now" ? () => pty.Resize(100, 30) : null);
         var hr = 0;
         if (shape == "before-spawn")
             hr = pty.Resize(100, 30);
@@ -384,7 +402,7 @@ static class Resizes
         var script = shape == "after-ready" ? "Write-Output READY; " + SizeScript : SizeScript;
         var child = pty.Spawn($"\"{s_powerShell}\" -NoLogo -NoProfile -Command \"{script}\"", mini);
         var spawned = Stopwatch.GetTimestamp();
-        if (shape is "after-spawn" or "resent")
+        if (shape is "after-spawn" or "resent" or "resent-now")
             hr = pty.Resize(100, 30);
         if (shape is "after-ready" or "resent")
         {
@@ -668,15 +686,20 @@ sealed class PipeReader
     private readonly StringBuilder _text = new();
     private readonly List<(long At, string Chunk)> _chunks = [];
     private readonly ManualResetEventSlim _ended = new();
+    private readonly Action? _onFirstOutput;
     private int _bytes;
 
-    public PipeReader(IntPtr handle)
+    /// <summary>Starts reading; <paramref name="onFirstOutput"/> runs on the reading thread right after the first read.</summary>
+    public PipeReader(IntPtr handle, Action? onFirstOutput = null)
     {
         _handle = handle;
+        _onFirstOutput = onFirstOutput;
         new Thread(Run) { IsBackground = true }.Start();
     }
 
     public long EndedAt { get; private set; }
+
+    public int ByteCount => Volatile.Read(ref _bytes);
 
     public bool Ended => _ended.IsSet;
 
@@ -740,7 +763,8 @@ sealed class PipeReader
                 _chunks.Add((Stopwatch.GetTimestamp(), chunk));
             }
 
-            Interlocked.Add(ref _bytes, read);
+            if (Interlocked.Add(ref _bytes, read) == read)
+                _onFirstOutput?.Invoke();
         }
 
         EndedAt = Stopwatch.GetTimestamp();
@@ -1063,11 +1087,13 @@ static class Native
         }
     }
 
+    /// <summary>The image's file name, from its native path: the Win32 one fails once the process has exited.</summary>
     private static string ImageName(IntPtr process)
     {
+        const uint ProcessNameNative = 1;
         var name = new StringBuilder(1024);
         var size = name.Capacity;
-        return QueryFullProcessImageNameW(process, 0, name, ref size) ? Path.GetFileName(name.ToString()) : "?";
+        return QueryFullProcessImageNameW(process, ProcessNameNative, name, ref size) ? Path.GetFileName(name.ToString()) : "?";
     }
 
     /// <summary>A UNICODE_STRING result of NtQueryObject: the type name (class 2) or the object name (class 1).</summary>

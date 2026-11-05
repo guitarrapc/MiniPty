@@ -187,6 +187,11 @@ public sealed record PtyStartInfo
     /// that writes stalls. Leave this off for consumers that only read output, such as
     /// <see cref="PtySession.CompleteAsync"/>, unless they write the report themselves.
     /// </para>
+    /// <para>
+    /// Before Windows 11 24H2 the in-box console host never exits while the query is unanswered, not even after the
+    /// session and the process that started it have ended. When the session ends with the query still unanswered,
+    /// MiniPty therefore writes a report itself (<c>ESC[1;1R</c>), which lets the host exit.
+    /// </para>
     /// </remarks>
     public bool InheritCursor { get; init; }
 
