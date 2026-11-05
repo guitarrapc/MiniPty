@@ -191,7 +191,8 @@ public sealed record PtyStartInfo
     /// Before Windows 11 24H2 the in-box console host never exits while the query is unanswered, not even after the
     /// session and the process that started it have ended. On such a host MiniPty therefore writes a report itself
     /// (<c>ESC[1;1R</c>) as the session ends, which lets a waiting host exit. A frontend that answered gets it too,
-    /// once the child has exited or is being ended.
+    /// once the child has exited or is being ended. <see cref="PtySession.DisposeAsync"/> then completes once the host
+    /// has ended, after 1 s at most.
     /// </para>
     /// </remarks>
     public bool InheritCursor { get; init; }

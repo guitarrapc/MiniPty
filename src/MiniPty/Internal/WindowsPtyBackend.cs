@@ -104,6 +104,13 @@ internal static class WindowsPtyBackend
     private static readonly IntPtr InvalidHandleValue = new(-1);
     // EOF staging advances one step per tick, matching the cadence of the exit-wait poll loop it replaced.
     private const int EofTickMs = 100;
+
+    /// <summary>
+    /// The longest disposal leaves the output pipe open after MiniPty wrote a legacy host the cursor report
+    /// (WindowsPtyBackendInstance.DeferOutputClose), for a host that keeps the pipe open. Such a host normally ends
+    /// within milliseconds.
+    /// </summary>
+    private const int DeferredOutputCloseMs = 1000;
     private const byte InputEofCtrlZ = 0x1A;
     private const byte InputEofSubmit = 0x0D;
 
@@ -476,6 +483,10 @@ internal static class WindowsPtyBackend
         private int _hostPhase;
         // A resize was sent before the legacy host had started, so OnOutput sends the size again.
         private bool _resizedBeforeStart;
+        // MiniPty wrote the cursor report as the transport closed, so disposal leaves output open (DeferOutputClose).
+        private bool _cursorReportWritten;
+        // The session's pump, whose stop disposal waits for before closing output it left open.
+        private PtyOutputPump? _pump;
 
         // Input queue and overlapped write state (see InputState), created on the first write. Guarded by lock (this),
         // which also orders EOF bytes and the pipe's close with writes; locking the instance itself, which is never
@@ -1042,6 +1053,7 @@ internal static class WindowsPtyBackend
         bool IWindowsOutputObserver.OnOutput(ReadOnlySpan<byte> bytes)
         {
             var phase = Volatile.Read(ref _hostPhase);
+            TeardownTraceForTests?.Invoke($"read {bytes.Length} bytes phase={phase} starts_with_query={bytes.StartsWith(CursorPositionQuery)}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
             if (_inheritCursor && phase == HostStarting && bytes.StartsWith(CursorPositionQuery))
             {
                 Volatile.Write(ref _hostPhase, HostAwaitingCursorReport);
@@ -1259,7 +1271,11 @@ internal static class WindowsPtyBackend
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
         /// <summary>Reads output on the completion-port loop that every session shares, holding no thread of its own.</summary>
-        public void StartOutput(PtyOutputPump pump) => WindowsOutputDriver.Run(pump, _outputReadHandle, _legacyHost ? this : null);
+        public void StartOutput(PtyOutputPump pump)
+        {
+            _pump = pump;
+            WindowsOutputDriver.Run(pump, _outputReadHandle, _legacyHost ? this : null);
+        }
 
         public void Dispose()
         {
@@ -1278,8 +1294,17 @@ internal static class WindowsPtyBackend
 
             // Queued writes fail now, on the disposing thread, without waiting for a write in flight.
             CloseTransport(InputDisposed);
-            CloseOutputPipe();
-            TeardownTraceForTests?.Invoke("output closed"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
+            var deferOutput = Volatile.Read(ref _cursorReportWritten);
+            if (deferOutput)
+            {
+                DeferOutputClose();
+                TeardownTraceForTests?.Invoke("output close deferred"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
+            }
+            else
+            {
+                CloseOutputPipe();
+                TeardownTraceForTests?.Invoke("output closed"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
+            }
 
             // Closes at once, or when a concurrent exit query or kill unpins it.
             _process.Dispose();
@@ -1291,11 +1316,35 @@ internal static class WindowsPtyBackend
                 Marshal.FreeHGlobal(_attrList);
             }
 
-            if (!_outputClosed)
+            if (!deferOutput && !_outputClosed)
             {
                 _outputReadHandle.Dispose();
                 _outputClosed = true;
             }
+        }
+
+        /// <summary>
+        /// Leaves the output pipe open after disposal, after MiniPty wrote a legacy host the cursor report, until that
+        /// host has ended. The report lets it go on attaching the client, which it shows with a write, and a write that
+        /// finds the pipe closed leaves it waiting for good: it never exits, and its close never returns. The output
+        /// driver reads on after disposal until the host's end breaks the pipe, which stops the pump. The bound is for a
+        /// host that keeps the pipe open, as <c>DisposeAsync</c> waits for output reading to stop.
+        /// </summary>
+        private void DeferOutputClose()
+        {
+            var stopped = _pump is null ? Task.CompletedTask : _pump.WaitForStopAsync().AsTask();
+            _ = Task.WhenAny(stopped, Task.Delay(DeferredOutputCloseMs)).ContinueWith(
+                static (_, state) => ((WindowsPtyBackendInstance)state!).CloseDeferredOutput(),
+                this,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        private void CloseDeferredOutput()
+        {
+            CloseOutputPipe();
+            TeardownTraceForTests?.Invoke("deferred output closed"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
         }
 
         /// <summary>
@@ -1425,6 +1474,7 @@ internal static class WindowsPtyBackend
                     var input = EnsureInputLocked();
                     StageLocked(input, CursorPositionReport, owner: null);
                     var written = WriteStagedLocked(input);
+                    Volatile.Write(ref _cursorReportWritten, true);
                     TeardownTraceForTests?.Invoke($"report written={written} in_flight={input.WriteInFlight}"); // Temporary: windows-2022 inherit-cursor investigation, remove before the PR.
                 }
             }
