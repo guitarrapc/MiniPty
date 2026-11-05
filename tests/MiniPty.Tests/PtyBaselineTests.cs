@@ -970,10 +970,11 @@ public sealed class PtyBaselineTests
     }
 
     /// <summary>
-    /// Handles on Windows, descriptors on Unix, of this process. Before Windows 11 24H2 (a <c>kernel32.dll</c> without
-    /// <c>ReleasePseudoConsole</c>) every pseudo-console leaves the process that created it a handle to its console
-    /// host, still open after the host exits, which MiniPty cannot close; handles to exited console hosts are not counted
-    /// there. MiniPty itself never opens a console host, so a handle it leaks, such as the child's, still counts.
+    /// Handles on Windows, descriptors on Unix, of this process. On Windows Server 2022, whose <c>kernel32.dll</c> has no
+    /// <c>ReleasePseudoConsole</c>, every pseudo-console leaves the process that created it a handle to its console
+    /// host, still open after the host exits, which MiniPty cannot close. So on a build without that export, handles to
+    /// exited console hosts are not counted. MiniPty itself never opens a console host, so a handle it leaks, such as the
+    /// child's, still counts.
     /// </summary>
     internal static int CountOpenHandles()
     {
@@ -1007,7 +1008,7 @@ public sealed class PtyBaselineTests
         return count;
     }
 
-    // The object type index of a process, found on the first process handle seen; 0 until then. Fixed until reboot.
+    // The object type index of a process, found on the first process handle seen, or 0 until then. Fixed until reboot.
     private static uint s_processTypeIndex;
 
     private static bool IsProcessHandle(IntPtr handle, uint typeIndex)
@@ -1040,7 +1041,7 @@ public sealed class PtyBaselineTests
             : null;
     }
 
-    /// <summary>This process's handles on Windows, each value with its object type index; null elsewhere or on failure.</summary>
+    /// <summary>This process's handles on Windows, each value with its object type index. Null elsewhere or on failure.</summary>
     private static Dictionary<long, uint>? SnapshotHandleTable()
     {
         if (!OperatingSystem.IsWindows())

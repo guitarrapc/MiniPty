@@ -106,9 +106,8 @@ internal static class WindowsPtyBackend
     private const int EofTickMs = 100;
 
     /// <summary>
-    /// The longest disposal leaves the output pipe open after MiniPty wrote a legacy host the cursor report
-    /// (WindowsPtyBackendInstance.DeferOutputClose), for a host that keeps the pipe open. Such a host normally ends
-    /// within milliseconds.
+    /// The longest disposal leaves a legacy host's output pipe open (WindowsPtyBackendInstance.DeferOutputClose), for a
+    /// host that keeps the pipe open. A legacy host normally ends within milliseconds of its close.
     /// </summary>
     private const int DeferredOutputCloseMs = 1000;
     private const byte InputEofCtrlZ = 0x1A;
@@ -470,16 +469,15 @@ internal static class WindowsPtyBackend
         private bool _disposed;
 
         // The in-box host from before Windows 11 24H2 (no ReleasePseudoConsole), which needs the help described at
-        // OnOutput and AnswerCursorQuery. Its first output reads go through OnOutput; no other session's do.
+        // OnOutput, AnswerCursorQuery, and DeferOutputClose. Its first output reads go through OnOutput. No other
+        // session's do.
         private readonly bool _legacyHost;
         private readonly bool _inheritCursor;
         // How far the legacy host has got, as its output shows (HostStarting, HostAwaitingCursorReport, HostStarted).
         private int _hostPhase;
         // A resize was sent before the legacy host had started, so OnOutput sends the size again.
         private bool _resizedBeforeStart;
-        // MiniPty wrote the cursor report as the transport closed, so disposal leaves output open (DeferOutputClose).
-        private bool _cursorReportWritten;
-        // The session's pump, whose stop disposal waits for before closing output it left open.
+        // The session's pump, whose stop disposal waits for before closing a legacy host's output.
         private PtyOutputPump? _pump;
 
         // Input queue and overlapped write state (see InputState), created on the first write. Guarded by lock (this),
@@ -994,8 +992,8 @@ internal static class WindowsPtyBackend
             columns = PtySizeLimits.Clamp(columns);
             rows = PtySizeLimits.Clamp(rows);
 
-            // The reference keeps the HPCON valid if drain closes the pseudo-console during the call;
-            // the deferred close is then queued on release instead of running under ResizePseudoConsole.
+            // The reference keeps the HPCON valid if drain closes the pseudo-console during the call. The deferred close
+            // is then queued on release instead of running under ResizePseudoConsole.
             var addedRef = false;
             try
             {
@@ -1287,8 +1285,7 @@ internal static class WindowsPtyBackend
 
             // Queued writes fail now, on the disposing thread, without waiting for a write in flight.
             CloseTransport(InputDisposed);
-            var deferOutput = Volatile.Read(ref _cursorReportWritten);
-            if (deferOutput)
+            if (_legacyHost)
                 DeferOutputClose();
             else
                 CloseOutputPipe();
@@ -1303,7 +1300,7 @@ internal static class WindowsPtyBackend
                 Marshal.FreeHGlobal(_attrList);
             }
 
-            if (!deferOutput && !_outputClosed)
+            if (!_legacyHost && !_outputClosed)
             {
                 _outputReadHandle.Dispose();
                 _outputClosed = true;
@@ -1311,17 +1308,32 @@ internal static class WindowsPtyBackend
         }
 
         /// <summary>
-        /// Leaves the output pipe open after disposal, after MiniPty wrote a legacy host the cursor report, until that
-        /// host has ended. The report lets it go on attaching the client, which it shows with a write, and a write that
-        /// finds the pipe closed leaves it waiting for good: it never exits, and its close never returns. The output
-        /// driver reads on after disposal until the host's end breaks the pipe, which stops the pump. The bound is for a
-        /// host that keeps the pipe open, as <c>DisposeAsync</c> waits for output reading to stop.
+        /// Leaves a legacy host's output pipe open after disposal until the host has ended. The host writes as it
+        /// attaches the client and as it shuts down, and a write that finds MiniPty's end closed can leave it waiting
+        /// for good: it never exits, and its close never returns. The output driver reads on after disposal until the
+        /// host's end breaks the pipe, which stops the pump. An end of output that the post-exit drain forced, or a
+        /// read that failed before disposal, says nothing about the host, and neither does a session that never read
+        /// output, so only the bound closes the pipe then. The bound is for a host that keeps the pipe open, as
+        /// <c>DisposeAsync</c> waits for output reading to stop.
         /// </summary>
         private void DeferOutputClose()
         {
-            var stopped = _pump is null ? Task.CompletedTask : _pump.WaitForStopAsync().AsTask();
-            _ = Task.WhenAny(stopped, Task.Delay(DeferredOutputCloseMs)).ContinueWith(
+            _ = Task.Delay(DeferredOutputCloseMs).ContinueWith(
                 static (_, state) => ((WindowsPtyBackendInstance)state!).CloseOutputPipe(),
+                this,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            if (_pump is not { } pump)
+                return;
+
+            _ = pump.WaitForStopAsync().AsTask().ContinueWith(
+                static (_, state) =>
+                {
+                    var self = (WindowsPtyBackendInstance)state!;
+                    if (!self._pump!.IsEndOfOutputForced && self._pump.Error is null)
+                        self.CloseOutputPipe();
+                },
                 this,
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
@@ -1434,9 +1446,9 @@ internal static class WindowsPtyBackend
         /// Answers a legacy host's cursor query as the transport closes, in case the frontend never did. A host still
         /// waiting for the report never exits: <c>ClosePseudoConsole</c> waits for it, once its input is closed it
         /// spins on a CPU core, and it outlives this process. The report lets it attach the client, see input end, and
-        /// exit. It goes to every such session, answered or not. A report the host is not waiting for arrives only as
-        /// the session ends, when the child has exited or is being ended and the close that follows ends whatever else
-        /// is attached, while a missed one leaves a host spinning for good.
+        /// exit. It goes to every such session, answered or not. A host that is not waiting takes the report as an F3
+        /// key press. That arrives only as the session ends, when the child has exited or is being ended and the close
+        /// that follows ends whatever else is attached, while a missed report leaves a host spinning for good.
         /// </summary>
         private void AnswerCursorQuery()
         {
@@ -1444,15 +1456,15 @@ internal static class WindowsPtyBackend
             {
                 lock (this)
                 {
-                    // Behind queued input, the report would be failed by the close that follows, so only an idle pipe
-                    // gets it. The waiting host reads its input, so a queue is not expected here.
+                    // The close that follows fails queued input and cancels a write in flight, so only an idle pipe gets
+                    // the report. A waiting host keeps reading its input, so the pipe is busy only for a moment, but a
+                    // host that misses the report this way stays.
                     if (_inputClosed || !IsInputIdleLocked)
                         return;
 
                     var input = EnsureInputLocked();
                     StageLocked(input, CursorPositionReport, owner: null);
                     WriteStagedLocked(input);
-                    Volatile.Write(ref _cursorReportWritten, true);
                 }
             }
             catch (Exception)

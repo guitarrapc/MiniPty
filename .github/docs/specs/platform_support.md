@@ -35,7 +35,7 @@ MiniPty does not use winpty or third-party PTY binaries. Backends are in-process
 
 ## Verification
 
-CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows. On Windows that includes Windows Server 2022 (build 20348), the only hosted build before Windows 11 24H2 (26100), so the in-box paths for a `kernel32.dll` without `ReleasePseudoConsole` run there. Build 17763, the minimum, has no hosted runner. The packed packages are smoke-tested (`samples/SingleFiles/NuGetSmoke.cs`, under `dotnet run` and as a NativeAOT executable) on every test runner, plus these, each on x64 and arm64:
+CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows. On Windows that includes Windows Server 2022 (build 20348), the only hosted build before Windows 11 24H2 (26100), so the in-box paths for a `kernel32.dll` without `ReleasePseudoConsole` run there. Build 17763, the minimum, has no hosted runner. The packed packages are smoke-tested (`samples/SingleFiles/NuGetSmoke.cs`, under `dotnet run` and as a NativeAOT executable) on every test runner except windows-2022, plus these, each on x64 and arm64:
 
 - macOS 15, the oldest macOS .NET 10 supports.
 - An AlmaLinux 8 container: glibc 2.28, the oldest glibc .NET 10 supports.
@@ -54,10 +54,10 @@ CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows. On Windows that incl
 
 Tests use property assertions, not golden byte captures, to reduce OS and timing flake.
 
-**Windows Server 2022 shows how the in-box ConPTY behaved before Windows 11 24H2.** `scripts/conpty-close-probe.cs` measures that ConPTY through `kernel32.dll` alone, so that a failure there can be told apart from MiniPty's own. A CI step ran it on windows-2022 and windows-2025 on 2026-11-05, and was removed once the findings were in. Build 20348 differs from 26100 in four ways ([pty_crossplatform.md](../references/pty_crossplatform.md#out-of-band-conpty), [Terminal size](../references/pty_crossplatform.md#terminal-size)):
+**Windows Server 2022 is the only build before Windows 11 24H2 that was measured.** `scripts/conpty-close-probe.cs` measures that ConPTY through `kernel32.dll` alone, so that a failure there can be told apart from MiniPty's own. A CI step ran it on windows-2022 and windows-2025 on 2026-11-05, and was removed once the findings were in. The probe found four differences from build 26100 ([pty_crossplatform.md](../references/pty_crossplatform.md#out-of-band-conpty), [Terminal size](../references/pty_crossplatform.md#terminal-size)):
 
-- Closing a pseudo-console waits until its host exits. MiniPty closes on the thread pool and never waits for the close.
-- A resize sent before the host has attached its first client can be dropped. MiniPty sends the size again once the host's first output has been read.
+- Closing a pseudo-console waits until its host exits. MiniPty closes on the thread pool and never waits for the close. Disposal leaves MiniPty's end of the output open until the host has ended, for 1 s at most, because a host whose write finds that end closed can wait for good.
+- A resize sent before the host has attached its first client can be dropped. MiniPty sends the size again once the host's output shows it has attached the client.
 - A host whose inherit-cursor query goes unanswered never exits. MiniPty answers the query as the transport closes.
 - Every pseudo-console leaves the creating process one handle to its exited host (`conhost.exe`), also when no child ran. MiniPty cannot close it, so there the leak checks do not count handles to console hosts that have exited. MiniPty never opens a console host itself, so a handle it leaks still counts.
 

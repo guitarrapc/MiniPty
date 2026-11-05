@@ -187,7 +187,8 @@ public sealed class PtyUnixLoopTests
         await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace);
 
         // A spin makes thousands of passes. A live child that epoll cannot watch through a pidfd, as on Linux before
-        // 5.3, is also polled every 10 ms, which adds about 50.
+        // 5.3, is also polled every 10 ms, which adds about 50. PidfdsWork is false on 5.3 too, which only loosens the
+        // bound there.
         var limit = OperatingSystem.IsLinux() && !PtyUnixChildSignalTests.PidfdsWork ? 100L : 50L;
         var before = UnixPtyBackend.LoopPassesForTests;
         await Task.Delay(500);

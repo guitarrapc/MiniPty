@@ -101,6 +101,31 @@ public sealed class PtyWindowsOutputDriverTests
     }
 
     /// <summary>
+    /// The Windows backend watches output until the console host shows it has started. With an inherit-cursor query
+    /// first, that is the output after the query, as the host attaches the child only once the report arrives. A resize
+    /// sent before then is sent again at that point, so stopping at the query would resend too early, and watching on
+    /// would resend on every read.
+    /// </summary>
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task TheBackendWatchesOutputUntilTheHostHasStarted(bool inheritCursor)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+        using var backend = WindowsPtyBackend.Start(
+            new PtyStartInfo { FileName = cmd, Arguments = ["/c", "exit"], InheritCursor = inheritCursor });
+        var observer = (IWindowsOutputObserver)backend;
+        var watchingAfterQuery = inheritCursor && observer.OnOutput("\e[6n"u8);
+        var watchingAfterTitle = observer.OnOutput("\e]0;cmd\a"u8);
+
+        await Assert.That(watchingAfterQuery).IsEqualTo(inheritCursor);
+        await Assert.That(watchingAfterTitle).IsFalse();
+    }
+
+    /// <summary>
     /// A driver that parked on a full ring and resumed counts as reading again, so the post-exit drain still ends output
     /// when the close does not end the pipe. A resumed driver that stayed marked as waiting kept the drain from ever
     /// seeing quiet, and the session never reached end of output.
