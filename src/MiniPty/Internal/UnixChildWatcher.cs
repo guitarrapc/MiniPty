@@ -370,7 +370,6 @@ internal static partial class UnixPtyBackend
         /// </summary>
         internal static void RequestService(UnixPtyBackendInstance session)
         {
-            TemporaryEchoTrace.Record(session.ProcessId, TemporaryEchoTrace.LoopRequest, 0); // Temporary
             lock (s_lock)
             {
                 if (session.ServiceQueued)
@@ -755,7 +754,6 @@ internal static partial class UnixPtyBackend
             int count;
             var arms = s_armCount;
             s_armCount = 0;
-            TemporaryEchoTrace.Record(0, TemporaryEchoTrace.LoopWaitBegin, timeout); // Temporary
             fixed (ulong* tokenPtr = tokens)
             fixed (int* reportPtr = reports)
             fixed (int* armFds = s_armFds)
@@ -766,7 +764,6 @@ internal static partial class UnixPtyBackend
                     s_watchFd, s_wakeRead, armFds, armTokens, armInterests, arms, tokenPtr, reportPtr, tokens.Length, timeout);
             }
 
-            TemporaryEchoTrace.Record(0, TemporaryEchoTrace.LoopWaitEnd, count); // Temporary
             // A session listed from now on is looked at by the pass this wait ends in. Written without the lock: one listed
             // meanwhile at most wakes the next wait at once.
             Volatile.Write(ref s_waitsWithoutTimeout, false);
