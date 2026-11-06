@@ -157,9 +157,6 @@ jobs:
       - name: Build
         shell: bash
         run: dotnet build tests/MiniPty.Tests/MiniPty.Tests.csproj -c Release
-      # Runs 11 to 20 compile methods with loops fully at their first call (DOTNET_TC_QuickJitForLoops=0), so no
-      # method is recompiled in the middle of its loop (on-stack replacement): the comparison tells whether that
-      # recompilation of the test's own method is what holds an echo up.
       - name: Run 20 times
         shell: bash
         run: |
@@ -167,19 +164,13 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then exe="$exe.exe"; fi
           failed=0
           for i in $(seq 1 20); do
-            mode=default
-            jit=()
-            if [[ $i -gt 10 ]]; then
-              mode=no-quick-jit-for-loops
-              jit=(DOTNET_TC_QuickJitForLoops=0)
-            fi
-            if env "${jit[@]}" "$exe" --treenode-filter "${{ matrix.filter }}" --no-progress --output detailed > run.txt 2>&1; then
+            if "$exe" --treenode-filter "${{ matrix.filter }}" --no-progress --output detailed > run.txt 2>&1; then
               result=passed
             else
               result=FAILED
               failed=$((failed + 1))
             fi
-            echo "== run $i ($mode): $result"
+            echo "== run $i: $result"
             grep -a -E "echoes, median|did not close|failed |total:|^echo-trace" run.txt || true
           done
           echo "$failed of 20 runs failed"

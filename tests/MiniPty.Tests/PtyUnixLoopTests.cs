@@ -29,6 +29,19 @@ public sealed class PtyUnixLoopTests
     /// stopped the whole process from a loop that served the flood ahead of the echo. On 2026-11-05 one echo in 37,589
     /// took 100.4 ms on CI's macos-26-intel runner, and nothing recorded which it was.
     /// </para>
+    /// <para>
+    /// Keystrokes are paced, and the first ones are not measured. The test used to type the next key the moment the last
+    /// echo came back, and on macos-26-intel (2026-11-07) that measured its own thread rather than MiniPty. A macOS
+    /// terminal echoes during the write, so every echo was read at once on the test's thread, which never waited. macOS
+    /// left that thread without the CPU for up to 126 ms while the loop and the flood ran. The runtime recompiled the
+    /// test's method in the middle of the loop, after 10,000 back-edges in one call (about 5,000 echoes), compiling for
+    /// 23–35 ms on that thread.
+    /// The first echo also paid for the first calls of the echo path, 8–12 ms. A trace of the loop showed it held none
+    /// of those echoes. Paced, the thread waits between keystrokes as a terminal waits for its user, and no call of the
+    /// method runs long enough to be recompiled. By each keystroke the loop has also taken reading back from the idle
+    /// consumer, so the echo goes through the loop, which is what the test means to measure: on Linux the consumer finds
+    /// nothing yet and waits for the loop's read, and on macOS, which echoes during the write, whichever reads first.
+    /// </para>
     /// </remarks>
     [Test]
     [NotInParallel]
@@ -58,40 +71,27 @@ public sealed class PtyUnixLoopTests
         while (Interlocked.Read(ref floodBytes) < 1024 * 1024)
             await Task.Delay(10);
 
-        // Echoes for half a second, so the flood keeps going all along however fast each echo is.
-        var floodAtStart = Interlocked.Read(ref floodBytes);
         var echoes = new List<EchoClock.Echo>();
         var echoPid = echo.ProcessId; // Temporary (I3)
         TemporaryEchoTrace.Start(echoPid, 1 << 20); // Temporary (I3)
+        long floodAtStart;
         using (var clock = new EchoClock(() => Interlocked.Read(ref floodBytes)))
         {
+            // The first echoes run the echo path's code for the first time, the test's included, which took 8–12 ms on
+            // macos-26-intel: they are typed before the clock starts.
+            for (var i = 0; i < WarmUpEchoes; i++)
+            {
+                await Task.Delay(KeystrokeGapMs);
+                await TypeAsync(clock);
+            }
+
+            // Echoes for half a second, so the flood keeps going all along however fast each echo is.
+            floodAtStart = Interlocked.Read(ref floodBytes);
             var measuring = Stopwatch.StartNew();
             while (echoes.Count < 40 || measuring.ElapsedMilliseconds < 500)
             {
-                var started = clock.Begin();
-                TemporaryEchoTrace.Record(echoPid, TraceTestWrite, ThreadCpuMicros()); // Temporary (I3)
-                await echo.WriteInputAsync("a");
-                TemporaryEchoTrace.Record(echoPid, TraceTestWritten, ThreadCpuMicros()); // Temporary (I3)
-                // The terminal echoes the character at once; cat sees nothing until a newline.
-                while (true)
-                {
-                    var moving = output.MoveNextAsync(); // Temporary (I3): was awaited in the assertion below
-                    var movedAtOnce = moving.IsCompleted; // Temporary (I3)
-                    TemporaryEchoTrace.Record(echoPid, TraceTestMoveNext, movedAtOnce ? 1 : 0); // Temporary (I3)
-                    var moved = movedAtOnce ? moving.Result : await moving.AsTask().WaitAsync(Timeout); // Temporary (I3)
-                    if (!movedAtOnce) // Temporary (I3)
-                        TemporaryEchoTrace.Record(echoPid, TraceTestResumed, ThreadCpuMicros()); // Temporary (I3)
-                    await Assert.That(moved).IsTrue(); // Temporary (I3): was await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
-                    TemporaryEchoTrace.Record(echoPid, TraceTestAsserted, ThreadCpuMicros()); // Temporary (I3)
-                    TemporaryEchoTrace.Record(echoPid, TraceTestChunk, output.Current.Data.Length); // Temporary (I3)
-                    if (output.Current.Data.Span.IndexOf((byte)'a') >= 0)
-                        break;
-                }
-
-                echoes.Add(clock.End(started));
-                // Erases the character again (VERASE is DEL), so the line never grows: a macOS terminal holds at most 1,024
-                // bytes on one line, then drops input and echoes BEL instead, and a fast loop echoes more than that in 500 ms.
-                await echo.WriteInputAsync("\x7f");
+                await Task.Delay(KeystrokeGapMs);
+                echoes.Add(await TypeAsync(clock));
             }
         }
 
@@ -112,7 +112,46 @@ public sealed class PtyUnixLoopTests
         // The flood kept going throughout, and echo stayed interactive.
         await Assert.That(floodDuring).IsGreaterThan(1024L * 1024);
         await Assert.That(slowest).IsLessThan(100.0).Because(summary);
+
+        // One keystroke: types "a", times it until its echo arrives, and erases it again.
+        async Task<EchoClock.Echo> TypeAsync(EchoClock clock)
+        {
+            var started = clock.Begin();
+            TemporaryEchoTrace.Record(echoPid, TraceTestWrite, ThreadCpuMicros()); // Temporary (I3)
+            await echo.WriteInputAsync("a");
+            TemporaryEchoTrace.Record(echoPid, TraceTestWritten, ThreadCpuMicros()); // Temporary (I3)
+            // The terminal echoes the character at once; cat sees nothing until a newline.
+            while (true)
+            {
+                var moving = output.MoveNextAsync(); // Temporary (I3): was awaited in the assertion below
+                var movedAtOnce = moving.IsCompleted; // Temporary (I3)
+                TemporaryEchoTrace.Record(echoPid, TraceTestMoveNext, movedAtOnce ? 1 : 0); // Temporary (I3)
+                var moved = movedAtOnce ? moving.Result : await moving.AsTask().WaitAsync(Timeout); // Temporary (I3)
+                if (!movedAtOnce) // Temporary (I3)
+                    TemporaryEchoTrace.Record(echoPid, TraceTestResumed, ThreadCpuMicros()); // Temporary (I3)
+                await Assert.That(moved).IsTrue(); // Temporary (I3): was await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+                TemporaryEchoTrace.Record(echoPid, TraceTestAsserted, ThreadCpuMicros()); // Temporary (I3)
+                TemporaryEchoTrace.Record(echoPid, TraceTestChunk, output.Current.Data.Length); // Temporary (I3)
+                if (output.Current.Data.Span.IndexOf((byte)'a') >= 0)
+                    break;
+            }
+
+            var typed = clock.End(started);
+            // Erases the character again (VERASE is DEL), so the line never grows: a macOS terminal holds at most 1,024
+            // bytes on one line, then drops input and echoes BEL instead.
+            await echo.WriteInputAsync("\x7f");
+            return typed;
+        }
     }
+
+    /// <summary>Echoes <see cref="AFloodDoesNotDelayAnotherSessionsEcho"/> types before it starts measuring.</summary>
+    private const int WarmUpEchoes = 20;
+
+    /// <summary>
+    /// The pause before each keystroke of <see cref="AFloodDoesNotDelayAnotherSessionsEcho"/>, a millisecond or the
+    /// timer's resolution, so its thread waits between keystrokes as a terminal waits for its user.
+    /// </summary>
+    private const int KeystrokeGapMs = 1;
 
     // Temporary (I3): the test's own events in TemporaryEchoTrace, next to the library's.
     private const int TraceTestWrite = 100; // Temporary (I3)
