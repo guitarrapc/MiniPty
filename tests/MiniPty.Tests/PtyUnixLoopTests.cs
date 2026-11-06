@@ -146,7 +146,8 @@ public sealed class PtyUnixLoopTests
     private static void PrintEchoTrace(EchoClock.Echo slow, int index, int echoPid) // Temporary (I3)
     {
         var (timestamps, pids, codes, args, threads, count, full) = TemporaryEchoTrace.Snapshot();
-        var from = slow.Started - Stopwatch.Frequency / 1000;
+        // A macOS echo takes about 25 μs, so a longer lead-in fills the print with earlier echoes.
+        var from = slow.Started - Stopwatch.Frequency / 20000;
         var to = slow.Ended + Stopwatch.Frequency / 5000;
         var lookBack = slow.Started - Stopwatch.Frequency / 20;
         var window = new List<int>();
@@ -157,7 +158,7 @@ public sealed class PtyUnixLoopTests
         }
 
         window.Sort((a, b) => timestamps[a].CompareTo(timestamps[b]));
-        System.Console.WriteLine($"echo-trace slow echo {slow.Milliseconds:F1} ms, echo #{index} (0 is the first), pid {echoPid}, trace of {count} events{(full ? " (full)" : "")}:");
+        System.Console.WriteLine($"echo-trace slow echo {slow.Milliseconds:F1} ms, echo #{index} (0 is the first), JIT on its thread {slow.JitOnThreadMilliseconds:F1} ms, pid {echoPid}, trace of {count} events{(full ? " (full)" : "")}:");
         long waitBegan = 0;
         var waitTimeout = 0;
         var otherServices = 0;
@@ -277,18 +278,33 @@ public sealed class PtyUnixLoopTests
             _thread.Start();
         }
 
-        public (long Timestamp, TimeSpan Paused) Begin() => (Stopwatch.GetTimestamp(), GC.GetTotalPauseDuration());
+        public Start Begin() => new(
+            Stopwatch.GetTimestamp(),
+            GC.GetTotalPauseDuration(),
+            Environment.CurrentManagedThreadId,
+            System.Runtime.JitInfo.GetCompilationTime(currentThread: true),
+            System.Runtime.JitInfo.GetCompilationTime(currentThread: false));
 
-        public Echo End((long Timestamp, TimeSpan Paused) started)
+        public Echo End(Start started)
         {
             var ended = Stopwatch.GetTimestamp();
+            // Compilation on the echo's own thread holds the echo up; it is known only when the echo ended on the thread it
+            // began on. Compilation elsewhere in the process runs beside it.
+            var jitOnThread = Environment.CurrentManagedThreadId == started.Thread
+                ? (System.Runtime.JitInfo.GetCompilationTime(currentThread: true) - started.JitOnThread).TotalMilliseconds
+                : double.NaN;
             return new Echo(
                 this,
                 started.Timestamp,
                 ended,
                 Stopwatch.GetElapsedTime(started.Timestamp, ended).TotalMilliseconds,
-                (GC.GetTotalPauseDuration() - started.Paused).TotalMilliseconds);
+                (GC.GetTotalPauseDuration() - started.Paused).TotalMilliseconds,
+                jitOnThread,
+                (System.Runtime.JitInfo.GetCompilationTime(currentThread: false) - started.JitInProcess).TotalMilliseconds);
         }
+
+        /// <summary>What <see cref="End"/> needs from the start of an echo.</summary>
+        public readonly record struct Start(long Timestamp, TimeSpan Paused, int Thread, TimeSpan JitOnThread, TimeSpan JitInProcess);
 
         public void Dispose()
         {
@@ -313,7 +329,14 @@ public sealed class PtyUnixLoopTests
         }
 
         /// <summary>One echo, described once the clock has stopped.</summary>
-        public readonly record struct Echo(EchoClock Clock, long Started, long Ended, double Milliseconds, double PausedMilliseconds)
+        public readonly record struct Echo(
+            EchoClock Clock,
+            long Started,
+            long Ended,
+            double Milliseconds,
+            double PausedMilliseconds,
+            double JitOnThreadMilliseconds,
+            double JitInProcessMilliseconds)
         {
             public override string ToString()
             {
@@ -343,8 +366,10 @@ public sealed class PtyUnixLoopTests
                 }
 
                 var flood = floodFrom < 0 ? "no ticks" : $"flood +{(floodTo - floodFrom) / 1024} KiB, still for {floodStill:F1} ms";
+                var jitOnThread = double.IsNaN(JitOnThreadMilliseconds) ? "?, the echo moved threads" : $"{JitOnThreadMilliseconds:F1} ms";
                 return $"{Milliseconds:F1} ms ({flood}, longest gap between ticks {longestGap:F1} ms, "
-                    + $"pool queue up to {mostQueued}, GC paused {PausedMilliseconds:F1} ms)";
+                    + $"pool queue up to {mostQueued}, GC paused {PausedMilliseconds:F1} ms, "
+                    + $"JIT on the echo's thread {jitOnThread}, in the process {JitInProcessMilliseconds:F1} ms)";
             }
         }
     }
