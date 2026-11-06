@@ -131,6 +131,54 @@ jobs:
             "$exe" --smoke
           fi
 
+  # Temporary (improvement plan I3): runs the two tests that failed intermittently 20 times each, on the runner each
+  # failed on, to record their causes. Remove this job once they are recorded. It does not gate build-complete.
+  repeat-intermittent-tests:
+    name: Repeat intermittent tests (${{ matrix.os }}, temporary)
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26-intel
+            filter: /*/*/PtyUnixLoopTests/AFloodDoesNotDelayAnotherSessionsEcho
+          # The whole class, so the test runs alongside others as in the suite.
+          - os: windows-2022
+            filter: /*/*/PtyWebSocketBridgeTests/*
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Build
+        shell: bash
+        run: dotnet build tests/MiniPty.Tests/MiniPty.Tests.csproj -c Release
+      - name: Run 20 times
+        shell: bash
+        run: |
+          exe=tests/MiniPty.Tests/bin/Release/net10.0/MiniPty.Tests
+          if [[ "$RUNNER_OS" == Windows ]]; then exe="$exe.exe"; fi
+          failed=0
+          for i in $(seq 1 20); do
+            if "$exe" --treenode-filter "${{ matrix.filter }}" --no-progress --output detailed > run.txt 2>&1; then
+              result=passed
+            else
+              result=FAILED
+              failed=$((failed + 1))
+            fi
+            echo "== run $i: $result"
+            grep -a -E "echoes, median|did not close|failed |total:" run.txt || true
+          done
+          echo "$failed of 20 runs failed"
+          test "$failed" -eq 0
+
   # musl has no hosted runner, so the suite runs once in an Alpine container, on x64, where the runner can run
   # JavaScript actions inside Alpine. The SDK image is pinned like every other image here (SDK 10.0.403 on Alpine
   # 3.24 when pinned). build-base compiles the shim; the tests' children need nothing beyond busybox.
@@ -152,6 +200,33 @@ jobs:
       - name: Test
         shell: bash
         run: dotnet test tests/MiniPty.Tests/MiniPty.Tests.csproj -c Release
+
+  # CI's kernels have every call the Linux start uses, so its fallbacks for older kernels run only here: the suite runs
+  # in a container under each seccomp profile in scripts/seccomp/, which make the kernel refuse the newer calls, after a
+  # probe has checked every refusal. On x64, with glibc and with musl; the SDK images are pinned like test-musl's (SDK
+  # 10.0.403 when pinned). What a filter cannot reproduce stays with scripts/old-kernel-qemu/, run by hand.
+  test-old-kernel-paths:
+    name: Test old-kernel paths (${{ matrix.libc }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - libc: glibc
+            image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e
+          - libc: musl
+            image: mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:cc02b814237a76c4735fb6eeee87181597b5e56f2ce458a435e527674d91f4d7
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Test under seccomp profiles
+        shell: bash
+        run: bash scripts/run-tests-under-seccomp.sh "${{ matrix.image }}"
 
   # Linux files are built in containers at the package's libc floors (glibc 2.27, musl 1.2.3), each on a runner of
   # its own architecture; macOS files on the runner for macOS 12.0. The script fails a build that misses its floor.
@@ -307,7 +382,7 @@ jobs:
         run: bash scripts/run-nuget-smoke-in-container.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}" "${{ matrix.image }}"
 
   build-complete:
-    needs: [build, test-musl, nuget-smoke]
+    needs: [build, test-musl, test-old-kernel-paths, nuget-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

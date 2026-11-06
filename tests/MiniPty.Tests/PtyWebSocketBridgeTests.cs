@@ -198,6 +198,16 @@ public sealed class PtyWebSocketBridgeTests
             await Assert.That(client.BinaryText).Contains("40 100");
     }
 
+    /// <summary>
+    /// Delivery pauses while the client withholds acknowledgements, stays paused without them, and resumes once the client
+    /// grants credit, through to the end of the session.
+    /// </summary>
+    /// <remarks>
+    /// On 2026-11-05 the wait for the close ran out the budget once on windows-2022, after the grant, in a run that predated
+    /// the fix for acknowledgements lost while their send had not yet returned
+    /// (<see cref="AnAcknowledgementHandledBeforeItsSendReturnsIsNotLost"/>, and the lessons in
+    /// <c>.github/docs/specs/terminal.md</c>). A timeout now says how far delivery got after the grant.
+    /// </remarks>
     [Test]
     public async Task BridgeFlowControlPausesWithoutAcksAndResumesOnAck()
     {
@@ -217,6 +227,7 @@ public sealed class PtyWebSocketBridgeTests
 
         // Withhold acks: delivery must stall once unacknowledged bytes reach the high watermark.
         long stalledAt = 0;
+        long stalled = 0;
         while (true)
         {
             cts.Token.ThrowIfCancellationRequested();
@@ -225,6 +236,7 @@ public sealed class PtyWebSocketBridgeTests
             if (client.BinaryByteCount == before && before >= options.HighWatermark)
             {
                 stalledAt = before;
+                stalled = Stopwatch.GetTimestamp();
                 break;
             }
         }
@@ -236,10 +248,28 @@ public sealed class PtyWebSocketBridgeTests
         // Grant all available credit rather than acknowledging the client-side count. The server
         // can have completed a SendAsync whose frame the client has not yet scheduled to receive;
         // using the observed count can leave that in-flight delta above the low watermark.
+        var resumedAt = client.BinaryByteCount;
         client.AckEverythingFromNowOn();
         await client.SendAckAsync(long.MaxValue, cts.Token);
+        var resumed = Stopwatch.GetTimestamp();
 
-        await clientTask;
+        // If the session does not end, the failure says how far delivery got after the grant.
+        try
+        {
+            await clientTask;
+        }
+        catch (Exception ex) when (cts.IsCancellationRequested)
+        {
+            var last = client.LastBinaryTimestamp;
+            throw new TimeoutException(
+                $"The bridge did not close within the budget. Delivery stalled at {stalledAt} bytes and stayed there; "
+                + $"all credit was granted {Stopwatch.GetElapsedTime(stalled, resumed).TotalMilliseconds:F0} ms after the stall was seen, at {resumedAt} bytes. "
+                + $"Since then {client.BinaryByteCount - resumedAt} more bytes arrived ({client.BinaryText.Count('\n')} line feeds in all), "
+                + (last > resumed ? $"the last {Stopwatch.GetElapsedTime(last).TotalMilliseconds:F0} ms ago; " : "none after the grant; ")
+                + $"exit message {(client.ExitMessage is null ? "not received" : "received")}; bridge task {bridgeTask.Status}.",
+                ex);
+        }
+
         var status = await bridgeTask.WaitAsync(cts.Token);
 
         await Assert.That(status.ExitCode).IsEqualTo(0);
@@ -696,6 +726,7 @@ public sealed class PtyWebSocketBridgeTests
         private readonly SemaphoreSlim _sendLock = new(1, 1);
         private readonly SemaphoreSlim _binarySignal = new(0);
         private long _binaryByteCount;
+        private long _lastBinaryTimestamp;
         private int _messageCount;
         private volatile bool _ackEverything;
 
@@ -713,6 +744,9 @@ public sealed class PtyWebSocketBridgeTests
         }
 
         public long BinaryByteCount => Interlocked.Read(ref _binaryByteCount);
+
+        /// <summary>The <see cref="Stopwatch"/> timestamp of the last binary frame's arrival, or 0 before the first.</summary>
+        public long LastBinaryTimestamp => Interlocked.Read(ref _lastBinaryTimestamp);
 
         /// <summary>
         /// Each binary frame's <see cref="Stopwatch"/> timestamp of arrival and size, in order. Read once
@@ -811,8 +845,10 @@ public sealed class PtyWebSocketBridgeTests
 
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
-                    BinaryFrames.Add((Stopwatch.GetTimestamp(), payload.Length));
+                    var arrived = Stopwatch.GetTimestamp();
+                    BinaryFrames.Add((arrived, payload.Length));
                     Interlocked.Add(ref _binaryByteCount, payload.Length);
+                    Interlocked.Exchange(ref _lastBinaryTimestamp, arrived);
                     lock (_binaryText)
                     {
                         _binaryText.Append(Encoding.UTF8.GetString(payload));

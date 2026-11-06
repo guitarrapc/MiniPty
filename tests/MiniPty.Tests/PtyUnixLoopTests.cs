@@ -18,10 +18,17 @@ public sealed class PtyUnixLoopTests
     /// A session flooding output does not delay another session's keystroke echo beyond a bound.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The loop reads each session at most a few reads per pass. That bound is not what this test isolates: a terminal
     /// delivers output more slowly than the loop reads it, so the flood's master runs dry between reads and the loop moves
     /// on by itself. The test passed with the bound removed, also with the flood going to a one-shot result, whose sink
     /// keeps its ring from ever filling.
+    /// </para>
+    /// <para>
+    /// A slow echo is described by what else ran meanwhile (<see cref="EchoClock"/>), so that a failure tells a host that
+    /// stopped the whole process from a loop that served the flood ahead of the echo. On 2026-11-05 one echo in 37,589
+    /// took 100.4 ms on CI's macos-26-intel runner, and nothing recorded which it was.
+    /// </para>
     /// </remarks>
     [Test]
     [NotInParallel]
@@ -53,35 +60,138 @@ public sealed class PtyUnixLoopTests
 
         // Echoes for half a second, so the flood keeps going all along however fast each echo is.
         var floodAtStart = Interlocked.Read(ref floodBytes);
-        var measuring = Stopwatch.StartNew();
-        var latencies = new List<double>();
-        while (latencies.Count < 40 || measuring.ElapsedMilliseconds < 500)
+        var echoes = new List<EchoClock.Echo>();
+        using (var clock = new EchoClock(() => Interlocked.Read(ref floodBytes)))
         {
-            var started = Stopwatch.GetTimestamp();
-            await echo.WriteInputAsync("a");
-            // The terminal echoes the character at once; cat sees nothing until a newline.
-            while (true)
+            var measuring = Stopwatch.StartNew();
+            while (echoes.Count < 40 || measuring.ElapsedMilliseconds < 500)
             {
-                await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
-                if (output.Current.Data.Span.IndexOf((byte)'a') >= 0)
-                    break;
-            }
+                var started = clock.Begin();
+                await echo.WriteInputAsync("a");
+                // The terminal echoes the character at once; cat sees nothing until a newline.
+                while (true)
+                {
+                    await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+                    if (output.Current.Data.Span.IndexOf((byte)'a') >= 0)
+                        break;
+                }
 
-            latencies.Add(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-            // Erases the character again (VERASE is DEL), so the line never grows: a macOS terminal holds at most 1,024
-            // bytes on one line, then drops input and echoes BEL instead, and a fast loop echoes more than that in 500 ms.
-            await echo.WriteInputAsync("\x7f");
+                echoes.Add(clock.End(started));
+                // Erases the character again (VERASE is DEL), so the line never grows: a macOS terminal holds at most 1,024
+                // bytes on one line, then drops input and echoes BEL instead, and a fast loop echoes more than that in 500 ms.
+                await echo.WriteInputAsync("\x7f");
+            }
         }
 
         var floodDuring = Interlocked.Read(ref floodBytes) - floodAtStart;
         stopFlood.Cancel();
         await floodReader.WaitAsync(Timeout);
-        latencies.Sort();
-        var slowest = latencies[^1];
+        echoes.Sort(static (a, b) => b.Milliseconds.CompareTo(a.Milliseconds));
+        var slowest = echoes[0].Milliseconds;
+        var summary = $"{echoes.Count} echoes, median {echoes[echoes.Count / 2].Milliseconds:F2} ms, slowest: "
+            + string.Join("; ", echoes.Take(3).Select(static e => e.ToString()));
+        System.Console.WriteLine(summary);
 
         // The flood kept going throughout, and echo stayed interactive.
         await Assert.That(floodDuring).IsGreaterThan(1024L * 1024);
-        await Assert.That(slowest).IsLessThan(100.0).Because($"{latencies.Count} echoes, median {latencies[latencies.Count / 2]:F2} ms, slowest {slowest:F1} ms");
+        await Assert.That(slowest).IsLessThan(100.0).Because(summary);
+    }
+
+    /// <summary>
+    /// Times echoes and records what else ran during each: a thread of its own ticks every millisecond and samples the
+    /// flood's byte count and the thread pool's queue. For one echo, a long gap between ticks means the process did not
+    /// run (the host descheduled it, or a collection suspended it); the flood standing still while ticks continued means
+    /// the flood's reader did not run either; the flood flowing throughout means only the echo was held up, by the loop
+    /// or by the thread pool, whose queue length tells which.
+    /// </summary>
+    private sealed class EchoClock : IDisposable
+    {
+        private const int Capacity = 1 << 16;
+        private readonly long[] _ticks = new long[Capacity];
+        private readonly long[] _flood = new long[Capacity];
+        private readonly long[] _queued = new long[Capacity];
+        private readonly Func<long> _floodBytes;
+        private readonly Thread _thread;
+        private volatile bool _stop;
+        private int _count;
+
+        public EchoClock(Func<long> floodBytes)
+        {
+            _floodBytes = floodBytes;
+            _thread = new Thread(Run) { IsBackground = true, Name = "EchoClock" };
+            _thread.Start();
+        }
+
+        public (long Timestamp, TimeSpan Paused) Begin() => (Stopwatch.GetTimestamp(), GC.GetTotalPauseDuration());
+
+        public Echo End((long Timestamp, TimeSpan Paused) started)
+        {
+            var ended = Stopwatch.GetTimestamp();
+            return new Echo(
+                this,
+                started.Timestamp,
+                ended,
+                Stopwatch.GetElapsedTime(started.Timestamp, ended).TotalMilliseconds,
+                (GC.GetTotalPauseDuration() - started.Paused).TotalMilliseconds);
+        }
+
+        public void Dispose()
+        {
+            _stop = true;
+            _thread.Join();
+        }
+
+        private void Run()
+        {
+            while (!_stop)
+            {
+                var i = _count;
+                if (i == Capacity)
+                    return;
+
+                _ticks[i] = Stopwatch.GetTimestamp();
+                _flood[i] = _floodBytes();
+                _queued[i] = ThreadPool.PendingWorkItemCount;
+                Volatile.Write(ref _count, i + 1);
+                Thread.Sleep(1);
+            }
+        }
+
+        /// <summary>One echo, described once the clock has stopped.</summary>
+        public readonly record struct Echo(EchoClock Clock, long Started, long Ended, double Milliseconds, double PausedMilliseconds)
+        {
+            public override string ToString()
+            {
+                var clock = Clock;
+                var count = Volatile.Read(ref clock._count);
+                double longestGap = 0, floodStill = 0;
+                long floodFrom = -1, floodTo = -1, mostQueued = 0;
+                long stillSince = 0;
+                for (var i = 1; i < count; i++)
+                {
+                    if (clock._ticks[i] < Started || clock._ticks[i - 1] > Ended)
+                        continue;
+
+                    longestGap = Math.Max(longestGap, Stopwatch.GetElapsedTime(clock._ticks[i - 1], clock._ticks[i]).TotalMilliseconds);
+                    mostQueued = Math.Max(mostQueued, clock._queued[i]);
+                    if (floodFrom < 0)
+                    {
+                        floodFrom = clock._flood[i - 1];
+                        stillSince = clock._ticks[i - 1];
+                    }
+
+                    if (clock._flood[i] != clock._flood[i - 1])
+                        stillSince = clock._ticks[i];
+                    else
+                        floodStill = Math.Max(floodStill, Stopwatch.GetElapsedTime(stillSince, clock._ticks[i]).TotalMilliseconds);
+                    floodTo = clock._flood[i];
+                }
+
+                var flood = floodFrom < 0 ? "no ticks" : $"flood +{(floodTo - floodFrom) / 1024} KiB, still for {floodStill:F1} ms";
+                return $"{Milliseconds:F1} ms ({flood}, longest gap between ticks {longestGap:F1} ms, "
+                    + $"pool queue up to {mostQueued}, GC paused {PausedMilliseconds:F1} ms)";
+            }
+        }
     }
 
     /// <summary>

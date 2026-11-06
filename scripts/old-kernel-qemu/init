@@ -1,0 +1,71 @@
+#!/bin/sh
+# PID 1 of the guest that scripts/old-kernel-qemu/run.sh boots: mounts what the tests need, runs them as /opt/mode says,
+# prints the results on the serial console, and powers off. The host reads GUEST-EXIT for the outcome.
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+exec </dev/console >/dev/console 2>&1
+mkdir -p /dev/pts /dev/shm
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5 devpts /dev/pts
+rm -f /dev/ptmx && ln -s pts/ptmx /dev/ptmx
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /dev/shm
+export HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export DOTNET_CLI_TELEMETRY_OPTOUT=1 TESTINGPLATFORM_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+echo "GUEST-KERNEL $(uname -r)"
+# getrandom blocks until the kernel's random pool is initialized, which Linux 4.9 never does by itself in an idle VM
+# without a hardware RNG, and the WebSocket tests then hang. Credit the pool first.
+/opt/seed-entropy && echo "GUEST-ENTROPY $(cat /proc/sys/kernel/random/entropy_avail)"
+# If this fails, init exits, the kernel panics and QEMU stops: the host then reports no result.
+cd /tmp || exit 1
+T=/opt/tests/MiniPty.Tests
+MODE=$(cat /opt/mode)
+ARGS=$(cat /opt/args)
+
+if [ "$MODE" = trace ]; then
+  # Each class runs twice under strace: once listing the calls that succeeded (-z), once those that failed (-Z), with
+  # descriptors named (-y), so a pidfd shows as anon_inode:[pidfd]. The counts show which path each start took.
+  # Failures are listed but do not fail the run: strace stops every traced call, and tests bound by time can then miss
+  # their bound. The two dispose tests whose hung-up child writes several terminal buffers before the 1 s grace kill did
+  # so on Linux 5.2, and passed without strace. Mode tests is the pass or fail.
+  CLASSES=${ARGS:-PtyUnixStartTests PtyUnixDisposeTests PtyKillProcessTreeTests}
+  S="strace -f -qq -y -e trace=clone,epoll_ctl,waitid,wait4,pidfd_open,pidfd_send_signal,ioctl,close_range"
+  for c in $CLASSES; do
+    $S -z -o /tmp/ok.$c $T --no-progress --treenode-filter "/*/*/$c/*" > /tmp/t1.$c 2>&1
+    $S -Z -o /tmp/bad.$c $T --no-progress --treenode-filter "/*/*/$c/*" > /tmp/t2.$c 2>&1
+    echo "== $c: $(grep -hE '^ *(total|failed):' /tmp/t1.$c /tmp/t2.$c | tr -s ' \n' ' ')"
+    grep -hA1 '^failed ' /tmp/t1.$c /tmp/t2.$c | cut -c1-300
+  done
+  cat /tmp/ok.* > /tmp/ok
+  cat /tmp/bad.* > /tmp/bad
+  P='[0-9]+<anon_inode:\[pidfd\]>'
+  row() {
+    echo "$1 succeeded / failed: $(grep -cE "$2" /tmp/ok) / $(grep -cE "$2" /tmp/bad)"
+    grep -m1 -hE "$2" /tmp/ok /tmp/bad | sed -E 's/^[0-9]+ +/  /' | cut -c1-200
+  }
+  row "ioctl TIOCGPTPEER" 'TIOCGPTPEER'
+  row "clone with CLONE_PIDFD" 'clone\(.*CLONE_PIDFD'
+  row "clone without CLONE_PIDFD" 'clone\(.*flags=CLONE_VM\|CLONE_VFORK\|SIGCHLD'
+  row "epoll_ctl ADD of a pidfd" "EPOLL_CTL_ADD, $P"
+  row "waitid P_PIDFD" 'waitid\(P_PIDFD'
+  row "waitid P_PID" 'waitid\(P_PID,'
+  row "wait4" 'wait4\('
+  row "pidfd_send_signal" 'pidfd_send_signal\('
+  row "pidfd_open" 'pidfd_open\('
+  row "close_range" 'close_range\('
+  echo "-- failed calls on a pidfd, by call and error"
+  grep -hE "$P" /tmp/bad | sed -E 's/^[0-9]+ +//' | sed -nE 's/^([a-z0-9_]+)\(.*= -1 ([A-Z]+).*/\1 \2/p' | sort | uniq -c
+  echo "GUEST-EXIT 0"
+else
+  if [ -n "$ARGS" ]; then
+    $T --no-progress --treenode-filter "$ARGS" > /tmp/out.txt 2>&1
+  else
+    $T --no-progress > /tmp/out.txt 2>&1
+  fi
+  rc=$?
+  grep -vE '^\s*$' /tmp/out.txt | tail -80
+  echo "GUEST-EXIT $rc"
+fi
+
+echo o > /proc/sysrq-trigger
+sleep 5
