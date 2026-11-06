@@ -7,6 +7,16 @@ using Microsoft.Win32.SafeHandles;
 
 namespace MiniPty.Internal;
 
+/// <summary>Sees a session's first output reads, for a backend that must react to what its console host writes first.</summary>
+internal interface IWindowsOutputObserver
+{
+    /// <summary>
+    /// Called with each read's bytes, before they are published, until it returns <see langword="false"/>. Runs on the
+    /// output loop, which serves every session, so it must neither block nor throw.
+    /// </summary>
+    bool OnOutput(ReadOnlySpan<byte> bytes);
+}
+
 /// <summary>
 /// The Windows output driver: overlapped reads of MiniPty's end of the ConPTY output pipe, completed on a completion port
 /// of MiniPty's own that one thread waits on for every session (<see cref="Loop"/>), with no buffer while the session is
@@ -132,6 +142,8 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
     private bool _cancelIssued;
     // A failure kept until no read is posted, when the next step ends output with it. On the loop's thread.
     private Exception? _failure;
+    // Shown the session's reads until it has seen enough, or null. Set before the first step, then on the loop's thread.
+    private IWindowsOutputObserver? _observer;
 
     /// <summary>Whether this driver waits on the loop's queue of drivers to look at. Guarded by the loop's lock.</summary>
     internal bool ServiceQueued;
@@ -162,9 +174,10 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
     /// <summary>
     /// Starts reading <paramref name="pipe"/> for <paramref name="pump"/>: what the Windows backend's
     /// <see cref="IPtyBackend.StartOutput"/> does. <paramref name="pipe"/> is the overlapped server end of a named pipe;
-    /// the backend owns it and closes it at disposal, which ends reading.
+    /// the backend owns it and closes it at disposal, which ends reading. <paramref name="observer"/>, when given, is shown
+    /// the session's reads (see <see cref="IWindowsOutputObserver"/>).
     /// </summary>
-    internal static void Run(PtyOutputPump pump, SafeFileHandle pipe)
+    internal static void Run(PtyOutputPump pump, SafeFileHandle pipe, IWindowsOutputObserver? observer = null)
     {
         var driver = Rent();
         try
@@ -184,6 +197,7 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
         driver._pipe = pipe;
         driver._cancelIssued = false;
         driver._failure = null;
+        driver._observer = observer;
         Volatile.Write(ref driver._requests, 0);
         Volatile.Write(ref driver._state, StateRunning);
         pump.AttachDriver(driver);
@@ -227,6 +241,7 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
 
         Volatile.Write(ref _pump, null);
         _pipe = null;
+        _observer = null;
         Volatile.Write(ref _state, StateIdle);
         Return(this);
     }
@@ -558,10 +573,13 @@ internal sealed unsafe class WindowsOutputDriver : IPtyOutputDriver
         }
     }
 
-    private static void Publish(PtyOutputPump pump, int length)
+    private void Publish(PtyOutputPump pump, int length)
     {
         var timestamp = Stopwatch.GetTimestamp();
         pump.OnOutputRead();
+        if (_observer is { } observer && !observer.OnOutput(pump.UnpublishedRead(length)))
+            _observer = null;
+
         pump.Publish(length, timestamp);
     }
 

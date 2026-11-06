@@ -33,6 +33,8 @@ jobs:
             rid: win-x64
           - os: windows-11-arm
             rid: win-arm64
+          - os: windows-2022
+            rid: win-x64
           - os: macos-26
             rid: osx-arm64
           - os: macos-26-intel
@@ -89,6 +91,7 @@ jobs:
           done
 
       - name: Publish and smoke-test the TUI sample (NativeAOT)
+        if: ${{ matrix.os != 'windows-2022' }}
         shell: bash
         run: |
           out="$RUNNER_TEMP/minipty-tui-aot"

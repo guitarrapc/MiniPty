@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace MiniPty.Tests;
 
@@ -907,6 +908,7 @@ public sealed class PtyBaselineTests
     /// an HTTPS connection, and the certificate chain engine and HTTP stack it brings up add 28 to 49 handles at once
     /// (certificate store keys, a native thread pool, ETW registrations). A one-time step grows one batch of runs, while a
     /// leak grows every batch, so a batch that grew is followed by another, and the check fails only when both grew.
+    /// On Windows the failure then says what the handles opened over the second batch are.
     /// </para>
     /// </remarks>
     internal static async Task AssertNoLeakAsync(Func<Task> iteration)
@@ -927,9 +929,11 @@ public sealed class PtyBaselineTests
         if (grown < LeakCheckSlack)
             return;
 
+        var table = SnapshotHandleTable();
         var grownAgain = await GrowthOverLeakCheckRunsAsync(iteration);
+        var added = grownAgain < LeakCheckSlack ? "" : DescribeHandlesAddedSince(table);
         await Assert.That(grownAgain).IsLessThan(LeakCheckSlack)
-            .Because($"{grown}, then {grownAgain} more handles or descriptors over two batches of {LeakCheckRuns} runs");
+            .Because($"{grown}, then {grownAgain} more handles or descriptors over two batches of {LeakCheckRuns} runs{added}");
     }
 
     private const int LeakCheckRuns = 40;
@@ -965,13 +969,187 @@ public sealed class PtyBaselineTests
         return count;
     }
 
-    /// <summary>Handles on Windows, descriptors on Unix, of this process.</summary>
+    /// <summary>
+    /// Handles on Windows, descriptors on Unix, of this process. On Windows Server 2022, whose <c>kernel32.dll</c> has no
+    /// <c>ReleasePseudoConsole</c>, every pseudo-console leaves the process that created it a handle to its console
+    /// host, still open after the host exits, which MiniPty cannot close. So on a build without that export, handles to
+    /// exited console hosts are not counted. MiniPty itself never opens a console host, so a handle it leaks, such as the
+    /// child's, still counts.
+    /// </summary>
     internal static int CountOpenHandles()
     {
         if (OperatingSystem.IsWindows())
-            return GetProcessHandleCount(new IntPtr(-1), out var count) ? (int)count : throw new Win32Exception();
+        {
+            var count = GetProcessHandleCount(new IntPtr(-1), out var handles) ? (int)handles : throw new Win32Exception();
+            return MiniPty.Internal.WindowsInterop.CanReleasePseudoConsole ? count : count - CountExitedConsoleHostHandles();
+        }
 
         return Directory.GetFileSystemEntries(OperatingSystem.IsLinux() ? "/proc/self/fd" : "/dev/fd").Length;
+    }
+
+    /// <summary>This process's handles to <c>conhost.exe</c> processes that have exited.</summary>
+    private static int CountExitedConsoleHostHandles()
+    {
+        if (SnapshotHandleTable() is not { } table)
+            return 0;
+
+        var count = 0;
+        foreach (var (value, typeIndex) in table)
+        {
+            var handle = new IntPtr(value);
+            if (IsProcessHandle(handle, typeIndex)
+                && GetExitCodeProcess(handle, out var code) && code != StillActive
+                && string.Equals(ImageFileName(handle), "conhost.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    // The object type index of a process, found on the first process handle seen, or 0 until then. Fixed until reboot.
+    private static uint s_processTypeIndex;
+
+    private static bool IsProcessHandle(IntPtr handle, uint typeIndex)
+    {
+        var known = Volatile.Read(ref s_processTypeIndex);
+        if (known != 0)
+            return typeIndex == known;
+
+        if (QueryObjectString(handle, infoClass: 2) != "Process")
+            return false;
+
+        Volatile.Write(ref s_processTypeIndex, typeIndex);
+        return true;
+    }
+
+    [ThreadStatic]
+    private static char[]? t_imageName;
+
+    /// <summary>
+    /// The file name of a process's image, or null. From its native path: the Win32 one fails with ERROR_GEN_FAILURE
+    /// once the process has exited.
+    /// </summary>
+    private static string? ImageFileName(IntPtr process)
+    {
+        const uint ProcessNameNative = 1;
+        var image = t_imageName ??= new char[1024];
+        var length = image.Length;
+        return QueryFullProcessImageNameW(process, ProcessNameNative, image, ref length)
+            ? Path.GetFileName(new string(image, 0, length))
+            : null;
+    }
+
+    /// <summary>This process's handles on Windows, each value with its object type index. Null elsewhere or on failure.</summary>
+    private static Dictionary<long, uint>? SnapshotHandleTable()
+    {
+        if (!OperatingSystem.IsWindows())
+            return null;
+
+        const int ProcessHandleInformation = 51;
+        const int StatusInfoLengthMismatch = unchecked((int)0xC0000004);
+
+        // PROCESS_HANDLE_SNAPSHOT_INFORMATION: a count and a reserved word, then entries of three pointer-sized fields
+        // (handle, handle count, pointer count) and four ULONGs (granted access, object type index, attributes, reserved).
+        var entrySize = 3 * IntPtr.Size + 16;
+        for (var size = 256 * 1024; ; size *= 2)
+        {
+            var buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                var status = NtQueryInformationProcess(new IntPtr(-1), ProcessHandleInformation, buffer, size, out _);
+                if (status == StatusInfoLengthMismatch)
+                    continue;
+                if (status < 0)
+                    return null;
+
+                var count = (long)Marshal.ReadIntPtr(buffer);
+                var table = new Dictionary<long, uint>((int)count);
+                for (var i = 0; i < count; i++)
+                {
+                    var entry = buffer + 2 * IntPtr.Size + i * entrySize;
+                    table[(long)Marshal.ReadIntPtr(entry)] = (uint)Marshal.ReadInt32(entry, 3 * IntPtr.Size + 4);
+                }
+
+                return table;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The handles opened since <paramref name="before"/>, counted by object type, with the image of a process and the
+    /// name of a file, such as "; added: Event x3, File(\Device\ConDrv) x2". Empty without a table to compare.
+    /// </summary>
+    private static string DescribeHandlesAddedSince(Dictionary<long, uint>? before)
+    {
+        if (before is null || SnapshotHandleTable() is not { } now)
+            return "";
+
+        var counts = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        var namesBlock = false;
+        foreach (var (value, type) in now)
+        {
+            if (before.TryGetValue(value, out var old) && old == type)
+                continue;
+
+            var key = DescribeHandle(new IntPtr(value), ref namesBlock);
+            counts.TryGetValue(key, out var count);
+            counts[key] = count + 1;
+        }
+
+        return counts.Count == 0 ? "" : "; added: " + string.Join(", ", counts.Select(pair => $"{pair.Key} x{pair.Value}"));
+    }
+
+    private static string DescribeHandle(IntPtr handle, ref bool namesBlock)
+    {
+        const int ObjectNameInformation = 1, ObjectTypeInformation = 2;
+
+        var type = QueryObjectString(handle, ObjectTypeInformation);
+        if (type == "Process")
+        {
+            var state = GetExitCodeProcess(handle, out var code) ? code == StillActive ? "running" : "exited" : "?";
+            return $"Process({ImageFileName(handle) ?? "?"},{state})";
+        }
+
+        if (type != "File" || namesBlock)
+            return type ?? "?";
+
+        // The name query on a synchronous file handle waits for any read pending on it, so it gets a thread of its own,
+        // and after one such wait no other name is asked for.
+        var query = Task.Run(() => QueryObjectString(handle, ObjectNameInformation));
+        if (!query.Wait(500))
+        {
+            namesBlock = true;
+            return "File(name query blocked)";
+        }
+
+        var fileName = query.Result;
+        return string.IsNullOrEmpty(fileName) ? "File(unnamed)" : $"File({Regex.Replace(fileName, "[0-9a-fA-F]{8,}", "*")})";
+    }
+
+    /// <summary>The UNICODE_STRING that NtQueryObject returns for a type or name query, or null when it fails.</summary>
+    private static string? QueryObjectString(IntPtr handle, int infoClass)
+    {
+        const int Size = 8192;
+        var buffer = Marshal.AllocHGlobal(Size);
+        try
+        {
+            if (NtQueryObject(handle, infoClass, buffer, Size, out _) < 0)
+                return null;
+
+            var length = (ushort)Marshal.ReadInt16(buffer);
+            var text = Marshal.ReadIntPtr(buffer, IntPtr.Size);
+            return length == 0 || text == IntPtr.Zero ? "" : Marshal.PtrToStringUni(text, length / 2);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     internal static async Task<string> ReadAllTextAsync(PtySession session)
@@ -1097,6 +1275,22 @@ public sealed class PtyBaselineTests
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetProcessHandleCount(IntPtr hProcess, out uint pdwHandleCount);
+
+    private const uint StillActive = 259;
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(IntPtr processHandle, int processInformationClass, IntPtr processInformation, int processInformationLength, out int returnLength);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryObject(IntPtr handle, int objectInformationClass, IntPtr objectInformation, int objectInformationLength, out int returnLength);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, [Out] char[] lpExeName, ref int lpdwSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);

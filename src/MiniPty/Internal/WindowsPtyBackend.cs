@@ -104,8 +104,26 @@ internal static class WindowsPtyBackend
     private static readonly IntPtr InvalidHandleValue = new(-1);
     // EOF staging advances one step per tick, matching the cadence of the exit-wait poll loop it replaced.
     private const int EofTickMs = 100;
+
+    /// <summary>
+    /// The longest disposal leaves a legacy host's output pipe open (WindowsPtyBackendInstance.DeferOutputClose), for a
+    /// host that keeps the pipe open. A legacy host normally ends within milliseconds of its close.
+    /// </summary>
+    private const int DeferredOutputCloseMs = 1000;
     private const byte InputEofCtrlZ = 0x1A;
     private const byte InputEofSubmit = 0x0D;
+
+    // How far a legacy host has got (WindowsPtyBackendInstance.OnOutput): no output yet, nothing but its cursor query
+    // yet, or started.
+    private const int HostStarting = 0;
+    private const int HostAwaitingCursorReport = 1;
+    private const int HostStarted = 2;
+
+    /// <summary>The host's cursor position query with <see cref="PtyStartInfo.InheritCursor"/>.</summary>
+    private static ReadOnlySpan<byte> CursorPositionQuery => "\e[6n"u8;
+
+    /// <summary>The report MiniPty answers an unanswered query with at teardown: row 1, column 1.</summary>
+    private static ReadOnlySpan<byte> CursorPositionReport => "\e[1;1R"u8;
     private const int ErrorBrokenPipe = 109;
     private const int ErrorNoData = WindowsInterop.ErrorNoData;
     private const int ErrorOperationAborted = 995;
@@ -307,7 +325,9 @@ internal static class WindowsPtyBackend
                 process,
                 job,
                 processInfo.dwProcessId,
-                size);
+                size,
+                legacyHost: library is null && !WindowsInterop.CanReleasePseudoConsole,
+                startInfo.InheritCursor);
         }
         catch
         {
@@ -412,7 +432,8 @@ internal static class WindowsPtyBackend
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private sealed unsafe class WindowsPtyBackendInstance : IPtyBackend, IPtyInputQueue, IWindowsExitObserver, IValueTaskSource<int>
+    private sealed unsafe class WindowsPtyBackendInstance
+        : IPtyBackend, IPtyInputQueue, IWindowsExitObserver, IValueTaskSource<int>, IWindowsOutputObserver, IThreadPoolWorkItem
     {
         private static readonly IOCompletionCallback s_inputWriteCompleted = OnInputWriteCompleted;
 
@@ -447,6 +468,18 @@ internal static class WindowsPtyBackend
         private int _exitCode;
         private bool _disposed;
 
+        // The in-box host from before Windows 11 24H2 (no ReleasePseudoConsole), which needs the help described at
+        // OnOutput, AnswerCursorQuery, and DeferOutputClose. Its first output reads go through OnOutput. No other
+        // session's do.
+        private readonly bool _legacyHost;
+        private readonly bool _inheritCursor;
+        // How far the legacy host has got, as its output shows (HostStarting, HostAwaitingCursorReport, HostStarted).
+        private int _hostPhase;
+        // A resize was sent before the legacy host had started, so OnOutput sends the size again.
+        private bool _resizedBeforeStart;
+        // The session's pump, whose stop disposal waits for before closing a legacy host's output.
+        private PtyOutputPump? _pump;
+
         // Input queue and overlapped write state (see InputState), created on the first write. Guarded by lock (this),
         // which also orders EOF bytes and the pipe's close with writes; locking the instance itself, which is never
         // exposed, adds no object to the session.
@@ -462,7 +495,9 @@ internal static class WindowsPtyBackend
             SafeKernelHandle process,
             SafeKernelHandle? job,
             int processId,
-            PtySize size)
+            PtySize size,
+            bool legacyHost,
+            bool inheritCursor)
         {
             _inputWriteHandle = inputWriteHandle;
             _outputReadHandle = outputReadHandle;
@@ -472,6 +507,8 @@ internal static class WindowsPtyBackend
             _job = job;
             _processId = processId;
             _size = size;
+            _legacyHost = legacyHost;
+            _inheritCursor = inheritCursor;
             Input = new PtyInputStream(this);
 
             // Last, so the watcher never observes a partially constructed instance. Nothing can release the handle yet.
@@ -955,8 +992,8 @@ internal static class WindowsPtyBackend
             columns = PtySizeLimits.Clamp(columns);
             rows = PtySizeLimits.Clamp(rows);
 
-            // The reference keeps the HPCON valid if drain closes the pseudo-console during the call;
-            // the deferred ClosePseudoConsole then runs on release instead of under ResizePseudoConsole.
+            // The reference keeps the HPCON valid if drain closes the pseudo-console during the call. The deferred close
+            // is then queued on release instead of running under ResizePseudoConsole.
             var addedRef = false;
             try
             {
@@ -970,7 +1007,17 @@ internal static class WindowsPtyBackend
             int hr;
             try
             {
-                hr = _hpc.Resize(new WindowsCoord((short)columns, (short)rows));
+                // One resize at a time, so the size recorded is the one sent last, which a legacy host's resend sends again.
+                lock (_hpc)
+                {
+                    // Flagged before the send: a resize that OnOutput finds unflagged is sent after the host has started.
+                    if (_legacyHost && Volatile.Read(ref _hostPhase) != HostStarted)
+                        Volatile.Write(ref _resizedBeforeStart, true);
+
+                    hr = _hpc.Resize(new WindowsCoord((short)columns, (short)rows));
+                    if (hr >= 0)
+                        _size = new PtySize(columns, rows);
+                }
             }
             finally
             {
@@ -985,8 +1032,57 @@ internal static class WindowsPtyBackend
 
                 throw new Win32Exception(hr, "ResizePseudoConsole failed");
             }
+        }
 
-            _size = new PtySize(columns, rows);
+        /// <summary>
+        /// Shown a legacy host's output reads until it has started, on the output loop. Such a host can drop a resize
+        /// that arrives before it has attached its first client: the child then sees the size the session started with.
+        /// The host's first output comes after that attach, as its title names the client's program, so a resize sent
+        /// before it is sent again then, from the thread pool, as nothing on the loop may block. With
+        /// <see cref="PtyStartInfo.InheritCursor"/> the first output is the cursor query instead, and the host attaches
+        /// the client only once the report arrives (see <see cref="AnswerCursorQuery"/>).
+        /// </summary>
+        bool IWindowsOutputObserver.OnOutput(ReadOnlySpan<byte> bytes)
+        {
+            var phase = Volatile.Read(ref _hostPhase);
+            if (_inheritCursor && phase == HostStarting && bytes.StartsWith(CursorPositionQuery))
+            {
+                Volatile.Write(ref _hostPhase, HostAwaitingCursorReport);
+                return true;
+            }
+
+            Volatile.Write(ref _hostPhase, HostStarted);
+            if (Volatile.Read(ref _resizedBeforeStart))
+                ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+
+            return false;
+        }
+
+        /// <summary>The resend of <see cref="IWindowsOutputObserver.OnOutput"/>: the size recorded last, sent again. Never throws.</summary>
+        void IThreadPoolWorkItem.Execute()
+        {
+            if (_disposed || _hpc.IsClosed)
+                return;
+
+            var addedRef = false;
+            try
+            {
+                _hpc.DangerousAddRef(ref addedRef);
+                lock (_hpc)
+                {
+                    var size = _size;
+                    _ = _hpc.Resize(new WindowsCoord((short)size.Columns, (short)size.Rows));
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // Closed since the check: there is nothing left to resize.
+            }
+            finally
+            {
+                if (addedRef)
+                    _hpc.DangerousRelease();
+            }
         }
 
         public void Clear()
@@ -1149,9 +1245,9 @@ internal static class WindowsPtyBackend
         }
 
         /// <summary>
-        /// Closes the pseudo-console. ConPTY then flushes what it has rendered and closes its end of the output
-        /// pipe, so the output driver drains the rest and sees end of output. The output pipe itself stays open for that
-        /// drain and closes with <see cref="Dispose"/>.
+        /// Closes the pseudo-console, off the calling thread (see <see cref="SafePseudoConsoleHandle"/>). ConPTY then
+        /// flushes what it has rendered and closes its end of the output pipe, so the output driver drains the rest and
+        /// sees end of output. The output pipe itself stays open for that drain and closes with <see cref="Dispose"/>.
         /// </summary>
         public void CloseOutputTransport()
         {
@@ -1166,7 +1262,11 @@ internal static class WindowsPtyBackend
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
         /// <summary>Reads output on the completion-port loop that every session shares, holding no thread of its own.</summary>
-        public void StartOutput(PtyOutputPump pump) => WindowsOutputDriver.Run(pump, _outputReadHandle);
+        public void StartOutput(PtyOutputPump pump)
+        {
+            _pump = pump;
+            WindowsOutputDriver.Run(pump, _outputReadHandle, _legacyHost ? this : null);
+        }
 
         public void Dispose()
         {
@@ -1185,7 +1285,10 @@ internal static class WindowsPtyBackend
 
             // Queued writes fail now, on the disposing thread, without waiting for a write in flight.
             CloseTransport(InputDisposed);
-            CloseOutputPipe();
+            if (_legacyHost)
+                DeferOutputClose();
+            else
+                CloseOutputPipe();
 
             // Closes at once, or when a concurrent exit query or kill unpins it.
             _process.Dispose();
@@ -1197,11 +1300,44 @@ internal static class WindowsPtyBackend
                 Marshal.FreeHGlobal(_attrList);
             }
 
-            if (!_outputClosed)
+            if (!_legacyHost && !_outputClosed)
             {
                 _outputReadHandle.Dispose();
                 _outputClosed = true;
             }
+        }
+
+        /// <summary>
+        /// Leaves a legacy host's output pipe open after disposal until the host has ended. The host writes as it
+        /// attaches the client and as it shuts down, and a write that finds MiniPty's end closed can leave it waiting
+        /// for good: it never exits, and its close never returns. The output driver reads on after disposal until the
+        /// host's end breaks the pipe, which stops the pump. An end of output that the post-exit drain forced, or a
+        /// read that failed before disposal, says nothing about the host, and neither does a session that never read
+        /// output, so only the bound closes the pipe then. The bound is for a host that keeps the pipe open, as
+        /// <c>DisposeAsync</c> waits for output reading to stop.
+        /// </summary>
+        private void DeferOutputClose()
+        {
+            _ = Task.Delay(DeferredOutputCloseMs).ContinueWith(
+                static (_, state) => ((WindowsPtyBackendInstance)state!).CloseOutputPipe(),
+                this,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            if (_pump is not { } pump)
+                return;
+
+            _ = pump.WaitForStopAsync().AsTask().ContinueWith(
+                static (_, state) =>
+                {
+                    var self = (WindowsPtyBackendInstance)state!;
+                    if (!self._pump!.IsEndOfOutputForced && self._pump.Error is null)
+                        self.CloseOutputPipe();
+                },
+                this,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
 
         /// <summary>
@@ -1306,6 +1442,37 @@ internal static class WindowsPtyBackend
             _outputClosed = true;
         }
 
+        /// <summary>
+        /// Answers a legacy host's cursor query as the transport closes, in case the frontend never did. A host still
+        /// waiting for the report never exits: <c>ClosePseudoConsole</c> waits for it, once its input is closed it
+        /// spins on a CPU core, and it outlives this process. The report lets it attach the client, see input end, and
+        /// exit. It goes to every such session, answered or not. A host that is not waiting takes the report as an F3
+        /// key press. That arrives only as the session ends, when the child has exited or is being ended and the close
+        /// that follows ends whatever else is attached, while a missed report leaves a host spinning for good.
+        /// </summary>
+        private void AnswerCursorQuery()
+        {
+            try
+            {
+                lock (this)
+                {
+                    // The close that follows fails queued input and cancels a write in flight, so only an idle pipe gets
+                    // the report. A waiting host keeps reading its input, so the pipe is busy only for a moment, but a
+                    // host that misses the report this way stays.
+                    if (_inputClosed || !IsInputIdleLocked)
+                        return;
+
+                    var input = EnsureInputLocked();
+                    StageLocked(input, CursorPositionReport, owner: null);
+                    WriteStagedLocked(input);
+                }
+            }
+            catch (Exception)
+            {
+                // A failed write leaves the host as it was, and the close that follows must still run.
+            }
+        }
+
         private void CloseTransport(int inputReason)
         {
             try
@@ -1316,6 +1483,9 @@ internal static class WindowsPtyBackend
             {
                 // A failed EOF write must not skip the close below, which disposal and the post-exit drain rely on.
             }
+
+            if (_legacyHost && _inheritCursor)
+                AnswerCursorQuery();
 
             CloseInputPipe(inputReason);
 
@@ -1620,7 +1790,16 @@ internal static class WindowsPtyBackend
     /// <c>conpty.dll</c> is an <see cref="OutOfBandPseudoConsoleHandle"/> instead; an in-box session carries nothing for
     /// the other implementation.
     /// </summary>
-    private class SafePseudoConsoleHandle : SafeHandle
+    /// <remarks>
+    /// The close runs off the thread that releases the handle. Before Windows 11 24H2 the in-box
+    /// <c>ClosePseudoConsole</c> waits until the console host exits. The last reference can drop on the post-exit
+    /// drain's timer, which every session shares, on a thread disposing the session, or on a caller's resize, and none
+    /// of them may wait for a host. A close that waits gets a thread of its own: on the thread pool it would hold a
+    /// worker for as long as the host takes to exit, and the drain's ticks and callers' continuations run there. The
+    /// out-of-band close and the in-box one from build 26100 return without waiting for the host, so they run on the
+    /// thread pool. Nothing waits for the close either, as that would add a wait only on older builds.
+    /// </remarks>
+    private class SafePseudoConsoleHandle : SafeHandle, IThreadPoolWorkItem
     {
         public SafePseudoConsoleHandle(IntPtr value) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(value);
 
@@ -1641,9 +1820,41 @@ internal static class WindowsPtyBackend
         public virtual int ReleaseServerReference() =>
             WindowsInterop.CanReleasePseudoConsole ? WindowsInterop.ReleasePseudoConsole(handle) : 0;
 
+        /// <summary>
+        /// Whether the close waits until the console host exits, as the in-box one does before build 26100. Such a
+        /// close runs the in-box <c>ClosePseudoConsole</c> on a thread of its own, so a handle that closes through
+        /// another implementation returns false.
+        /// </summary>
+        protected virtual bool CloseWaitsForHost => !WindowsInterop.CanReleasePseudoConsole;
+
+        protected virtual void ClosePseudoConsole() => WindowsInterop.ClosePseudoConsole(handle);
+
         protected override bool ReleaseHandle()
         {
-            WindowsInterop.ClosePseudoConsole(handle);
+            if (!CloseWaitsForHost || !TryStartCloseThread())
+                ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
+
+            return true;
+        }
+
+        void IThreadPoolWorkItem.Execute() => ClosePseudoConsole();
+
+        /// <summary>
+        /// Closes on a new thread that runs no managed code, or returns false when the system cannot create one. The
+        /// thread pool then takes the close, as a held pool worker costs less than a console host that never closes.
+        /// </summary>
+        /// <remarks>
+        /// A managed thread keeps its handle and two events after it ends, until a garbage collection, so a close on
+        /// one leaves three handles per session behind. The thread starts in <c>ClosePseudoConsole</c> itself and ends
+        /// when the close returns, and its own handle closes at once.
+        /// </remarks>
+        private bool TryStartCloseThread()
+        {
+            var thread = WindowsInterop.StartClosePseudoConsoleThread(handle);
+            if (thread == IntPtr.Zero)
+                return false;
+
+            WindowsInterop.CloseHandle(thread);
             return true;
         }
     }
@@ -1664,11 +1875,9 @@ internal static class WindowsPtyBackend
 
         public override int ReleaseServerReference() => _library.ReleasePseudoConsole(handle);
 
-        protected override bool ReleaseHandle()
-        {
-            _library.ClosePseudoConsole(handle);
-            return true;
-        }
+        protected override bool CloseWaitsForHost => false;
+
+        protected override void ClosePseudoConsole() => _library.ClosePseudoConsole(handle);
     }
 
     /// <summary>
@@ -1746,17 +1955,42 @@ internal static partial class WindowsInterop
     /// <summary>Calls <c>ReleasePseudoConsole</c>; only when <see cref="CanReleasePseudoConsole"/>.</summary>
     internal static unsafe int ReleasePseudoConsole(IntPtr hPC) => s_releasePseudoConsole(hPC);
 
-    private static unsafe delegate* unmanaged[Stdcall]<IntPtr, int> FindReleasePseudoConsole()
+    private static unsafe delegate* unmanaged[Stdcall]<IntPtr, int> FindReleasePseudoConsole() =>
+        (delegate* unmanaged[Stdcall]<IntPtr, int>)FindKernel32Export("ReleasePseudoConsole");
+
+    /// <summary>
+    /// The address of <c>ClosePseudoConsole</c> in <c>kernel32.dll</c>, or zero where it cannot be found.
+    /// </summary>
+    private static readonly IntPtr s_closePseudoConsole = FindKernel32Export("ClosePseudoConsole");
+
+    /// <summary>
+    /// Starts a thread whose start routine is the in-box <c>ClosePseudoConsole</c>, given <paramref name="hPC"/>, and
+    /// returns the thread's handle, or zero when the thread cannot be created. A start routine takes one pointer-sized
+    /// argument and returns a value, while the close returns none, so the thread's exit code means nothing.
+    /// </summary>
+    internal static IntPtr StartClosePseudoConsoleThread(IntPtr hPC) =>
+        s_closePseudoConsole == IntPtr.Zero
+            ? IntPtr.Zero
+            : CreateThread(IntPtr.Zero, 0, s_closePseudoConsole, hPC, 0, IntPtr.Zero);
+
+    private static IntPtr FindKernel32Export(string name)
     {
         // kernel32.dll is loaded in every Windows process and is a known DLL, so this binds the system copy and only
-        // adds a reference to it. The reference is never dropped, as the function stays in use for the process.
+        // adds a reference to it. The reference is never dropped, as the functions stay in use for the process.
         if (!OperatingSystem.IsWindows() || !NativeLibrary.TryLoad("kernel32.dll", out var kernel32))
-            return null;
+            return IntPtr.Zero;
 
-        return NativeLibrary.TryGetExport(kernel32, "ReleasePseudoConsole", out var address)
-            ? (delegate* unmanaged[Stdcall]<IntPtr, int>)address
-            : null;
+        return NativeLibrary.TryGetExport(kernel32, name, out var address) ? address : IntPtr.Zero;
     }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr CreateThread(
+        IntPtr lpThreadAttributes,
+        nuint dwStackSize,
+        IntPtr lpStartAddress,
+        IntPtr lpParameter,
+        uint dwCreationFlags,
+        IntPtr lpThreadId);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

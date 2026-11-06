@@ -121,8 +121,10 @@ public static class PtyStdioBridge
             if (_discardOutput)
                 return;
 
-            await WriteFrameAsync(PtyStdioFrameType.Output, data, _teardownToken).ConfigureAwait(false);
+            // Counted before the write: the peer can acknowledge these bytes before the write returns, and an
+            // acknowledgement of bytes not yet counted is lost, which can leave delivery paused for good.
             _flowControl.OnSent(data.Length);
+            await WriteFrameAsync(PtyStdioFrameType.Output, data, _teardownToken).ConfigureAwait(false);
         }
 
         private async Task ReceiveLoopAsync(PtyTerminal terminal, CancellationToken cancellationToken)

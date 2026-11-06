@@ -35,6 +35,17 @@ public sealed class PtyUnixDisposeTests
     /// </summary>
     private const string HungUpOutput = "hung-up-output";
 
+    /// <summary>
+    /// Whether a master's fdinfo names its terminal (<c>tty-index</c>), which Linux does from 4.14. The tests that find a
+    /// session's master by its terminal need it. The probe opens a master of its own, so a MiniPty regression fails those
+    /// tests instead of skipping them.
+    /// </summary>
+    private static readonly Lazy<bool> s_mastersNameTheirTerminal = new(() =>
+    {
+        using var master = File.OpenHandle("/dev/ptmx", FileMode.Open, FileAccess.ReadWrite);
+        return TerminalIndexOf((int)master.DangerousGetHandle()) is not null;
+    });
+
     [Test]
     public async Task DisposeHangsUpAChildThatExitsOnHangup()
     {
@@ -111,7 +122,7 @@ public sealed class PtyUnixDisposeTests
     [Test]
     public async Task DisposeHangsUpTheChildWhileAnotherHolderKeepsTheMasterOpen()
     {
-        if (!OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsLinux() || !s_mastersNameTheirTerminal.Value)
             return;
 
         var marker = NewMarkerPath();
@@ -356,7 +367,7 @@ public sealed class PtyUnixDisposeTests
     [Test]
     public async Task DisposeClosesTheMasterOnceTheChildIsGone()
     {
-        if (!OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsLinux() || !s_mastersNameTheirTerminal.Value)
             return;
 
         // The descendant is forked while the shell ignores the hang-up, so it ignores it from its first instruction. It

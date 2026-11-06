@@ -69,6 +69,63 @@ public sealed class PtyWindowsOutputDriverTests
     }
 
     /// <summary>
+    /// An observer is shown each read's bytes until it declines, and the consumer still gets everything. Each write waits
+    /// until the consumer has the previous one, so each lands in a read of its own.
+    /// </summary>
+    [Test]
+    public async Task AnObserverSeesReadsUntilItDeclines()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var observer = new RecordingObserver(reads: 2);
+        var backend = new PipeBackend { Observer = observer };
+        await using var session = new PtySession(backend);
+        var received = new List<byte>();
+        await using (var enumerator = session.ReadOutputAsync().GetAsyncEnumerator())
+        {
+            foreach (var part in new[] { "AB"u8.ToArray(), "CD"u8.ToArray(), "EF"u8.ToArray() })
+            {
+                backend.Write(part);
+                var expected = received.Count + part.Length;
+                while (received.Count < expected)
+                {
+                    await Assert.That(await enumerator.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+                    received.AddRange(enumerator.Current.Data.Span);
+                }
+            }
+        }
+
+        await Assert.That(System.Text.Encoding.ASCII.GetString(received.ToArray())).IsEqualTo("ABCDEF");
+        await Assert.That(string.Join(",", observer.Seen)).IsEqualTo("AB,CD");
+    }
+
+    /// <summary>
+    /// The Windows backend watches output until the console host shows it has started. With an inherit-cursor query
+    /// first, that is the output after the query, as the host attaches the child only once the report arrives. A resize
+    /// sent before then is sent again at that point, so stopping at the query would resend too early, and watching on
+    /// would resend on every read.
+    /// </summary>
+    [Test]
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task TheBackendWatchesOutputUntilTheHostHasStarted(bool inheritCursor)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var cmd = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
+        using var backend = WindowsPtyBackend.Start(
+            new PtyStartInfo { FileName = cmd, Arguments = ["/c", "exit"], InheritCursor = inheritCursor });
+        var observer = (IWindowsOutputObserver)backend;
+        var watchingAfterQuery = inheritCursor && observer.OnOutput("\e[6n"u8);
+        var watchingAfterTitle = observer.OnOutput("\e]0;cmd\a"u8);
+
+        await Assert.That(watchingAfterQuery).IsEqualTo(inheritCursor);
+        await Assert.That(watchingAfterTitle).IsFalse();
+    }
+
+    /// <summary>
     /// A driver that parked on a full ring and resumed counts as reading again, so the post-exit drain still ends output
     /// when the close does not end the pipe. A resumed driver that stayed marked as waiting kept the drain from ever
     /// seeing quiet, and the session never reached end of output.
@@ -640,6 +697,30 @@ public sealed class PtyWindowsOutputDriverTests
         }
     }
 
+    /// <summary>Records the reads it is shown as text, and declines after <c>reads</c> of them.</summary>
+    private sealed class RecordingObserver(int reads) : IWindowsOutputObserver
+    {
+        private readonly List<string> _seen = [];
+
+        public string[] Seen
+        {
+            get
+            {
+                lock (_seen)
+                    return [.. _seen];
+            }
+        }
+
+        public bool OnOutput(ReadOnlySpan<byte> bytes)
+        {
+            lock (_seen)
+            {
+                _seen.Add(System.Text.Encoding.ASCII.GetString(bytes));
+                return _seen.Count < reads;
+            }
+        }
+    }
+
     /// <summary>
     /// A child whose output is a named pipe created exactly like ConPTY's, read by <see cref="WindowsOutputDriver"/>. The
     /// test writes the other end. Closing the transport does not end the pipe, as when another process holds it; only
@@ -660,7 +741,10 @@ public sealed class PtyWindowsOutputDriverTests
 
         public override int OutputChunkLimit => PtyOutputPump.Capacity;
 
-        public override void StartOutput(PtyOutputPump pump) => WindowsOutputDriver.Run(pump, _reader);
+        /// <summary>Shown the session's reads, as the Windows backend's is for a legacy console host.</summary>
+        public IWindowsOutputObserver? Observer { get; init; }
+
+        public override void StartOutput(PtyOutputPump pump) => WindowsOutputDriver.Run(pump, _reader, Observer);
 
         public void Write(ReadOnlySpan<byte> bytes) => _writeStream.Write(bytes);
 

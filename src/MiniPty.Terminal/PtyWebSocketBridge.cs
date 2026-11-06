@@ -219,14 +219,15 @@ public static class PtyWebSocketBridge
                 if (_discardOutput)
                     return;
 
+                // Counted before the send: the client can acknowledge these bytes before SendAsync returns, and an
+                // acknowledgement of bytes not yet counted is lost, which can leave delivery paused for good.
+                _flowControl.OnSent(data.Length);
                 await _webSocket.SendAsync(data, WebSocketMessageType.Binary, endOfMessage: true, sendCancellation).ConfigureAwait(false);
             }
             finally
             {
                 _sendLock.Release();
             }
-
-            _flowControl.OnSent(data.Length);
         }
 
         /// <summary>

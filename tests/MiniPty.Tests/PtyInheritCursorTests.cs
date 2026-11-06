@@ -99,6 +99,55 @@ public sealed class PtyInheritCursorTests
         }
     }
 
+    /// <summary>
+    /// A console host still waiting for its cursor report when its session ends exits all the same. On Windows Server
+    /// 2022 such a host otherwise waits for the report for good: with its input closed it spins on a CPU core, and it
+    /// outlives the process that started it. A session ends either by disposal while the child waits, or by a kill
+    /// whose end of output comes from the post-exit drain. After a kill, the host must have exited before disposal.
+    /// </summary>
+    [Test]
+    [NotInParallel] // The session's console host is the one child conhost.exe that appears, while no other test starts one.
+    [Arguments(false)]
+    [Arguments(true)]
+    public async Task UnansweredInheritCursorHostExitsOnceTheSessionEnds(bool killFirst)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var before = PtyConsoleHostTests.ConsoleHostChildren();
+        var output = new StringBuilder();
+        var host = IntPtr.Zero;
+        try
+        {
+            await using (var session = Pty.Start(WindowsCommand("echo NEVER_SHOWN") with { InheritCursor = true }))
+            {
+                using var cts = new CancellationTokenSource(Timeout);
+                await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
+                while (output.ToString().IndexOf(CursorPositionQuery, StringComparison.Ordinal) < 0)
+                {
+                    await Assert.That(await reader.MoveNextAsync()).IsTrue();
+                    output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
+                }
+
+                host = PtyConsoleHostTests.OpenConsoleHostStartedSince(before);
+                if (killFirst)
+                {
+                    session.Kill();
+                    while (await reader.MoveNextAsync())
+                        output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
+
+                    await PtyConsoleHostTests.AssertExitsAsync(host, output.ToString());
+                }
+            }
+
+            await PtyConsoleHostTests.AssertExitsAsync(host, output.ToString());
+        }
+        finally
+        {
+            PtyConsoleHostTests.Close(host);
+        }
+    }
+
     [Test]
     public async Task InheritCursorIsIgnoredOnUnix()
     {

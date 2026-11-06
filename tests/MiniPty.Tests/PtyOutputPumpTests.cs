@@ -515,6 +515,34 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
+    /// The bytes of a read stay where it put them until they are published, also when the consumer releases everything
+    /// in between. The second read lands after unread output, and the release then empties the ring, which is when
+    /// <see cref="PtyOutputPump.NextReadSpan"/> starts over and would show the first read's bytes instead.
+    /// </summary>
+    [Test]
+    public async Task AReadIsPublishedAsReadAfterTheConsumerReleasedEverything()
+    {
+        var backend = new ManualRingBackend();
+        await using var session = new PtySession(backend);
+        var pump = session.OutputPump;
+
+        pump.HoldRing();
+        "AB"u8.CopyTo(pump.NextReadSpan);
+        pump.Publish(2, 0);
+        "CD"u8.CopyTo(pump.NextReadSpan);
+        await Assert.That(pump.TryPeek(out _)).IsTrue();
+        pump.Release();
+
+        await Assert.That(pump.UnpublishedRead(2).SequenceEqual("CD"u8)).IsTrue();
+        pump.Publish(2, 0);
+        await Assert.That(pump.TryPeek(out var chunk)).IsTrue();
+        await Assert.That(chunk.Span.SequenceEqual("CD"u8)).IsTrue();
+        pump.Release();
+        pump.LetGoOfRing();
+        backend.End();
+    }
+
+    /// <summary>
     /// A ring with nothing unread starts its next read at its beginning, so a read never has to fit the few bytes left
     /// before the end: a Linux master hands out 4,095 bytes per read, and four of those left 4 bytes, which the fifth read
     /// took alone, a read and a publish per 16 KiB for nothing. A ring with unread output keeps its place, so the next read

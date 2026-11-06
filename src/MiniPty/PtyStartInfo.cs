@@ -187,6 +187,15 @@ public sealed record PtyStartInfo
     /// that writes stalls. Leave this off for consumers that only read output, such as
     /// <see cref="PtySession.CompleteAsync"/>, unless they write the report themselves.
     /// </para>
+    /// <para>
+    /// On Windows Server 2022, and possibly on other builds before Windows 11 24H2, the in-box console host never exits
+    /// while the query is unanswered, not even after the session and the process that started it have ended. On a
+    /// build before Windows 11 24H2 MiniPty therefore writes the in-box host a report itself (<c>ESC[1;1R</c>) as the
+    /// session ends, also when the frontend has answered, and keeps its end of the output open until the host has
+    /// ended, for 1 s at most, as the host needs it to exit. <see cref="PtySession.DisposeAsync"/> normally completes
+    /// only then, so await it before the process exits: a process that exits right after
+    /// <see cref="PtySession.Dispose"/> can leave the host waiting.
+    /// </para>
     /// </remarks>
     public bool InheritCursor { get; init; }
 

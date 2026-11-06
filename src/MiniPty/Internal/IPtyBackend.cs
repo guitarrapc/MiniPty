@@ -100,7 +100,8 @@ internal interface IPtyBackend : IDisposable
     /// <summary>
     /// Closes the transport so the output driver reaches end of output: the pseudo-console on Windows (output already
     /// produced still drains), the master on Unix (released once the loop's registration and any in-flight call let go).
-    /// Afterwards <see cref="Resize"/> is a no-op.
+    /// Afterwards <see cref="Resize"/> is a no-op. It must not wait: the post-exit drain calls it on a timer that every
+    /// session shares.
     /// </summary>
     public void CloseOutputTransport();
 }

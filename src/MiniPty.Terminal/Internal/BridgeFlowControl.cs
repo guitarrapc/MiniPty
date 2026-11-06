@@ -36,6 +36,10 @@ internal sealed class BridgeFlowControl
         }
     }
 
+    /// <summary>
+    /// Counts bytes about to go to the client. Call it before the send: the client can acknowledge them before the send
+    /// returns, and an acknowledgement of bytes not yet counted is lost.
+    /// </summary>
     public void OnSent(int bytes)
     {
         lock (_lock)
