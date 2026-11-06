@@ -131,8 +131,8 @@ jobs:
             "$exe" --smoke
           fi
 
-  # Temporary (improvement plan I3): runs the two tests that failed intermittently 20 times each, on the runner each
-  # failed on, to record their causes. Remove this job once they are recorded. It does not gate build-complete.
+  # Temporary (improvement plan I3): runs a test that failed intermittently 20 times, on the runner it failed on, to
+  # find its cause. Remove this job once the cause is fixed. It does not gate build-complete.
   repeat-intermittent-tests:
     name: Repeat intermittent tests (${{ matrix.os }}, temporary)
     timeout-minutes: 45
@@ -142,9 +142,6 @@ jobs:
         include:
           - os: macos-26-intel
             filter: /*/*/PtyUnixLoopTests/AFloodDoesNotDelayAnotherSessionsEcho
-          # The whole class, so the test runs alongside others as in the suite.
-          - os: windows-2022
-            filter: /*/*/PtyWebSocketBridgeTests/*
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
@@ -174,7 +171,7 @@ jobs:
               failed=$((failed + 1))
             fi
             echo "== run $i: $result"
-            grep -a -E "echoes, median|did not close|failed |total:" run.txt || true
+            grep -a -E "echoes, median|did not close|failed |total:|^echo-trace" run.txt || true
           done
           echo "$failed of 20 runs failed"
           test "$failed" -eq 0

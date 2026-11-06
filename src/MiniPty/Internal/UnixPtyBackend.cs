@@ -422,6 +422,7 @@ internal static partial class UnixPtyBackend
                 if (_inputHead is null)
                 {
                     var written = WriteNow(bytes);
+                    TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.InputWritten, written); // Temporary
                     if (written == bytes.Length)
                         return null;
 
@@ -454,6 +455,7 @@ internal static partial class UnixPtyBackend
                     if (_inputHead is null)
                     {
                         var written = WriteNow(bytes.Span);
+                        TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.InputWritten, written); // Temporary
                         if (written == bytes.Length)
                             return null;
 
@@ -564,6 +566,7 @@ internal static partial class UnixPtyBackend
                     try
                     {
                         written = WriteNow(head.Remaining.Span);
+                        TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.InputFlushed, written); // Temporary
                     }
                     catch (Exception ex)
                     {
@@ -919,11 +922,14 @@ internal static partial class UnixPtyBackend
                 return false;
 
             Volatile.Read(ref InlineReadHookForTests)?.Invoke();
+            TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.ConsumerTry, Volatile.Read(ref _consumerReads)); // Temporary
             var published = TryReadInlineOnce(pump, out var leftToLoop);
             if (!published && !leftToLoop && (OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()) && IsStreaming
                 && !PtyConsumerYield.HasSchedulingContext())
             {
-                if (WaitForOutputOnConsumer())
+                var waited = WaitForOutputOnConsumer(); // Temporary: was inline in the if below
+                TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.ConsumerWaited, waited ? 1 : 0); // Temporary
+                if (waited) // Temporary: was if (WaitForOutputOnConsumer())
                     published = TryReadInlineOnce(pump, out leftToLoop);
             }
 
@@ -944,6 +950,7 @@ internal static partial class UnixPtyBackend
             // A consumer that was reading inline goes on reading inline once it is handed output.
             Volatile.Write(ref _consumerReads,
                 Volatile.Read(ref _consumerReads) == ConsumerReadsLoop ? ConsumerReadsLoop : ConsumerReadsWaiting);
+            TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.ConsumerParks, Volatile.Read(ref _consumerReads)); // Temporary
             ArmForConsumer();
             return false;
         }
@@ -957,7 +964,10 @@ internal static partial class UnixPtyBackend
         {
             leftToLoop = true;
             if (!pump.TryEnterProducer())
+            {
+                TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.ConsumerTurnBusy, 0); // Temporary
                 return false;
+            }
 
             try
             {
@@ -1083,9 +1093,10 @@ internal static partial class UnixPtyBackend
                 return InlineReaderKeep;
 
             // A consumer that reads again meanwhile takes the turn back by its next read.
-            return Interlocked.CompareExchange(ref _consumerReads, ConsumerReadsLoop, ConsumerReadsInline) == ConsumerReadsInline
-                ? InlineReaderTakeOver
-                : InlineReaderKeep;
+            var takeOver = Interlocked.CompareExchange(ref _consumerReads, ConsumerReadsLoop, ConsumerReadsInline) == ConsumerReadsInline; // Temporary: was returned directly
+            if (takeOver) // Temporary
+                TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.LoopTakeOver, 0); // Temporary
+            return takeOver ? InlineReaderTakeOver : InlineReaderKeep; // Temporary: was the expression above
         }
 
         /// <summary>
@@ -1118,6 +1129,7 @@ internal static partial class UnixPtyBackend
                 // any consumer reads inline; the consumer arms it when it waits.
                 if (pump.IsFull)
                 {
+                    TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.ConsumerLeftToParkedLoop, 0); // Temporary
                     leftToLoop = true;
                     return false;
                 }
@@ -1141,6 +1153,7 @@ internal static partial class UnixPtyBackend
                     fixed (byte* ptr = span)
                         read = ReadMasterNow(master, ptr, span.Length);
 
+                    TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.ConsumerRead, read); // Temporary
                     // Nothing more for now, or end of output, which the loop sees when it reads the master again.
                     if (read <= 0)
                         break;
@@ -1202,6 +1215,7 @@ internal static partial class UnixPtyBackend
 
                 var inputQueued = Volatile.Read(ref _inputHead) is not null;
                 SetInterest(slot, ChildWatcher.InterestRead | (inputQueued ? ChildWatcher.InterestWrite : 0));
+                TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.ConsumerArm, _loopInterest); // Temporary
                 if (!inputQueued && Volatile.Read(ref _inputHead) is not null)
                     ChildWatcher.RequestService(this);
             }
@@ -1222,6 +1236,7 @@ internal static partial class UnixPtyBackend
                 return;
 
             Volatile.Write(ref _consumerReadStamp, System.Diagnostics.Stopwatch.GetTimestamp());
+            TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.LoopResumeInline, 0); // Temporary
             if (Interlocked.CompareExchange(ref _consumerReads, ConsumerReadsInline, ConsumerReadsWaiting) == ConsumerReadsWaiting
                 && !Volatile.Read(ref InlineReaderListed))
             {
@@ -1242,6 +1257,7 @@ internal static partial class UnixPtyBackend
         /// </remarks>
         internal void ServiceOnLoop(int report)
         {
+            TemporaryEchoTrace.RecordService(_pid, report); // Temporary
             var pump = Volatile.Read(ref _pump);
             if (pump is not null)
             {
@@ -1249,7 +1265,10 @@ internal static partial class UnixPtyBackend
                     && (report & ~(ChildWatcher.ReportReadable | ChildWatcher.ReportHangup)) == 0
                     && _loopPhase == LoopReading;
                 if (!(outputOnly ? pump.TryEnterProducer() : pump.TryEnterProducerOrDefer()))
+                {
+                    TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.LoopTurnBusy, report); // Temporary
                     return;
+                }
             }
 
             try
@@ -1393,6 +1412,7 @@ internal static partial class UnixPtyBackend
                     fixed (byte* ptr = span)
                         read = ReadMasterNow(master, ptr, span.Length);
 
+                    TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.LoopRead, read); // Temporary
                     if (read < 0)
                     {
                         foundNothing = reads == 0;
@@ -1477,13 +1497,17 @@ internal static partial class UnixPtyBackend
             var read = _loopPhase == LoopDiscarding || (_loopPhase == LoopReading && !_loopParked);
             var write = _loopPhase == LoopReading && Volatile.Read(ref _inputHead) is not null;
             if (read && !write && _loopPhase == LoopReading && Volatile.Read(ref _consumerReads) == ConsumerReadsInline)
+            {
+                TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.LoopArmSkipped, 0); // Temporary
                 return;
+            }
 
             var interest = (read ? ChildWatcher.InterestRead : 0) | (write ? ChildWatcher.InterestWrite : 0);
             if (interest == 0 && _loopInterest == 0)
                 return;
 
             SetInterestOnLoop(_loopSlot, interest);
+            TemporaryEchoTrace.Record(_pid, TemporaryEchoTrace.LoopArm, interest); // Temporary
         }
 
         /// <summary>

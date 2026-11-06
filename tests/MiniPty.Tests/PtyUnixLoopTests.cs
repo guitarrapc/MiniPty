@@ -61,17 +61,29 @@ public sealed class PtyUnixLoopTests
         // Echoes for half a second, so the flood keeps going all along however fast each echo is.
         var floodAtStart = Interlocked.Read(ref floodBytes);
         var echoes = new List<EchoClock.Echo>();
+        var echoPid = echo.ProcessId; // Temporary (I3)
+        TemporaryEchoTrace.Start(echoPid, 1 << 20); // Temporary (I3)
         using (var clock = new EchoClock(() => Interlocked.Read(ref floodBytes)))
         {
             var measuring = Stopwatch.StartNew();
             while (echoes.Count < 40 || measuring.ElapsedMilliseconds < 500)
             {
                 var started = clock.Begin();
+                TemporaryEchoTrace.Record(echoPid, TraceTestWrite, ThreadCpuMicros()); // Temporary (I3)
                 await echo.WriteInputAsync("a");
+                TemporaryEchoTrace.Record(echoPid, TraceTestWritten, ThreadCpuMicros()); // Temporary (I3)
                 // The terminal echoes the character at once; cat sees nothing until a newline.
                 while (true)
                 {
-                    await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+                    var moving = output.MoveNextAsync(); // Temporary (I3): was awaited in the assertion below
+                    var movedAtOnce = moving.IsCompleted; // Temporary (I3)
+                    TemporaryEchoTrace.Record(echoPid, TraceTestMoveNext, movedAtOnce ? 1 : 0); // Temporary (I3)
+                    var moved = movedAtOnce ? moving.Result : await moving.AsTask().WaitAsync(Timeout); // Temporary (I3)
+                    if (!movedAtOnce) // Temporary (I3)
+                        TemporaryEchoTrace.Record(echoPid, TraceTestResumed, ThreadCpuMicros()); // Temporary (I3)
+                    await Assert.That(moved).IsTrue(); // Temporary (I3): was await Assert.That(await output.MoveNextAsync().AsTask().WaitAsync(Timeout)).IsTrue();
+                    TemporaryEchoTrace.Record(echoPid, TraceTestAsserted, ThreadCpuMicros()); // Temporary (I3)
+                    TemporaryEchoTrace.Record(echoPid, TraceTestChunk, output.Current.Data.Length); // Temporary (I3)
                     if (output.Current.Data.Span.IndexOf((byte)'a') >= 0)
                         break;
                 }
@@ -83,18 +95,161 @@ public sealed class PtyUnixLoopTests
             }
         }
 
+        TemporaryEchoTrace.Stop(); // Temporary (I3)
         var floodDuring = Interlocked.Read(ref floodBytes) - floodAtStart;
         stopFlood.Cancel();
         await floodReader.WaitAsync(Timeout);
+        var echoesInOrder = echoes.ToArray(); // Temporary (I3)
         echoes.Sort(static (a, b) => b.Milliseconds.CompareTo(a.Milliseconds));
         var slowest = echoes[0].Milliseconds;
         var summary = $"{echoes.Count} echoes, median {echoes[echoes.Count / 2].Milliseconds:F2} ms, slowest: "
             + string.Join("; ", echoes.Take(3).Select(static e => e.ToString()));
         System.Console.WriteLine(summary);
+        System.Console.WriteLine($"echo-trace {Environment.ProcessorCount} CPUs, {SynchronizationContext.Current?.GetType().Name ?? "no context"}"); // Temporary (I3)
+        foreach (var slow in echoes.Take(3)) // Temporary (I3)
+            PrintEchoTrace(slow, Array.FindIndex(echoesInOrder, e => e.Started == slow.Started), echoPid); // Temporary (I3)
 
         // The flood kept going throughout, and echo stayed interactive.
         await Assert.That(floodDuring).IsGreaterThan(1024L * 1024);
         await Assert.That(slowest).IsLessThan(100.0).Because(summary);
+    }
+
+    // Temporary (I3): the test's own events in TemporaryEchoTrace, next to the library's.
+    private const int TraceTestWrite = 100; // Temporary (I3)
+    private const int TraceTestWritten = 101; // Temporary (I3)
+    private const int TraceTestMoveNext = 102; // Temporary (I3)
+    private const int TraceTestResumed = 103; // Temporary (I3)
+    private const int TraceTestChunk = 104; // Temporary (I3)
+    private const int TraceTestAsserted = 105; // Temporary (I3)
+
+    // Temporary (I3): the calling thread's CPU time in microseconds, or -1, so a trace tells a test thread that was
+    // descheduled (wall time without CPU time) from one that was busy. CLOCK_THREAD_CPUTIME_ID is 16 on macOS, 3 on Linux.
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "clock_gettime")]
+    private static extern int ClockGetTime(int clock, out TimeSpec value); // Temporary (I3)
+
+    private struct TimeSpec // Temporary (I3)
+    {
+        public long Seconds;
+        public long Nanoseconds;
+    }
+
+    private static int ThreadCpuMicros() // Temporary (I3)
+        => ClockGetTime(OperatingSystem.IsMacOS() ? 16 : 3, out var value) == 0
+            ? (int)(value.Seconds * 1_000_000 + value.Nanoseconds / 1000)
+            : -1;
+
+    /// <summary>
+    /// Temporary (I3): prints the traced events from a millisecond before <paramref name="slow"/> began to just after it
+    /// ended, in time order, as lines starting with <c>echo-trace</c>. The loop's waits are printed as one line each, at
+    /// their end, with how long they took; the loop's services of the flood are counted, not printed.
+    /// </summary>
+    private static void PrintEchoTrace(EchoClock.Echo slow, int index, int echoPid) // Temporary (I3)
+    {
+        var (timestamps, pids, codes, args, threads, count, full) = TemporaryEchoTrace.Snapshot();
+        var from = slow.Started - Stopwatch.Frequency / 1000;
+        var to = slow.Ended + Stopwatch.Frequency / 5000;
+        var lookBack = slow.Started - Stopwatch.Frequency / 20;
+        var window = new List<int>();
+        for (var i = 0; i < count; i++)
+        {
+            if (timestamps[i] != 0 && timestamps[i] >= lookBack && timestamps[i] <= to)
+                window.Add(i);
+        }
+
+        window.Sort((a, b) => timestamps[a].CompareTo(timestamps[b]));
+        System.Console.WriteLine($"echo-trace slow echo {slow.Milliseconds:F1} ms, echo #{index} (0 is the first), pid {echoPid}, trace of {count} events{(full ? " (full)" : "")}:");
+        long waitBegan = 0;
+        var waitTimeout = 0;
+        var otherServices = 0;
+        var lines = 0;
+        var idleWaits = 0;
+        long idleFrom = 0;
+        double idleLongest = 0;
+        var lastCpu = new Dictionary<int, (long Timestamp, int Micros)>();
+        foreach (var i in window)
+        {
+            var code = codes[i];
+            var cpuNote = "";
+            if (code is TraceTestWrite or TraceTestWritten or TraceTestResumed or TraceTestAsserted)
+            {
+                // The CPU time the thread used since its previous sample, against the wall time.
+                if (lastCpu.TryGetValue(threads[i], out var previous) && previous.Micros >= 0 && args[i] >= 0)
+                {
+                    cpuNote = $" (since T{threads[i]}'s previous sample: cpu {(args[i] - previous.Micros) / 1000.0:F3} ms, "
+                        + $"wall {Stopwatch.GetElapsedTime(previous.Timestamp, timestamps[i]).TotalMilliseconds:F3} ms)";
+                }
+
+                lastCpu[threads[i]] = (timestamps[i], args[i]);
+            }
+
+            if (code == TemporaryEchoTrace.LoopWaitBegin)
+            {
+                waitBegan = timestamps[i];
+                waitTimeout = args[i];
+                continue;
+            }
+
+            if (timestamps[i] < from)
+                continue;
+
+            if (code == TemporaryEchoTrace.LoopServiceOther)
+            {
+                otherServices++;
+                continue;
+            }
+
+            // Waits that ended with no report (the loop's timeout for its inline readers) are summed into one line, printed
+            // before the next other event.
+            if (code == TemporaryEchoTrace.LoopWaitEnd && args[i] == 0)
+            {
+                var waited = waitBegan == 0 ? 0 : Stopwatch.GetElapsedTime(waitBegan, timestamps[i]).TotalMilliseconds;
+                if (idleWaits++ == 0)
+                    idleFrom = timestamps[i];
+                idleLongest = Math.Max(idleLongest, waited);
+                continue;
+            }
+
+            if (idleWaits > 0)
+            {
+                System.Console.WriteLine(
+                    $"echo-trace   {Stopwatch.GetElapsedTime(slow.Started, idleFrom).TotalMilliseconds,9:F3} ms      loop "
+                    + $"{idleWaits} waits ended without a report, the longest {idleLongest:F3} ms");
+                idleWaits = 0;
+                idleLongest = 0;
+                lines++;
+            }
+
+            if (++lines > 400)
+            {
+                System.Console.WriteLine("echo-trace   (cut at 400 lines)");
+                break;
+            }
+
+            var at = Stopwatch.GetElapsedTime(slow.Started, timestamps[i]).TotalMilliseconds;
+            var name = code switch
+            {
+                TraceTestWrite => "TestWrite",
+                TraceTestWritten => "TestWritten",
+                TraceTestMoveNext => "TestMoveNext sync=",
+                TraceTestResumed => "TestResumed",
+                TraceTestAsserted => "TestAsserted",
+                TraceTestChunk => "TestChunk bytes=",
+                _ => TemporaryEchoTrace.Name(code),
+            };
+            var detail = code == TemporaryEchoTrace.LoopWaitEnd
+                ? $"{name} reports={args[i]} after {(waitBegan == 0 ? "?" : Stopwatch.GetElapsedTime(waitBegan, timestamps[i]).TotalMilliseconds.ToString("F3"))} ms (timeout {waitTimeout}), flood services so far {otherServices}"
+                : cpuNote.Length > 0 || code is TraceTestWrite or TraceTestWritten or TraceTestResumed or TraceTestAsserted
+                    ? name + cpuNote
+                    : $"{name} {args[i]}";
+            System.Console.WriteLine($"echo-trace   {at,9:F3} ms T{threads[i],-3} {(pids[i] == 0 ? "loop" : "echo")} {detail}");
+        }
+
+        if (idleWaits > 0)
+        {
+            System.Console.WriteLine(
+                $"echo-trace   {Stopwatch.GetElapsedTime(slow.Started, idleFrom).TotalMilliseconds,9:F3} ms      loop "
+                + $"{idleWaits} waits ended without a report, the longest {idleLongest:F3} ms");
+        }
     }
 
     /// <summary>
