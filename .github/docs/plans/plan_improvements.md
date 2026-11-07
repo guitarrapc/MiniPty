@@ -394,22 +394,22 @@ This phase measures `main` once the Windows Server 2022 changes have landed ther
     - **Checks:** the current watcher with a pinned array added measured as the old one did, and without the forced GC both measured the same. No keystroke costs more ([platform lessons](../specs/platform_support.md#lessons-learned)).
   - **The large-host table:** the updater writes a `startup-host-memory` block from `PtyStartupHostMemoryBenchmarks`, and the README has it.
   - **Done once `improve` is merged:** the gates hold, apart from the in-box keystroke ratio, whose move comes from the benchmark's timing.
-- **I5, the allocation probe (`--alloc-probe` in the benchmarks).** It runs the benchmarks' 1 MiB flood round after round and records each round's bytes on every thread and on the thread that waits, the pool's threads and new OS threads. Locally on Windows 11 (build 26200), 200 rounds per case:
+- **I5, an allocation probe outside BenchmarkDotNet.** It ran the benchmarks' 1 MiB flood round after round and recorded each round's bytes on every thread and on the thread that waits, the pool's threads and new OS threads. Locally on Windows 11 (build 26200), 200 rounds per case:
   - **A thread added during the run allocated 1,072 B,** in the round the pool went from 3 to 4 threads. `dotnet-trace` showed `PortableThreadPool.CreateWorkerThread` and the new worker's thread locals.
   - **Not threads, each once per process:**
     - 56 B in the first `MoveNextAsync` after a pause: `TaskScheduler`'s static constructor, through `PtyConsumerYield.HasSchedulingContext`.
     - 48 B inside `WriteInputAsync` around the 64th write: gone with `DOTNET_TieredPGO=0` and after a long warm-up, and never an allocation event in the trace, so the runtime's tiered compilation.
     - 6192 B on another thread with no thread added, in about one run in four, on Windows and on Linux: never an allocation event in the trace either. Over 8 Linux runs per setting it appeared by default and with `DOTNET_TieredPGO=0`, and never with `DOTNET_TieredCompilation=0`, so tiered compilation's own thread.
   - **After a warm-up of 150 rounds, the flood allocated 0 B in 150 rounds** on both ConPTYs, and with a listener after the one-off 56 B.
-  - **Done:** each case is a thread or a one-time cost, and no flood allocates. The README says so beside the throughput table, the [platform lessons](../specs/platform_support.md#lessons-learned) have the detail, and [core_session.md](../specs/core_session.md#metrics) explains the metrics figures.
-- **I7, the start probe.** `scripts/macos-start-probe/start-probe.c` times five starts, alternating round by round:
+  - **Done:** each case is a thread or a one-time cost, and no flood allocates. The README says so beside the throughput table, the [platform lessons](../specs/platform_support.md#lessons-learned) have the detail, and [core_session.md](../specs/core_session.md#metrics) explains the metrics figures. The probe was removed once the findings were in.
+- **I7, the start probe.** A native probe timed five starts, alternating round by round:
   - `posix_spawn` alone.
   - With MiniPty's terminal and attributes.
   - The same with the slave opened by name in a file action, which is the start without the helper.
   - Through `minipty_spawn_helper`.
   - Through the helper given the bare name.
 
-  It also asks each child whether it has a controlling terminal. The benchmarks' `--start-probe` times MiniPty's whole start on the same runner. A temporary job in Build ran both on macos-26 and macos-26-intel, three times. The last two runs, [run 42335490843](https://github.com/guitarrapc/MiniPty/actions/runs/42335490843) and [run 42336144488](https://github.com/guitarrapc/MiniPty/actions/runs/42336144488), had all five starts. Below, the minimum of 300 starts, in ms, over four passes:
+  It also asked each child whether it had a controlling terminal. A probe in the benchmarks timed MiniPty's whole start on the same runner. A temporary job in Build ran both on macos-26 and macos-26-intel, three times. The last two runs, [run 42335490843](https://github.com/guitarrapc/MiniPty/actions/runs/42335490843) and [run 42336144488](https://github.com/guitarrapc/MiniPty/actions/runs/42336144488), had all five starts. Below, the minimum of 300 starts, in ms, over four passes:
 
   | Start | macos-26 (M1, virtual), `/usr/bin/true` | macos-26, `/bin/sh -c 'exit 0'` | macos-26-intel (i7-8700B), `/usr/bin/true` | macos-26-intel, `/bin/sh -c 'exit 0'` |
   |---|---|---|---|---|
@@ -426,7 +426,7 @@ This phase measures `main` once the Windows Server 2022 changes have landed ther
     - Searching `PATH` for `sh` costs 0.3–0.55 ms on the M1 (22 entries) and 0.8–1.2 ms on the Intel runner (19 entries).
     - MiniPty's own work is about 0.2 ms on the M1.
   - **Only the helper gives a controlling terminal.** The start that opens the slave by name in a file action cost within 0.2 ms of inheriting it. Its child led its session, but it had no controlling terminal. The helper's child had one, with its group in the foreground. The probe itself had none. In the second run, a shell test (`exec 3</dev/tty`) had reported a terminal for every start, so the third asked the child itself.
-  - **Done: the helper stays.** The only start without it that `posix_spawn` allows fails the first gate, the controlling terminal and job control. The breakdown is in the [platform lessons](../specs/platform_support.md#lessons-learned). The temporary job is removed. The probe stays in `scripts/` for a rerun. A start without the helper would need code in the child before its exec, as the Linux `clone` start has. That is a new design, outside this plan.
+  - **Done: the helper stays.** The only start without it that `posix_spawn` allows fails the first gate, the controlling terminal and job control. The breakdown is in the [platform lessons](../specs/platform_support.md#lessons-learned). The temporary job and both probes are removed. A start without the helper would need code in the child before its exec, as the Linux `clone` start has. That is a new design, outside this plan.
 
 ### Phase 3: Windows before 24H2 (I4)
 
