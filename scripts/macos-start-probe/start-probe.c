@@ -9,8 +9,9 @@
  *                POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK. The child gets no controlling terminal, which is what
  *                the helper is for.
  *   open         as pty, but the child opens the slave by name in a file action instead of inheriting the parent's
- *                descriptor: the start without the helper. It takes the controlling terminal only if Darwin creates
- *                the new session before it runs the file actions, which the check below reports.
+ *                descriptor: the start without the helper. It would take the controlling terminal if Darwin created
+ *                the new session before it ran the file actions. On macOS 26 it does not: the check below reports
+ *                no controlling terminal (2026-11-07).
  *   helper       as pty, but spawning minipty_spawn_helper, which opens the slave by name (taking it as the
  *                controlling terminal) and then executes the program: the native part of MiniPty's start.
  *   helper-name  as helper, but passing the program's file name alone, so the helper searches PATH for it as it does
@@ -24,6 +25,8 @@
  * probe's own controlling terminal would also open /dev/tty.
  *
  * MiniPty's whole start, from Pty.Start to the exit, is timed on the same runner by the benchmarks' --start-probe.
+ * The results are in the platform lessons (.github/docs/specs/platform_support.md). No CI job runs this probe; to
+ * run it again, build it on a Mac or in a temporary job and pass the helper from the benchmarks' build output.
  * This probe leaves out what MiniPty adds around the spawn and does not depend on the helper: the start report pipe,
  * the stdio slots it reserves, and its environment handling.
  *
