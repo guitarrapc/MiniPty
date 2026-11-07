@@ -38,11 +38,21 @@ internal static class BenchmarkPtyCommands
     /// Persistent child for the steady-state benchmarks: answers each input byte with an echo or a flood of
     /// <paramref name="floodBytes"/> (see <see cref="BenchmarkServeSession"/>).
     /// </summary>
+    /// <remarks>
+    /// A process that <c>dotnet-trace</c> started (the <c>--alloc-probe</c> run under a trace) has
+    /// <c>DOTNET_DiagnosticPorts</c> set to suspend until the tracer connects. The serve child, a .NET program too, would
+    /// inherit it and wait for a tracer that never connects to it, so it starts without the variable then.
+    /// </remarks>
     internal static PtyStartInfo Serve(int floodBytes, string conPty) =>
         Spawn(ResolveBenchmarkChildPath(), ServeArguments(floodBytes)) with
         {
             ConPty = conPty == ConPtyOutOfBand ? LoadOutOfBandConPty() : null,
+            Environment = Environment.GetEnvironmentVariable(DiagnosticPorts) is null
+                ? null
+                : new Dictionary<string, string?> { [DiagnosticPorts] = null },
         };
+
+    private const string DiagnosticPorts = "DOTNET_DiagnosticPorts";
 
     /// <summary>The serve child's path, for libraries other than MiniPty to start it.</summary>
     internal static string BenchmarkChildPath => ResolveBenchmarkChildPath();

@@ -131,6 +131,48 @@ jobs:
             "$exe" --smoke
           fi
 
+  # Temporary (improvement plan I7): splits a macOS session start into process creation, the terminal, the spawn
+  # helper and MiniPty's own work, on the benchmark's runner and on the Intel one. Remove this job once the breakdown
+  # is recorded. It does not gate build-complete.
+  macos-start-probe:
+    name: macOS start probe (${{ matrix.os }}, temporary)
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-26-intel]
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Build
+        shell: bash
+        run: |
+          dotnet build src/MiniPty.Benchmarks/MiniPty.Benchmarks.csproj -c Release
+          cc -O2 -Wall -o "$RUNNER_TEMP/start-probe" scripts/macos-start-probe/start-probe.c
+      # Each pass runs the native probe and then MiniPty's whole start, for /usr/bin/true and for the benchmark's
+      # sh -c 'exit 0'. Two passes show how much the runner drifts.
+      - name: Probe
+        shell: bash
+        run: |
+          out=src/MiniPty.Benchmarks/bin/Release/net10.0
+          sysctl -n machdep.cpu.brand_string hw.ncpu
+          for pass in 1 2; do
+            echo "== pass $pass"
+            "$RUNNER_TEMP/start-probe" "$out/minipty_spawn_helper" 300 /usr/bin/true
+            "$out/MiniPty.Benchmarks" --start-probe 300 /usr/bin/true
+            "$RUNNER_TEMP/start-probe" "$out/minipty_spawn_helper" 300 /bin/sh -c 'exit 0'
+            "$out/MiniPty.Benchmarks" --start-probe 300
+          done
+
   # musl has no hosted runner, so the suite runs once in an Alpine container, on x64, where the runner can run
   # JavaScript actions inside Alpine. The SDK image is pinned like every other image here (SDK 10.0.403 on Alpine
   # 3.24 when pinned). build-base compiles the shim; the tests' children need nothing beyond busybox.
