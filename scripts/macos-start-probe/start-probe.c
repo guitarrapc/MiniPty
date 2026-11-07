@@ -16,8 +16,12 @@
  *   helper-name  as helper, but passing the program's file name alone, so the helper searches PATH for it as it does
  *                for MiniPty's "sh".
  *
- * Before timing, each terminal variant runs /bin/sh -c 'exec 3</dev/tty' once (sh -c ... for helper-name): /dev/tty
- * opens only for a process that has a controlling terminal, so its exit status shows which variants have one.
+ * Before timing, each terminal variant starts this probe once more as `start-probe --check`, which reports four
+ * things about itself: whether it leads its session, whether /dev/tty opens (it has some controlling terminal),
+ * whether its stdin is that terminal (tcgetpgrp works only on the caller's controlling terminal), and whether its
+ * group is the terminal's foreground group. The helper's start, which takes the slave as the controlling terminal,
+ * shows what a start with job control reports. The probe reports the same for itself, since a child that kept the
+ * probe's own controlling terminal would also open /dev/tty.
  *
  * MiniPty's whole start, from Pty.Start to the exit, is timed on the same runner by the benchmarks' --start-probe.
  * This probe leaves out what MiniPty adds around the spawn and does not depend on the helper: the start report pipe,
@@ -29,6 +33,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -51,11 +56,15 @@ enum { Spawn, Pty, Open, Helper, HelperName };
 
 static const char *const variant_names[Variants] = { "spawn", "pty", "open", "helper", "helper-name" };
 
+/* What --check reports, one bit each, as its exit status. */
+enum { CheckLeader = 1, CheckTty = 2, CheckStdinIsTty = 4, CheckForeground = 8 };
+
 static unsigned long long now_ns(void)
 {
     return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 }
 
+/* The exit status of a child, or -1 when it did not exit normally. */
 static int wait_child(pid_t pid)
 {
     int status;
@@ -65,7 +74,48 @@ static int wait_child(pid_t pid)
             return -1;
     }
 
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* The --check bits of the calling process. */
+static int check_self(void)
+{
+    int bits = 0;
+    int fd;
+    pid_t foreground;
+
+    if (getsid(0) == getpid())
+        bits |= CheckLeader;
+
+    fd = open("/dev/tty", O_RDWR | O_NOCTTY);
+    if (fd >= 0) {
+        bits |= CheckTty;
+        close(fd);
+    }
+
+    foreground = tcgetpgrp(STDIN_FILENO);
+    if (foreground > 0) {
+        bits |= CheckStdinIsTty;
+        if (foreground == getpgrp())
+            bits |= CheckForeground;
+    }
+
+    return bits;
+}
+
+static void print_check(const char *name, int bits)
+{
+    if (bits < 0) {
+        printf(" %s failed;", name);
+        return;
+    }
+
+    printf(" %s leader %s, /dev/tty %s, stdin %s, foreground %s;",
+        name,
+        (bits & CheckLeader) != 0 ? "yes" : "no",
+        (bits & CheckTty) != 0 ? "yes" : "no",
+        (bits & CheckStdinIsTty) != 0 ? "yes" : "no",
+        (bits & CheckForeground) != 0 ? "yes" : "no");
 }
 
 /* A master and its open slave, as MiniPty opens them before the spawn, and the slave's name. */
@@ -98,11 +148,11 @@ fail:
 }
 
 /*
- * One start of a variant, until the child is reaped; returns its time in nanoseconds, or 0 when the start failed or
- * the child exited with a status other than 0. argv is the program's (spawn, pty, open) or the helper's (helper,
+ * One start of a variant, until the child is reaped; returns its time in nanoseconds, or 0 when the start failed.
+ * Stores the child's exit status (see wait_child). argv is the program's (spawn, pty, open) or the helper's (helper,
  * helper-name).
  */
-static unsigned long long start_once(int variant, char **argv)
+static unsigned long long start_once(int variant, char **argv, int *exit_status)
 {
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attrs;
@@ -115,13 +165,15 @@ static unsigned long long start_once(int variant, char **argv)
     int ok;
     pid_t pid;
 
+    *exit_status = -1;
     started = now_ns();
     if (variant == Spawn) {
         err = posix_spawn(&pid, argv[0], NULL, NULL, argv, environ);
         if (err != 0)
             return 0;
 
-        return wait_child(pid) == 0 ? now_ns() - started : 0;
+        *exit_status = wait_child(pid);
+        return now_ns() - started;
     }
 
     if (open_terminal(&master, &slave, name) != 0)
@@ -155,10 +207,21 @@ static unsigned long long start_once(int variant, char **argv)
     posix_spawn_file_actions_destroy(&actions);
     posix_spawnattr_destroy(&attrs);
     /* MiniPty keeps the slave open until it closes the master; both close after the exit here. */
-    ok = err == 0 && wait_child(pid) == 0;
+    ok = err == 0;
+    if (ok)
+        *exit_status = wait_child(pid);
     close(slave);
     close(master);
     return ok ? now_ns() - started : 0;
+}
+
+/* One timed start that must exit with 0; returns its time in nanoseconds, or 0. */
+static unsigned long long timed_start(int variant, char **argv)
+{
+    int exit_status;
+    unsigned long long elapsed = start_once(variant, argv, &exit_status);
+
+    return exit_status == 0 ? elapsed : 0;
 }
 
 /* argv for the helper: minipty_spawn_helper <program> [arguments...]. */
@@ -188,8 +251,10 @@ static int compare_ns(const void *a, const void *b)
 
 int main(int argc, char **argv)
 {
-    static char *check_arguments[] = { "-c", "exec 3</dev/tty" };
-    static char *check_program_argv[] = { "/bin/sh", "-c", "exec 3</dev/tty", NULL };
+    static char check_flag[] = "--check";
+    static char self[PATH_MAX];
+    char *check_program_argv[] = { self, check_flag, NULL };
+    char *check_arguments[] = { check_flag };
     unsigned long long *times[Variants];
     char **run_argv[Variants];
     char **check_argv[Variants];
@@ -199,7 +264,10 @@ int main(int argc, char **argv)
     int i;
     int v;
 
-    if (argc < 4 || strchr(argv[3], '/') == NULL) {
+    if (argc == 2 && strcmp(argv[1], check_flag) == 0)
+        _exit(check_self());
+
+    if (argc < 4 || strchr(argv[3], '/') == NULL || realpath(argv[0], self) == NULL) {
         fprintf(stderr, "usage: %s <path to minipty_spawn_helper> <rounds> <program path> [arguments...]\n", argv[0]);
         return 2;
     }
@@ -215,11 +283,11 @@ int main(int argc, char **argv)
     run_argv[Spawn] = run_argv[Pty] = run_argv[Open] = &argv[3];
     run_argv[Helper] = helper_argv_for(helper, argv[3], &argv[4], argc - 4);
     run_argv[HelperName] = helper_argv_for(helper, file_name, &argv[4], argc - 4);
+    /* The probe is not on PATH, so helper-name's check runs through the helper by path, as helper's does. */
     check_argv[Spawn] = NULL;
     check_argv[Pty] = check_argv[Open] = check_program_argv;
-    check_argv[Helper] = helper_argv_for(helper, "/bin/sh", check_arguments, 2);
-    check_argv[HelperName] = helper_argv_for(helper, "sh", check_arguments, 2);
-    if (run_argv[Helper] == NULL || run_argv[HelperName] == NULL || check_argv[Helper] == NULL || check_argv[HelperName] == NULL)
+    check_argv[Helper] = check_argv[HelperName] = helper_argv_for(helper, self, check_arguments, 1);
+    if (run_argv[Helper] == NULL || run_argv[HelperName] == NULL || check_argv[Helper] == NULL)
         return 1;
 
     for (v = 0; v < Variants; v++) {
@@ -229,13 +297,17 @@ int main(int argc, char **argv)
     }
 
     printf("start-probe: controlling terminal:");
-    for (v = Pty; v < Variants; v++)
-        printf(" %s %s", variant_names[v], start_once(v, check_argv[v]) != 0 ? "yes" : "no");
+    print_check("probe", check_self());
+    for (v = Pty; v <= Helper; v++) {
+        int bits;
+
+        print_check(variant_names[v], start_once(v, check_argv[v], &bits) != 0 ? bits : -1);
+    }
     printf("\n");
 
     for (i = 0; i < WarmUpRounds; i++) {
         for (v = 0; v < Variants; v++) {
-            if (start_once(v, run_argv[v]) == 0) {
+            if (timed_start(v, run_argv[v]) == 0) {
                 fprintf(stderr, "%s start failed (errno %d)\n", variant_names[v], errno);
                 return 1;
             }
@@ -244,7 +316,7 @@ int main(int argc, char **argv)
 
     for (i = 0; i < rounds; i++) {
         for (v = 0; v < Variants; v++) {
-            times[v][i] = start_once(v, run_argv[v]);
+            times[v][i] = timed_start(v, run_argv[v]);
             if (times[v][i] == 0) {
                 fprintf(stderr, "%s start failed in round %d (errno %d)\n", variant_names[v], i + 1, errno);
                 return 1;
