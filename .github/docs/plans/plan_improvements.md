@@ -11,7 +11,7 @@ The items below came from a review of the library as a whole. Each is closed by 
 **Status:** Phase 1 done on branch `improve` (2026-11-07), not yet merged. I2 and the bridge half of I3 are done. The echo half of I3 is fixed in the test: a temporary trace, since removed, found the test's own thread holding the slow echoes on macOS, not MiniPty, and the paced test passed 20 runs of 20 there; see [Phase 1](#phase-1-trustworthy-ci-i3-i2). Phase 1 closes when `improve` is merged.
 
 Phase 2 is done on the same branch, also not yet merged; see [Phase 2](#phase-2-current-figures-i1-i5-i7).
-- **I1:** three full runs hold every gate but the in-box keystroke. That one holds in a local A/B, and the cost behind it is located and recorded.
+- **I1:** three full runs hold every gate but the in-box keystroke ratio. A local A/B traced its move to the benchmark's own timing, not to a cost.
 - **I5:** the bytes are one-time costs, and no flood allocates.
 - **I7:** the helper stays, since `posix_spawn` cannot give the child its controlling terminal.
 
@@ -378,7 +378,7 @@ This phase measures `main` once the Windows Server 2022 changes have landed ther
   | Windows out-of-band keystroke ratio, 0.978 | 0.943 | 0.972 | 1.005 | yes, all three |
   | Windows out-of-band flood ratio, 0.905 | 0.857 | 0.895 | 0.922 | yes, all three |
   | Windows in-box flood ratio, 1.000 | 0.974 | 1.000 | 0.969 | yes, all three |
-  | Windows in-box keystroke ratio, 0.745 | 0.989 | 0.931 | 1.085 | no run on CI; +2–3% in a local A/B, below |
+  | Windows in-box keystroke ratio, 0.745 | 0.989 | 0.931 | 1.085 | no run on CI; locally the benchmark's timing, below |
   | macOS flood, 38.9–64.4 MiB/s | 46.3 | 60.8 | 58.7 | yes, all three |
   | Start, Linux 1.569 ms | 0.616 | 0.522 | 0.858 | yes, faster |
   | Start, macOS 10.271 ms | 10.077 | 9.762 | 5.606 | yes |
@@ -387,13 +387,13 @@ This phase measures `main` once the Windows Server 2022 changes have landed ther
   | Start in a large host, 2 GiB against none | Linux 0.0%, macOS +7.6%, Windows +1.7% | +2.8%, −14.8%, −1.0% | 0.0%, +0.9%, −3.4% | yes: no start was more than 10% slower |
 
   - **The Windows start in R1 is the runner's CPU, not the code.** R1 moved from an AMD EPYC 7763 to an Intel Xeon 8573C. R2, on the baseline's CPU, took 17.29 ms (+2.5%). Locally, three alternating rounds of `Session_Exit0_WaitForExit` took 39.15–39.77 ms at `5ca042f` and 37.86–39.98 ms on the current code.
-  - **The in-box keystroke ratio swings with the runner, but a small cost is real.**
+  - **The in-box keystroke ratio moves with the runner and with the benchmark's own timing, not with a cost.**
     - **CI:** the in-box ConPTY's round trip follows its frame schedule, and both libraries' P50 ranged 10.6–14.4 ms over the four runs, so the ratio moved by 25–46%.
-    - **Locally:** on Windows 11 (build 26200) the round trip held within 0.1 ms per version. MiniPty's P50 rose from 7.21–7.48 ms at `5ca042f` to 7.42–7.66 ms. Porta.Pty's stayed at 7.43–7.70 ms, and the out-of-band round trip did not move.
-    - **Bisect:** the rise begins at `d2f772a`. That commit, with the old exit watcher swapped back in, measured as `5ca042f` did. So the cost comes from observing exits with `SetThreadpoolWait`. Why a wait on the child's process handle delays the in-box host is not known.
-    - **Recorded:** it is under [next_todo.md](../next_todo.md#open).
+    - **Locally:** on Windows 11 (build 26200) the round trip held within 0.1 ms per version. MiniPty's P50 rose from 7.21–7.48 ms at `5ca042f` to 7.42–7.66 ms. Porta.Pty's stayed at 7.43–7.70 ms, and the out-of-band round trip did not move. The rise begins at `d2f772a`, which replaced the exit watcher.
+    - **Cause:** the earlier watcher pinned an array through its wait. That made each forced GC before an iteration about 0.1 ms longer, 390–470 μs against 260–320 μs. The in-box host's round trip is shorter the later a keystroke comes after the previous echo, so the longer GC measured as a shorter round trip.
+    - **Checks:** the current watcher with a pinned array added measured as the old one did, and without the forced GC both measured the same. No keystroke costs more ([platform lessons](../specs/platform_support.md#lessons-learned)).
   - **The large-host table:** the updater writes a `startup-host-memory` block from `PtyStartupHostMemoryBenchmarks`, and the README has it.
-  - **Done once `improve` is merged:** the gates hold, apart from the in-box keystroke. That one holds in the local A/B, and its cost is located and recorded.
+  - **Done once `improve` is merged:** the gates hold, apart from the in-box keystroke ratio, whose move comes from the benchmark's timing.
 - **I5, the allocation probe (`--alloc-probe` in the benchmarks).** It runs the benchmarks' 1 MiB flood round after round and records each round's bytes on every thread and on the thread that waits, the pool's threads and new OS threads. Locally on Windows 11 (build 26200), 200 rounds per case:
   - **A thread added during the run allocated 1,072 B,** in the round the pool went from 3 to 4 threads. `dotnet-trace` showed `PortableThreadPool.CreateWorkerThread` and the new worker's thread locals.
   - **Not threads, each once per process:**
