@@ -159,17 +159,20 @@ jobs:
           dotnet build src/MiniPty.Benchmarks/MiniPty.Benchmarks.csproj -c Release
           cc -O2 -Wall -o "$RUNNER_TEMP/start-probe" scripts/macos-start-probe/start-probe.c
       # Each pass runs the native probe and then MiniPty's whole start, for /usr/bin/true and for the benchmark's
-      # sh -c 'exit 0'. Two passes show how much the runner drifts.
+      # sh -c 'exit 0', whose sh MiniPty finds on PATH; /bin/sh -c 'exit 0' shows that search's share. Two passes show
+      # how much the runner drifts.
       - name: Probe
         shell: bash
         run: |
           out=src/MiniPty.Benchmarks/bin/Release/net10.0
           sysctl -n machdep.cpu.brand_string hw.ncpu
+          echo "PATH entries: $(echo "$PATH" | tr ':' '\n' | wc -l | tr -d ' '), sh: $(type -P sh), true: $(type -P true)"
           for pass in 1 2; do
             echo "== pass $pass"
             "$RUNNER_TEMP/start-probe" "$out/minipty_spawn_helper" 300 /usr/bin/true
             "$out/MiniPty.Benchmarks" --start-probe 300 /usr/bin/true
             "$RUNNER_TEMP/start-probe" "$out/minipty_spawn_helper" 300 /bin/sh -c 'exit 0'
+            "$out/MiniPty.Benchmarks" --start-probe 300 /bin/sh -c 'exit 0'
             "$out/MiniPty.Benchmarks" --start-probe 300
           done
 

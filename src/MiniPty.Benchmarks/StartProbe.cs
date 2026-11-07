@@ -30,7 +30,7 @@ internal static class StartProbe
         }
 
         var startInfo = args.Length > 1
-            ? new PtyStartInfo { FileName = args[1], Arguments = args[2..] }
+            ? new PtyStartInfo { FileName = args[1], Arguments = args[2..], Size = new(BenchmarkPtyCommands.Columns, BenchmarkPtyCommands.Rows) }
             : BenchmarkPtyCommands.Exit0();
         for (var i = 0; i < WarmUpRounds; i++)
             await StartOnceAsync(startInfo);
