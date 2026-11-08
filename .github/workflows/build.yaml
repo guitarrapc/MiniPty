@@ -386,6 +386,32 @@ jobs:
         shell: bash
         run: bash scripts/run-nuget-smoke-in-container.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}" "${{ matrix.image }}"
 
+  # Temporary (improvement plan I4): measures whether closing an in-box ConPTY before its first output loses a fast
+  # child's output, on a build without ReleasePseudoConsole and on one with it. Remove this job and
+  # scripts/legacy-close-probe.cs once the result is recorded. It does not gate build-complete.
+  probe-legacy-host-close:
+    name: Probe in-box ConPTY close (${{ matrix.os }}, temporary)
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Run the probe
+        shell: bash
+        run: dotnet run scripts/legacy-close-probe.cs
+
   build-complete:
     needs: [build, test-musl, test-old-kernel-paths, freebsd-native, test-freebsd, nuget-smoke]
     runs-on: ubuntu-24.04

@@ -15,9 +15,9 @@ Phase 2 is done on the same branch, also not yet merged; see [Phase 2](#phase-2-
 - **I5:** the bytes are one-time costs, and no flood allocates.
 - **I7:** the helper stays, since `posix_spawn` cannot give the child its controlling terminal.
 
-Phases 3 and 4 are in progress on the same branch (2026-11-08); see [Phase 3](#phase-3-windows-before-24h2-i4) and [Phase 4](#phase-4-freebsd-i6).
-- **I4:** the smoke test runs on windows-2022, with the in-box ConPTY, and the README states the Server 2022 differences. The VM runs are postponed.
-- **I6:** kept, with a compile check and with tests. The suite passes in a FreeBSD guest; the CI jobs have not run yet.
+Phases 3 and 4 are done on the same branch (2026-11-08), except Phase 3's VM runs, which are postponed; see [Phase 3](#phase-3-windows-before-24h2-i4) and [Phase 4](#phase-4-freebsd-i6).
+- **I4:** the smoke test passes on windows-2022 with the in-box ConPTY, the startup benchmark ran there, and the README states the Server 2022 differences. The VM runs are postponed.
+- **I6:** kept, with a compile check and with tests, both passing in CI.
 
 The CI evidence in the findings comes from the Build runs of 2026-11-05.
 
@@ -459,8 +459,11 @@ The README part can land first, worded as measured on Server 2022.
 
 **Results (2026-11-07):**
 
-- **The smoke test runs on windows-2022.** Until now the smoke on Windows ran the child on the out-of-band ConPTY only, so adding the runner alone would not have run the in-box host there. It now runs the child on the in-box ConPTY first, on every Windows runner. Locally on build 26200 both passed, under `dotnet run` and after a NativeAOT publish.
-- **The startup benchmark can run on windows-2022.** The benchmark workflow takes the Windows runner as an input. The README's update runs only with windows-2025, so a windows-2022 run leaves the README alone.
+- **The smoke test passes on windows-2022.** Until now the smoke on Windows ran the child on the out-of-band ConPTY only, so adding the runner alone would not have run the in-box host there. It now runs the child on the in-box ConPTY first, on every Windows runner. Both passed, under `dotnet run` and after a NativeAOT publish, locally on build 26200 and in CI on windows-2022 and windows-2025 ([42439618631](https://github.com/guitarrapc/MiniPty/actions/runs/42439618631), 2026-11-08).
+- **The startup benchmark ran on windows-2022** ([42439620940](https://github.com/guitarrapc/MiniPty/actions/runs/42439620940), 2026-11-08). The benchmark workflow takes the Windows runner as an input, and the README's update runs only with windows-2025. Against windows-2025 ([Verification](../specs/platform_support.md#verification)):
+  - **Start through disposal:** about the same, 12.6 ms against 11.9 ms.
+  - **Reading output to its end:** about 100 ms more, the post-exit drain's quiet interval: 119 ms against 17 ms.
+  - **A child that writes nothing, run to completion:** 1,018 ms against 15 ms. The completion waited out its 1 s grace, because the host wrote nothing and a one-shot completion does not close before its first read. Recorded under [next_todo.md](../next_todo.md#open), not fixed.
 - **The README states the drawing differences measured on Server 2022,** recommends the out-of-band ConPTY for terminal emulators on those builds, and says to await `DisposeAsync` before the process exits.
 - **The VM runs are postponed.** Builds 19045, 22631, and 17763 stay unmeasured, under [next_todo.md](../next_todo.md#unverified).
 
@@ -482,7 +485,7 @@ This phase is independent of the others and starts after the decision.
   - **One gap recorded, not fixed.** A FreeBSD consumer does not wait on its own thread for a flood, so a flood is handed over about once per two reads ([next_todo.md](../next_todo.md#open)).
   - **The harness.** Some tests start the test host again, whose apphost was built on Linux, so a script stands in for it. The image's first-boot `freebsd-update` is turned off through `/etc/rc.conf.d`.
 - **With the fixes, the suite passed in a guest without KVM,** twice, once through the committed harness (776 and 777 passed; the flood tests that need 4.1 MB/s skipped themselves).
-- **Not finished:** the first runs of `freebsd-native` and `test-freebsd` in CI. Phase 4 closes once they pass.
+- **Done: both CI jobs passed on their first run** ([42439618631](https://github.com/guitarrapc/MiniPty/actions/runs/42439618631), 2026-11-08). `freebsd-native` passed on all four targets. `test-freebsd`, with KVM, passed all 779 tests with none skipped, in 1 min 1 s.
 
 ## Not in This Plan
 
