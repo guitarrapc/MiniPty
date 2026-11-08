@@ -82,7 +82,7 @@ A temporary probe then ran MiniPty's completion with a shorter grace on the same
 
 The 26100 host writes its frame without the close (86 bytes for `cmd /c exit 0`), and it ends with the child, so the grace did not matter there.
 
-So on an in-box ConPTY without `ReleasePseudoConsole`, a one-shot completion no longer waits for its first read: the post-exit drain closes the pseudo-console after 100 ms of quiet, as it does once output has been read ([lifecycle lessons](lifecycle.md#lessons-learned)). Builds before 20348 get the same, unmeasured, as with the mitigations above.
+So on an in-box ConPTY without `ReleasePseudoConsole`, a one-shot completion no longer waits for its first read: the post-exit drain closes the pseudo-console after 100 ms of quiet, as it does once output has been read ([lifecycle lessons](lifecycle.md#lessons-learned)). With that change `Session_Exit0_Bytes` took 124 ms on windows-2022, level with `Session_Echo_Bytes` (125 ms). Builds before 20348 get the same, unmeasured, as with the mitigations above.
 
 **MiniPty's fallbacks for older Linux kernels run in CI under seccomp, and under QEMU by hand.** CI's Linux jobs, the containers included, run on the hosted Ubuntu 24.04 runners, whose kernels (6.8 or later) have every call MiniPty uses. A container runs on its host's kernel, so an old distribution's image does not test an old kernel. Two methods make the fallbacks run:
 
