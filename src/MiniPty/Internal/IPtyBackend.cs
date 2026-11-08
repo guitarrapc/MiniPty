@@ -95,6 +95,14 @@ internal interface IPtyBackend : IDisposable
     /// a loaded host schedules its threads.
     /// </summary>
     public int PostExitQuietMs { get; }
+    /// <summary>
+    /// Whether closing the transport makes it send the output it still holds, so that the post-exit drain may close it
+    /// on quiet before anything was read. Without it, a one-shot completion waits for its first read, or for its grace,
+    /// because ConPTY can send its first frame after a fast child has exited. True only for an in-box ConPTY without
+    /// <c>ReleasePseudoConsole</c>: build 20348's host writes its frame as it closes, and for a child that writes
+    /// nothing it writes nothing before the close, so the wait cost that child the whole grace.
+    /// </summary>
+    public bool CloseSendsHeldOutput { get; }
     /// <summary>Gets whether the transport was closed, after which reads report end of output without blocking.</summary>
     public bool IsOutputClosed { get; }
     /// <summary>

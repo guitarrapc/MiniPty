@@ -73,7 +73,16 @@ MiniPty cannot change either. The TUI smoke checks exact cells, so it does not r
 
 - **Start, exit, and disposal cost the same.** `Session_Exit0_WaitForExit` took 12.6 ms, against 11.9 ms on windows-2025. Each session allocated 0.4–0.6 KB more, which matches disposal's deferred close of the output pipe (a timer and two continuations).
 - **Reading output to its end costs about 100 ms more.** `Session_Echo_Bytes` took 119 ms against 17 ms, and `Session_32KiB_Bytes` 187 ms against 65 ms. Without `ReleasePseudoConsole` the output ends only when the post-exit drain closes the pseudo-console, after 100 ms of quiet.
-- **A child that writes nothing costs a full second.** `Session_Exit0_Bytes` took 1,018 ms against 15 ms. A one-shot completion closes the transport only after its first read, because ConPTY can send its first frame after a fast child has exited, or else once `OutputDrainGrace` (1 s) has passed. The 20348 host wrote nothing for that child, so the completion waited out the grace ([next_todo.md](../next_todo.md#open)).
+- **A child that writes nothing costs a full second.** `Session_Exit0_Bytes` took 1,018 ms against 15 ms. A one-shot completion closes the transport only after its first read, because ConPTY can send its first frame after a fast child has exited, or else once `OutputDrainGrace` (1 s) has passed. For that child the 20348 host writes nothing until the pseudo-console closes, so the completion waited out the grace. The wait was then dropped for such hosts, below.
+
+A temporary probe then ran MiniPty's completion with a shorter grace on the same day, 30 runs per case and 80 for 8 sessions at once, on windows-2022 and windows-2025. On build 20348, closing at the drain's first tick after the exit lost nothing in 170 runs, before any read for `exit 0`:
+
+- **`cmd /c exit 0`:** the host wrote its frame as it closed: 48 bytes, the clear, the title, and the shown cursor. They are the same 48 bytes it writes after a full second, and the completion took 31 ms instead of 1,016 ms.
+- **`echo` and 40 lines:** every run had the last line, also with 8 sessions at once, in 31 ms against 124 ms with the 100 ms quiet interval.
+
+The 26100 host writes its frame without the close (86 bytes for `cmd /c exit 0`), and it ends with the child, so the grace did not matter there.
+
+So on an in-box ConPTY without `ReleasePseudoConsole`, a one-shot completion no longer waits for its first read: the post-exit drain closes the pseudo-console after 100 ms of quiet, as it does once output has been read ([lifecycle lessons](lifecycle.md#lessons-learned)). Builds before 20348 get the same, unmeasured, as with the mitigations above.
 
 **MiniPty's fallbacks for older Linux kernels run in CI under seccomp, and under QEMU by hand.** CI's Linux jobs, the containers included, run on the hosted Ubuntu 24.04 runners, whose kernels (6.8 or later) have every call MiniPty uses. A container runs on its host's kernel, so an old distribution's image does not test an old kernel. Two methods make the fallbacks run:
 

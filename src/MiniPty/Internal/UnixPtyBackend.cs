@@ -806,6 +806,13 @@ internal static partial class UnixPtyBackend
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
         /// <summary>
+        /// A master reports end of output once its last slave closes, so the drain closes one mostly when another
+        /// process keeps the slave open. Whether that close loses output was not measured, so a completion keeps waiting
+        /// for its first read.
+        /// </summary>
+        public bool CloseSendsHeldOutput => false;
+
+        /// <summary>
         /// Reads output on the watcher's loop (epoll on Linux, kqueue on macOS and FreeBSD), which holds no thread of the
         /// session's own and also writes queued input when the master can take more. A master the loop cannot register
         /// fails the start: no other path reads the session.

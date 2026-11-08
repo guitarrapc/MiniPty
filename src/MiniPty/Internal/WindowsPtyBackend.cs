@@ -1261,6 +1261,14 @@ internal static class WindowsPtyBackend
 
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
+        /// <summary>
+        /// A legacy host writes what it holds as it closes. Build 20348's host writes nothing for a child that writes
+        /// nothing until the close, and a close at the drain's first tick after the exit lost no output there. The other
+        /// hosts end with the child, so the drain rarely closes them, and how their close treats a pending frame was not
+        /// measured.
+        /// </summary>
+        public bool CloseSendsHeldOutput => _legacyHost;
+
         /// <summary>Reads output on the completion-port loop that every session shares, holding no thread of its own.</summary>
         public void StartOutput(PtyOutputPump pump)
         {
