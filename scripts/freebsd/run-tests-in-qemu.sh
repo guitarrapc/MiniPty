@@ -6,7 +6,7 @@
 #   - The guest is FreeBSD 14.5's cloud-init image from download.freebsd.org, pinned by SHA-256.
 #   - Microsoft publishes no .NET for FreeBSD, and FreeBSD's packages stop at .NET 9. .NET 10 comes from
 #     github.com/Thefrank/dotnet-freebsd-crossbuild, which builds it from Microsoft's sources for FreeBSD 14, pinned by
-#     SHA-512.
+#     SHA-512. When the release's download link fails, the same asset is fetched through the API.
 #   - The tests are built in the .NET SDK image without the Linux shim. The guest compiles libminipty_unix with its own
 #     cc, as MiniPty.csproj does on FreeBSD, and installs .NET's dependencies with pkg, so it needs the network.
 # The guest reads its instructions (./user-data) from a disk labelled cidata through nuageinit, FreeBSD's cloud-init,
@@ -33,6 +33,9 @@ image_url="https://download.freebsd.org/releases/VM-IMAGES/14.5-RELEASE/amd64/La
 image_sha256=a2a8cd84cd59077225a0e75ead852e8a08fe26f9ab251a96d5a4fd4fe1db4454
 dotnet=dotnet-sdk-10.0.113-freebsd-x64.tar.gz
 dotnet_url="https://github.com/Thefrank/dotnet-freebsd-crossbuild/releases/download/v10.0.113-amd64-freebsd-14/$dotnet"
+# The same file through the API (asset 642238327 of that release). On 2026-11-08 the download link above returned 504
+# on every try, from CI and locally, and for other repositories' releases too, while this endpoint served the file.
+dotnet_asset_url="https://api.github.com/repos/Thefrank/dotnet-freebsd-crossbuild/releases/assets/642238327"
 dotnet_sha512=3fc6f4b3424cbe3716499823f612418d16934022f1e47e6d7c13dba9139490d391dfac76b3dc62004a4fd34d62f48c0fc312e76959793ca9fb85ea125f330ff4
 
 kvm=()
@@ -66,7 +69,8 @@ docker run --rm -v "$volume:/w" "$host_image" sh -c "
   if [ -f /w/$dotnet ]; then
     echo 'dotnet cached'
   else
-    curl -fsSL --retry 5 --retry-all-errors -o /w/$dotnet.part '$dotnet_url'
+    curl -fsSL --retry 5 --retry-all-errors -o /w/$dotnet.part '$dotnet_url' ||
+      curl -fsSL --retry 5 --retry-all-errors -H 'Accept: application/octet-stream' -o /w/$dotnet.part '$dotnet_asset_url'
     echo '$dotnet_sha512  /w/$dotnet.part' | sha512sum -c -
     mv /w/$dotnet.part /w/$dotnet
   fi
