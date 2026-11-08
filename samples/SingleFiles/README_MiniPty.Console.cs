@@ -4,8 +4,8 @@
 #:property ImplicitUsings=enable
 #:property AllowUnsafeBlocks=true
 #:property PublishAot=true
-#:package MiniPty@1.4.0
-#:package MiniPty.Console@1.4.0
+#:package MiniPty@1.5.0
+#:package MiniPty.Console@1.5.0
 
 // The MiniPty.Console section of README.md's Quick start, as a runnable file (from an interactive terminal):
 //   dotnet samples/SingleFiles/README_MiniPty.Console.cs

@@ -4,7 +4,7 @@
 #:property ImplicitUsings=enable
 #:property AllowUnsafeBlocks=true
 #:property PublishAot=true
-#:package MiniPty@1.4.0
+#:package MiniPty@1.5.0
 
 // The MiniPty section of README.md's Quick start, as a runnable file: dotnet samples/SingleFiles/README_MiniPty.cs
 // It uses the published NuGet package, as an application that installs MiniPty does. Keep it in step with the README.

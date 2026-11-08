@@ -25,7 +25,7 @@ Full-screen TUIs and GUI terminal windows have their own projects: [TuiDemo](../
 
 ## README snippets
 
-`README_MiniPty.cs`, `README_MiniPty.Capture.cs`, and `README_MiniPty.Console.cs` hold the [root README](../../README.md#quick-start)'s Quick start code as runnable files. They reference the NuGet packages (`#:package MiniPty@1.4.0`), so they show exactly what an application that installs MiniPty writes.
+`README_MiniPty.cs`, `README_MiniPty.Capture.cs`, and `README_MiniPty.Console.cs` hold the [root README](../../README.md#quick-start)'s Quick start code as runnable files. They reference the NuGet packages (`#:package MiniPty@1.5.0`), so they show exactly what an application that installs MiniPty writes.
 
 ## Run a command for its result
 

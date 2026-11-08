@@ -15,7 +15,7 @@
     <!-- NuGet -->
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <IsPackable>false</IsPackable>
-    <Version>1.4.1</Version>
+    <Version>1.5.0</Version>
     <Authors>guitarrapc</Authors>
     <Copyright>© guitarrapc</Copyright>
     <PackageTags>pty</PackageTags>
