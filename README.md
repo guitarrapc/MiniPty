@@ -10,7 +10,7 @@ NativeAOT-friendly minimal cross-platform pseudo-terminal library for .NET.
 
 **Motivation**
 
-I needed a PTY library for NativeAOT projects, but existing .NET PTY libraries don't reliably work with NativeAOT. MiniPty is a minimal PTY library with a simple API, no third-party dependencies, and in-process backends built for AOT publish.
+I needed a PTY library for high-performance NativeAOT projects. MiniPty is a minimal PTY library with a simple API, no third-party dependencies, and in-process backends built for AOT publish.
 
 ## Features
 
