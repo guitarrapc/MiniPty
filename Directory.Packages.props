@@ -5,9 +5,10 @@
     <NoWarn>$(NoWarn);NU1507</NoWarn>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Targets -->
+    <PackageVersion Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" />
+
     <!-- Tests -->
-    <PackageVersion Include="BenchmarkDotNet" Version="0.15.6" />
-    <!-- Another .NET PTY library, compared with MiniPty by the steady-state benchmarks only. -->
     <PackageVersion Include="Porta.Pty" Version="2.2.3" />
     <PackageVersion Include="Microsoft.Testing.Platform" Version="2.0.2" />
     <PackageVersion Include="TUnit" Version="1.12.111" />
@@ -16,6 +17,8 @@
       binary and takes no dependency: an application supplies the package and opts in with PtyStartInfo.ConPty. This is
       the version MiniPty is verified against; bumping it runs the out-of-band tests in CI.
     -->
-    <PackageVersion Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" />
+
+    <!-- Benchmark -->
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.6" />
   </ItemGroup>
 </Project>

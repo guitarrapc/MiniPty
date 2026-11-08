@@ -6,8 +6,13 @@
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
 
-    <!-- NuGet -->
+    <!-- AOT compatibility -->
     <IsAotCompatible>true</IsAotCompatible>
+
+    <!-- Every warning fails the build: analyzers (nullable, XML docs, trim/AOT) and NuGet vulnerability advisories -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- NuGet -->
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <IsPackable>false</IsPackable>
     <Version>1.4.1</Version>
