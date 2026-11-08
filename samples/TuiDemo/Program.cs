@@ -78,8 +78,8 @@ internal static class DemoHost
     private static async Task<int> RunAutoplayAsync()
     {
         var size = new PtySize(Console.WindowWidth, Console.WindowHeight);
-        // Attach turns on host VT processing for the interactive host; here the host does it itself, and keeps a line
-        // feed in its column, because ConPTY's output moves the cursor down with bare line feeds.
+        // Attach sets these modes for the interactive host; here the host sets them itself: VT processing, and a line
+        // feed that keeps its column, because ConPTY's output moves the cursor down with bare line feeds.
         using var vtOutput = DemoTui.VirtualTerminalOutput.Enable(disableNewlineAutoReturn: true);
         await using var session = Pty.Start(StartInfo(child: true) with { Size = size });
         using var stop = new CancellationTokenSource();

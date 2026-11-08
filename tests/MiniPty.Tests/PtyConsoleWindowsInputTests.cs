@@ -7,7 +7,8 @@ namespace MiniPty.Tests;
 
 /// <summary>
 /// Host console input tests. They share one process-wide console input queue (the attached console or one
-/// allocated per test), so they run one at a time: a concurrent read would consume another test's records.
+/// allocated per test), so they run one at a time, also with <see cref="PtyConsoleTests"/>
+/// (<see cref="HostConsoleGroup"/>): a concurrent read would consume another test's records.
 /// Each test starts from an empty queue. The reset does not absorb an orphaned console read, so a host terminal
 /// that left one behind on detach (conhost keeps a <c>CancelIoEx</c>-cancelled read registered and it swallows the
 /// next record) fails the test that follows as well as the dedicated regression tests.
@@ -16,11 +17,47 @@ namespace MiniPty.Tests;
 /// Without a console (redirected test host where <c>AllocConsole</c> fails) these tests return early, so a green
 /// run does not prove they executed. Run them on a real console after changing the Windows input path.
 /// </remarks>
-[NotInParallel(nameof(PtyConsoleWindowsInputTests))]
+[NotInParallel(HostConsoleGroup.Key)]
 public sealed class PtyConsoleWindowsInputTests
 {
     private const string ReadyMarker = "pty-console-ready";
     private const string EchoMarker = "pty-console-echo";
+
+    /// <summary>
+    /// ConPTY output moves the cursor down with a bare LF and expects the column to stay. A console without
+    /// <c>DISABLE_NEWLINE_AUTO_RETURN</c> also returns to column 1, which drew TuiDemo's Charts <c>disk</c> row over
+    /// the bar labels; TuiDemo's smoke covers that end to end. Both modes start cleared, so the restore shows.
+    /// </summary>
+    [Test]
+    public async Task WindowsHostTerminal_StdoutMode_KeepsLineFeedColumnUntilDispose()
+    {
+        if (!TryAcquireConsole(out var allocatedConsole))
+            return;
+
+        const uint vtModes = ConsoleWindowsInterop.EnableVirtualTerminalProcessing | ConsoleWindowsInterop.DisableNewlineAutoReturn;
+        var stdout = ConsoleWindowsInterop.GetStdHandle(ConsoleWindowsInterop.StdOutputHandle);
+        if (!ConsoleWindowsInterop.GetConsoleMode(stdout, out var original))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+        try
+        {
+            var plain = original & ~vtModes;
+            if (!ConsoleWindowsInterop.SetConsoleMode(stdout, plain))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+
+            uint attached;
+            using (new WindowsHostTerminal())
+                ConsoleWindowsInterop.GetConsoleMode(stdout, out attached);
+            ConsoleWindowsInterop.GetConsoleMode(stdout, out var detached);
+
+            await Assert.That(attached & vtModes).IsEqualTo(vtModes);
+            await Assert.That(detached).IsEqualTo(plain);
+        }
+        finally
+        {
+            ConsoleWindowsInterop.SetConsoleMode(stdout, original);
+            ReleaseConsole(allocatedConsole);
+        }
+    }
 
     [Test]
     public async Task WindowsHostTerminal_ReadInput_SkipsQueuedMouseRecordBeforeKey()

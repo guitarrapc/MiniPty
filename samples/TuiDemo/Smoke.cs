@@ -302,6 +302,10 @@ internal static class Smoke
             var charts = g.Charts(default);
             await ChangesAsync(() => Slice(4, 7, charts.PlotColumns), "braille plot");
             await ChangesAsync(() => Slice(charts.Top, charts.LoadLeft + 6, charts.SparkLength), "cpu sparkline");
+            // The bar labels and the Load panel's disk row share the last row. ConPTY's repaint moves down to the disk
+            // row with a bare LF, so a host console that also returns to column 1 on LF draws it over the labels.
+            await WaitUntilAsync(() => Slice(charts.PageBottom - 2, 3, 3) == "GET" && Slice(charts.Top + 4, charts.LoadLeft + 1, 4) == "disk",
+                "the bar labels and the disk row to share the bottom row");
             await SendAsync(" ");
             await ExpectAsync("Paused: yes", alternate: true);
             await ExpectFrozenAsync(() => Slice(4, 7, charts.PlotColumns), () => Slice(charts.Top, charts.LoadLeft + 6, charts.SparkLength));

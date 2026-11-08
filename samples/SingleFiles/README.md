@@ -121,7 +121,7 @@ using (var input = PtyConsoleInput.Attach(session))
 ```
 
 - MiniPty.Console handles input and the window size. Copying output to stdout stays your job.
-- Write status messages before `Attach`. While attached, stdout on Unix is raw and does not turn `\n` into `\r\n`, so after detaching the sample writes `\r\n` to put the parent shell's prompt at the start of a line.
+- Write status messages before `Attach`. While attached, stdout does not turn `\n` into `\r\n`: on Unix it is raw, and on Windows `Attach` sets `DISABLE_NEWLINE_AUTO_RETURN`, because ConPTY's output moves the cursor down with a bare LF. On Unix, after detaching, the sample writes `\r\n` to put the parent shell's prompt at the start of a line.
 - With `InheritCursor`, attach before the output copy starts; the [TUI demo](../TuiDemo/README.md#using-minipty-with-a-tui) explains why, and covers running full-screen programs.
 - On Windows the sample sets `Console.OutputEncoding = Encoding.UTF8` while the shell runs and restores it afterwards: PTY output is UTF-8, and a console with a legacy code page would misdecode non-ASCII text. MiniPty.Console handles the input side itself.
 

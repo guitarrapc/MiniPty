@@ -94,7 +94,7 @@ This package does **not** observe bytes written through embedder `WriteInputAsyn
 On `Attach`, **MiniPty.Console** configures the **host** terminal for TUI passthrough:
 
 - Host **stdin** enters a mode suitable for raw byte input (not line discipline).
-- Host **stdout** enters a mode suitable for writing PTY output bytes (including VT sequences) without host-side line editing or spurious translation.
+- Host **stdout** enters a mode suitable for writing PTY output bytes (including VT sequences) without host-side line editing or spurious translation. On Windows that is VT processing plus `DISABLE_NEWLINE_AUTO_RETURN`: ConPTY's output moves the cursor down with a bare LF and expects the column to stay, and without that mode the console also returns to column 1.
 
 On `Dispose`, saved host terminal state is **restored**.
 
@@ -211,7 +211,7 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 - Manual validation (2026-06-30): Windows Terminal and Bash (WSL/Linux) with `ConsoleAttach` passed after moving host terminal setup and VT `ReadFile` onto one dedicated input thread.
 - NativeAOT `LibraryImport` must name console APIs with their wide entry points (`PeekConsoleInputW`, `ReadConsoleInputW`, `WriteConsoleInputW`); undecorated names are not exported from `kernel32.dll`.
 - Start the embedder `ReadOutputAsync` pump before `PtyConsoleInput.Attach` so the child cannot block on a full ConPTY output pipe during startup.
-- On Unix, host stdout with `OPOST` off does not map `\n` to `\r\n`; embedders should not write status to stderr after `Attach`, and may emit `\r\n` on stdout after dispose to realign the parent shell prompt.
+- While attached, host stdout does not map `\n` to `\r\n`: on Unix `OPOST` is off, and on Windows `DISABLE_NEWLINE_AUTO_RETURN` is set (since 2026-11-09). Embedders should not write status to stdout or stderr after `Attach`. On Unix they may emit `\r\n` on stdout after dispose to realign the parent shell prompt.
 - Resize polling on a separate task is acceptable on Windows; console handles are process-wide.
 - Manual validation (2026-10-18) in a VT terminal on Windows: a ConPTY session started without `InheritCursor` erased the prompt, the command line, and three lines the host had printed; with it they stayed, the terminal's cursor report reached ConPTY through the input pump, and the child exited by itself.
 - With `InheritCursor`, the order of output pump and `Attach` decides whether the session starts. Measured the same day with host stdout's VT processing turned off first (as in a console whose shell never enabled it): when the pump wrote ConPTY's cursor query 300 ms before `Attach`, nothing answered and the child was still waiting 8 s later; attaching first, the child ran and exited. Pump-first without a delay also worked, but only because `Attach` won the race.
@@ -237,10 +237,15 @@ Use case 2 (one-shot recorded steps) continues to use [Capture](capture.md) only
 - Animation is driven by a clock in the TUI's existing input poll loop, and job state is a pure function of the frame, so tests and the renderer agree without shared state. The clock stops while paused or while the dialog is open, and the screen then emits nothing.
 - Assert the interpreted screen, not raw status strings: ConPTY may send only changed cells. Check animated cells by waiting until they change, not at fixed frames: fixed frames would hide the continuous output being tested, and slow CI runners would fail them. Smoke checks cover Unicode, color, streaming animation and pause, keys, the dialog, resize, alternate-screen/cursor restoration, final output drain, and normal exit on every CI platform except windows-2022; they do not replace physical-keyboard testing or certify all terminal extensions. The in-box host of build 20348 forwards neither the alternate screen nor the hidden cursor, and its rows shift in an emulator that ends a pending wrap at `ESC[K`, as xterm does ([Verification](platform_support.md#verification)).
 - Autoplay and the README recording (2026-11-09). `TuiDemo --autoplay` writes a fixed tour of keys and SGR mouse reports with `WriteInputAsync`, and `--smoke` plays it at a tenth of its pace. Recording it with scenetake on Windows put two ConPTYs in a row, the sample's and the recorder's, with the host's console between them. Two errors appeared that one ConPTY did not show:
-  - ConPTY moves the cursor down with a bare LF and expects the column to stay. A console without `DISABLE_NEWLINE_AUTO_RETURN` also returns to column 1, so the Charts page's `disk` row was drawn over the bar labels. The autoplay host sets that mode with VT processing. `PtyConsoleInput.Attach` sets only VT processing, and the interactive host showed the same misplaced row inside an outer ConPTY.
+  - ConPTY moves the cursor down with a bare LF and expects the column to stay. A console without `DISABLE_NEWLINE_AUTO_RETURN` also returns to column 1, so the Charts page's `disk` row was drawn over the bar labels. The autoplay host sets that mode with VT processing. `PtyConsoleInput.Attach` then set only VT processing, and the interactive host showed the same misplaced row inside an outer ConPTY. `Attach` now sets the mode too; the TuiDemo smoke's console-host pass checks that row, which failed before the fix, and `WindowsHostTerminal_StdoutMode_KeepsLineFeedColumnUntilDispose` checks the mode and its restore.
   - With the mode set, some cells still landed one row and two columns off after the Charts border drags. Replaying the inner ConPTY's bytes into a console in 4 KiB writes did not reproduce it, so the cause likely depends on where writes split. It was not resolved.
 
   The README recording is made on Linux, where the PTYs pass the bytes through unchanged.
+- Two attaches in one process (2026-11-09). `Attach` rejects a second attach only on the same session, but the host console is process-wide. Measured in a real console with two sessions attached at once:
+  - Disposing them in nested order hung. The first attach's `ReadFile` was waiting first, so it took the second attach's wake record, and the second dispose waited for a reader that never woke.
+  - Disposing them in start order returned, but left the console in the attached modes (stdin `0x1f7` → `0x3f8`, stdout `0x7` → `0xf`), because the later attach restored the modes it had seen.
+
+  `PtyConsoleTests` hit the first case whenever the test host had a real console: its attaching tests ran in parallel and the class never finished. Under `dotnet test` output is redirected, those tests return early, and CI never showed it. Tests that use the process console now share one `NotInParallel` key (`HostConsoleGroup`). The library still accepts a second attach on another session.
 
 ## Related Documents
 

@@ -301,7 +301,7 @@ internal static partial class DemoTui
 
     /// <summary>
     /// Turns on VT output processing for this process's Windows console until disposed; elsewhere it does nothing.
-    /// The child and the autoplay host use it. The interactive host gets VT processing from MiniPty.Console's attach.
+    /// The child and the autoplay host use it. The interactive host gets both modes from MiniPty.Console's attach.
     /// </summary>
     internal readonly struct VirtualTerminalOutput : IDisposable
     {

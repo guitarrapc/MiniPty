@@ -20,6 +20,7 @@ internal static partial class ConsoleWindowsInterop
     internal const uint EnableProcessedOutput = 0x0001;
     internal const uint EnableWrapAtEolOutput = 0x0002;
     internal const uint EnableVirtualTerminalProcessing = 0x0004;
+    internal const uint DisableNewlineAutoReturn = 0x0008;
 
     internal const ushort KeyEvent = 0x0001;
     internal const ushort MouseEvent = 0x0002;
