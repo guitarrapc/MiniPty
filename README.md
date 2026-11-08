@@ -6,28 +6,27 @@
 
 # MiniPty
 
-NativeAOT-friendly minimal cross-platform pseudo-terminal library for .NET.
+A minimal, cross-platform pseudo-terminal (PTY) library for .NET with NativeAOT support.
 
 **Motivation**
 
-I needed a PTY library for high-performance NativeAOT projects. MiniPty is a minimal PTY library with a simple API, no third-party dependencies, and in-process backends built for AOT publish.
+I needed a PTY library for high-performance NativeAOT projects. MiniPty provides a simple API, no third-party dependencies, and in-process backends built for NativeAOT publishing.
 
 ## Features
 
 - NativeAOT ready: no winpty, and no helper process running beside a session ([what ships per platform](#native-files))
 - Cross-platform: Windows, Linux, and macOS (FreeBSD: [experimental](#platforms))
-- Scales to thousands of sessions: an idle session holds no thread and no output buffer (one I/O completion port loop on Windows, one epoll/kqueue loop on Unix)
-- Idle sessions cost nothing: an idle session holds no thread and no output buffer ([how each OS reads output](#backends))
-- Bounded memory with backpressure: output goes into a 16 KiB buffer per session, and a slow consumer pauses the child instead of growing memory
-- Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call
-- Signals the right process: on Linux 5.2 and later, `clone` returns a pidfd with the child, and signals go through it rather than through a PID that another process can reuse ([details](.github/docs/references/pty_crossplatform.md#child-exit-observation))
-- Observable: a `MiniPty` meter reports open sessions, start time, output bytes, and stalls, and takes no timestamps and allocates nothing while nobody listens ([Metrics](#metrics))
+- Scaling: Scales to thousands of sessions. An idle session holds no thread and no output buffer.
+- Bounded output memory: each session uses a 16 KiB buffer. A slow consumer pauses the child instead of increasing memory use.
+- Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call.
+- Safe signal delivery: on Linux 5.2 and later, `clone` returns a pidfd with the child. Signals use this handle, avoiding PIDs that another process can reuse ([details](.github/docs/references/pty_crossplatform.md#child-exit-observation)).
+- Metrics: the `MiniPty` meter reports open sessions, start time, output bytes, and stalls. Without listeners, it takes no timestamps and allocates nothing ([metrics](#metrics)).
 
 **Not supported**
 
 - Remote shells (`ssh`) or tunneling a PTY over the network
 - Full terminal emulation, TUI replay, or faithfully preserving `\r` overwrite lines
-- Falling back to pipe redirect when PTY creation fails
+- Pipe redirection when PTY creation fails
 
 ## Platforms
 
@@ -39,20 +38,20 @@ MiniPty creates a real PTY on each supported OS. See [Backends](#backends) for h
 | Linux, glibc 2.27+ | x64, arm64 | Supported |
 | Linux, musl 1.2.3+ (Alpine) | x64, arm64 | Supported |
 | macOS 12.0+ | x64, arm64 | Supported |
-| FreeBSD 14.4+ | x64 (tested), arm64 (compiled only) | Experimental: CI compiles the shim for 14.4 and 15.1 and runs the tests on 14.5 in a VM, with a community build of .NET 10. The package ships no FreeBSD binary, so MiniPty works there only when built from source |
+| FreeBSD 14.4+ | x64 (tested), arm64 (compiled only) | Experimental |
 
-The Linux and macOS minimums are those of the native files. They reach at least as far back as .NET 10 itself runs. Windows needs ConPTY, which first shipped in Windows 10 1809 and Windows Server 2019. .NET 10 also runs on earlier builds, such as Windows 10 1607 and Windows Server 2016; there `Pty.IsSupported` is `false` and `Pty.Start` throws `PlatformNotSupportedException`.
+The Linux and macOS minimums apply to the native files. They cover at least the OS versions that .NET 10 supports. Windows requires ConPTY, introduced in Windows 10 1809 and Windows Server 2019. .NET 10 also supports earlier builds, such as Windows 10 1607 and Windows Server 2016. On those builds, `Pty.IsSupported` is `false` and `Pty.Start` throws `PlatformNotSupportedException`. The FreeBSD support is experimental, it compiles & tests on Container & CI for 14.4 and 15.1.
 
 ### Native files
 
-Your application carries the following besides the MiniPty assembly. The package and `dotnet publish` place these files for you.
+Your application needs these files in addition to the MiniPty assembly. The package and `dotnet publish` place them for you.
 
 | OS | Files beside the application | Under NativeAOT |
 |----|------------------------------|-----------------|
 | Windows | None: ConPTY comes with Windows. The [out-of-band ConPTY](#out-of-band-conpty-for-windows) is optional and supplied by your application | None |
-| Linux (x64, arm64; glibc and musl) | `libminipty_unix.so` | None: the shim is linked into the executable |
-| macOS (x64, arm64) | `libminipty_unix.dylib` and `minipty_spawn_helper` | `minipty_spawn_helper` only: the shim is linked into the executable, and the launcher must stay in the same directory, where MiniPty looks for it |
-| FreeBSD (experimental) | `libminipty_unix.so`, which the package does not include: it is built with `cc` when MiniPty is built from source on FreeBSD | Not supported by the package |
+| Linux (x64, arm64, glibc and musl) | `libminipty_unix.so` | None. The shim links into the executable. |
+| macOS (x64, arm64) | `libminipty_unix.dylib` and `minipty_spawn_helper` | `minipty_spawn_helper` only. The shim links into the executable. The launcher must remain beside the executable, where MiniPty searches for it. |
+| FreeBSD (experimental) | `libminipty_unix.so`. The package does not include it. Building MiniPty from source on FreeBSD compiles it with `cc`. | Not supported by the package |
 
 ## Performance
 
@@ -66,13 +65,7 @@ The numbers below are from [run 42335813387](https://github.com/guitarrapc/MiniP
 
 <!-- benchmark:run:end -->
 
-Each table names the report it comes from, the methods it compares, and the columns it quotes, and every value is copied from that report as written, units included. On the run's page, each runner's job summary lists the reports by those names. CI rewrites these tables after every full benchmark run.
-
-Hosted runners get a different CPU from run to run, and the gap between the libraries, even their order, can change with it. Compare the libraries within one run only. The macOS runner swings even on the same CPU: over 20 runs, Porta.Pty's 1 MiB flood ranged from 32.6 to 81.3 MiB/s and MiniPty's from 38.9 to 64.4, so the macOS order follows the run ([platform lessons](.github/docs/specs/platform_support.md#lessons-learned)).
-
-The keystroke and throughput benchmarks keep one child running with raw input, as a shell or an editor runs, so they measure the PTY path and not process startup. [Porta.Pty](https://www.nuget.org/packages/Porta.Pty) 2.2.3 runs the same child for comparison, in its default mode (method `PortaPty`).
-
-**Keystroke round trip** (`PtyLatencyBenchmarks`, job `AllCpus`, columns `P50`, `P95` and `Allocated`): one byte written until the child's echo of it is read.
+`PtyLatencyBenchmarks` benchmarks the keystroke round trip, time from writing one byte to reading the child's echo. On Windows, the `ConPty` parameter selects either ConPTY implementation for each library. The in-box ConPTY repaints on its own frame schedule, which determines round-trip latency for any library. The [out-of-band ConPTY](#out-of-band-conpty-for-windows) removes that wait.
 
 <!-- benchmark:latency:start -->
 
@@ -85,9 +78,7 @@ The keystroke and throughput benchmarks keep one child running with raw input, a
 
 <!-- benchmark:latency:end -->
 
-On Windows each library runs on both ConPTY implementations, the `ConPty` parameter. The in-box ConPTY repaints on its own frame schedule, which sets the round trip for any library; the [out-of-band ConPTY](#out-of-band-conpty-for-windows) removes that wait.
-
-**Output throughput** (`PtyThroughputBenchmarks`, job `AllCpus`, `PayloadBytes` 1048576, columns `MiB/s` and `Allocated`): the child writes 1 MiB of 77-character lines, read until its end marker.
+`PtyThroughputBenchmarks` measures output throughput, the child writes 1 MiB of 77-character lines, read until its end marker. On Windows, the `ConPty` renders the child's output and sends its own VT stream. On Windows, this benchmark mainly measures ConPTY rendering speed rather than byte-pipe throughput.
 
 <!-- benchmark:throughput:start -->
 
@@ -100,11 +91,7 @@ On Windows each library runs on both ConPTY implementations, the `ConPty` parame
 
 <!-- benchmark:throughput:end -->
 
-ConPTY renders the child's output and sends its own VT stream, so on Windows this is mostly the speed of ConPTY's renderer, not of a byte pipe.
-
-A few bytes in the `Allocated` column are one-time costs of the benchmark process, not of each flood. BenchmarkDotNet counts every thread's allocations over a few operations of a quarter of a second each, so a one-time cost that falls there shows as bytes per operation. Such costs include a thread-pool thread added during the run (about 1 KB), the runtime's tiered compilation, or its first use of a type. Run outside BenchmarkDotNet, the flood allocated nothing per operation on either ConPTY ([platform lessons](.github/docs/specs/platform_support.md#lessons-learned)).
-
-**Session start** (`PtyStartupBenchmarks`, columns `Mean` and `Allocated`): one session from `Pty.Start` to exit, through the OS shell (`cmd.exe /c` on Windows, `sh -c` elsewhere), so the time is mostly process creation. `Session_Exit0_WaitForExit` runs `exit 0` and waits for the exit; `Session_Echo_Bytes` runs `echo` and reads its output to the end.
+`PtyStartupBenchmarks` measures session start time, one session from `Pty.Start` to exit. It uses the OS shell (`cmd.exe /c` on Windows, `sh -c` elsewhere), so process creation accounts for most of the time. `Session_Exit0_WaitForExit` runs `exit 0` and waits for exit. `Session_Echo_Bytes` runs `echo` and reads all output.
 
 <!-- benchmark:startup:start -->
 
@@ -116,7 +103,7 @@ A few bytes in the `Allocated` column are one-time costs of the benchmark proces
 
 <!-- benchmark:startup:end -->
 
-**Session start in a large host** (`PtyStartupHostMemoryBenchmarks`, `HostResidentMiB` 0 and 2048, columns `Mean` and `Allocated`): `Session_Exit0_WaitForExit` while the host holds nothing or 2 GiB of resident memory beside the runtime's own, as an IDE backend or a web terminal may. No platform copies the host to start the child (Linux uses `clone(CLONE_VM | CLONE_VFORK)`, macOS `posix_spawn`, Windows `CreateProcess`), so the two columns should match. This benchmark runs fewer iterations than the one above, so its figure without the host memory can differ from that table's.
+PtyStartupHostMemoryBenchmarks measures session start in a large host with the same `Session_Exit0_WaitForExit` operation with extra host memory. The host holds either 0 or 2 GiB of resident memory beyond the runtime's own, as an IDE backend or web terminal may.
 
 <!-- benchmark:startup-host-memory:start -->
 
@@ -127,9 +114,6 @@ A few bytes in the `Allocated` column are one-time costs of the benchmark proces
 | Windows | 13.41 ms / 1.25 KB | 12.95 ms / 1.25 KB |
 
 <!-- benchmark:startup-host-memory:end -->
-
-The run's reports also include every other benchmark, Porta.Pty's `UseAsyncIo` mode (`PortaPtyAsyncIo`), and 64 KiB floods. On Linux and Windows, each keystroke and throughput case also runs on two of the runner's four logical CPUs (job `TwoCpus`), and those reports add the thread-pool work items (`Completed Work Items`) and, for throughput, the benchmark process's CPU time (`Process CPU`) per operation. Run them locally with `dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter "*PtyLatencyBenchmarks*"`.
-
 
 ## Quick start
 
@@ -142,7 +126,7 @@ dotnet add package MiniPty.Terminal   # backend for xterm.js and editor terminal
 
 ### MiniPty
 
-Start a child with `Pty.Start`, then either run it for its result with `CompleteAsync` or drive it with `WriteInputAsync` and `ReadOutputAsync`. To run this code: `dotnet samples/SingleFiles/README_MiniPty.cs`.
+Start a child with `Pty.Start`. Use `CompleteAsync` to collect its result, or use `WriteInputAsync` and `ReadOutputAsync` to interact with it. Run this example with `dotnet samples/SingleFiles/README_MiniPty.cs`. For more examples, [run a command with stdin and EOF](samples/SingleFiles/README.md#run-a-command-for-its-result). Or [control an interactive program](samples/SingleFiles/README.md#drive-an-interactive-program) by waiting for output before sending input.
 
 ```csharp
 using MiniPty;
@@ -169,11 +153,9 @@ await foreach (var chunk in session.ReadOutputAsync())
 Console.WriteLine($"exit={(await session.WaitForExitAsync()).ExitCode}");
 ```
 
-Advanced: [run a command for its result](samples/SingleFiles/README.md#run-a-command-for-its-result) with stdin and EOF, and [drive an interactive program](samples/SingleFiles/README.md#drive-an-interactive-program) that waits for output before it answers.
-
 ### MiniPty.Capture
 
-Run a child and get its output, exit code, and every read with its time since `Pty.Start`. To run this code: `dotnet samples/SingleFiles/README_MiniPty.Capture.cs`.
+Run a child and collect its output, exit code, and each read's time since `Pty.Start`. Run this example with `dotnet samples/SingleFiles/README_MiniPty.Capture.cs`. For an example with stdin and a printed timeline, see [Capture output with timing](samples/SingleFiles/README.md#capture-output-with-timing).
 
 ```csharp
 using MiniPty;
@@ -191,13 +173,12 @@ foreach (var chunk in result.Chunks)
 Console.WriteLine(result.ToDisplayText(PtyOutputDisplayMode.PlainText));
 ```
 
-Advanced: [capture output with timing](samples/SingleFiles/README.md#capture-output-with-timing), with stdin and a printed timeline.
-
 ### MiniPty.Console
 
-Attach the host terminal to a session, so interactive programs such as vim get your keyboard and window size. Reading output stays your job. To run this code: `dotnet samples/SingleFiles/README_MiniPty.Console.cs`, from an interactive terminal.
+Attach the host terminal to a session to send keyboard input and window size changes to interactive programs such as vim. Your application must read the output. Run `dotnet samples/SingleFiles/README_MiniPty.Console.cs` from an interactive terminal. See [Hand your terminal to a program](samples/SingleFiles/README.md#hand-your-terminal-to-a-program) for status messages and shell prompt alignment after exit. See the [TUI demo](samples/TuiDemo) for full-screen programs.
 
-On Windows, the host console reads input as UTF-8 while attached (the previous input code page is restored on detach), so non-ASCII keys such as Japanese text reach the PTY as UTF-8. Output is still yours: a console with a legacy output code page misdecodes the PTY's UTF-8 bytes, so set `Console.OutputEncoding = Encoding.UTF8` while copying output.
+> [!TIP]
+> On Windows, the host console reads input as UTF-8 while attached and restores the previous input code page on detach. Non-ASCII input, such as Japanese text, reaches the PTY as UTF-8. A legacy console output code page misdecodes the PTY's UTF-8 bytes. Set `Console.OutputEncoding = Encoding.UTF8` while copying output.
 
 ```csharp
 using MiniPty;
@@ -228,11 +209,9 @@ static async Task CopyOutputAsync(PtySession session)
 }
 ```
 
-Advanced: [hand your terminal to a program](samples/SingleFiles/README.md#hand-your-terminal-to-a-program), which adds status messages and keeps the shell prompt aligned afterwards, and the [TUI demo](samples/TuiDemo) for full-screen programs.
-
 ### MiniPty.Terminal
 
-Serve a PTY to xterm.js or an editor terminal, the role node-pty plays behind VS Code. For a complete server, run `dotnet samples/SingleFiles/WebTerminal.cs` and open the address it prints.
+Connect a PTY to xterm.js or an editor terminal, as node-pty does for VS Code. Run the complete server with `dotnet samples/SingleFiles/WebTerminal.cs`. Open the address it prints. This integration snippet requires an existing `webSocket` and cancellation token `ct`. It starts Bash on Unix.
 
 ```csharp
 using MiniPty;
@@ -247,7 +226,7 @@ var status = await PtyWebSocketBridge.RunAsync(
 Console.WriteLine($"shell exited: {status.ExitCode}");
 ```
 
-Advanced: the [web terminal guide](samples/SingleFiles/README.md#web-terminal) (who may connect, the browser side, flow control) and the [VS Code terminal backend](samples/VsCodeExtension).
+See the [web terminal guide](samples/SingleFiles/README.md#web-terminal) for authentication, browser code, and flow control. See also the [VS Code terminal backend](samples/VsCodeExtension).
 
 Other entry points:
 
@@ -259,57 +238,57 @@ Protocol and bridging details: [terminal.md](.github/docs/specs/terminal.md).
 
 ## Backends
 
-Each OS has its own backend behind the same API. None of them uses winpty, and none keeps a helper process running beside a session.
+Each OS has its own backend behind the same API. No backend uses winpty or keeps a helper process running beside a session.
 
 ### Windows: ConPTY
 
-MiniPty calls Win32 ConPTY (`CreatePseudoConsole`) directly through P/Invoke, attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, and resizes with `ResizePseudoConsole`. One background loop waits on an I/O completion port of MiniPty's own and reads every session's output, so an idle session holds no thread and no output buffer. An application can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session with `PtyStartInfo.ConPty`; see [Out-of-band ConPTY](#out-of-band-conpty-for-windows).
+MiniPty calls Win32 ConPTY (`CreatePseudoConsole`) directly through P/Invoke. It attaches the child with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` and resizes with `ResizePseudoConsole`. One background loop waits on MiniPty's I/O completion port and reads output from all sessions. An idle session holds no thread and no output buffer. Applications can supply the out-of-band ConPTY (`conpty.dll` + `OpenConsole.exe`) per session through `PtyStartInfo.ConPty`. See [Out-of-band ConPTY](#out-of-band-conpty-for-windows).
 
 ### Linux: `clone`
 
-MiniPty uses the small `libminipty_unix` native shim to open the PTY, start the child with `clone(CLONE_VM | CLONE_VFORK)` as `posix_spawn` does, and `execve` it inside the PTY. The host is not copied as a `fork` would copy it, so a start costs the same in a host with a large heap. Resize uses `TIOCSWINSZ`. One background loop (the exit watcher's thread, on epoll) reads every session's output and writes its queued input, so an idle session holds no thread and no output buffer.
+The small `libminipty_unix` native shim opens the PTY. It starts the child with `clone(CLONE_VM | CLONE_VFORK)`, as `posix_spawn` does, then calls `execve` inside the PTY. Unlike `fork`, this does not copy the host, so startup costs remain the same with a large host heap. Resize uses `TIOCSWINSZ`.
+
+One background loop uses epoll on the exit watcher's thread to read output and write queued input for all sessions. An idle session holds no thread and no output buffer.
 
 ### macOS: `posix_spawn` + launcher
 
-MiniPty uses the Unix backend through `libminipty_unix.dylib`, and starts each child through `minipty_spawn_helper` (not `forkpty`): a small launcher that `posix_spawn` starts, which takes the terminal as its controlling terminal and then replaces itself with the child by `exec`, so no helper process stays running. Resize uses `TIOCSWINSZ`. Output and input go through the same one loop as on Linux, on kqueue.
+MiniPty uses the Unix backend through `libminipty_unix.dylib`. It starts each child through `minipty_spawn_helper`, using `posix_spawn` rather than `forkpty`. This small launcher takes the terminal as its controlling terminal, then replaces itself with the child through `exec`. No helper process remains. Resize uses `TIOCSWINSZ`. Input and output use the same single loop as on Linux, with kqueue instead of epoll.
 
 ### FreeBSD (experimental): `fork`
 
-MiniPty uses the Unix backend through `libminipty_unix.so`, which is built with `cc` when MiniPty is built from source on FreeBSD. It opens the terminal close-on-exec and starts each child with `fork`; the child takes the terminal as its controlling terminal and `exec`s, as on Linux. Output and input go through the same one loop as on macOS, on kqueue.
+MiniPty uses the Unix backend through `libminipty_unix.so`. Building MiniPty from source on FreeBSD compiles this shim with `cc`. It opens the terminal with close-on-exec and starts each child with `fork`. The child takes the terminal as its controlling terminal and calls `exec`, as on Linux. Input and output use the same single kqueue loop as on macOS.
 
-## Advanced Usage
+## Advanced
 
 ### Good to know
 
-To use MiniPty effectively, keep the following points in mind.
-
-- **Keep reading output.** A PTY nobody reads fills up and blocks the child. `ReadOutputAsync`, `CompleteAsync`, and the `Output` stream all drain it.
-- **Disposing ends the child.** Windows terminates it. Unix hangs it up (`SIGHUP`, so a shell saves its history) and kills it if it has not exited a second later ([Session contract](.github/docs/specs/core_session.md#session-contract)).
+- **Keep reading output.** An unread PTY fills its buffer and blocks the child. `ReadOutputAsync`, `CompleteAsync`, and the `Output` stream all drain it.
+- **Disposal ends the child.** Windows terminates it. Unix sends `SIGHUP` so a shell can save its history, then kills the child if it does not exit within one second ([Session contract](.github/docs/specs/core_session.md#session-contract)).
 - **`Environment` overlays the parent's.** A null value removes a variable. On Unix, `TerminalName` sets `TERM`, which defaults to `xterm-256color` ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)). To keep your process's variables out of the child, see [Environment for shared hosts](#environment-for-shared-hosts).
 - **MiniPty is not a sandbox.** The child runs with your permissions. If a program name, path, or argument comes from untrusted input, read [Untrusted program names and paths](.github/docs/specs/core_session.md#untrusted-program-names-and-paths) and [Batch files](.github/docs/specs/core_session.md#batch-files-windows) first.
 
 ### Out-of-band ConPTY for Windows
 
-Building a terminal emulator on Windows? Use the out-of-band ConPTY library instead of the in-box ConPTY.
+Use the out-of-band ConPTY library for terminal emulators on Windows.
 
 > [!TIP]
 > In-box means the ConPTY that comes with Windows itself.
 
-The in-box ConPTY drops graphics protocols (Sixel, Kitty) and some terminal queries, forwards mouse tracking only to programs that read VT input, and changes behavior with Windows updates. The ConPTY that Windows Terminal ships, published by Microsoft as `Microsoft.Windows.Console.ConPTY`, forwards everything and behaves the same on every Windows build.
+The in-box ConPTY drops graphics protocols (Sixel, Kitty) and some terminal queries. It forwards mouse tracking only to programs that read VT input. Its behavior changes with Windows updates. Windows Terminal ships the ConPTY that Microsoft publishes as `Microsoft.Windows.Console.ConPTY`. This version forwards everything and behaves the same on every Windows build.
 
-Before Windows 11 24H2, the in-box host differs further. Of those builds, only Windows Server 2022 (build 20348) was measured ([Verification](.github/docs/specs/platform_support.md#verification)):
+Before Windows 11 24H2, the in-box host also has the following differences. Only Windows Server 2022 (build 20348) was measured among those builds ([verification](.github/docs/specs/platform_support.md#verification)):
 
-- It forwards neither the switch to the alternate screen nor the hidden cursor, so a full-screen program draws on the main screen, with its cursor showing.
-- After a row that fills the width, it relies on the pending wrap outliving `ESC[K`, which xterm ends, so the next row starts one column to the left.
+- It does not forward alternate-screen switches or cursor hiding. Full-screen programs therefore draw on the main screen with the cursor visible.
+- After a full-width row, it assumes that pending wrap survives `ESC[K`. xterm clears pending wrap, so the next row starts one column to the left.
 
-MiniPty cannot change either, so a terminal emulator that runs on these builds should use the out-of-band ConPTY. On these builds, also await `DisposeAsync` before your process exits. Disposal keeps the in-box host's output open until the host has ended, for 1 s at most, because a host that finds it closed can keep running for good.
+MiniPty cannot change either behavior. Terminal emulators on these builds should use the out-of-band ConPTY. Also await `DisposeAsync` before your process exits on these builds. Disposal keeps the in-box host's output open until the host exits, for at most one second. If the output closes too early, the host can run indefinitely.
 
 ```shell
 # Use the out-of-band ConPTY library, 1.25 or later (older ones can stall three seconds at startup)
 dotnet add package Microsoft.Windows.Console.ConPTY --version 1.25.260930003
 ```
 
-MiniPty's build targets copy `OpenConsole.exe` beside `conpty.dll` for you. Both are native code that runs as your application, so ship them where your own binaries are protected, and take security fixes through package updates ([details and measurements](.github/docs/specs/core_session.md#out-of-band-conpty)).
+MiniPty's build targets copy `OpenConsole.exe` beside `conpty.dll`. Both run native code with your application's permissions. Store them with the same protection as your application binaries. Update the package to receive security fixes ([details and measurements](.github/docs/specs/core_session.md#out-of-band-conpty)).
 
 ```csharp
 using MiniPty;
@@ -324,9 +303,9 @@ await using var session = Pty.Start(new PtyStartInfo { FileName = "cmd.exe", Con
 
 ### Windows options
 
-`KillProcessTree = true` ends everything the child started, even programs in a console of their own, on dispose, on kill, and when your process crashes. Turn it on for commands run for their result (CI steps, test runners, agent tool calls). Leave it off for interactive terminals, where a window the user opened (`code .`) should outlive the tab ([Process tree](.github/docs/specs/core_session.md#process-tree)).
+`KillProcessTree = true` ends all processes the child started, including programs with their own console. This applies on disposal, on kill, and when your process crashes. Enable it for commands whose results you collect, such as CI steps, test runners, and agent tool calls. Leave it disabled for interactive terminals where a user-opened window (`code .`) should outlive the tab ([process tree](.github/docs/specs/core_session.md#process-tree)).
 
-`InheritCursor = true` keeps what the frontend already shows instead of letting ConPTY clear the screen. The frontend must then answer ConPTY's cursor position query, or the child waits ([Inherited cursor](.github/docs/specs/core_session.md#inherited-cursor)). Both options are ignored on Unix.
+`InheritCursor = true` preserves the frontend's screen contents instead of letting ConPTY clear them. The frontend must answer ConPTY's cursor position query, or the child waits ([inherited cursor](.github/docs/specs/core_session.md#inherited-cursor)). Unix ignores both options.
 
 ```csharp
 await using var session = Pty.Start(new PtyStartInfo
@@ -339,9 +318,9 @@ await using var session = Pty.Start(new PtyStartInfo
 
 ### Environment for shared hosts
 
-A web host's environment holds connection strings and cloud credentials that its shells should not be handed. `InheritEnvironment = false` starts the child from the minimum it needs (`SystemRoot` on Windows, nothing on Unix besides `TERM`), so a variable reaches the child's environment only when `Environment` names it. Pass what your shells need yourself ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
+A web host's environment contains connection strings and cloud credentials that its shells should not receive. `InheritEnvironment = false` gives the child only the required environment: `SystemRoot` on Windows, and `TERM` on Unix. Additional variables reach the child only through `Environment`. Pass the variables your shells need explicitly ([spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
 
-It is not isolation. A child that runs as the same user can still read your process's environment from the operating system, for example from `/proc/<pid>/environ` on Linux. Run shells for untrusted users as another user or in a container.
+This does not isolate the child. A child running as the same user can still read your process's environment through the OS, such as `/proc/<pid>/environ` on Linux. Run shells for untrusted users as another user or in a container.
 
 ```csharp
 await using var session = Pty.Start(new PtyStartInfo
@@ -359,25 +338,27 @@ await using var session = Pty.Start(new PtyStartInfo
 
 ### Metrics
 
-MiniPty reports what a host pays on the output path on a meter named `MiniPty`: open sessions, start time and failures, output bytes, stalls on a full output buffer, and (Unix) a consumer's native waits for output. While nobody listens, MiniPty only keeps the count of open sessions: it takes no timestamps and allocates nothing ([Metrics](.github/docs/specs/core_session.md#metrics)).
+The `MiniPty` meter reports open sessions, start time and failures, output bytes, and stalls caused by a full output buffer. On Unix, it also reports the consumer's native waits for output. Without listeners, MiniPty only tracks the open session count. It takes no timestamps and allocates nothing ([metrics](.github/docs/specs/core_session.md#metrics)).
 
-With OpenTelemetry, add the meter; [AspireTerminal](samples/AspireTerminal) exports it this way to the Aspire dashboard:
+With OpenTelemetry, add the meter as shown below. [AspireTerminal](samples/AspireTerminal) uses this configuration to export metrics to the Aspire dashboard.
 
 ```csharp
 builder.Services.AddOpenTelemetry().WithMetrics(metrics => metrics.AddMeter("MiniPty"));
 ```
 
-Without any setup, `dotnet-counters` reads it from a running process:
+Use `dotnet-counters` to read the meter from a running process without application configuration:
 
 ```shell
 dotnet-counters monitor --counters MiniPty --process-id <pid>
 ```
 
-In code without OpenTelemetry, a `MeterListener` reads it: [WebTerminalScale](samples/SingleFiles/WebTerminalScale.cs) shows them beside its host's threads and memory, and [WinUiTerminal](samples/WinUiTerminal) and [AvaloniaTerminal](samples/AvaloniaTerminal) on their status line.
+Use a `MeterListener` to read metrics without OpenTelemetry. [WebTerminalScale](samples/SingleFiles/WebTerminalScale.cs) displays them beside host thread and memory usage. [WinUiTerminal](samples/WinUiTerminal) and [AvaloniaTerminal](samples/AvaloniaTerminal) display them in their status lines.
 
 ### GUI hosts
 
-WinUI, WPF, WinForms, and Avalonia can call every MiniPty API on the UI thread. Nothing blocks it, and no marshaling is needed. Full terminal emulators built this way: [samples/WinUiTerminal](samples/WinUiTerminal) (Windows) and [samples/AvaloniaTerminal](samples/AvaloniaTerminal) (Windows, Linux, macOS). See also [GUI hosts](.github/docs/specs/core_session.md#gui-hosts).
+WinUI, WPF, WinForms, and Avalonia can call every MiniPty API on the UI thread without blocking it or requiring marshaling. For full terminal emulators, see [WinUiTerminal](samples/WinUiTerminal) (Windows) and [AvaloniaTerminal](samples/AvaloniaTerminal) (Windows, Linux, macOS). See also [GUI hosts](.github/docs/specs/core_session.md#gui-hosts).
+
+This integration snippet uses your application's `shell`, dimensions, view, and window.
 
 
 ```csharp
@@ -399,17 +380,17 @@ await foreach (var chunk in session.ReadOutputAsync())
 
 ## Samples
 
-Each guide shows how to build that kind of application with MiniPty.
+Each guide explains how to build that kind of application with MiniPty.
 
 | Building | Guide | Package |
 |----------|-------|---------|
 | A tool that runs commands, drives programs, or records their output | [Single-file samples](samples/SingleFiles/README.md) | MiniPty, MiniPty.Capture |
-| A program that hands your terminal to a shell or an editor | [ConsoleAttach.cs](samples/SingleFiles/README.md#hand-your-terminal-to-a-program) | MiniPty.Console |
-| A full-screen TUI shown in the terminal you are using | [TuiDemo](samples/TuiDemo) | MiniPty.Console |
+| A program that connects your terminal to a shell or editor | [ConsoleAttach.cs](samples/SingleFiles/README.md#hand-your-terminal-to-a-program) | MiniPty.Console |
+| A full-screen TUI in your current terminal | [TuiDemo](samples/TuiDemo) | MiniPty.Console |
 | A terminal window on Windows | [WinUiTerminal](samples/WinUiTerminal) | MiniPty |
 | A terminal window on Windows, Linux, and macOS | [AvaloniaTerminal](samples/AvaloniaTerminal) | MiniPty |
 | A terminal in the browser (xterm.js) | [Web terminal](samples/SingleFiles/README.md#web-terminal) | MiniPty.Terminal |
-| A browser terminal whose metrics the Aspire dashboard charts | [AspireTerminal](samples/AspireTerminal) | MiniPty.Terminal |
+| A browser terminal with metrics in the Aspire dashboard | [AspireTerminal](samples/AspireTerminal) | MiniPty.Terminal |
 | A VS Code terminal backend | [VsCodeExtension](samples/VsCodeExtension) | MiniPty.Terminal |
 
 Run them locally (JIT):
@@ -428,7 +409,7 @@ dotnet run --project samples/AvaloniaTerminal
 dotnet run samples/AspireTerminal/apphost.cs
 ```
 
-NativeAOT publish, with the same flags as CI (on Linux and macOS, run `bash scripts/build-native.sh <rid>` first):
+Publish with NativeAOT using the same flags as CI. On Linux and macOS, first run `bash scripts/build-native.sh <rid>` for the target runtime identifier.
 
 ```bash
 dotnet publish samples/SingleFiles/Session.cs -c Release -r linux-x64 --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
