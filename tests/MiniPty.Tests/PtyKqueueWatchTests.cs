@@ -111,9 +111,10 @@ public sealed partial class PtyKqueueWatchTests
     }
 
     /// <summary>
-    /// kqueue keeps reporting end of file on a registration after the slave closed and opened again, once per arm, while
-    /// reads find nothing; the loop renews such a registration when a hang-up report found nothing to read, which clears
-    /// it and keeps reporting output. Without the renewal every pass of the loop would find that master hung up again.
+    /// macOS's kqueue keeps reporting end of file on a registration after the slave closed and opened again, once per arm,
+    /// while reads find nothing; the loop renews such a registration when a hang-up report found nothing to read, which
+    /// clears it and keeps reporting output. Without the renewal every pass of the loop would find that master hung up
+    /// again. FreeBSD clears the end of file itself when the slave opens again.
     /// </summary>
     [Test]
     public async Task RenewClearsAnEndOfFileLeftByASlaveOpenedAgain()
@@ -130,12 +131,23 @@ public sealed partial class PtyKqueueWatchTests
         await Assert.That(pty.ReadMaster()).IsEqualTo(0);
 
         pty.OpenSlave();
-        // Stale: each arm reports the end of file again while a read finds nothing.
-        await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
-        await Assert.That(watch.Report() & ReportHangup).IsEqualTo(ReportHangup);
-        await Assert.That(pty.ReadMaster()).IsEqualTo(-1);
-        await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
-        await Assert.That(watch.Report() & ReportHangup).IsEqualTo(ReportHangup);
+        if (OperatingSystem.IsFreeBSD())
+        {
+            // FreeBSD clears the end of file when the slave opens again (ptsdrv_open in tty_pts.c), so nothing is stale
+            // and the renewal below changes nothing.
+            await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
+            await Assert.That(watch.Report()).IsEqualTo(0);
+            await Assert.That(pty.ReadMaster()).IsEqualTo(-1);
+        }
+        else
+        {
+            // Stale: each arm reports the end of file again while a read finds nothing.
+            await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
+            await Assert.That(watch.Report() & ReportHangup).IsEqualTo(ReportHangup);
+            await Assert.That(pty.ReadMaster()).IsEqualTo(-1);
+            await Assert.That(minipty_watch_modify(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
+            await Assert.That(watch.Report() & ReportHangup).IsEqualTo(ReportHangup);
+        }
 
         await Assert.That(minipty_watch_renew(watch.Fd, pty.Master, Token, InterestRead)).IsEqualTo(0);
         await Assert.That(watch.Report()).IsEqualTo(0);
@@ -246,13 +258,26 @@ public sealed partial class PtyKqueueWatchTests
             if (Master < 0 || grantpt(Master) != 0 || unlockpt(Master) != 0)
                 throw new IOException($"Opening a PTY failed (errno {Marshal.GetLastPInvokeError()})");
 
-            _slaveName = Marshal.PtrToStringUTF8(ptsname(Master))!;
+            _slaveName = SlaveName(Master);
             OpenSlave();
             if (UnixInterop.minipty_set_nonblocking(Master) != 0)
                 throw new IOException($"Setting the master non-blocking failed (errno {Marshal.GetLastPInvokeError()})");
         }
 
         public int Master { get; }
+
+        /// <summary>
+        /// The slave's path, through <c>ptsname_r</c>. <c>ptsname</c> returns a buffer shared by the process on FreeBSD,
+        /// so these tests, which run in parallel, opened each other's slaves through it in a 14.5 guest.
+        /// </summary>
+        private static unsafe string SlaveName(int master)
+        {
+            var name = stackalloc byte[128];
+            if (ptsname_r(master, name, 128) != 0)
+                throw new IOException($"ptsname_r failed (errno {Marshal.GetLastPInvokeError()})");
+
+            return Marshal.PtrToStringUTF8((IntPtr)name)!;
+        }
 
         public void OpenSlave()
         {
@@ -326,7 +351,7 @@ public sealed partial class PtyKqueueWatchTests
     private static partial int unlockpt(int fd);
 
     [LibraryImport("libc", SetLastError = true)]
-    private static partial IntPtr ptsname(int fd);
+    private static unsafe partial int ptsname_r(int fd, byte* buffer, nuint length);
 
     // Without O_CREAT, open takes no mode, so its variadic part is never used.
     [LibraryImport("libc", EntryPoint = "open", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]

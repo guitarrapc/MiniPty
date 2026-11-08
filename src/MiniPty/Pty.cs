@@ -41,8 +41,8 @@ public static class Pty
     /// An out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>) does not change the answer.
     /// </para>
     /// <para>
-    /// FreeBSD support is experimental: it is not tested, and the package ships no FreeBSD native library, so
-    /// <see cref="Start"/> works there only when MiniPty is built from source. This property reports whether the
+    /// FreeBSD support is experimental: its tests run only in a virtual machine, with a community build of .NET, and the
+    /// package ships no FreeBSD native library, so <see cref="Start"/> works there only when MiniPty is built from source. This property reports whether the
     /// operating system has pseudo-terminals MiniPty can drive, not whether the native library is present.
     /// </para>
     /// </remarks>

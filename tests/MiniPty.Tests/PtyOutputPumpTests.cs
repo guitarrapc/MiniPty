@@ -237,6 +237,52 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
+    /// A one-shot completion does not close on quiet before its first read, since ConPTY can send its first frame after
+    /// a fast child has exited: a transport that sends nothing until its close is closed only at the grace, and its frame
+    /// then still arrives.
+    /// </summary>
+    [Test]
+    public async Task CompleteAsyncClosesASilentTransportAtItsGrace()
+    {
+        var backend = new SilentUntilTheCloseBackend(closeSendsHeldOutput: false);
+        await using var session = new PtySession(backend);
+        await backend.Reading.WaitAsync(Timeout);
+        var completion = session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false, OutputDrainGrace = TimeSpan.FromSeconds(1) });
+
+        backend.Exit(0);
+        // Past the quiet interval three times over, well before the grace.
+        await Task.Delay(PtyOutputPump.DefaultPostExitQuietMs * 3);
+        await Assert.That(backend.IsOutputClosed).IsFalse();
+
+        var result = await completion.WaitAsync(Timeout);
+        var hasFrame = result.Contains(SilentUntilTheCloseBackend.Frame);
+        await Assert.That(hasFrame).IsTrue();
+    }
+
+    /// <summary>
+    /// Where the close sends what the transport holds, as an in-box ConPTY before Windows 11 24H2 does, a one-shot
+    /// completion closes a silent transport on quiet, and gets the frame the close sends. That host writes nothing for a
+    /// child that writes nothing until the close, so waiting for the first read cost such a child the whole grace there.
+    /// </summary>
+    [Test]
+    public async Task CompleteAsyncClosesASilentTransportOnQuietWhereTheCloseSendsWhatItHolds()
+    {
+        var backend = new SilentUntilTheCloseBackend(closeSendsHeldOutput: true);
+        await using var session = new PtySession(backend);
+        await backend.Reading.WaitAsync(Timeout);
+        // The grace outlasts the bound below, so a close at the grace cannot pass as the quiet close.
+        var completion = session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false, OutputDrainGrace = TimeSpan.FromMilliseconds(ForcedEndBoundMs * 2) });
+
+        var stopwatch = Stopwatch.StartNew();
+        backend.Exit(0);
+
+        var result = await completion.WaitAsync(Timeout);
+        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(ForcedEndBoundMs);
+        var hasFrame = result.Contains(SilentUntilTheCloseBackend.Frame);
+        await Assert.That(hasFrame).IsTrue();
+    }
+
+    /// <summary>
     /// Output still draining out of the transport after the close is not quiet. Each read restarts the interval, so
     /// a slow final flush is delivered in full before the pump ends output on its own; measured from the close alone,
     /// the forced end would cut it short.
@@ -744,6 +790,45 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
+    /// A transport that sends nothing until it is closed, then one frame and end of output, as build 20348's in-box
+    /// ConPTY host does for a child that writes nothing.
+    /// </summary>
+    private sealed class SilentUntilTheCloseBackend(bool closeSendsHeldOutput) : FakeBackend
+    {
+        private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Touched only by the driver's thread.
+        private bool _frameSent;
+
+        /// <summary>The frame the close sends.</summary>
+        public static ReadOnlySpan<byte> Frame => "frame-at-close"u8;
+
+        /// <summary>Completes once the driver thread is inside <see cref="ReadOutput"/>.</summary>
+        public Task Reading => _reading.Task;
+
+        public override bool CloseSendsHeldOutput => closeSendsHeldOutput;
+
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
+        {
+            if (IsDisposed)
+                return 0;
+
+            if (IsOutputClosed)
+            {
+                if (_frameSent)
+                    return 0;
+
+                _frameSent = true;
+                Frame.CopyTo(buffer);
+                return Frame.Length;
+            }
+
+            _reading.TrySetResult();
+            driver.WaitForWake(System.Threading.Timeout.Infinite);
+            return -1;
+        }
+    }
+
+    /// <summary>
     /// Held open like <see cref="HeldOpenBackend"/>, but after the close it still yields one byte per read, each
     /// after <c>intervalMs</c>, for <c>flushReads</c> reads: a transport flushing its tail slowly.
     /// </summary>
@@ -981,6 +1066,7 @@ public sealed class PtyOutputPumpTests
 
         public virtual int OutputChunkLimit => PtyOutputPump.PublishSize;
         public virtual int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
+        public virtual bool CloseSendsHeldOutput => false;
 
         /// <summary>Reports child exit the way the exit watcher does: records it, then notifies the session's listener.</summary>
         public void Exit(int exitCode)

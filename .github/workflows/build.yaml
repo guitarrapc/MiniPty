@@ -153,6 +153,82 @@ jobs:
         shell: bash
         run: dotnet test tests/MiniPty.Tests/MiniPty.Tests.csproj -c Release
 
+  # CI's kernels have every call the Linux start uses, so its fallbacks for older kernels run only here: the suite runs
+  # in a container under each seccomp profile in scripts/seccomp/, which make the kernel refuse the newer calls, after a
+  # probe has checked every refusal. On x64, with glibc and with musl; the SDK images are pinned like test-musl's (SDK
+  # 10.0.403 when pinned). What a filter cannot reproduce stays with scripts/old-kernel-qemu/, run by hand.
+  test-old-kernel-paths:
+    name: Test old-kernel paths (${{ matrix.libc }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - libc: glibc
+            image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e
+          - libc: musl
+            image: mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:cc02b814237a76c4735fb6eeee87181597b5e56f2ce458a435e527674d91f4d7
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Test under seccomp profiles
+        shell: bash
+        run: bash scripts/run-tests-under-seccomp.sh "${{ matrix.image }}"
+
+  # FreeBSD has no hosted runner and the package ships no FreeBSD binary, so the shim is cross-compiled against the base
+  # system of the oldest and the newest supported release, on both architectures.
+  freebsd-native:
+    name: FreeBSD compile (${{ matrix.release }}, ${{ matrix.arch }})
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ["14.4", "15.1"]
+        arch: [amd64, arm64]
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/freebsd
+            src/MiniPty/Native
+      - name: Install clang and lld
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends clang lld
+      - name: Compile the shim for FreeBSD
+        shell: bash
+        run: bash scripts/freebsd/compile-check.sh "${RELEASE}" "${ARCH}"
+        env:
+          RELEASE: ${{ matrix.release }}
+          ARCH: ${{ matrix.arch }}
+
+  # The suite in a FreeBSD 14.5 guest under QEMU, with KVM. .NET for FreeBSD is a community build of Microsoft's sources,
+  # pinned by hash in the script.
+  test-freebsd:
+    name: Test FreeBSD (14.5 x64, QEMU)
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Test in a FreeBSD guest
+        shell: bash
+        run: bash scripts/freebsd/run-tests-in-qemu.sh
+        env:
+          MINIPTY_QEMU_SDK_IMAGE: mcr.microsoft.com/dotnet/sdk:10.0@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e
+
   # Linux files are built in containers at the package's libc floors (glibc 2.27, musl 1.2.3), each on a runner of
   # its own architecture; macOS files on the runner for macOS 12.0. The script fails a build that misses its floor.
   build-unix-native:
@@ -243,6 +319,10 @@ jobs:
           - os: windows-2025
             label: windows-2025
             rid: win-x64
+          # The only hosted build without ReleasePseudoConsole (Server 2022, build 20348), for the in-box ConPTY.
+          - os: windows-2022
+            label: windows-2022
+            rid: win-x64
           - os: windows-11-arm
             label: windows-11-arm
             rid: win-arm64
@@ -307,7 +387,7 @@ jobs:
         run: bash scripts/run-nuget-smoke-in-container.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}" "${{ matrix.image }}"
 
   build-complete:
-    needs: [build, test-musl, nuget-smoke]
+    needs: [build, test-musl, test-old-kernel-paths, freebsd-native, test-freebsd, nuget-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

@@ -1,0 +1,12 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "comment": "clone with CLONE_PIDFD (Linux 5.2) fails with EINVAL, and nothing else: the start runs clone again without the flag and opens the pidfd by pid.",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 22,
+      "args": [{ "index": 0, "value": 4096, "valueTwo": 4096, "op": "SCMP_CMP_MASKED_EQ" }]
+    }
+  ]
+}

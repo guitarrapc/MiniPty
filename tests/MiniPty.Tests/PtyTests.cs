@@ -348,6 +348,36 @@ public sealed class PtyTests
     }
 
     /// <summary>
+    /// A child that writes nothing completes without waiting out <see cref="PtyCompleteOptions.OutputDrainGrace"/>
+    /// either. An in-box ConPTY before Windows 11 24H2 writes nothing for it until the pseudo-console closes, and the
+    /// completion waited for a first read before closing, so <c>cmd /c exit</c> took the whole grace there (1,016 ms of
+    /// the default 1 s on windows-2022). The host's frame still arrives, with the close: every measured host writes one.
+    /// </summary>
+    [Test]
+    public async Task PtyCompleteAsyncOfAChildThatWritesNothingReturnsBeforeOutputDrainGraceOnWindows()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return;
+
+        await using var session = Pty.Start(WindowsCommand("exit 3"));
+
+        var options = new PtyCompleteOptions
+        {
+            DecodeOutput = false,
+            OutputDrainGrace = TimeSpan.FromSeconds(10),
+        };
+        var maxElapsed = options.OutputDrainGrace - TimeSpan.FromSeconds(2);
+
+        var elapsed = Stopwatch.StartNew();
+        var result = await session.CompleteAsync(options);
+        elapsed.Stop();
+
+        await Assert.That(result.ExitCode).IsEqualTo(3);
+        await Assert.That(elapsed.Elapsed).IsLessThan(maxElapsed);
+        await Assert.That(result.Output.Length).IsGreaterThan(0);
+    }
+
+    /// <summary>
     /// Post-exit quiet detection must not truncate output across representative gap classes.
     /// </summary>
     [Test]

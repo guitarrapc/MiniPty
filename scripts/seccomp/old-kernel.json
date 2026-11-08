@@ -1,0 +1,32 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "comment": "TIOCGPTPEER (Linux 4.13) fails with ENOTTY, as on a kernel without it: the start opens the slave by its path.",
+      "names": ["ioctl"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 25,
+      "args": [{ "index": 1, "value": 21569, "op": "SCMP_CMP_EQ" }]
+    },
+    {
+      "comment": "clone with CLONE_PIDFD (Linux 5.2) fails with EINVAL: the start runs clone again without the flag.",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 22,
+      "args": [{ "index": 0, "value": 4096, "valueTwo": 4096, "op": "SCMP_CMP_MASKED_EQ" }]
+    },
+    {
+      "comment": "waitid with P_PIDFD (Linux 5.4) fails with EINVAL: children are reaped by pid.",
+      "names": ["waitid"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 22,
+      "args": [{ "index": 0, "value": 3, "op": "SCMP_CMP_EQ" }]
+    },
+    {
+      "comment": "pidfd_send_signal (5.1), pidfd_open (5.3), clone3 (5.3), and close_range (5.9) fail with ENOSYS: no pidfd, so children are signaled with kill after a check, and the child marks descriptors close-on-exec one by one.",
+      "names": ["pidfd_send_signal", "pidfd_open", "clone3", "close_range"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38
+    }
+  ]
+}

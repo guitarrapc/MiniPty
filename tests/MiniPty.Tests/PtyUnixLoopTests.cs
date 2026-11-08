@@ -18,10 +18,30 @@ public sealed class PtyUnixLoopTests
     /// A session flooding output does not delay another session's keystroke echo beyond a bound.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The loop reads each session at most a few reads per pass. That bound is not what this test isolates: a terminal
     /// delivers output more slowly than the loop reads it, so the flood's master runs dry between reads and the loop moves
     /// on by itself. The test passed with the bound removed, also with the flood going to a one-shot result, whose sink
     /// keeps its ring from ever filling.
+    /// </para>
+    /// <para>
+    /// A slow echo is described by what else ran meanwhile (<see cref="EchoClock"/>), so that a failure tells a host that
+    /// stopped the whole process from a loop that served the flood ahead of the echo. On 2026-11-05 one echo in 37,589
+    /// took 100.4 ms on CI's macos-26-intel runner, and nothing recorded which it was.
+    /// </para>
+    /// <para>
+    /// Keystrokes are paced, and the first ones are not measured. The test used to type the next key the moment the last
+    /// echo came back, and on macos-26-intel (2026-11-07) that measured its own thread rather than MiniPty. A macOS
+    /// terminal echoes during the write, so every echo was read at once on the test's thread, which never waited. macOS
+    /// left that thread without the CPU for up to 126 ms while the loop and the flood ran. The runtime recompiled the
+    /// test's method in the middle of the loop, after 10,000 back-edges in one call (about 5,000 echoes), compiling for
+    /// 23–35 ms on that thread.
+    /// The first echo also paid for the first calls of the echo path, 8–12 ms. A trace of the loop showed it held none
+    /// of those echoes. Paced, the thread waits between keystrokes as a terminal waits for its user, and no call of the
+    /// method runs long enough to be recompiled. By each keystroke the loop has also taken reading back from the idle
+    /// consumer, so the echo goes through the loop, which is what the test means to measure: on Linux the consumer finds
+    /// nothing yet and waits for the loop's read, and on macOS, which echoes during the write, whichever reads first.
+    /// </para>
     /// </remarks>
     [Test]
     [NotInParallel]
@@ -51,13 +71,45 @@ public sealed class PtyUnixLoopTests
         while (Interlocked.Read(ref floodBytes) < 1024 * 1024)
             await Task.Delay(10);
 
-        // Echoes for half a second, so the flood keeps going all along however fast each echo is.
-        var floodAtStart = Interlocked.Read(ref floodBytes);
-        var measuring = Stopwatch.StartNew();
-        var latencies = new List<double>();
-        while (latencies.Count < 40 || measuring.ElapsedMilliseconds < 500)
+        var echoes = new List<EchoClock.Echo>();
+        long floodAtStart;
+        using (var clock = new EchoClock(() => Interlocked.Read(ref floodBytes)))
         {
-            var started = Stopwatch.GetTimestamp();
+            // The first echoes run the echo path's code for the first time, the test's included, which took 8–12 ms on
+            // macos-26-intel: they are typed before the clock starts.
+            for (var i = 0; i < WarmUpEchoes; i++)
+            {
+                await Task.Delay(KeystrokeGapMs);
+                await TypeAsync(clock);
+            }
+
+            // Echoes for half a second, so the flood keeps going all along however fast each echo is.
+            floodAtStart = Interlocked.Read(ref floodBytes);
+            var measuring = Stopwatch.StartNew();
+            while (echoes.Count < 40 || measuring.ElapsedMilliseconds < 500)
+            {
+                await Task.Delay(KeystrokeGapMs);
+                echoes.Add(await TypeAsync(clock));
+            }
+        }
+
+        var floodDuring = Interlocked.Read(ref floodBytes) - floodAtStart;
+        stopFlood.Cancel();
+        await floodReader.WaitAsync(Timeout);
+        echoes.Sort(static (a, b) => b.Milliseconds.CompareTo(a.Milliseconds));
+        var slowest = echoes[0].Milliseconds;
+        var summary = $"{echoes.Count} echoes, median {echoes[echoes.Count / 2].Milliseconds:F2} ms, slowest: "
+            + string.Join("; ", echoes.Take(3).Select(static e => e.ToString()));
+        System.Console.WriteLine(summary);
+
+        // The flood kept going throughout, and echo stayed interactive.
+        await Assert.That(floodDuring).IsGreaterThan(1024L * 1024);
+        await Assert.That(slowest).IsLessThan(100.0).Because(summary);
+
+        // One keystroke: types "a", times it until its echo arrives, and erases it again.
+        async Task<EchoClock.Echo> TypeAsync(EchoClock clock)
+        {
+            var started = clock.Begin();
             await echo.WriteInputAsync("a");
             // The terminal echoes the character at once; cat sees nothing until a newline.
             while (true)
@@ -67,21 +119,144 @@ public sealed class PtyUnixLoopTests
                     break;
             }
 
-            latencies.Add(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            var typed = clock.End(started);
             // Erases the character again (VERASE is DEL), so the line never grows: a macOS terminal holds at most 1,024
-            // bytes on one line, then drops input and echoes BEL instead, and a fast loop echoes more than that in 500 ms.
+            // bytes on one line, then drops input and echoes BEL instead.
             await echo.WriteInputAsync("\x7f");
+            return typed;
+        }
+    }
+
+    /// <summary>Echoes <see cref="AFloodDoesNotDelayAnotherSessionsEcho"/> types before it starts measuring.</summary>
+    private const int WarmUpEchoes = 20;
+
+    /// <summary>
+    /// The pause before each keystroke of <see cref="AFloodDoesNotDelayAnotherSessionsEcho"/>, a millisecond or the
+    /// timer's resolution, so its thread waits between keystrokes as a terminal waits for its user.
+    /// </summary>
+    private const int KeystrokeGapMs = 1;
+
+    /// <summary>
+    /// Times echoes and records what else ran during each: a thread of its own ticks every millisecond and samples the
+    /// flood's byte count and the thread pool's queue. For one echo, a long gap between ticks means the process did not
+    /// run (the host descheduled it, or a collection suspended it); the flood standing still while ticks continued means
+    /// the flood's reader did not run either; the flood flowing throughout means only the echo was held up, by the loop,
+    /// by the thread pool, whose queue length tells, or on the echo's own thread. Compilation on that thread is recorded
+    /// too, since the runtime compiles there: an echo loop that never waited once spent 23–35 ms recompiling the test's
+    /// own method. A thread the host left without the CPU shows in none of these.
+    /// </summary>
+    private sealed class EchoClock : IDisposable
+    {
+        private const int Capacity = 1 << 16;
+        private readonly long[] _ticks = new long[Capacity];
+        private readonly long[] _flood = new long[Capacity];
+        private readonly long[] _queued = new long[Capacity];
+        private readonly Func<long> _floodBytes;
+        private readonly Thread _thread;
+        private volatile bool _stop;
+        private int _count;
+
+        public EchoClock(Func<long> floodBytes)
+        {
+            _floodBytes = floodBytes;
+            _thread = new Thread(Run) { IsBackground = true, Name = "EchoClock" };
+            _thread.Start();
         }
 
-        var floodDuring = Interlocked.Read(ref floodBytes) - floodAtStart;
-        stopFlood.Cancel();
-        await floodReader.WaitAsync(Timeout);
-        latencies.Sort();
-        var slowest = latencies[^1];
+        public Start Begin() => new(
+            Stopwatch.GetTimestamp(),
+            GC.GetTotalPauseDuration(),
+            Environment.CurrentManagedThreadId,
+            System.Runtime.JitInfo.GetCompilationTime(currentThread: true),
+            System.Runtime.JitInfo.GetCompilationTime(currentThread: false));
 
-        // The flood kept going throughout, and echo stayed interactive.
-        await Assert.That(floodDuring).IsGreaterThan(1024L * 1024);
-        await Assert.That(slowest).IsLessThan(100.0).Because($"{latencies.Count} echoes, median {latencies[latencies.Count / 2]:F2} ms, slowest {slowest:F1} ms");
+        public Echo End(Start started)
+        {
+            var ended = Stopwatch.GetTimestamp();
+            // Compilation on the echo's own thread holds the echo up; it is known only when the echo ended on the thread it
+            // began on. Compilation elsewhere in the process runs beside it.
+            var jitOnThread = Environment.CurrentManagedThreadId == started.Thread
+                ? (System.Runtime.JitInfo.GetCompilationTime(currentThread: true) - started.JitOnThread).TotalMilliseconds
+                : double.NaN;
+            return new Echo(
+                this,
+                started.Timestamp,
+                ended,
+                Stopwatch.GetElapsedTime(started.Timestamp, ended).TotalMilliseconds,
+                (GC.GetTotalPauseDuration() - started.Paused).TotalMilliseconds,
+                jitOnThread,
+                (System.Runtime.JitInfo.GetCompilationTime(currentThread: false) - started.JitInProcess).TotalMilliseconds);
+        }
+
+        /// <summary>What <see cref="End"/> needs from the start of an echo.</summary>
+        public readonly record struct Start(long Timestamp, TimeSpan Paused, int Thread, TimeSpan JitOnThread, TimeSpan JitInProcess);
+
+        public void Dispose()
+        {
+            _stop = true;
+            _thread.Join();
+        }
+
+        private void Run()
+        {
+            while (!_stop)
+            {
+                var i = _count;
+                if (i == Capacity)
+                    return;
+
+                _ticks[i] = Stopwatch.GetTimestamp();
+                _flood[i] = _floodBytes();
+                _queued[i] = ThreadPool.PendingWorkItemCount;
+                Volatile.Write(ref _count, i + 1);
+                Thread.Sleep(1);
+            }
+        }
+
+        /// <summary>One echo, described once the clock has stopped.</summary>
+        public readonly record struct Echo(
+            EchoClock Clock,
+            long Started,
+            long Ended,
+            double Milliseconds,
+            double PausedMilliseconds,
+            double JitOnThreadMilliseconds,
+            double JitInProcessMilliseconds)
+        {
+            public override string ToString()
+            {
+                var clock = Clock;
+                var count = Volatile.Read(ref clock._count);
+                double longestGap = 0, floodStill = 0;
+                long floodFrom = -1, floodTo = -1, mostQueued = 0;
+                long stillSince = 0;
+                for (var i = 1; i < count; i++)
+                {
+                    if (clock._ticks[i] < Started || clock._ticks[i - 1] > Ended)
+                        continue;
+
+                    longestGap = Math.Max(longestGap, Stopwatch.GetElapsedTime(clock._ticks[i - 1], clock._ticks[i]).TotalMilliseconds);
+                    mostQueued = Math.Max(mostQueued, clock._queued[i]);
+                    if (floodFrom < 0)
+                    {
+                        floodFrom = clock._flood[i - 1];
+                        stillSince = clock._ticks[i - 1];
+                    }
+
+                    if (clock._flood[i] != clock._flood[i - 1])
+                        stillSince = clock._ticks[i];
+                    else
+                        floodStill = Math.Max(floodStill, Stopwatch.GetElapsedTime(stillSince, clock._ticks[i]).TotalMilliseconds);
+                    floodTo = clock._flood[i];
+                }
+
+                var flood = floodFrom < 0 ? "no ticks" : $"flood +{(floodTo - floodFrom) / 1024} KiB, still for {floodStill:F1} ms";
+                var jitOnThread = double.IsNaN(JitOnThreadMilliseconds) ? "?, the echo moved threads" : $"{JitOnThreadMilliseconds:F1} ms";
+                return $"{Milliseconds:F1} ms ({flood}, longest gap between ticks {longestGap:F1} ms, "
+                    + $"pool queue up to {mostQueued}, GC paused {PausedMilliseconds:F1} ms, "
+                    + $"JIT on the echo's thread {jitOnThread}, in the process {JitInProcessMilliseconds:F1} ms)";
+            }
+        }
     }
 
     /// <summary>
@@ -379,7 +554,8 @@ public sealed class PtyUnixLoopTests
     /// few reads (<c>head | tr</c> took about one hand-off per four reads). A macOS master hands out 1 KiB per read, and
     /// its writer refills the terminal only after each read, so a consumer there finds it empty after almost every read
     /// and waits for it on its own thread instead of parking; the loop's passes are counted there too, since each park
-    /// would be one.
+    /// would be one. A FreeBSD consumer does not wait on its own thread, which is unmeasured there, so on FreeBSD only the
+    /// output is checked: in a 14.5 guest under QEMU a flood was handed over about once per two reads.
     /// </remarks>
     [Test]
     [NotInParallel]
@@ -409,6 +585,9 @@ public sealed class PtyUnixLoopTests
         var takenBack = UnixPtyBackend.LoopPassesForLoopConsumerForTests - takenBackBefore;
         var askedAgain = UnixPtyBackend.LoopLooksAskedAgainByConsumerForTests - askedAgainBefore;
         await Assert.That(received).IsEqualTo(Size);
+        if (OperatingSystem.IsFreeBSD())
+            return;
+
         await Assert.That(handOffs).IsLessThan(chunks / 4L).Because($"{handOffs} thread-pool work items for {chunks} chunks");
         await Assert.That(passes - takenBack - askedAgain).IsLessThan(chunks / 4L + elapsedMs)
             .Because($"{passes} loop passes, {takenBack} reading for a consumer taken back from and {askedAgain} asked for again by the consumer, for {chunks} chunks over {elapsedMs} ms");

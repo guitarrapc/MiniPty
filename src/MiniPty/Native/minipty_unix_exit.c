@@ -319,8 +319,9 @@ int minipty_child_watch_wake(int watch_fd, int wake_write)
  * silent; enabling it again reports at once what arrived meanwhile. The readiness probe's rules (pty_crossplatform.md,
  * "Readiness on a pty master") apply: a master is registered only after its slave is open, because before that kqueue reports it writable
  * while writes fail with EAGAIN. EV_EOF is reported as hang-up, and the caller ends output only on a read that returns 0:
- * EV_EOF stays on a registration after a slave is opened again, while reads fail with EAGAIN, so the caller renews the
- * registration (minipty_watch_renew) when a hang-up report found nothing to read. The caller removes the master at end of
+ * on macOS EV_EOF stays on a registration after a slave is opened again, while reads fail with EAGAIN, so the caller
+ * renews the registration (minipty_watch_renew) when a hang-up report found nothing to read. FreeBSD clears it when the
+ * slave opens again. The caller removes the master at end of
  * output, because EV_EOF repeats on every wait until then. A token needs 64 bits of udata, so a 32-bit build reports
  * ENOTSUP and its sessions fail to start.
  */

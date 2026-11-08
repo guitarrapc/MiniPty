@@ -132,6 +132,7 @@ static class BenchmarkTables
         var latency = new List<string[]>();
         var throughput = new List<string[]>();
         var startup = new List<string[]>();
+        var startupHostMemory = new List<string[]>();
 
         foreach (var runner in Runners)
         {
@@ -177,6 +178,15 @@ static class BenchmarkTables
                 $"{exit["Mean"]} / {exit["Allocated"]}",
                 $"{echo["Mean"]} / {echo["Allocated"]}",
             ]);
+
+            report = Report.Load(ReportPath(results, "PtyStartupHostMemoryBenchmarks", ".csv"));
+            var empty = report.Get("Session_Exit0_WaitForExit", ("HostResidentMiB", "0"));
+            var large = report.Get("Session_Exit0_WaitForExit", ("HostResidentMiB", "2048"));
+            startupHostMemory.Add([
+                runner.Name,
+                $"{empty["Mean"]} / {empty["Allocated"]}",
+                $"{large["Mean"]} / {large["Allocated"]}",
+            ]);
         }
 
         var run = new List<string>
@@ -192,6 +202,7 @@ static class BenchmarkTables
             ("latency", Table(["Runner", "`ConPty`", "`MiniPty` P50 / P95", "`PortaPty` P50 / P95", "Allocated (`MiniPty` / `PortaPty`)"], latency)),
             ("throughput", Table(["Runner", "`ConPty`", "`MiniPty` MiB/s", "`PortaPty` MiB/s", "Allocated (`MiniPty` / `PortaPty`)"], throughput)),
             ("startup", Table(["Runner", "`Session_Exit0_WaitForExit` Mean / Allocated", "`Session_Echo_Bytes` Mean / Allocated"], startup)),
+            ("startup-host-memory", Table(["Runner", "`HostResidentMiB` 0: Mean / Allocated", "`HostResidentMiB` 2048: Mean / Allocated"], startupHostMemory)),
         ];
     }
 

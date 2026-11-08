@@ -761,9 +761,11 @@ internal sealed class PtyOutputPump : IValueTaskSource
         var sink = Volatile.Read(ref _sink);
         if ((flags & FlagCloseRequested) == 0)
         {
-            // One-shot completion never closes before the first read: ConPTY can emit its first frame after a fast
-            // child has already exited, and closing then would lose it. The grace bounds that wait.
-            var quiet = IsQuietSince(now, ExitTick) && (sink is null || Volatile.Read(ref _lastReadTick) != 0);
+            // One-shot completion does not close before the first read: ConPTY can emit its first frame after a fast
+            // child has already exited, and closing then could lose it. The grace bounds that wait. A transport whose
+            // close sends what it holds needs no wait (IPtyBackend.CloseSendsHeldOutput).
+            var quiet = IsQuietSince(now, ExitTick)
+                && (sink is null || _backend.CloseSendsHeldOutput || Volatile.Read(ref _lastReadTick) != 0);
             if (!quiet && (sink is null || !sink.IsGraceExpired(now, ExitTick)))
                 return false;
 

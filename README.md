@@ -39,7 +39,7 @@ MiniPty creates a real PTY on each supported OS. See [Backends](#backends) for h
 | Linux, glibc 2.27+ | x64, arm64 | Supported |
 | Linux, musl 1.2.3+ (Alpine) | x64, arm64 | Supported |
 | macOS 12.0+ | x64, arm64 | Supported |
-| FreeBSD | — | Experimental: tested neither locally nor in CI, and the package ships no FreeBSD binary, so MiniPty works there only when built from source |
+| FreeBSD 14.4+ | x64 (tested), arm64 (compiled only) | Experimental: CI compiles the shim for 14.4 and 15.1 and runs the tests on 14.5 in a VM, with a community build of .NET 10. The package ships no FreeBSD binary, so MiniPty works there only when built from source |
 
 The Linux and macOS minimums are those of the native files. They reach at least as far back as .NET 10 itself runs. Windows needs ConPTY, which first shipped in Windows 10 1809 and Windows Server 2019. .NET 10 also runs on earlier builds, such as Windows 10 1607 and Windows Server 2016; there `Pty.IsSupported` is `false` and `Pty.Start` throws `PlatformNotSupportedException`.
 
@@ -58,11 +58,11 @@ Your application carries the following besides the MiniPty assembly. The package
 
 <!-- benchmark:run:start -->
 
-The numbers below are from [run 42176016063](https://github.com/guitarrapc/MiniPty/actions/runs/42176016063) on 2026-11-06, with .NET 10.0.14 on GitHub Actions hosted runners:
+The numbers below are from [run 42335813387](https://github.com/guitarrapc/MiniPty/actions/runs/42335813387) on 2026-11-07, with .NET 10.0.14 on GitHub Actions hosted runners:
 
-- Linux (`ubuntu-24.04`): AMD EPYC 9V45 4.28GHz, 1 CPU, 4 logical and 2 physical cores
+- Linux (`ubuntu-24.04`): AMD EPYC 7763 2.61GHz, 1 CPU, 4 logical and 2 physical cores
 - macOS (`macos-26`): Apple M1 (Virtual), 1 CPU, 3 logical and 3 physical cores
-- Windows (`windows-2025`): INTEL XEON PLATINUM 8573C 2.30GHz, 1 CPU, 4 logical and 2 physical cores
+- Windows (`windows-2025`): AMD EPYC 9V45 2.60GHz, 1 CPU, 4 logical and 2 physical cores
 
 <!-- benchmark:run:end -->
 
@@ -78,10 +78,10 @@ The keystroke and throughput benchmarks keep one child running with raw input, a
 
 | Runner | `ConPty` | `MiniPty` P50 / P95 | `PortaPty` P50 / P95 | Allocated (`MiniPty` / `PortaPty`) |
 |--------|----------|---------------------|----------------------|------------------------------------|
-| Linux | none | 39.46 μs / 71.37 μs | 35.29 μs / 53.57 μs | 0 B / 680 B |
-| macOS | none | 58.37 μs / 81.30 μs | 54.79 μs / 94.63 μs | 0 B / 680 B |
-| Windows | out-of-band | 218.7 μs / 259.8 μs | 232.0 μs / 280.9 μs | 0 B / 376 B |
-| Windows | in-box | 14,187.7 μs / 20,578.3 μs | 14,340.7 μs / 20,460.1 μs | 0 B / 160 B |
+| Linux | none | 95.34 μs / 121.92 μs | 105.71 μs / 131.84 μs | 0 B / 680 B |
+| macOS | none | 34.17 μs / 61.25 μs | 38.73 μs / 132.57 μs | 0 B / 680 B |
+| Windows | out-of-band | 110.05 μs / 131.0 μs | 109.50 μs / 134.4 μs | 0 B / 376 B |
+| Windows | in-box | 11,933.70 μs / 22,455.0 μs | 10,998.50 μs / 22,009.2 μs | 0 B / 160 B |
 
 <!-- benchmark:latency:end -->
 
@@ -93,14 +93,16 @@ On Windows each library runs on both ConPTY implementations, the `ConPty` parame
 
 | Runner | `ConPty` | `MiniPty` MiB/s | `PortaPty` MiB/s | Allocated (`MiniPty` / `PortaPty`) |
 |--------|----------|-----------------|------------------|------------------------------------|
-| Linux | none | 275.9 | 284.5 | 0 B / 67829 B |
-| macOS | none | 46.3 | 60.0 | 0 B / 492165 B |
-| Windows | out-of-band | 4.2 | 4.9 | 8 B / 884845 B |
-| Windows | in-box | 3.8 | 3.9 | 12 B / 172 B |
+| Linux | none | 216.3 | 192.2 | 0 B / 72889 B |
+| macOS | none | 58.7 | 83.9 | 0 B / 492200 B |
+| Windows | out-of-band | 7.1 | 7.7 | 12 B / 884802 B |
+| Windows | in-box | 6.3 | 6.5 | 12 B / 120 B |
 
 <!-- benchmark:throughput:end -->
 
 ConPTY renders the child's output and sends its own VT stream, so on Windows this is mostly the speed of ConPTY's renderer, not of a byte pipe.
+
+A few bytes in the `Allocated` column are one-time costs of the benchmark process, not of each flood. BenchmarkDotNet counts every thread's allocations over a few operations of a quarter of a second each, so a one-time cost that falls there shows as bytes per operation. Such costs include a thread-pool thread added during the run (about 1 KB), the runtime's tiered compilation, or its first use of a type. Run outside BenchmarkDotNet, the flood allocated nothing per operation on either ConPTY ([platform lessons](.github/docs/specs/platform_support.md#lessons-learned)).
 
 **Session start** (`PtyStartupBenchmarks`, columns `Mean` and `Allocated`): one session from `Pty.Start` to exit, through the OS shell (`cmd.exe /c` on Windows, `sh -c` elsewhere), so the time is mostly process creation. `Session_Exit0_WaitForExit` runs `exit 0` and waits for the exit; `Session_Echo_Bytes` runs `echo` and reads its output to the end.
 
@@ -108,11 +110,23 @@ ConPTY renders the child's output and sends its own VT stream, so on Windows thi
 
 | Runner | `Session_Exit0_WaitForExit` Mean / Allocated | `Session_Echo_Bytes` Mean / Allocated |
 |--------|----------------------------------------------|---------------------------------------|
-| Linux | 616.4 μs / 1.27 KB | 642.4 μs / 1.78 KB |
-| macOS | 10.077 ms / 1.27 KB | 9.491 ms / 1.79 KB |
-| Windows | 22.68 ms / 1.26 KB | 24.80 ms / 1.86 KB |
+| Linux | 858.0 μs / 1.27 KB | 879.1 μs / 1.78 KB |
+| macOS | 5.606 ms / 1.27 KB | 8.376 ms / 1.79 KB |
+| Windows | 11.88 ms / 1.25 KB | 16.61 ms / 1.86 KB |
 
 <!-- benchmark:startup:end -->
+
+**Session start in a large host** (`PtyStartupHostMemoryBenchmarks`, `HostResidentMiB` 0 and 2048, columns `Mean` and `Allocated`): `Session_Exit0_WaitForExit` while the host holds nothing or 2 GiB of resident memory beside the runtime's own, as an IDE backend or a web terminal may. No platform copies the host to start the child (Linux uses `clone(CLONE_VM | CLONE_VFORK)`, macOS `posix_spawn`, Windows `CreateProcess`), so the two columns should match. This benchmark runs fewer iterations than the one above, so its figure without the host memory can differ from that table's.
+
+<!-- benchmark:startup-host-memory:start -->
+
+| Runner | `HostResidentMiB` 0: Mean / Allocated | `HostResidentMiB` 2048: Mean / Allocated |
+|--------|---------------------------------------|------------------------------------------|
+| Linux | 852.0 μs / 1.27 KB | 852.1 μs / 1.27 KB |
+| macOS | 5.472 ms / 1.27 KB | 5.523 ms / 1.27 KB |
+| Windows | 13.41 ms / 1.25 KB | 12.95 ms / 1.25 KB |
+
+<!-- benchmark:startup-host-memory:end -->
 
 The run's reports also include every other benchmark, Porta.Pty's `UseAsyncIo` mode (`PortaPtyAsyncIo`), and 64 KiB floods. On Linux and Windows, each keystroke and throughput case also runs on two of the runner's four logical CPUs (job `TwoCpus`), and those reports add the thread-pool work items (`Completed Work Items`) and, for throughput, the benchmark process's CPU time (`Process CPU`) per operation. Run them locally with `dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter "*PtyLatencyBenchmarks*"`.
 
@@ -259,9 +273,9 @@ MiniPty uses the small `libminipty_unix` native shim to open the PTY, start the 
 
 MiniPty uses the Unix backend through `libminipty_unix.dylib`, and starts each child through `minipty_spawn_helper` (not `forkpty`): a small launcher that `posix_spawn` starts, which takes the terminal as its controlling terminal and then replaces itself with the child by `exec`, so no helper process stays running. Resize uses `TIOCSWINSZ`. Output and input go through the same one loop as on Linux, on kqueue.
 
-### FreeBSD (experimental): `forkpty`
+### FreeBSD (experimental): `fork`
 
-MiniPty uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle.
+MiniPty uses the Unix backend through `libminipty_unix.so`, which is built with `cc` when MiniPty is built from source on FreeBSD. It opens the terminal close-on-exec and starts each child with `fork`; the child takes the terminal as its controlling terminal and `exec`s, as on Linux. Output and input go through the same one loop as on macOS, on kqueue.
 
 ## Advanced Usage
 
@@ -282,6 +296,13 @@ Building a terminal emulator on Windows? Use the out-of-band ConPTY library inst
 > In-box means the ConPTY that comes with Windows itself.
 
 The in-box ConPTY drops graphics protocols (Sixel, Kitty) and some terminal queries, forwards mouse tracking only to programs that read VT input, and changes behavior with Windows updates. The ConPTY that Windows Terminal ships, published by Microsoft as `Microsoft.Windows.Console.ConPTY`, forwards everything and behaves the same on every Windows build.
+
+Before Windows 11 24H2, the in-box host differs further. Of those builds, only Windows Server 2022 (build 20348) was measured ([Verification](.github/docs/specs/platform_support.md#verification)):
+
+- It forwards neither the switch to the alternate screen nor the hidden cursor, so a full-screen program draws on the main screen, with its cursor showing.
+- After a row that fills the width, it relies on the pending wrap outliving `ESC[K`, which xterm ends, so the next row starts one column to the left.
+
+MiniPty cannot change either, so a terminal emulator that runs on these builds should use the out-of-band ConPTY. On these builds, also await `DisposeAsync` before your process exits. Disposal keeps the in-box host's output open until the host has ended, for 1 s at most, because a host that finds it closed can keep running for good.
 
 ```shell
 # Use the out-of-band ConPTY library, 1.25 or later (older ones can stall three seconds at startup)
