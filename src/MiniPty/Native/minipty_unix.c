@@ -60,7 +60,6 @@
 #include <sys/proc.h>
 #include <util.h>
 #elif defined(__FreeBSD__)
-#include <libutil.h>
 #include <sys/param.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
@@ -142,7 +141,7 @@ static void minipty_default_termios(struct termios *term)
 
 /*
  * Opens the start report pipe, both ends close-on-exec, with the write end at a descriptor above stdio and above the
- * descriptor the macOS helper receives it on. A forkpty child replaces stdio with the terminal, and posix_spawn's
+ * descriptor the macOS helper receives it on. A FreeBSD child replaces stdio with the terminal, and posix_spawn's
  * adddup2 onto the same descriptor would leave close-on-exec set, so neither may hold the write end.
  */
 static int minipty_open_report_pipe(int fds[2])
@@ -229,7 +228,8 @@ static int minipty_await_start_report(int fd, int *stage_out, int *err_out)
         if (received < sizeof(report))
             continue;
 
-        if (report[0] != MINIPTY_START_STAGE_CHDIR && report[0] != MINIPTY_START_STAGE_EXEC)
+        /* NONE is a FreeBSD child that failed to take the terminal, before chdir. */
+        if (report[0] < MINIPTY_START_STAGE_NONE || report[0] > MINIPTY_START_STAGE_EXEC)
             return 0;
 
         *stage_out = report[0];
@@ -248,7 +248,7 @@ static int minipty_await_start_report(int fd, int *stage_out, int *err_out)
 #define NSIG 32
 #endif
 
-/* FreeBSD's forkpty child. The Linux child resets with the system call instead. */
+/* FreeBSD's forked child. The Linux child resets with the system call instead. */
 static void minipty_reset_child_signals(void)
 {
     struct sigaction sa;
@@ -263,8 +263,6 @@ static void minipty_reset_child_signals(void)
 }
 
 #endif /* !__linux__ */
-
-#if defined(__linux__)
 
 #define MINIPTY_INHERITED_FD_SCAN_DEFAULT 4096
 #define MINIPTY_INHERITED_FD_SCAN_CAP 65536
@@ -293,20 +291,31 @@ static int minipty_compute_inherited_fd_scan_limit(void)
     return (int)limit;
 }
 
+/*
+ * Marks every descriptor above stdio close-on-exec in the child, so the program it execs inherits only the terminal.
+ * Linux and FreeBSD share it. The macOS helper starts with POSIX_SPAWN_CLOEXEC_DEFAULT instead.
+ */
 static void minipty_scrub_inherited_fds(int scan_limit)
 {
+#if defined(__linux__)
 #if defined(SYS_close_range) && defined(CLOSE_RANGE_CLOEXEC)
     if (syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC) == 0)
         return;
 #endif
+#elif defined(CLOSE_RANGE_CLOEXEC)
+    if (close_range(3, ~0U, CLOSE_RANGE_CLOEXEC) == 0)
+        return;
+#endif
 
     /*
-     * Where close_range fails, before Linux 5.11 or under a seccomp filter that refuses it: set FD_CLOEXEC on fds >= 3.
-     * scan_limit is computed in the parent, so the child makes no libc query.
+     * Where close_range fails, before Linux 5.11, under a seccomp filter that refuses it, or where the headers lack the
+     * flag: set FD_CLOEXEC on fds >= 3. scan_limit is computed in the parent, so the child makes no libc query.
      */
     for (int fd = 3; fd < scan_limit; fd++)
         minipty_set_close_on_exec(fd);
 }
+
+#if defined(__linux__)
 
 /* The bytes of the kernel's signal set: 64 signals on every architecture .NET runs on. */
 #define MINIPTY_KERNEL_SIGSET_BYTES 8
@@ -594,8 +603,16 @@ done:
 
 #if !defined(__linux__)
 
-/* FreeBSD (experimental, untested) keeps forkpty. */
-static int spawn_pty_child_forkpty(
+/*
+ * FreeBSD (experimental, tested in a guest under QEMU only). Starts the child with fork, doing what forkpty does (a
+ * session of its own, with the slave as its controlling terminal and stdio), but the host opens only the master,
+ * close-on-exec, and the child opens the slave by name. forkpty opens both ends in the host without O_CLOEXEC and holds
+ * them through the fork: in a FreeBSD 14.5 guest, 338 of 410 processes the host started on other threads meanwhile kept
+ * a master or slave. Even a slave the host holds close-on-exec reaches a process forked on another thread until its exec,
+ * and when the session leader exits while any other process holds the slave, FreeBSD ends the terminal by revoke, which
+ * discards the output the master has not read. The slave's first open resets its termios, so the child sets them.
+ */
+static int spawn_pty_child_fork(
     int *master,
     const struct winsize *winp,
     const char *cwd,
@@ -610,11 +627,13 @@ static int spawn_pty_child_forkpty(
     sigset_t newmask;
     sigset_t oldmask;
     struct termios term;
+    char name[64];
     char **child_envp = envp == NULL ? minipty_envp_for_child(NULL) : (char **)envp;
     int report[2];
-    int report_err;
     int stage = MINIPTY_START_STAGE_NONE;
     int child_err = 0;
+    int fd_scan_limit = minipty_compute_inherited_fd_scan_limit();
+    int err = 0;
 
     /* FreeBSD has no pidfd. */
     *pidfd_out = -1;
@@ -623,11 +642,25 @@ static int spawn_pty_child_forkpty(
         return ENOMEM;
     }
 
-    report_err = minipty_open_report_pipe(report);
-    if (report_err != 0) {
+    /* O_NOCTTY: a host that leads a session without a controlling terminal must not acquire this one. */
+    *master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (*master < 0)
+        err = errno > 0 ? errno : EINVAL;
+    else if (grantpt(*master) != 0 || unlockpt(*master) != 0)
+        err = errno > 0 ? errno : EINVAL;
+    /* FreeBSD's ptsname_r returns nonzero and sets errno. */
+    else if (ptsname_r(*master, name, sizeof(name)) != 0)
+        err = errno > 0 ? errno : EINVAL;
+    else
+        err = minipty_open_report_pipe(report);
+    if (err != 0) {
+        if (*master >= 0) {
+            close(*master);
+            *master = -1;
+        }
         if (envp == NULL)
             free(child_envp);
-        return report_err;
+        return err;
     }
 
     minipty_default_termios(&term);
@@ -635,35 +668,51 @@ static int spawn_pty_child_forkpty(
     sigfillset(&newmask);
     pthread_sigmask(SIG_BLOCK, &newmask, &oldmask);
 
-    pid = forkpty(master, NULL, &term, (struct winsize *)winp);
+    pid = fork();
+    err = errno;
 
     if (pid == 0)
         minipty_reset_child_signals();
 
     pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
 
-    if (pid < 0) {
-        int err = errno > 0 ? errno : EINVAL;
-        close(report[0]);
-        close(report[1]);
-        if (envp == NULL)
-            free(child_envp);
-        return err;
-    }
-
     if (pid == 0) {
-        /* errno is saved first: the report's write could change it. Inherited descriptors are not scrubbed here yet. */
-        int err;
+        /*
+         * errno is saved first: the report's write could change it. The master, the slave's own descriptor, and the
+         * report's write end are close-on-exec, so the scrub leaves them open until the exec.
+         */
+        int stage_failed = MINIPTY_START_STAGE_NONE;
+        int slave;
 
+        if (setsid() < 0)
+            goto child_failed;
+        slave = open(name, O_RDWR | O_NOCTTY | O_CLOEXEC);
+        if (slave < 0 || ioctl(slave, TIOCSCTTY, 0) != 0 || tcsetattr(slave, TCSANOW, &term) != 0
+                || (winp != NULL && ioctl(slave, TIOCSWINSZ, winp) != 0))
+            goto child_failed;
+        /* dup2 onto the slave's own descriptor would leave close-on-exec set; see minipty_clone_child. */
+        if (slave <= STDERR_FILENO) {
+            slave = fcntl(slave, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+            if (slave < 0)
+                goto child_failed;
+        }
+        for (int fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
+            if (dup2(slave, fd) < 0)
+                goto child_failed;
+        }
+
+        minipty_scrub_inherited_fds(fd_scan_limit);
         if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0) {
-            err = errno;
-            minipty_report_start_failure(report[1], MINIPTY_START_STAGE_CHDIR, err);
-            _exit(126);
+            stage_failed = MINIPTY_START_STAGE_CHDIR;
+            goto child_failed;
         }
         minipty_execvpe(file, argv, child_envp);
+        stage_failed = MINIPTY_START_STAGE_EXEC;
+
+child_failed:
         err = errno;
-        minipty_report_start_failure(report[1], MINIPTY_START_STAGE_EXEC, err);
-        _exit(127);
+        minipty_report_start_failure(report[1], stage_failed, err);
+        _exit(stage_failed == MINIPTY_START_STAGE_CHDIR ? 126 : 127);
     }
 
     /* Closed before anything else, so the pipe's end of file depends on the child's exec alone. */
@@ -672,22 +721,11 @@ static int spawn_pty_child_forkpty(
     if (envp == NULL)
         free(child_envp);
 
-    /*
-     * forkpty may open the master without O_CLOEXEC, so every child the host starts later would inherit it and keep the
-     * terminal from hanging up. A fork on another thread before this call can still inherit it, and the slave inside
-     * forkpty.
-     */
-    if (fcntl(*master, F_SETFD, FD_CLOEXEC) != 0) {
-        int err = errno > 0 ? errno : EINVAL;
-        int exit_code;
-        int term_signal;
-
+    if (pid < 0) {
         close(report[0]);
-        minipty_signal_child(-1, (int)pid, SIGKILL);
-        minipty_reap_child(-1, (int)pid, 1, &exit_code, &term_signal);
         close(*master);
         *master = -1;
-        return err;
+        return err > 0 ? err : EINVAL;
     }
 
     /*
@@ -1111,7 +1149,7 @@ static int spawn_pty_child(
 #elif defined(__linux__)
     return spawn_pty_child_linux(master, winp, cwd, file, argv, envp, pid_out, pidfd_out, start_stage_out);
 #else
-    return spawn_pty_child_forkpty(master, winp, cwd, file, argv, envp, pid_out, pidfd_out, start_stage_out);
+    return spawn_pty_child_fork(master, winp, cwd, file, argv, envp, pid_out, pidfd_out, start_stage_out);
 #endif
 }
 

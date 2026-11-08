@@ -15,7 +15,11 @@ Phase 2 is done on the same branch, also not yet merged; see [Phase 2](#phase-2-
 - **I5:** the bytes are one-time costs, and no flood allocates.
 - **I7:** the helper stays, since `posix_spawn` cannot give the child its controlling terminal.
 
-Phases 3 and 4 are not started. The CI evidence in the findings comes from the Build runs of 2026-11-05.
+Phases 3 and 4 are in progress on the same branch (2026-11-08); see [Phase 3](#phase-3-windows-before-24h2-i4) and [Phase 4](#phase-4-freebsd-i6).
+- **I4:** the smoke test runs on windows-2022, with the in-box ConPTY, and the README states the Server 2022 differences. The VM runs are postponed.
+- **I6:** kept, with a compile check and with tests. The suite passes in a FreeBSD guest; the CI jobs have not run yet.
+
+The CI evidence in the findings comes from the Build runs of 2026-11-05.
 
 ## Inventory
 
@@ -453,11 +457,32 @@ The README part can land first, worded as measured on Server 2022.
 - [next_todo.md](../next_todo.md#unverified): the bullet on the in-box ConPTY before 24H2 is replaced by what is still unmeasured.
 - The README.
 
+**Results (2026-11-07):**
+
+- **The smoke test runs on windows-2022.** Until now the smoke on Windows ran the child on the out-of-band ConPTY only, so adding the runner alone would not have run the in-box host there. It now runs the child on the in-box ConPTY first, on every Windows runner. Locally on build 26200 both passed, under `dotnet run` and after a NativeAOT publish.
+- **The startup benchmark can run on windows-2022.** The benchmark workflow takes the Windows runner as an input. The README's update runs only with windows-2025, so a windows-2022 run leaves the README alone.
+- **The README states the drawing differences measured on Server 2022,** recommends the out-of-band ConPTY for terminal emulators on those builds, and says to await `DisposeAsync` before the process exits.
+- **The VM runs are postponed.** Builds 19045, 22631, and 17763 stay unmeasured, under [next_todo.md](../next_todo.md#unverified).
+
 ### Phase 4: FreeBSD (I6)
 
 This phase is independent of the others and starts after the decision.
 
 **Closed when:** the decision is recorded in [platform_support.md](../specs/platform_support.md) and in the README, and its option is implemented: a compile check that passes, a test run that passes, or the code removed.
+
+**Decision (2026-11-07): keep, with a compile check and with tests.**
+
+- **The compile check passes.** `scripts/freebsd/compile-check.sh` cross-compiles the shim with clang against the base system of FreeBSD 14.4 and 15.1, the oldest and the newest supported releases, on amd64 and arm64, with warnings as errors, and links a program against it. Build's `freebsd-native` job runs it. It caught a missing function and an undeclared one on purpose.
+- **The child scrubs inherited descriptors,** with `close_range`, as the Linux child does.
+- **The tests run in a FreeBSD 14.5 guest under QEMU.** `scripts/freebsd/run-tests-in-qemu.sh`, Build's `test-freebsd` job, with KVM on CI. FreeBSD's packages stop at .NET 9, so .NET 10 is a community build of Microsoft's sources, pinned by hash, run only inside the guest.
+- **The first run, emulated without KVM, passed 763 of 779 tests.** The failures, and what fixed them:
+  - **A descriptor leak, and output lost through it.** `forkpty` opened the terminal without close-on-exec and held it through the fork: 338 of 410 processes the host started meanwhile kept a master or slave. FreeBSD discards a session leader's unread output when another process holds the slave as the leader exits, so six tests read no output. Opening both ends close-on-exec in the host was not enough, since a process forked on another thread holds them until its exec. The host now opens only the master, and the child opens the slave by name. The output, the active process name, and the bridge tests whose child had died of `SIGHUP` passed after it.
+  - **Three kernel differences the tests had assumed away.** FreeBSD erases a whole UTF-8 character only while it echoes, drops the rest of an overlong canonical line as macOS does, and clears a kqueue registration's end of file when the slave opens again, where macOS keeps it.
+  - **A test bug.** The kqueue tests took the slave's name from `ptsname`, whose buffer FreeBSD shares across the process, so tests running in parallel opened each other's slaves. They use `ptsname_r`.
+  - **One gap recorded, not fixed.** A FreeBSD consumer does not wait on its own thread for a flood, so a flood is handed over about once per two reads ([next_todo.md](../next_todo.md#open)).
+  - **The harness.** Some tests start the test host again, whose apphost was built on Linux, so a script stands in for it. The image's first-boot `freebsd-update` is turned off through `/etc/rc.conf.d`.
+- **With the fixes, the suite passed in a guest without KVM,** twice, once through the committed harness (776 and 777 passed; the flood tests that need 4.1 MB/s skipped themselves).
+- **Not finished:** the first runs of `freebsd-native` and `test-freebsd` in CI. Phase 4 closes once they pass.
 
 ## Not in This Plan
 

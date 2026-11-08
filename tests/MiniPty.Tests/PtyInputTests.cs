@@ -276,13 +276,14 @@ public sealed class PtyInputTests
         // buffer ends with a line terminator. On Linux one 4 MiB line puts the cut inside it. Windows takes whole 4 KiB
         // parts and macOS about 1 KiB, so both get short lines whose length (101 and 9 bytes) divides neither amount.
         // A long line would not work there: the Windows console hands a line longer than its read buffer to the
-        // reader without waiting for the CR, and a macOS tty drops the rest of an overlong line, EOT included.
+        // reader without waiting for the CR, and a macOS tty drops the rest of an overlong line, EOT included. A FreeBSD
+        // tty drops it too (ttydisc_rint, once no complete line is queued), so it takes the macOS lines.
         byte[] input;
         if (OperatingSystem.IsWindows())
         {
             input = Encoding.ASCII.GetBytes(NumberedLines(0, 7000));
         }
-        else if (OperatingSystem.IsMacOS())
+        else if (OperatingSystem.IsMacOS() || OperatingSystem.IsFreeBSD())
         {
             input = Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("xxxxxxxx\n", 500000)));
         }

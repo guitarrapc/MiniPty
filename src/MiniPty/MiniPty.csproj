@@ -14,7 +14,7 @@
     <MiniPtyUnixNativeLibraryName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libminipty_unix.dylib</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLibraryName Condition="'$(MiniPtyUnixNativeLibraryName)' == ''">libminipty_unix.so</MiniPtyUnixNativeLibraryName>
     <MiniPtyUnixNativeLinkFlags Condition="$([MSBuild]::IsOSPlatform('Linux'))">-Wl,-z,now</MiniPtyUnixNativeLinkFlags>
-    <MiniPtyUnixNativeLinkFlags Condition="$([MSBuild]::IsOSPlatform('OSX')) Or $([MSBuild]::IsOSPlatform('FreeBSD'))">-lutil</MiniPtyUnixNativeLinkFlags>
+    <MiniPtyUnixNativeLinkFlags Condition="$([MSBuild]::IsOSPlatform('OSX'))">-lutil</MiniPtyUnixNativeLinkFlags>
     <MiniPtyUnixNativeLinkFlags Condition="'$(MiniPtyUnixNativeLinkFlags)' == ''"></MiniPtyUnixNativeLinkFlags>
     <!-- Same flags as scripts/build-native.sh, which builds the shipped files: the macOS deployment target that
          NativeAOT links for, and -pthread elsewhere. The link flags follow the sources there and here. -->

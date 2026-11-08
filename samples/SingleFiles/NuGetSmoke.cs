@@ -1,7 +1,7 @@
 // NuGetSmoke: checks the packed NuGet packages, not the sources. It has no #: directives on purpose:
 // scripts/run-nuget-smoke.sh compiles it in a temporary project that references the packages in a local feed, then
-// runs it under `dotnet run` and, given a RID, after a publish. On Windows it also checks that the package's build
-// targets staged OpenConsole.exe beside conpty.dll.
+// runs it under `dotnet run` and, given a RID, after a publish. On Windows it runs the child on the in-box ConPTY and
+// then on the out-of-band one, after checking that the package's build targets staged OpenConsole.exe beside conpty.dll.
 
 using System.Runtime.InteropServices;
 using MiniPty;
@@ -50,28 +50,38 @@ try
             return 1;
         }
 
+        // The in-box ConPTY runs too, since the system's own host is what a build before Windows 11 24H2 (no
+        // ReleasePseudoConsole, such as windows-2022) differs in, and what most consumers use.
+        if (!await RunOnceAsync(startInfo, "in-box"))
+            return 1;
+
         startInfo = startInfo with { ConPty = conPty };
     }
 
-    var result = await PtyCapture.RunAsync(startInfo);
-    if (result.ExitCode != 0)
-    {
-        Console.Error.WriteLine($"FAIL NuGet smoke: unexpected exit code {result.ExitCode}.");
-        return 1;
-    }
-
-    if (!result.Contains(marker))
-    {
-        Console.Error.WriteLine("FAIL NuGet smoke: expected marker missing from output.");
-        return 1;
-    }
-
-    var host = conPty is null ? string.Empty : $" conpty={conPty.FileVersion} host={conPty.ConsoleHostPath}";
-    Console.Error.WriteLine($"ok NuGet smoke: exit={result.ExitCode} bytes={result.Output.Length}{host}");
-    return 0;
+    var host = conPty is null ? "unix pty" : $"out-of-band conpty={conPty.FileVersion} host={conPty.ConsoleHostPath}";
+    return await RunOnceAsync(startInfo, host) ? 0 : 1;
 }
 catch (Exception ex)
 {
     Console.Error.WriteLine($"FAIL NuGet smoke: {ex.GetType().Name}: {ex.Message}");
     return 1;
+}
+
+static async Task<bool> RunOnceAsync(PtyStartInfo startInfo, string host)
+{
+    var result = await PtyCapture.RunAsync(startInfo);
+    if (result.ExitCode != 0)
+    {
+        Console.Error.WriteLine($"FAIL NuGet smoke ({host}): unexpected exit code {result.ExitCode}.");
+        return false;
+    }
+
+    if (!result.Contains(marker))
+    {
+        Console.Error.WriteLine($"FAIL NuGet smoke ({host}): expected marker missing from output.");
+        return false;
+    }
+
+    Console.Error.WriteLine($"ok NuGet smoke: exit={result.ExitCode} bytes={result.Output.Length} {host}");
+    return true;
 }

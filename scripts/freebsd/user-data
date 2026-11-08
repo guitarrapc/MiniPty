@@ -1,0 +1,14 @@
+#cloud-config
+# Read by nuageinit, FreeBSD's cloud-init, from the cidata disk that run-tests-in-qemu.sh builds; runcmd runs at the end
+# of boot. The image's first-boot freebsd-update and sshd are turned off through /etc/rc.conf.d, which rc reads again for
+# each script. An addition to /etc/rc.conf would not reach them: rc reads that file once, before nuageinit writes.
+write_files:
+  - path: /etc/rc.conf.d/firstboot_freebsd_update
+    content: |
+      firstboot_freebsd_update_enable="NO"
+  - path: /etc/rc.conf.d/sshd
+    content: |
+      sshd_enable="NO"
+runcmd:
+  - mount_cd9660 /dev/iso9660/cidata /mnt || mount_cd9660 /dev/iso9660/CIDATA /mnt
+  - sh /mnt/guest.sh

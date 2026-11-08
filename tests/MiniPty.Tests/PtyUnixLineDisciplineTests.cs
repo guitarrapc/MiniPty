@@ -16,11 +16,14 @@ public sealed class PtyUnixLineDisciplineTests
             return;
 
         // Echo is off, so the only bracketed text in the output is the line the child read. The erase happens in the
-        // line discipline as the input is written, so it does not depend on when echo was turned off.
+        // line discipline as the input is written, so it does not depend on when echo was turned off. FreeBSD erases a
+        // whole UTF-8 character only on its echo path (ttydisc_rubchar in tty_ttydisc.c, 14.5 and 15.1), so echo stays
+        // on there; the echo holds the character's three bytes and no bracket.
+        var echoOff = OperatingSystem.IsFreeBSD() ? "" : "stty -echo; ";
         await using var session = Pty.Start(new PtyStartInfo
         {
             FileName = "sh",
-            Arguments = ["-c", "stty -echo; printf ready; IFS= read -r line; printf '[%s]' \"$line\""],
+            Arguments = ["-c", echoOff + "printf ready; IFS= read -r line; printf '[%s]' \"$line\""],
         });
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();

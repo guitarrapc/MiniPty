@@ -20,6 +20,14 @@ on:
           - "*PtyOutputBenchmarks*"
           - "*PtyCaptureDisplayBenchmarks*"
           - "*PtyMetricsBenchmarks*"
+      windows:
+        description: "Windows runner (windows-2022 measures the in-box ConPTY without ReleasePseudoConsole; the README takes windows-2025 only)"
+        required: true
+        default: windows-2025
+        type: choice
+        options:
+          - windows-2025
+          - windows-2022
 
 jobs:
   benchmark:
@@ -32,7 +40,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             artifact-suffix: linux
-          - os: windows-2025
+          - os: ${{ inputs.windows }}
             artifact-suffix: windows
           - os: macos-26
             artifact-suffix: macos
@@ -91,7 +99,7 @@ jobs:
   update-readme:
     name: update README benchmark tables
     needs: [benchmark]
-    if: ${{ inputs.benchmark == '*' }}
+    if: ${{ inputs.benchmark == '*' && inputs.windows == 'windows-2025' }}
     permissions:
       contents: read
     runs-on: ubuntu-24.04

@@ -39,7 +39,7 @@ MiniPty creates a real PTY on each supported OS. See [Backends](#backends) for h
 | Linux, glibc 2.27+ | x64, arm64 | Supported |
 | Linux, musl 1.2.3+ (Alpine) | x64, arm64 | Supported |
 | macOS 12.0+ | x64, arm64 | Supported |
-| FreeBSD | — | Experimental: tested neither locally nor in CI, and the package ships no FreeBSD binary, so MiniPty works there only when built from source |
+| FreeBSD 14.4+ | x64 (tested), arm64 (compiled only) | Experimental: CI compiles the shim for 14.4 and 15.1 and runs the tests on 14.5 in a VM, with a community build of .NET 10. The package ships no FreeBSD binary, so MiniPty works there only when built from source |
 
 The Linux and macOS minimums are those of the native files. They reach at least as far back as .NET 10 itself runs. Windows needs ConPTY, which first shipped in Windows 10 1809 and Windows Server 2019. .NET 10 also runs on earlier builds, such as Windows 10 1607 and Windows Server 2016; there `Pty.IsSupported` is `false` and `Pty.Start` throws `PlatformNotSupportedException`.
 
@@ -273,9 +273,9 @@ MiniPty uses the small `libminipty_unix` native shim to open the PTY, start the 
 
 MiniPty uses the Unix backend through `libminipty_unix.dylib`, and starts each child through `minipty_spawn_helper` (not `forkpty`): a small launcher that `posix_spawn` starts, which takes the terminal as its controlling terminal and then replaces itself with the child by `exec`, so no helper process stays running. Resize uses `TIOCSWINSZ`. Output and input go through the same one loop as on Linux, on kqueue.
 
-### FreeBSD (experimental): `forkpty`
+### FreeBSD (experimental): `fork`
 
-MiniPty uses the Unix backend through libutil, matching the Linux/macOS PTY lifecycle.
+MiniPty uses the Unix backend through `libminipty_unix.so`, which is built with `cc` when MiniPty is built from source on FreeBSD. It opens the terminal close-on-exec and starts each child with `fork`; the child takes the terminal as its controlling terminal and `exec`s, as on Linux. Output and input go through the same one loop as on macOS, on kqueue.
 
 ## Advanced Usage
 
@@ -296,6 +296,13 @@ Building a terminal emulator on Windows? Use the out-of-band ConPTY library inst
 > In-box means the ConPTY that comes with Windows itself.
 
 The in-box ConPTY drops graphics protocols (Sixel, Kitty) and some terminal queries, forwards mouse tracking only to programs that read VT input, and changes behavior with Windows updates. The ConPTY that Windows Terminal ships, published by Microsoft as `Microsoft.Windows.Console.ConPTY`, forwards everything and behaves the same on every Windows build.
+
+Before Windows 11 24H2, the in-box host differs further. Of those builds, only Windows Server 2022 (build 20348) was measured ([Verification](.github/docs/specs/platform_support.md#verification)):
+
+- It forwards neither the switch to the alternate screen nor the hidden cursor, so a full-screen program draws on the main screen, with its cursor showing.
+- After a row that fills the width, it relies on the pending wrap outliving `ESC[K`, which xterm ends, so the next row starts one column to the left.
+
+MiniPty cannot change either, so a terminal emulator that runs on these builds should use the out-of-band ConPTY. On these builds, also await `DisposeAsync` before your process exits. Disposal keeps the in-box host's output open until the host has ended, for 1 s at most, because a host that finds it closed can keep running for good.
 
 ```shell
 # Use the out-of-band ConPTY library, 1.25 or later (older ones can stall three seconds at startup)
