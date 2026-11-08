@@ -8,19 +8,21 @@ if (args is ["--child"])
 if (args is ["--smoke"])
     return await Smoke.RunAsync();
 
-if (args.Length != 0)
+var autoplay = args is ["--autoplay"];
+if (args.Length != 0 && !autoplay)
 {
-    Console.Error.WriteLine("Usage: TuiDemo [--smoke]");
+    Console.Error.WriteLine("Usage: TuiDemo [--autoplay | --smoke]");
     return 2;
 }
 
-if (Console.IsInputRedirected || Console.IsOutputRedirected)
+// Autoplay reads no keys, so only its output needs a terminal.
+if (Console.IsOutputRedirected || (!autoplay && Console.IsInputRedirected))
 {
     Console.Error.WriteLine("Run TuiDemo in an interactive terminal, or use --smoke for automated checks.");
     return 2;
 }
 
-return await DemoHost.RunAsync();
+return await DemoHost.RunAsync(autoplay);
 
 /// <summary>
 /// The host only transports bytes. The child owns the TUI and the user's terminal renders it.
@@ -49,20 +51,64 @@ internal static class DemoHost
         };
     }
 
-    internal static async Task<int> RunAsync()
+    internal static async Task<int> RunAsync(bool autoplay)
     {
         // PTY output is UTF-8. Windows console byte writes otherwise decode it using the host's legacy
         // code page, which can corrupt Japanese text even though the PTY transport preserved every byte.
-        // Input needs nothing here: MiniPty.Console reads the host console as UTF-8 while attached.
+        // Input needs nothing here: MiniPty.Console reads the host console as UTF-8 while attached, and
+        // autoplay writes its UTF-8 input itself.
         var outputEncoding = Console.OutputEncoding;
         try
         {
             Console.OutputEncoding = Encoding.UTF8;
-            return await RunAttachedAsync();
+            return autoplay ? await RunAutoplayAsync() : await RunAttachedAsync();
         }
         finally
         {
             Console.OutputEncoding = outputEncoding;
+        }
+    }
+
+    /// <summary>
+    /// Plays <see cref="DemoAutoplay"/> instead of forwarding the keyboard: the host writes keys and mouse reports
+    /// itself with <c>WriteInputAsync</c>, as a test or a recording does. Without MiniPty.Console nothing answers
+    /// ConPTY's inherited-cursor query, so the session starts without <c>InheritCursor</c>, and the PTY keeps the size
+    /// the terminal had at start. Ctrl+C ends the tour early and quits the TUI, which then restores the terminal.
+    /// </summary>
+    private static async Task<int> RunAutoplayAsync()
+    {
+        var size = new PtySize(Console.WindowWidth, Console.WindowHeight);
+        // Attach turns on host VT processing for the interactive host; here the host does it itself, and keeps a line
+        // feed in its column, because ConPTY's output moves the cursor down with bare line feeds.
+        using var vtOutput = DemoTui.VirtualTerminalOutput.Enable(disableNewlineAutoReturn: true);
+        await using var session = Pty.Start(StartInfo(child: true) with { Size = size });
+        using var stop = new CancellationTokenSource();
+        ConsoleCancelEventHandler onCancel = (_, e) =>
+        {
+            e.Cancel = true;
+            stop.Cancel();
+        };
+        Console.CancelKeyPress += onCancel;
+        try
+        {
+            var output = CopyOutputAsync(session);
+            var exited = session.WaitForExitAsync();
+            try
+            {
+                await DemoAutoplay.PlayAsync(session, DemoAutoplay.Script(size.Columns, size.Rows), pace: 1, exited, stop.Token);
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested)
+            {
+                if (!exited.IsCompleted)
+                    await session.WriteInputAsync("\u0003"); // Ctrl+C quits even while the filter box takes text.
+            }
+            var status = await exited;
+            await output; // Drain the final reset/alternate-screen sequences.
+            return status.ExitCode;
+        }
+        finally
+        {
+            Console.CancelKeyPress -= onCancel;
         }
     }
 

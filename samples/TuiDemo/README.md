@@ -4,7 +4,10 @@ Run a full-screen TUI program inside a MiniPty session and show it in the termin
 
 ```sh
 dotnet run --project samples/TuiDemo -c Release    # from an interactive terminal; 1-3 or Tab switch pages, Q or Ctrl+C quits
+dotnet run --project samples/TuiDemo -c Release -- --autoplay    # plays a fixed tour instead; Ctrl+C stops it
 ```
+
+![TuiDemo --autoplay](../../assets/tuidemo.svg)
 
 The TUI itself (a dashboard, a file tree with a filter box, braille charts) is a dependency-free child program that knows nothing about MiniPty. The same executable runs as that child with `--child`. It exists to give the PTY realistic traffic: 24-bit color, Unicode and wide characters, mouse reporting with drags, scroll regions, resize, and continuous animation.
 
@@ -62,6 +65,15 @@ Running interactive TUI programs is an intended PTY use case. MiniPty transports
 - **Drain, then detach.** Await the output copy after the exit and before disposing the attach handle, so the TUI's final bytes (leave the alternate screen, show the cursor, stop mouse reporting) reach the terminal before the host restores its own modes. A TUI that is killed cannot restore them; the frontend has to.
 - **`TERM` on Unix.** It defaults to `xterm-256color`. Set `PtyStartInfo.TerminalName` when the host terminal supports less (or more).
 - **Windows in-box ConPTY.** It reinterprets and repaints output, drops graphics protocols and some queries, and forwards mouse tracking only to a program that reads VT input; this TUI enables VT input before it requests mouse tracking. This sample stays on the in-box ConPTY to keep zero native dependencies. Programs that need more should run on the [out-of-band ConPTY](../../README.md#out-of-band-conpty-for-windows).
+
+## Autoplay
+
+`--autoplay` drives the TUI from code instead of your keyboard. The host writes the tour in [DemoAutoplay.cs](DemoAutoplay.cs) into the session with `WriteInputAsync`, as a test or a recording does. The recording above comes from it: [assets/tuidemo.yaml](../../assets/tuidemo.yaml) records it with [scenetake](https://github.com/guitarrapc/scenetake).
+
+- **Input is the bytes a terminal sends.** Keys are their sequences (`\e[B` for Down, `\r` for Enter, UTF-8 for `日本`). Mouse actions are SGR reports, because the TUI turns on SGR mouse mode: `\e[<0;40;5M` presses at column 40, row 5, code 32 moves with the button held, and a final `m` releases. Positions come from the geometry the TUI uses for hit testing.
+- **Without MiniPty.Console, the host sets up its own console.** It starts the session without `InheritCursor`, because nothing would answer ConPTY's cursor query, and the PTY keeps the size the terminal had at start. On Windows it turns on VT processing and `DISABLE_NEWLINE_AUTO_RETURN`. ConPTY moves the cursor down with a bare LF and expects the column to stay. A console without that mode also moves to column 1, which drew the Charts page's `disk` row over the bar labels.
+- **Ctrl+C** stops the tour and sends Ctrl+C to the TUI, which quits and restores the terminal.
+- `--smoke` plays the tour at a tenth of its pace and checks that its drags land and that it quits.
 
 ## Other frontends
 
