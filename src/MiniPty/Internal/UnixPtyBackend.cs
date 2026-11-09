@@ -839,6 +839,9 @@ internal static partial class UnixPtyBackend
         /// </summary>
         public bool CloseSendsHeldOutput => false;
 
+        /// <summary>Closing the master never waits for another process.</summary>
+        public bool CloseWaitsForHost => false;
+
         /// <summary>
         /// Reads output on the watcher's loop (epoll on Linux, kqueue on macOS and FreeBSD), which holds no thread of the
         /// session's own and also writes queued input when the master can take more. A master the loop cannot register

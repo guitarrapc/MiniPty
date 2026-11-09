@@ -358,11 +358,10 @@ public sealed class PtyTests
     /// either. An in-box ConPTY before Windows 11 24H2 writes nothing for it until the pseudo-console closes, and the
     /// completion waited for a first read before closing, so <c>cmd /c exit</c> took the whole grace there (1,016 ms of
     /// the default 1 s on windows-2022). The host's frame still arrives, with the close: every measured host writes one.
+    /// There the close waits for the host's exit, and output ends no earlier than its return
+    /// (<c>PtyOutputPumpTests.AFrameTheHostWritesAsASlowCloseReturnsIsDelivered</c>).
     /// </summary>
-    // Retried: on a loaded windows-2022 runner the pump can end output before that host's close has written the frame
-    // (see platform_support.md).
     [Test]
-    [Retry(3)]
     public async Task PtyCompleteAsyncOfAChildThatWritesNothingReturnsBeforeOutputDrainGraceOnWindows()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))

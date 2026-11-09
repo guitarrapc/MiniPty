@@ -78,12 +78,21 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// </summary>
     internal const int DefaultPostExitQuietMs = 100;
 
+    /// <summary>
+    /// How long a close that waits for its host (<see cref="IPtyBackend.CloseWaitsForHost"/>) holds back the end of
+    /// output that the drain forces. Past it, a host that never exits no longer keeps output open. Build 20348's close
+    /// took up to 470 ms on a loaded runner.
+    /// </summary>
+    internal const int CloseReturnWaitMs = 1000;
+
     private const int FlagProducerFinished = 1;
     private const int FlagSessionDisposed = 2;
     private const int FlagCloseRequested = 4;
     private const int FlagExitObserved = 8;
     /// <summary>The drain has given up on the OS ending the transport; the driver drains without blocking and stops.</summary>
     private const int FlagEndOfOutputForced = 16;
+    /// <summary>A close that waits for its host has returned (<see cref="OnTransportCloseReturned"/>).</summary>
+    private const int FlagCloseReturned = 32;
 
     // Who has the ring (_ringState), guarded by lock (this): nobody, the driver, or unread output it left behind.
     private const int RingNone = 0;
@@ -130,6 +139,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     private Exception? _error;
     private long _lastReadTick;
     private long _exitTick;
+    // When the close was requested, or, once a close that waits for its host has returned, when it returned.
     private long _closeRequestedTick;
     private ManualResetValueTaskSourceCore<bool> _stopped;
     private int _stopWaitState;
@@ -780,15 +790,44 @@ internal sealed class PtyOutputPump : IValueTaskSource
         // reads have been quiet for the same interval after the close, the pump ends output itself: the driver's
         // pending read is canceled and the driver drains what is left without waiting. Repeated every tick until the
         // driver has finished, because a cancel that lands between two reads cancels nothing.
-        var closeRequestedTick = Volatile.Read(ref _closeRequestedTick);
-        if (IsQuietSince(now, closeRequestedTick))
+        if (IsQuietSince(now, ForcedEndQuietStart(now)))
         {
             SetFlag(FlagEndOfOutputForced);
             Volatile.Read(ref _driver)?.CancelRead(this);
         }
 
         // Only a completion sink has a deadline of its own to watch; every pump ticks until its driver finishes.
-        return sink is not null && sink.CheckCloseTimeout(now, closeRequestedTick, this);
+        return sink is not null && sink.CheckCloseTimeout(now, Volatile.Read(ref _closeRequestedTick), this);
+    }
+
+    /// <summary>
+    /// Where the quiet that forces the end of output counts from: the close request, or, for a close that waits for its
+    /// host (<see cref="IPtyBackend.CloseWaitsForHost"/>), the moment that close returned. Such a host writes what it
+    /// holds as it exits, and its close took 140–470 ms on a loaded windows-2022 runner. Counted from the request, the
+    /// quiet then ended output before that frame arrived, and a child that wrote nothing got no output. Until the close
+    /// returns, nothing is quiet, for at most <see cref="CloseReturnWaitMs"/> after the request.
+    /// </summary>
+    private long ForcedEndQuietStart(long now)
+    {
+        // The flag before the tick: OnTransportCloseReturned writes the tick first.
+        var returned = (Volatile.Read(ref _flags) & FlagCloseReturned) != 0;
+        var since = Volatile.Read(ref _closeRequestedTick);
+        if (returned || !_backend.CloseWaitsForHost || now - since >= CloseReturnWaitMs)
+            return since;
+
+        return now;
+    }
+
+    /// <summary>
+    /// A close that waits for its host has returned (<see cref="IPtyBackend.CloseWaitsForHost"/>): the host has exited and
+    /// written what it held. The quiet that forces the end of output counts from here (<see cref="ForcedEndQuietStart"/>),
+    /// and so does a completion's <see cref="PtyCompleteOptions.OutputReaderCloseTimeout"/>. Any thread.
+    /// </summary>
+    internal void OnTransportCloseReturned()
+    {
+        // Written before the flag, so a tick that sees the flag also sees when the close returned.
+        Volatile.Write(ref _closeRequestedTick, Environment.TickCount64);
+        SetFlag(FlagCloseReturned);
     }
 
     /// <summary>

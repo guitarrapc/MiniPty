@@ -287,6 +287,49 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
+    /// Where the close waits for the transport's host, as build 20348's in-box ConPTY's does, the host writes what it
+    /// holds as it exits, and the close returns then. The end of output that the drain forces counts its quiet from that
+    /// return, so a close slower than the quiet interval still delivers the frame. Counted from the request, a close of
+    /// 140–470 ms on a loaded windows-2022 runner ended output first, and a child that wrote nothing got no output.
+    /// </summary>
+    [Test]
+    public async Task AFrameTheHostWritesAsASlowCloseReturnsIsDelivered()
+    {
+        // Three quiet intervals: long past the quiet the forced end counted from the request, well inside the wait.
+        var backend = new SlowClosingHostBackend(closeReturnsAfterMs: PtyOutputPump.DefaultPostExitQuietMs * 3);
+        await using var session = new PtySession(backend);
+        await backend.Reading.WaitAsync(Timeout);
+        var completion = session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false });
+
+        backend.Exit(0);
+
+        var result = await completion.WaitAsync(Timeout);
+        var hasFrame = result.Contains(SlowClosingHostBackend.Frame);
+        await Assert.That(hasFrame).IsTrue();
+    }
+
+    /// <summary>
+    /// A close that waits for its host and never returns holds back the end of output only for
+    /// <see cref="PtyOutputPump.CloseReturnWaitMs"/>: a host that never exits does not keep output open.
+    /// </summary>
+    [Test]
+    public async Task OutputEndsWhenACloseThatWaitsForItsHostNeverReturns()
+    {
+        var backend = new SlowClosingHostBackend(closeReturnsAfterMs: System.Threading.Timeout.Infinite);
+        await using var session = new PtySession(backend);
+        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+        var next = enumerator.MoveNextAsync().AsTask();
+        await backend.Reading.WaitAsync(Timeout);
+
+        var stopwatch = Stopwatch.StartNew();
+        backend.Exit(0);
+
+        await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
+        // Never earlier: the quiet before the close and the wait for its return both come first.
+        await Assert.That(stopwatch.ElapsedMilliseconds).IsGreaterThanOrEqualTo(PtyOutputPump.CloseReturnWaitMs);
+    }
+
+    /// <summary>
     /// Output still draining out of the transport after the close is not quiet. Each read restarts the interval, so
     /// a slow final flush is delivered in full before the pump ends output on its own; measured from the close alone,
     /// the forced end would cut it short.
@@ -850,6 +893,84 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
+    /// A transport whose close waits for its host, as build 20348's in-box ConPTY's does. It sends nothing until the close
+    /// returns, <c>closeReturnsAfterMs</c> after the close starts (never, for <see cref="System.Threading.Timeout.Infinite"/>).
+    /// It then sends the frame the host writes as it exits, and ends.
+    /// </summary>
+    private sealed class SlowClosingHostBackend(int closeReturnsAfterMs) : FakeBackend
+    {
+        private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private PtyOutputPump? _pump;
+        private ScriptedOutputDriver? _driver;
+        private volatile bool _returned;
+        // Touched only by the driver's thread.
+        private bool _frameSent;
+
+        /// <summary>The frame the host writes as it exits.</summary>
+        public static ReadOnlySpan<byte> Frame => "frame-as-the-host-exits"u8;
+
+        /// <summary>Completes once the driver thread is inside <see cref="ReadOutput"/>.</summary>
+        public Task Reading => _reading.Task;
+
+        public override bool CloseSendsHeldOutput => true;
+
+        public override bool CloseWaitsForHost => true;
+
+        public override void StartOutput(PtyOutputPump pump)
+        {
+            _pump = pump;
+            base.StartOutput(pump);
+        }
+
+        public override void CloseOutputTransport()
+        {
+            base.CloseOutputTransport();
+            if (closeReturnsAfterMs == System.Threading.Timeout.Infinite)
+                return;
+
+            var pump = _pump!;
+            // A thread of its own, as the legacy host's close has.
+            new Thread(() =>
+            {
+                Thread.Sleep(closeReturnsAfterMs);
+                _returned = true;
+                pump.OnTransportCloseReturned();
+                Volatile.Read(ref _driver)?.Wake(pump);
+            })
+            {
+                IsBackground = true,
+            }.Start();
+        }
+
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
+        {
+            if (IsDisposed)
+                return 0;
+
+            // Stored before the check, so a return after it wakes the wait below.
+            Volatile.Write(ref _driver, driver);
+            if (_returned)
+                return SendFrameOnce(buffer);
+
+            _reading.TrySetResult();
+            driver.WaitForWake(System.Threading.Timeout.Infinite);
+            return -1;
+        }
+
+        public override int ReadOutputNow(Span<byte> buffer) => _returned ? SendFrameOnce(buffer) : 0;
+
+        private int SendFrameOnce(Span<byte> buffer)
+        {
+            if (_frameSent)
+                return 0;
+
+            _frameSent = true;
+            Frame.CopyTo(buffer);
+            return Frame.Length;
+        }
+    }
+
+    /// <summary>
     /// Held open like <see cref="HeldOpenBackend"/>, but after the close it still yields one byte per read, each
     /// after <c>intervalMs</c>, for <c>flushReads</c> reads: a transport flushing its tail slowly.
     /// </summary>
@@ -1089,6 +1210,7 @@ public sealed class PtyOutputPumpTests
         public virtual int OutputChunkLimit => PtyOutputPump.PublishSize;
         public virtual int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
         public virtual bool CloseSendsHeldOutput => false;
+        public virtual bool CloseWaitsForHost => false;
 
         /// <summary>Reports child exit the way the exit watcher does: records it, then notifies the session's listener.</summary>
         public void Exit(int exitCode)

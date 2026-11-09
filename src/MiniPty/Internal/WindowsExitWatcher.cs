@@ -21,7 +21,8 @@ internal static unsafe partial class WindowsExitWatcher
 
     /// <summary>
     /// Starts watching <paramref name="processHandle"/>. <paramref name="onExited"/> runs on a native thread-pool
-    /// worker once the process exits. The caller keeps ownership of its own handle.
+    /// worker once the process exits. The caller keeps ownership of its own handle. A thread's handle signals once too,
+    /// as the thread ends; the thread that closes a legacy pseudo-console is watched that way.
     /// </summary>
     internal static void Register(IntPtr processHandle, IWindowsExitObserver onExited)
     {
