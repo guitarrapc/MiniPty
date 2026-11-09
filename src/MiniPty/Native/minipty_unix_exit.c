@@ -925,8 +925,9 @@ int minipty_master_poll(int master, int timeout_us)
  * ahead once this reports the exit. P_WEXIT is set before the exit closes the child's descriptors, and kqueue's
  * NOTE_EXIT comes only after that close, so it is too late for this.
  *
- * Returns 1 when the child is exiting or a zombie, 0 while it runs, and -1 on failure, with ESRCH once it is reaped.
- * Elsewhere it fails with ENOTSUP.
+ * Returns 1 when the child is exiting or a zombie, 0 while it runs, and -1 on failure. The failure is ESRCH once the
+ * child is reaped, and also while this process may not see the child, as when an unprivileged host runs with
+ * security.bsd.see_other_uids=0 and the child changed its real uid. Elsewhere it fails with ENOTSUP.
  */
 int minipty_child_exiting(int pid)
 {

@@ -1259,7 +1259,8 @@ internal static class WindowsPtyBackend
                 return;
 
             // A legacy host writes its frame during the close, which returns only once the host has exited. The pump
-            // waits for that return before it ends output (CloseWaitsForHost).
+            // waits for that return, for PtyOutputPump.CloseReturnWaitMs at most, before it ends output itself
+            // (CloseWaitsForHost).
             if (_legacyHost && Volatile.Read(ref _pump) is { } pump)
             {
                 _hpc.ObserveCloseReturn(pump);
@@ -1841,8 +1842,9 @@ internal static class WindowsPtyBackend
         public SafePseudoConsoleHandle(IntPtr value) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(value);
 
         /// <summary>
-        /// Has <paramref name="pump"/> told when a close that waits for the host (<see cref="CloseWaitsForHost"/>) returns,
-        /// which is when the host has exited. Call before the close. A close that does not wait never tells.
+        /// Makes <paramref name="pump"/> the pump that learns when a close that waits for the host
+        /// (<see cref="CloseWaitsForHost"/>) returns, which is when the host has exited. Call it before the close. A close
+        /// that does not wait never reports.
         /// </summary>
         public void ObserveCloseReturn(PtyOutputPump pump) => Interlocked.Exchange(ref _closeReturnPump, pump);
 

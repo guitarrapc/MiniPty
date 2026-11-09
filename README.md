@@ -17,7 +17,7 @@ I needed a PTY library for high-performance NativeAOT projects. MiniPty provides
 - NativeAOT ready: no winpty, and no helper process running beside a session ([what ships per platform](#native-files))
 - Cross-platform: Windows, Linux, and macOS (FreeBSD: [experimental](#platforms))
 - Scaling: Scales to thousands of sessions. An idle session holds no thread and no output buffer.
-- Bounded output memory: each session uses a 16 KiB buffer. A slow consumer pauses the child instead of increasing memory use.
+- Bounded output memory: each session uses a 16 KiB buffer, and on FreeBSD up to about 23 KiB more for output its child left at exit, until that output is read. A slow consumer pauses the child instead of increasing memory use.
 - Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call.
 - Safe signal delivery: on Linux 5.2 and later, `clone` returns a pidfd with the child. Signals use this handle, avoiding PIDs that another process can reuse ([details](.github/docs/references/pty_crossplatform.md#child-exit-observation)).
 - Metrics: the `MiniPty` meter reports open sessions, start time, output bytes, and stalls. Without listeners, it takes no timestamps and allocates nothing ([metrics](#metrics)).

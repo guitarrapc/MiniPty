@@ -296,7 +296,8 @@ public sealed class PtyOutputPumpTests
     [NotInParallel]
     public async Task AFrameTheHostWritesAsASlowCloseReturnsIsDelivered()
     {
-        // Three quiet intervals: long past the quiet the forced end counted from the request, well inside the wait.
+        // The close returns three quiet intervals after it starts: later than a forced end counted from the request would
+        // come, and well inside the wait.
         var backend = new SlowClosingHostBackend(closeReturnsAfterMs: PtyOutputPump.DefaultPostExitQuietMs * 3);
         await using var session = new PtySession(backend);
         await backend.Reading.WaitAsync(Timeout);
@@ -310,8 +311,8 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
-    /// A close that waits for its host and never returns holds back the end of output only for
-    /// <see cref="PtyOutputPump.CloseReturnWaitMs"/>: a host that never exits does not keep output open.
+    /// A close that waits for its host and never returns does not keep output open: output ends, and never before
+    /// <see cref="PtyOutputPump.CloseReturnWaitMs"/>.
     /// </summary>
     [Test]
     public async Task OutputEndsWhenACloseThatWaitsForItsHostNeverReturns()
@@ -337,8 +338,11 @@ public sealed class PtyOutputPumpTests
     /// ticks time to check the timeout once the close is done. Counted from the return, it leaves 450 ms.
     /// </summary>
     /// <remarks>Timed against the close timeout, so it runs alone, as the tests paced against <see cref="PacedQuietMs"/> do.</remarks>
+    // Retried: a runner that holds the scripted return thread back by about half a second loses the frame. A timeout
+    // counted from the request fails every attempt.
     [Test]
     [NotInParallel]
+    [Retry(3)]
     public async Task ACloseTimeoutShorterThanASlowCloseDoesNotFailTheCompletion()
     {
         var backend = new SlowClosingHostBackend(closeReturnsAfterMs: 600, endsAfterFrameMs: 50);
@@ -368,7 +372,7 @@ public sealed class PtyOutputPumpTests
     public async Task ACloseThatReturnsAfterTheWaitDoesNotPostponeTheCloseTimeout()
     {
         const int CloseTimeoutMs = 2000;
-        // After the wait, and before the timeout counted from the wait's end fires.
+        // The close returns after the wait, and before a timeout counted from the wait's end would fire.
         const int ReturnMs = PtyOutputPump.CloseReturnWaitMs + 1500;
         var backend = new TrickleAfterCloseBackend(closeReturnsAfterMs: ReturnMs);
         await using var session = new PtySession(backend);
@@ -397,8 +401,11 @@ public sealed class PtyOutputPumpTests
     /// close started, and one quiet interval more.
     /// </summary>
     /// <remarks>Timed against the wait, so it runs alone, as the tests paced against <see cref="PacedQuietMs"/> do.</remarks>
+    // Retried: a runner that stalls the reader or the return thread by about 0.7 s passes the bound. A pump that ignores
+    // the return fails every attempt.
     [Test]
     [NotInParallel]
+    [Retry(3)]
     public async Task OutputHeldOpenEndsOneQuietIntervalAfterASlowCloseReturns()
     {
         var backend = new SlowClosingHostBackend(closeReturnsAfterMs: PtyOutputPump.DefaultPostExitQuietMs * 2, holdOpenAfterFrame: true);
@@ -419,8 +426,8 @@ public sealed class PtyOutputPumpTests
         var endedAt = Stopwatch.GetTimestamp();
         var hasFrame = output.ToArray().AsSpan().SequenceEqual(SlowClosingHostBackend.Frame);
         await Assert.That(hasFrame).IsTrue();
-        // Measured from the close's start, which a late return thread cannot move: about 300 ms when the return counts,
-        // and at least the whole wait when it does not.
+        // The end is measured from the close's start, which does not depend on when the return thread runs. It comes about
+        // 300 ms after that start when the return counts, and the whole wait or later when it does not.
         var endedAfterCloseStarted = Stopwatch.GetElapsedTime(backend.CloseStartedAt, endedAt);
         await Assert.That(endedAfterCloseStarted.TotalMilliseconds).IsLessThan(PtyOutputPump.CloseReturnWaitMs);
     }
@@ -1031,7 +1038,8 @@ public sealed class PtyOutputPumpTests
                 return;
 
             var pump = _pump!;
-            // A thread of its own, as the legacy host's close has.
+            // The return comes from a thread of its own, as a legacy host's close does, not from the drain tick that
+            // requested the close.
             new Thread(() =>
             {
                 Thread.Sleep(closeReturnsAfterMs);

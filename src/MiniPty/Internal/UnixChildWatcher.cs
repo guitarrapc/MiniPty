@@ -87,10 +87,10 @@ internal static partial class UnixPtyBackend
         // Times a session joined s_inlineReaders, for tests of where a consumer reads. Guarded by s_lock.
         private static long s_inlineReaderListings;
         // FreeBSD: sessions this thread parked on a full ring, linked through NextParked. While any is listed, this thread
-        // looks at each about every ParkedLookMs, so that a child that begins to exit meanwhile has its last output read
-        // ahead before the kernel discards it (UnixPtyBackendInstance.ReadAheadIfChildExits). The kernel gives up after a
-        // second without a read, so a look every quarter of it leaves room for a slow pass. Only this thread parks a
-        // session, so the list and the next look's time are this thread's alone.
+        // looks at each about every ParkedLookMs until its child is reaped, so that a child that begins to exit meanwhile
+        // has its last output read ahead before the kernel discards it (UnixPtyBackendInstance.ReadAheadIfChildExits). The
+        // kernel gives up after a second without a read, so a look every quarter of it leaves room for a slow pass. Only
+        // this thread parks a session, so the list and the next look's time are this thread's alone.
         private static UnixPtyBackendInstance? s_parked;
         private static long s_nextParkedLook;
         private const int ParkedLookMs = 250;
@@ -469,8 +469,8 @@ internal static partial class UnixPtyBackend
 
         /// <summary>
         /// FreeBSD: lists <paramref name="session"/>, which this thread just parked on a full ring, so that this thread looks
-        /// at it about every <see cref="ParkedLookMs"/> while it stays parked (<see cref="ServeParked"/>). On this thread,
-        /// whose next wait takes the look's timeout.
+        /// at it about every <see cref="ParkedLookMs"/> while it stays parked and its child is not reaped
+        /// (<see cref="ServeParked"/>). On this thread, whose next wait takes the look's timeout.
         /// </summary>
         internal static void WatchParked(UnixPtyBackendInstance session)
         {
@@ -486,8 +486,9 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>
-        /// Once every <see cref="ParkedLookMs"/>, serves each listed session that is still parked, which reads ahead if its
-        /// child has begun to exit, and unlists the others. Runs on every pass.
+        /// Once every <see cref="ParkedLookMs"/>, serves each listed session that still needs a look, which reads ahead if its
+        /// child has begun to exit, and unlists the others (<see cref="UnixPtyBackendInstance.NeedsParkedLook"/>). Runs on
+        /// every pass.
         /// </summary>
         private static void ServeParked()
         {
@@ -504,7 +505,7 @@ internal static partial class UnixPtyBackend
             while (session is not null)
             {
                 var next = session.NextParked;
-                if (session.IsParkedOnLoop)
+                if (session.NeedsParkedLook)
                 {
                     s_parkedLooks.Add(session);
                     previous = session;

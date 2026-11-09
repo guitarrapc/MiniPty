@@ -811,7 +811,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
     /// </summary>
     private bool TryGetCloseDoneTick(long now, out long tick)
     {
-        // The flag before the tick: OnTransportCloseReturned writes the tick first.
+        // Read the flag before the tick, because OnTransportCloseReturned writes the tick first.
         var returned = (Volatile.Read(ref _flags) & FlagCloseReturned) != 0;
         tick = Volatile.Read(ref _closeRequestedTick);
         if (returned || !_backend.CloseWaitsForHost)

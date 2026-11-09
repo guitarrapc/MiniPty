@@ -396,18 +396,25 @@ internal static partial class UnixPtyBackend
         /// <summary>The next session on the watcher's list of parked sessions. The loop's thread only.</summary>
         internal UnixPtyBackendInstance? NextParked;
 
-        /// <summary>Whether the loop is parked on this session's full ring, for the watcher's list of parked sessions.</summary>
-        internal bool IsParkedOnLoop => Volatile.Read(ref _loopParked) && Volatile.Read(ref _loopPhase) == LoopReading;
+        /// <summary>
+        /// Whether the watcher keeps looking at this session: the loop is parked on its full ring, and its child has not been
+        /// reaped. Once it has, its exit is over, so a look can no longer save output.
+        /// </summary>
+        internal bool NeedsParkedLook =>
+            Volatile.Read(ref _loopParked) && Volatile.Read(ref _loopPhase) == LoopReading && !IsExitObserved;
 
         // FreeBSD: output read from the master ahead of the ring while the loop was parked on it and the child was exiting
         // (ReadAheadIfChildExits), from _readAheadStart to _readAheadEnd. Every read of output takes it before the master
         // (ReadOutputNow). Null while empty. Used under the producer's turn, by the loop or by a consumer reading inline.
+        // Allocated, not pooled: the path is rare, and a consumer that empties it would strand a shared-pool array in its own
+        // thread's cache.
         private byte[]? _readAhead;
         private int _readAheadStart;
         private int _readAheadEnd;
-        // FreeBSD's largest tty output queue, which bounds what an exiting child leaves behind: TTYBUF_MAX (64 KiB) in
-        // whole 248-byte blocks.
-        private const int ReadAheadCapacity = 65_720;
+        // The largest output queue of a FreeBSD pseudo-terminal, which bounds what an exiting child leaves behind. The kernel
+        // clamps a pseudo-terminal's speed to 115200 baud and sizes the queue to a fifth of the speed in bytes, in whole
+        // 248-byte blocks.
+        private const int ReadAheadCapacity = 23_064;
 
         private bool HasReadAhead => _readAhead is not null;
 
@@ -1224,6 +1231,10 @@ internal static partial class UnixPtyBackend
                     pump.LetGoOfRing();
             }
 
+            // The master never reports output already read ahead, so the loop must come back for the rest.
+            if (HasReadAhead)
+                ChildWatcher.RequestService(this);
+
             return published;
         }
 
@@ -1366,7 +1377,8 @@ internal static partial class UnixPtyBackend
                 return;
             }
 
-            if (IsMasterClosed)
+            // Output read ahead is already out of the terminal, so it is delivered before a close ends output.
+            if (IsMasterClosed && !HasReadAhead)
             {
                 // The close (the post-exit drain, or disposal after the exit) ends output; what the master still holds is
                 // left unread.
@@ -1374,7 +1386,7 @@ internal static partial class UnixPtyBackend
                 return;
             }
 
-            // Output read ahead is owed first, and the master may report nothing more for it.
+            // The master never reports output already read ahead, so the pass reads whenever some is left.
             if ((report & (ChildWatcher.ReportReadable | ChildWatcher.ReportHangup | ChildWatcher.ReportError)) != 0
                 || pump.IsEndOfOutputForced || HasReadAhead)
             {
@@ -1384,8 +1396,7 @@ internal static partial class UnixPtyBackend
                 if (foundNothing)
                     RenewIfHangupIsStale(report);
 
-                // A pass ends after a bound of reads. The master does not report output that was read ahead, so the loop
-                // must come back for the rest.
+                // A pass ends after a bound of reads, so the loop comes back for what is still read ahead.
                 if (!ParkWhileFull(pump) && HasReadAhead)
                     ChildWatcher.RequestService(this);
             }
@@ -1409,7 +1420,7 @@ internal static partial class UnixPtyBackend
                 if (pump.BeginWaitForFreeSpace())
                 {
                     _loopParked = true;
-                    if (OperatingSystem.IsFreeBSD())
+                    if (OperatingSystem.IsFreeBSD() && !IsExitObserved)
                         ChildWatcher.WatchParked(this);
 
                     return true;
@@ -1430,15 +1441,18 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>
-        /// Reads what the master holds into the ring, up to <see cref="LoopReadsPerService"/> reads, and publishes each read
-        /// as it completes. There is no coalescing window: a consumer still busy with its previous chunk takes everything
-        /// that arrived meanwhile as one chunk, the policy the Windows driver has too. Returns <see langword="false"/> once
+        /// Reads output into the ring, what was read ahead first and then what the master holds, up to
+        /// <see cref="LoopReadsPerService"/> reads, and publishes each read as it completes. There is no coalescing window:
+        /// a consumer still busy with its previous chunk takes everything that arrived meanwhile as one chunk, the policy
+        /// the Windows driver has too. Returns <see langword="false"/> once
         /// output ended. <paramref name="foundNothing"/> is set when the first read found nothing to read.
         /// </summary>
         private unsafe bool ReadOnLoop(PtyOutputPump pump, out bool foundNothing)
         {
             foundNothing = false;
-            if (!TryAcquireMaster(out var master))
+            // A closed master's read-ahead is still delivered: ReadOutputNow takes it without the master.
+            var acquired = TryAcquireMaster(out var master);
+            if (!acquired && !HasReadAhead)
             {
                 EndOnLoop(pump);
                 return false;
@@ -1451,6 +1465,9 @@ internal static partial class UnixPtyBackend
                 for (var reads = 0; reads < LoopReadsPerService; reads++)
                 {
                     if (pump.IsFull)
+                        break;
+
+                    if (!acquired && !HasReadAhead)
                         break;
 
                     pump.HoldRing();
@@ -1500,10 +1517,18 @@ internal static partial class UnixPtyBackend
             }
             finally
             {
-                ReleaseMaster();
+                if (acquired)
+                    ReleaseMaster();
             }
 
-            if (pump.IsEndOfOutputForced)
+            // Nothing is left to read once a closed master's read-ahead is in, so output ends here.
+            if (!acquired && !HasReadAhead)
+            {
+                EndOnLoop(pump);
+                return false;
+            }
+
+            if (pump.IsEndOfOutputForced && !HasReadAhead)
             {
                 // The drain gave up on the transport ending; what the master held is in.
                 EndOnLoop(pump);
@@ -1594,7 +1619,7 @@ internal static partial class UnixPtyBackend
                 pump.EndWaitForFreeSpace();
             }
 
-            ReturnReadAhead();
+            ClearReadAhead();
 
             // Queued input is written by this loop; once it stops reading the session, nothing can deliver it. A disposal fails
             // it as disposed, also when the loop sees the disposal on the pump before the backend's own close of the input,
@@ -1674,7 +1699,7 @@ internal static partial class UnixPtyBackend
                         _pump!.EndWaitForFreeSpace();
                     }
 
-                    ReturnReadAhead();
+                    ClearReadAhead();
                     CloseInput(InputOutputEnded);
                     _pump!.Finish(error);
                 }
@@ -1715,7 +1740,7 @@ internal static partial class UnixPtyBackend
             readAhead.AsSpan(_readAheadStart, count).CopyTo(new Span<byte>(buffer, length));
             _readAheadStart += count;
             if (_readAheadStart == _readAheadEnd)
-                ReturnReadAhead();
+                ClearReadAhead();
 
             return count;
         }
@@ -1747,7 +1772,7 @@ internal static partial class UnixPtyBackend
             if (!TryAcquireMaster(out var master))
                 return;
 
-            var readAhead = _readAhead ?? ArrayPool<byte>.Shared.Rent(ReadAheadCapacity);
+            var readAhead = _readAhead ?? GC.AllocateUninitializedArray<byte>(ReadAheadCapacity);
             if (_readAheadStart > 0)
             {
                 // Taken from the front since the last read ahead: what is left moves there, so the space after it is free.
@@ -1781,21 +1806,14 @@ internal static partial class UnixPtyBackend
 
             if (_readAheadEnd > 0)
                 _readAhead = readAhead;
-            else
-                ArrayPool<byte>.Shared.Return(readAhead);
         }
 
-        /// <summary>Drops what was read ahead and returns its buffer. Under the producer's turn.</summary>
-        private void ReturnReadAhead()
+        /// <summary>Drops what was read ahead, and its buffer. Under the producer's turn.</summary>
+        private void ClearReadAhead()
         {
-            var readAhead = _readAhead;
-            if (readAhead is null)
-                return;
-
             _readAhead = null;
             _readAheadStart = 0;
             _readAheadEnd = 0;
-            ArrayPool<byte>.Shared.Return(readAhead);
         }
 
         /// <summary>

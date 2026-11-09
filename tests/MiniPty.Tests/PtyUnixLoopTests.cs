@@ -744,20 +744,150 @@ public sealed class PtyUnixLoopTests
     /// so there the loop must read ahead once the child exits. Linux keeps the rest in the master. On macOS the child cannot
     /// exit before the consumer reads, since its terminal holds less than 2 KiB, so there the test reads at once.
     /// </summary>
+    // Retried: on FreeBSD a stop of the loop thread under CI load can keep it from looking at the parked session within the
+    // kernel's second. Without the read-ahead the test fails every attempt.
     [Test]
+    [Retry(3)]
     public async Task OutputOfAChildThatExitsWhileTheRingIsFullIsNotLost()
     {
         if (OperatingSystem.IsWindows())
             return;
 
-        // The ring parks with between 12 and 16 KiB in it, so 2 to 6 KiB are left in the terminal: within a FreeBSD
-        // terminal's output queue (7,688 bytes at the 38400 baud MiniPty sets), so the child exits. dd, not head: FreeBSD's
-        // head starts helper processes that inherit the terminal, and one that outlives head loses the rest whatever the
-        // loop does.
+        // The ring parks with between 12 and 16 KiB in it, so 2 to 6 KiB are left in the terminal. At 115200 baud a FreeBSD
+        // terminal's output queue (23,064 bytes) takes all 18 KiB, so dd never sleeps on a full queue. FreeBSD would wake
+        // it only once the master had read most of the queue. dd, not head: FreeBSD's head starts helper processes that
+        // inherit the terminal, and one that outlives head loses the rest whatever the loop does.
         const int Size = PtyOutputPump.Capacity + 2048;
-        await using var session = Pty.Start(Shell($"dd if=/dev/zero bs=2048 count={Size / 2048} 2>/dev/null"));
+        await using var session = Pty.Start(Shell($"stty 115200 && exec dd if=/dev/zero bs=2048 count={Size / 2048} 2>/dev/null"));
         if (!OperatingSystem.IsMacOS())
             await session.WaitForExitAsync().WaitAsync(Timeout);
+
+        var received = 0;
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+        while (await output.MoveNextAsync().AsTask().WaitAsync(Timeout))
+            received += output.Current.Data.Length;
+
+        await Assert.That(received).IsEqualTo(Size);
+    }
+
+    /// <summary>
+    /// On FreeBSD the loop reads ahead more than one pass takes, and delivers all of it. The child raises the terminal's
+    /// speed to 115200 baud first, the most FreeBSD allows a pseudo-terminal, which makes its output queue 23,064 bytes.
+    /// It writes what fills the ring, waits for a line the test sends once the loop has parked, then writes 18 KiB more
+    /// and exits. The read-ahead then needs more than one pass of the loop or of the consumer, each up to four 4 KiB reads.
+    /// </summary>
+    // Retried for the same reason as OutputOfAChildThatExitsWhileTheRingIsFullIsNotLost.
+    [Test]
+    [Retry(3)]
+    public async Task OutputReadAheadOverSeveralPassesIsNotLostOnFreeBsd()
+    {
+        if (!OperatingSystem.IsFreeBSD())
+            return;
+
+        // The ring parks with 12 to 16 KiB, so 18 to 22 KiB are left in the terminal, which holds 23,064 bytes. Writing the
+        // rest only after the park keeps the queue from filling: FreeBSD would wake a writer that a full queue put to sleep
+        // only once the master had read nine tenths of it, more than the ring holds.
+        const int Size = PtyOutputPump.Capacity + 18 * 1024;
+        await using var session = Pty.Start(Shell(
+            $"stty 115200 -echo && dd if=/dev/zero bs=2048 count={PtyOutputPump.Capacity / 2048} 2>/dev/null && read _ && " +
+            $"exec dd if=/dev/zero bs=2048 count={18 * 1024 / 2048} 2>/dev/null"));
+        await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace);
+        await session.WriteInputAsync("\n");
+        await session.WaitForExitAsync().WaitAsync(Timeout);
+
+        var received = 0;
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+        while (await output.MoveNextAsync().AsTask().WaitAsync(Timeout))
+            received += output.Current.Data.Length;
+
+        await Assert.That(received).IsEqualTo(Size);
+    }
+
+    /// <summary>
+    /// On FreeBSD the loop reads ahead only for a child that has begun to exit, so a child that runs is still held back by a
+    /// full ring. The child writes more than the ring and its terminal hold, but less than that and what the loop may read
+    /// ahead, so a loop that read ahead for a running child would let it finish and exit while nobody reads.
+    /// </summary>
+    // Retried: the child exits while the test reads, so a stop of the loop thread then loses the end, as for the 32 KiB
+    // tests. A loop that reads ahead for a running child fails every attempt.
+    [Test]
+    [Retry(3)]
+    public async Task ARunningChildStaysHeldBackByAFullRingOnFreeBsd()
+    {
+        if (!OperatingSystem.IsFreeBSD())
+            return;
+
+        // The ring and the terminal (7,688 bytes at 38400 baud) hold at most 24,072 bytes, so the child still has more than
+        // 8 KiB to write. A loop that read ahead for it would take that in two or three of its looks.
+        const int Size = 32 * 1024;
+        await using var session = Pty.Start(Shell($"exec dd if=/dev/zero bs=4096 count={Size / 4096} 2>/dev/null"));
+        await WaitUntilAsync(() => session.OutputPump.IsWaitingForFreeSpace);
+        // The delay spans six of the loop's looks at the parked session, which come 250 ms apart.
+        await Task.Delay(1500);
+        var exitedWhileHeld = session.HasExited;
+
+        var received = 0;
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+        while (await output.MoveNextAsync().AsTask().WaitAsync(Timeout))
+            received += output.Current.Data.Length;
+
+        await Assert.That(exitedWhileHeld).IsFalse();
+        await Assert.That(received).IsEqualTo(Size);
+    }
+
+    /// <summary>
+    /// On FreeBSD a session parked on a full ring stops waking the loop once its child's exit is observed. The loop looks at
+    /// a parked session every 250 ms only to catch the exit in time for a read-ahead, and a look after the reap can save
+    /// nothing. A loop that kept looking would make about 8 passes in the 2 s measured.
+    /// </summary>
+    // Retried for the same reason as OutputOfAChildThatExitsWhileTheRingIsFullIsNotLost, whose scenario this test starts
+    // with. A loop that keeps looking fails every attempt on the pass count.
+    [Test]
+    [NotInParallel]
+    [Retry(3)]
+    public async Task AParkedSessionWhoseChildExitedDoesNotWakeTheLoopOnFreeBsd()
+    {
+        if (!OperatingSystem.IsFreeBSD())
+            return;
+
+        // At 115200 baud the queue takes the whole burst, as in OutputOfAChildThatExitsWhileTheRingIsFullIsNotLost.
+        const int Size = PtyOutputPump.Capacity + 2048;
+        await using var session = Pty.Start(Shell($"stty 115200 && exec dd if=/dev/zero bs=2048 count={Size / 2048} 2>/dev/null"));
+        await session.WaitForExitAsync().WaitAsync(Timeout);
+        // The look that unlists the session comes within 250 ms of the reap.
+        await Task.Delay(500);
+        var before = UnixPtyBackend.LoopPassesForTests;
+        await Task.Delay(2000);
+        var passes = UnixPtyBackend.LoopPassesForTests - before;
+
+        var received = 0;
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+        while (await output.MoveNextAsync().AsTask().WaitAsync(Timeout))
+            received += output.Current.Data.Length;
+
+        await Assert.That(passes).IsLessThan(4L);
+        await Assert.That(received).IsEqualTo(Size);
+    }
+
+    /// <summary>
+    /// On FreeBSD a master closed while output is read ahead still delivers that output before output ends. The test closes
+    /// the transport itself while the loop is parked after the child's exit, with the rest of the output read ahead.
+    /// </summary>
+    // Retried for the same reason as OutputOfAChildThatExitsWhileTheRingIsFullIsNotLost.
+    [Test]
+    [Retry(3)]
+    public async Task AClosedMasterStillDeliversWhatWasReadAheadOnFreeBsd()
+    {
+        if (!OperatingSystem.IsFreeBSD())
+            return;
+
+        // At 115200 baud the queue takes the whole burst, as in OutputOfAChildThatExitsWhileTheRingIsFullIsNotLost, so the
+        // child exits with 2 to 6 KiB read ahead behind the parked ring.
+        const int Size = PtyOutputPump.Capacity + 2048;
+        await using var session = Pty.Start(Shell($"stty 115200 && exec dd if=/dev/zero bs=2048 count={Size / 2048} 2>/dev/null"));
+        await session.WaitForExitAsync().WaitAsync(Timeout);
+        await Assert.That(session.OutputPump.IsWaitingForFreeSpace).IsTrue();
+        session.OutputPump.RequestClose();
 
         var received = 0;
         await using var output = session.ReadOutputAsync().GetAsyncEnumerator();

@@ -358,9 +358,9 @@ public sealed class PtyTests
 
     /// <summary>
     /// A child that writes nothing completes without waiting out <see cref="PtyCompleteOptions.OutputDrainGrace"/>
-    /// either. An in-box ConPTY before Windows 11 24H2 writes nothing for it until the pseudo-console closes, and the
-    /// completion waited for a first read before closing, so <c>cmd /c exit</c> took the whole grace there (1,016 ms of
-    /// the default 1 s on windows-2022). The host's frame still arrives, with the close: every measured host writes one.
+    /// either. An in-box ConPTY before Windows 11 24H2 writes nothing for it until the pseudo-console closes, so a
+    /// completion that waited for a first read before closing would take the whole grace there. The host's frame still
+    /// arrives, with the close: every measured host writes one.
     /// There the close waits for the host's exit, and the drain does not end output before the close returns, or before
     /// 1 s after it starts if it has not returned by then (<c>PtyOutputPumpTests.AFrameTheHostWritesAsASlowCloseReturnsIsDelivered</c>).
     /// </summary>

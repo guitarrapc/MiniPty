@@ -65,7 +65,7 @@ internal static partial class UnixInterop
 
     /// <summary>
     /// FreeBSD: 1 when the child with <paramref name="pid"/> has begun to exit or is a zombie, 0 while it runs, -1 on
-    /// failure or once it is reaped. Fails elsewhere.
+    /// failure: once it is reaped, or while this process may not see it. Fails elsewhere.
     /// </summary>
     [LibraryImport("minipty_unix", SetLastError = true)]
     internal static partial int minipty_child_exiting(int pid);
