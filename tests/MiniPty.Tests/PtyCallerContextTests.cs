@@ -199,12 +199,11 @@ public sealed class PtyCallerContextTests
         // 4 MiB of short lines: well past the tty line buffer and the kernel flip-buffer limit.
         var text = string.Concat(Enumerable.Repeat(new string('x', 63) + "\n", 65536));
         var bytes = Encoding.ASCII.GetBytes(text);
-        var write = ui.RunAsync(() => textOverload
-            ? session.WriteInputAsync(text).AsTask()
-            : session.WriteInputAsync(bytes).AsTask());
+        var (write, issued) = StartWriteOnUiThread(ui, session, textOverload, text, bytes);
 
         try
         {
+            await AssertWriteIssuedAndPendingAsync(issued);
             await AssertUiThreadStaysFreeAsync(ui);
         }
         finally
@@ -234,20 +233,12 @@ public sealed class PtyCallerContextTests
         var lineCount = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 1024 : 65536;
         var text = string.Concat(Enumerable.Repeat(new string('x', 63) + LineInput[^1], lineCount));
         var bytes = Encoding.ASCII.GetBytes(text);
-        var waitedAtIssue = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var write = ui.RunAsync(() =>
-        {
-            var task = textOverload ? session.WriteInputAsync(text).AsTask() : session.WriteInputAsync(bytes).AsTask();
-            waitedAtIssue.TrySetResult(!task.IsCompleted);
-            return task;
-        });
+        var (write, issued) = StartWriteOnUiThread(ui, session, textOverload, text, bytes);
 
         try
         {
+            await AssertWriteIssuedAndPendingAsync(issued);
             await AssertUiThreadStaysFreeAsync(ui);
-            // The write had to wait, so a free UI thread proves it did not block. A write that completed or failed
-            // at issue would leave the UI thread free for another reason.
-            await Assert.That(await waitedAtIssue.Task.WaitAsync(OperationTimeout)).IsTrue();
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 // ConPTY takes input again once its output drains. The Unix child never reads, so its write stays queued.
@@ -424,6 +415,43 @@ public sealed class PtyCallerContextTests
             }
         }
     }
+
+    /// <summary>
+    /// Issues a write from the UI thread. <c>Issued</c> completes when the call returns, with whether the write was
+    /// still pending and how long the call took.
+    /// </summary>
+    /// <remarks>
+    /// The call encodes the text, rents a buffer for it, and hands the transport what it accepts, all on the caller's
+    /// thread. That is work the caller asked for, not a wait for the child, and a slow runner can spend more than the
+    /// busy budget on it. So the call gets its own bound, and the idle window starts once it has returned.
+    /// </remarks>
+    private static (Task Write, Task<WriteIssue> Issued) StartWriteOnUiThread(
+        SingleThreadSynchronizationContext ui, PtySession session, bool textOverload, string text, byte[] bytes)
+    {
+        var issued = new TaskCompletionSource<WriteIssue>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var write = ui.RunAsync(() =>
+        {
+            var started = Stopwatch.GetTimestamp();
+            var task = textOverload ? session.WriteInputAsync(text).AsTask() : session.WriteInputAsync(bytes).AsTask();
+            issued.TrySetResult(new WriteIssue(!task.IsCompleted, Stopwatch.GetElapsedTime(started)));
+            return task;
+        });
+        return (write, issued.Task);
+    }
+
+    /// <summary>
+    /// Asserts the write call returned promptly with the write still pending. A write that blocked until the child
+    /// read would not return at all. A write that completed or failed at issue would leave the UI thread free for
+    /// another reason, so the idle check after it would prove nothing.
+    /// </summary>
+    private static async Task AssertWriteIssuedAndPendingAsync(Task<WriteIssue> issued)
+    {
+        var issue = await issued.WaitAsync(OperationTimeout);
+        await Assert.That(issue.Elapsed).IsLessThan(ProbeTimeout);
+        await Assert.That(issue.Pending).IsTrue();
+    }
+
+    private readonly record struct WriteIssue(bool Pending, TimeSpan Elapsed);
 
     private static async Task AssertUiThreadStaysFreeAsync(SingleThreadSynchronizationContext ui)
     {
