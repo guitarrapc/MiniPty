@@ -105,6 +105,13 @@ internal interface IPtyBackend : IDisposable
     /// nothing it writes nothing before the close, so the wait cost that child the whole grace.
     /// </summary>
     public bool CloseSendsHeldOutput { get; }
+    /// <summary>
+    /// Whether the close returns only once the transport's host has exited, and the backend then reports that to the pump
+    /// (<see cref="PtyOutputPump.OnTransportCloseReturned"/>). The host writes its frame during such a close, so the
+    /// post-exit drain counts the close as done only when it returns, or <see cref="PtyOutputPump.CloseReturnWaitMs"/>
+    /// after the request. True only for an in-box ConPTY without <c>ReleasePseudoConsole</c>.
+    /// </summary>
+    public bool CloseWaitsForHost { get; }
     /// <summary>Gets whether the transport was closed, after which reads report end of output without blocking.</summary>
     public bool IsOutputClosed { get; }
     /// <summary>

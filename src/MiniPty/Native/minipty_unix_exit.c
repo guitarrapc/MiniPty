@@ -41,6 +41,12 @@
 #endif
 #endif
 
+#if defined(__FreeBSD__)
+/* kinfo_proc and P_WEXIT, for minipty_child_exiting. */
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#endif
+
 /*
  * Child exit watcher, child signaling and reaping.
  *
@@ -907,6 +913,39 @@ int minipty_master_poll(int master, int timeout_us)
 #else
     (void)master;
     (void)timeout_us;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+/*
+ * FreeBSD: whether the child with pid has begun to exit. When a session leader exits, the last close of its terminal waits
+ * for the master to read what the terminal still holds, but only while the master makes progress: after a second with
+ * no read, the kernel discards it. A caller that stopped reading the master to hold back the child (a full ring) reads
+ * ahead once this reports the exit. P_WEXIT is set before the exit closes the child's descriptors, and kqueue's
+ * NOTE_EXIT comes only after that close, so it is too late for this.
+ *
+ * Returns 1 when the child is exiting or a zombie, 0 while it runs, and -1 on failure. The failure is ESRCH once the
+ * child is reaped, and also while this process may not see the child, as when an unprivileged host runs with
+ * security.bsd.see_other_uids=0 and the child changed its real uid. Elsewhere it fails with ENOTSUP.
+ */
+int minipty_child_exiting(int pid)
+{
+#if defined(__FreeBSD__)
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+    struct kinfo_proc proc;
+    size_t length = sizeof(proc);
+
+    if (sysctl(mib, 4, &proc, &length, NULL, 0) != 0)
+        return -1;
+    if (length < sizeof(proc)) {
+        errno = ESRCH;
+        return -1;
+    }
+
+    return (proc.ki_flag & P_WEXIT) != 0 ? 1 : 0;
+#else
+    (void)pid;
     errno = ENOTSUP;
     return -1;
 #endif

@@ -77,12 +77,15 @@ internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
         return graceMs >= 0 && now - exitTick >= graceMs;
     }
 
-    /// <summary>Fails the drain wait once output reading has outlived the close timeout. Runs on a drain tick.</summary>
+    /// <summary>
+    /// Fails the drain wait once output reading has outlived the close timeout, counted from when the close is done
+    /// (<paramref name="closeDoneTick"/>). Runs on a drain tick.
+    /// </summary>
     /// <returns><see langword="true"/> once the timeout has fired.</returns>
-    internal bool CheckCloseTimeout(long now, long closeRequestedTick, PtyOutputPump pump)
+    internal bool CheckCloseTimeout(long now, long closeDoneTick, PtyOutputPump pump)
     {
         var closeTimeoutMs = Volatile.Read(ref _closeTimeoutMs);
-        if (closeTimeoutMs < 0 || now - closeRequestedTick < closeTimeoutMs)
+        if (closeTimeoutMs < 0 || now - closeDoneTick < closeTimeoutMs)
             return false;
 
         // A full fence before reading the wait state, paired with the waiter's arm-then-check below.

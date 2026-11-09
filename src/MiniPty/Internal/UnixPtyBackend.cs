@@ -390,6 +390,34 @@ internal static partial class UnixPtyBackend
         /// <summary>The next session on the watcher's queue. Guarded by its lock.</summary>
         internal UnixPtyBackendInstance? NextService;
 
+        /// <summary>FreeBSD: whether this session is on the watcher's list of parked sessions. The loop's thread only.</summary>
+        internal bool ParkedListed;
+
+        /// <summary>The next session on the watcher's list of parked sessions. The loop's thread only.</summary>
+        internal UnixPtyBackendInstance? NextParked;
+
+        /// <summary>
+        /// Whether the watcher keeps looking at this session: the loop is parked on its full ring, and its child has not been
+        /// reaped. Once it has, its exit is over, so a look can no longer save output.
+        /// </summary>
+        internal bool NeedsParkedLook =>
+            Volatile.Read(ref _loopParked) && Volatile.Read(ref _loopPhase) == LoopReading && !IsExitObserved;
+
+        // FreeBSD: output read from the master ahead of the ring while the loop was parked on it and the child was exiting
+        // (ReadAheadIfChildExits), from _readAheadStart to _readAheadEnd. Every read of output takes it before the master
+        // (ReadOutputNow). Null while empty. Used under the producer's turn, by the loop or by a consumer reading inline.
+        // Allocated, not pooled: the path is rare, and a consumer that empties it would strand a shared-pool array in its own
+        // thread's cache.
+        private byte[]? _readAhead;
+        private int _readAheadStart;
+        private int _readAheadEnd;
+        // The largest output queue of a FreeBSD pseudo-terminal, which bounds what an exiting child leaves behind. The kernel
+        // clamps a pseudo-terminal's speed to 115200 baud and sizes the queue to a fifth of the speed in bytes, in whole
+        // 248-byte blocks.
+        private const int ReadAheadCapacity = 23_064;
+
+        private bool HasReadAhead => _readAhead is not null;
+
         public UnixPtyBackendInstance(int master, int slave, int pid, int pidfd, PtySize size)
         {
             _master = master;
@@ -839,6 +867,9 @@ internal static partial class UnixPtyBackend
         /// </summary>
         public bool CloseSendsHeldOutput => false;
 
+        /// <summary>Closing the master never waits for another process.</summary>
+        public bool CloseWaitsForHost => false;
+
         /// <summary>
         /// Reads output on the watcher's loop (epoll on Linux, kqueue on macOS and FreeBSD), which holds no thread of the
         /// session's own and also writes queued input when the master can take more. A master the loop cannot register
@@ -1173,7 +1204,7 @@ internal static partial class UnixPtyBackend
                     var span = pump.NextReadSpan;
                     int read;
                     fixed (byte* ptr = span)
-                        read = ReadMasterNow(master, ptr, span.Length);
+                        read = ReadOutputNow(master, ptr, span.Length);
 
                     // Nothing more for now, or end of output, which the loop sees when it reads the master again.
                     if (read <= 0)
@@ -1199,6 +1230,10 @@ internal static partial class UnixPtyBackend
                 if (!published)
                     pump.LetGoOfRing();
             }
+
+            // The master never reports output already read ahead, so the loop must come back for the rest.
+            if (HasReadAhead)
+                ChildWatcher.RequestService(this);
 
             return published;
         }
@@ -1337,11 +1372,13 @@ internal static partial class UnixPtyBackend
             // space.
             if (ParkWhileFull(pump))
             {
+                ReadAheadIfChildExits();
                 SetLoopInterest();
                 return;
             }
 
-            if (IsMasterClosed)
+            // Output read ahead is already out of the terminal, so it is delivered before a close ends output.
+            if (IsMasterClosed && !HasReadAhead)
             {
                 // The close (the post-exit drain, or disposal after the exit) ends output; what the master still holds is
                 // left unread.
@@ -1349,8 +1386,9 @@ internal static partial class UnixPtyBackend
                 return;
             }
 
+            // The master never reports output already read ahead, so the pass reads whenever some is left.
             if ((report & (ChildWatcher.ReportReadable | ChildWatcher.ReportHangup | ChildWatcher.ReportError)) != 0
-                || pump.IsEndOfOutputForced)
+                || pump.IsEndOfOutputForced || HasReadAhead)
             {
                 if (!ReadOnLoop(pump, out var foundNothing))
                     return;
@@ -1358,7 +1396,9 @@ internal static partial class UnixPtyBackend
                 if (foundNothing)
                     RenewIfHangupIsStale(report);
 
-                ParkWhileFull(pump);
+                // A pass ends after a bound of reads, so the loop comes back for what is still read ahead.
+                if (!ParkWhileFull(pump) && HasReadAhead)
+                    ChildWatcher.RequestService(this);
             }
 
             ResumeInlineReading(pump);
@@ -1380,6 +1420,9 @@ internal static partial class UnixPtyBackend
                 if (pump.BeginWaitForFreeSpace())
                 {
                     _loopParked = true;
+                    if (OperatingSystem.IsFreeBSD() && !IsExitObserved)
+                        ChildWatcher.WatchParked(this);
+
                     return true;
                 }
 
@@ -1398,15 +1441,18 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>
-        /// Reads what the master holds into the ring, up to <see cref="LoopReadsPerService"/> reads, and publishes each read
-        /// as it completes. There is no coalescing window: a consumer still busy with its previous chunk takes everything
-        /// that arrived meanwhile as one chunk, the policy the Windows driver has too. Returns <see langword="false"/> once
+        /// Reads output into the ring, what was read ahead first and then what the master holds, up to
+        /// <see cref="LoopReadsPerService"/> reads, and publishes each read as it completes. There is no coalescing window:
+        /// a consumer still busy with its previous chunk takes everything that arrived meanwhile as one chunk, the policy
+        /// the Windows driver has too. Returns <see langword="false"/> once
         /// output ended. <paramref name="foundNothing"/> is set when the first read found nothing to read.
         /// </summary>
         private unsafe bool ReadOnLoop(PtyOutputPump pump, out bool foundNothing)
         {
             foundNothing = false;
-            if (!TryAcquireMaster(out var master))
+            // A closed master's read-ahead is still delivered: ReadOutputNow takes it without the master.
+            var acquired = TryAcquireMaster(out var master);
+            if (!acquired && !HasReadAhead)
             {
                 EndOnLoop(pump);
                 return false;
@@ -1421,11 +1467,14 @@ internal static partial class UnixPtyBackend
                     if (pump.IsFull)
                         break;
 
+                    if (!acquired && !HasReadAhead)
+                        break;
+
                     pump.HoldRing();
                     var span = pump.NextReadSpan;
                     int read;
                     fixed (byte* ptr = span)
-                        read = ReadMasterNow(master, ptr, span.Length);
+                        read = ReadOutputNow(master, ptr, span.Length);
 
                     if (read < 0)
                     {
@@ -1468,10 +1517,18 @@ internal static partial class UnixPtyBackend
             }
             finally
             {
-                ReleaseMaster();
+                if (acquired)
+                    ReleaseMaster();
             }
 
-            if (pump.IsEndOfOutputForced)
+            // Nothing is left to read once a closed master's read-ahead is in, so output ends here.
+            if (!acquired && !HasReadAhead)
+            {
+                EndOnLoop(pump);
+                return false;
+            }
+
+            if (pump.IsEndOfOutputForced && !HasReadAhead)
             {
                 // The drain gave up on the transport ending; what the master held is in.
                 EndOnLoop(pump);
@@ -1562,6 +1619,8 @@ internal static partial class UnixPtyBackend
                 pump.EndWaitForFreeSpace();
             }
 
+            ClearReadAhead();
+
             // Queued input is written by this loop; once it stops reading the session, nothing can deliver it. A disposal fails
             // it as disposed, also when the loop sees the disposal on the pump before the backend's own close of the input,
             // which would otherwise find the queue already failed with the end of output.
@@ -1640,6 +1699,7 @@ internal static partial class UnixPtyBackend
                         _pump!.EndWaitForFreeSpace();
                     }
 
+                    ClearReadAhead();
                     CloseInput(InputOutputEnded);
                     _pump!.Finish(error);
                 }
@@ -1664,6 +1724,96 @@ internal static partial class UnixPtyBackend
             Volatile.Write(ref _loopSlot, -1);
             ChildWatcher.DeregisterMaster(_master, slot);
             ReleaseMaster();
+        }
+
+        /// <summary>
+        /// One read of output into the ring: from what was read ahead while it lasts, then from the master, which the caller
+        /// has pinned. Returns as <see cref="ReadMasterNow"/> does. Under the producer's turn.
+        /// </summary>
+        private unsafe int ReadOutputNow(int master, byte* buffer, int length)
+        {
+            var readAhead = _readAhead;
+            if (readAhead is null)
+                return ReadMasterNow(master, buffer, length);
+
+            var count = Math.Min(length, _readAheadEnd - _readAheadStart);
+            readAhead.AsSpan(_readAheadStart, count).CopyTo(new Span<byte>(buffer, length));
+            _readAheadStart += count;
+            if (_readAheadStart == _readAheadEnd)
+                ClearReadAhead();
+
+            return count;
+        }
+
+        /// <summary>
+        /// FreeBSD, while the loop is parked on a full ring: once the child has begun to exit, reads what the master holds
+        /// into the read-ahead buffer, which every later read takes first. On the loop, under the producer's turn.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// When a session leader exits, FreeBSD's last close of its terminal waits for the master to read what the terminal
+        /// holds, and discards it after a second without a read. The loop does not read a parked session, so a consumer
+        /// that keeps the ring full that long would lose the end of the output. Linux keeps that output in the master,
+        /// and on macOS the session's own slave descriptor keeps the child's close from being the last one. On FreeBSD
+        /// that descriptor would be worse: the leader's exit revokes the terminal, and a close by revoke discards at once.
+        /// </para>
+        /// <para>
+        /// Reading ahead only once the child exits keeps backpressure on a child that runs: it still stops when the ring
+        /// is full. An exiting child writes nothing more, so what is read here is at most the terminal's output queue,
+        /// which <see cref="ReadAheadCapacity"/> bounds. The watcher looks at a parked session often enough to read it
+        /// within that second (<see cref="ChildWatcher.WatchParked"/>).
+        /// </para>
+        /// </remarks>
+        private unsafe void ReadAheadIfChildExits()
+        {
+            if (!OperatingSystem.IsFreeBSD() || IsExitObserved || UnixInterop.minipty_child_exiting(_pid) != 1)
+                return;
+
+            if (!TryAcquireMaster(out var master))
+                return;
+
+            var readAhead = _readAhead ?? GC.AllocateUninitializedArray<byte>(ReadAheadCapacity);
+            if (_readAheadStart > 0)
+            {
+                // Taken from the front since the last read ahead: what is left moves there, so the space after it is free.
+                _readAheadEnd -= _readAheadStart;
+                Buffer.BlockCopy(readAhead, _readAheadStart, readAhead, 0, _readAheadEnd);
+                _readAheadStart = 0;
+            }
+
+            try
+            {
+                fixed (byte* ptr = readAhead)
+                {
+                    while (_readAheadEnd < ReadAheadCapacity)
+                    {
+                        var read = ReadMasterNow(master, ptr + _readAheadEnd, ReadAheadCapacity - _readAheadEnd);
+                        if (read <= 0)
+                            break;
+
+                        _readAheadEnd += read;
+                    }
+                }
+            }
+            catch (IOException)
+            {
+                // The next read of the master meets the failure and ends output with it.
+            }
+            finally
+            {
+                ReleaseMaster();
+            }
+
+            if (_readAheadEnd > 0)
+                _readAhead = readAhead;
+        }
+
+        /// <summary>Drops what was read ahead, and its buffer. Under the producer's turn.</summary>
+        private void ClearReadAhead()
+        {
+            _readAhead = null;
+            _readAheadStart = 0;
+            _readAheadEnd = 0;
         }
 
         /// <summary>

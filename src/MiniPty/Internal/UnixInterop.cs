@@ -63,6 +63,13 @@ internal static partial class UnixInterop
     [LibraryImport("minipty_unix", SetLastError = true)]
     internal static partial int minipty_master_wait(int waitFd, int timeoutMs);
 
+    /// <summary>
+    /// FreeBSD: 1 when the child with <paramref name="pid"/> has begun to exit or is a zombie, 0 while it runs, -1 on
+    /// failure: once it is reaped, or while this process may not see it. Fails elsewhere.
+    /// </summary>
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_child_exiting(int pid);
+
     // Child signaling (minipty_unix_exit.c).
 
     /// <summary>
