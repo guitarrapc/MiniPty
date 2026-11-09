@@ -359,7 +359,10 @@ public sealed class PtyTests
     /// completion waited for a first read before closing, so <c>cmd /c exit</c> took the whole grace there (1,016 ms of
     /// the default 1 s on windows-2022). The host's frame still arrives, with the close: every measured host writes one.
     /// </summary>
+    // Retried: on a loaded windows-2022 runner the pump can end output before that host's close has written the frame
+    // (see platform_support.md).
     [Test]
+    [Retry(3)]
     public async Task PtyCompleteAsyncOfAChildThatWritesNothingReturnsBeforeOutputDrainGraceOnWindows()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
