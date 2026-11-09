@@ -48,8 +48,12 @@ internal sealed class WindowsHostTerminal : IHostTerminal
         stdinMode |= ConsoleWindowsInterop.EnableWindowInput
             | ConsoleWindowsInterop.EnableVirtualTerminalInput;
 
+        // ConPTY output moves the cursor down with a bare LF and expects the column to stay, as on a VT terminal.
+        // Without DISABLE_NEWLINE_AUTO_RETURN the console also returns to column 1, and text after such an LF lands
+        // at the left edge (a TUI's right-hand panel drawn over its left one).
         uint stdoutMode = _stdoutModeSnapshot;
-        stdoutMode |= ConsoleWindowsInterop.EnableVirtualTerminalProcessing;
+        stdoutMode |= ConsoleWindowsInterop.EnableVirtualTerminalProcessing
+            | ConsoleWindowsInterop.DisableNewlineAutoReturn;
 
         if (!ConsoleWindowsInterop.SetConsoleMode(_stdin, stdinMode))
         {

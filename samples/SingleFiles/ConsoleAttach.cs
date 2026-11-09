@@ -58,8 +58,8 @@ static int RunInteractiveShell()
 {
     using var session = Pty.Start(CreateShellStartInfo());
 
-    // Write status before Attach. Once attached, Unix stdout is raw (OPOST off: \n no longer returns to the start of the
-    // line), and the shell's own output starts arriving.
+    // Write status before Attach. Once attached, \n no longer returns to the start of the line (Unix: OPOST off;
+    // Windows: DISABLE_NEWLINE_AUTO_RETURN), and the shell's own output starts arriving.
     Console.Error.WriteLine($"Starting PTY shell (pid {session.ProcessId})...");
     Console.Error.WriteLine("Keyboard input is forwarded to the child; PTY output is written to this terminal.");
     Console.Error.WriteLine("Exit the shell (for example type exit) to end the sample.");

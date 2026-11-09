@@ -17,7 +17,7 @@ This document describes **how** **MiniPty.Console** reads host stdin on Windows.
 
 On VT-aware hosts (Windows Terminal, modern conhost):
 
-1. Save and configure host stdin/stdout modes (`SetConsoleMode`).
+1. Save and configure host stdin/stdout modes (`SetConsoleMode`). Stdout gets `ENABLE_VIRTUAL_TERMINAL_PROCESSING` and `DISABLE_NEWLINE_AUTO_RETURN`, so a bare LF in ConPTY's output keeps its column.
 2. Enable `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin.
 3. Save the input code page and set it to UTF-8 (`SetConsoleCP(65001)`).
 4. Read raw bytes with `ReadFile` on the process stdin handle.

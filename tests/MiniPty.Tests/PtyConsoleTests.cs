@@ -3,6 +3,11 @@ using MiniPty.Console;
 
 namespace MiniPty.Tests;
 
+/// <summary>
+/// Attach contract tests. Those that attach run only when the test host has a real console, and they share it with
+/// <see cref="PtyConsoleWindowsInputTests"/>, so both classes run one test at a time (<see cref="HostConsoleGroup"/>).
+/// </summary>
+[NotInParallel(HostConsoleGroup.Key)]
 public sealed class PtyConsoleTests
 {
     [Test]

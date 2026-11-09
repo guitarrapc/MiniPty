@@ -17,6 +17,7 @@ internal static class Smoke
         {
             await RunScenarioAsync(throughHost: false, quit: "q");
             await RunScenarioAsync(throughHost: true, quit: "\u0003");
+            await RunAutoplayAsync();
             return 0;
         }
         catch (Exception exception)
@@ -40,6 +41,98 @@ internal static class Smoke
                 text.Append(c);
         }
         return text.ToString();
+    }
+
+    /// <summary>
+    /// Plays the <c>--autoplay</c> tour at a tenth of its pace against the TUI. Its drags must move both chart borders
+    /// and its last key must quit, so a layout or key change that would leave a recording stuck or off target fails
+    /// here. Input is read in order, so the fast tour reaches the same states as the normal one.
+    /// </summary>
+    private static async Task RunAutoplayAsync()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        await using var session = Pty.Start(DemoHost.StartInfo(child: true) with { KillProcessTree = true });
+        var screen = new ScreenBuffer(80, 24);
+        var parser = new VtParser(screen);
+        var gate = new object();
+        screen.Response += response => session.Input.Write(Encoding.UTF8.GetBytes(response));
+        var output = ReadAsync();
+        try
+        {
+            var exited = session.WaitForExitAsync(timeout.Token);
+            var script = DemoAutoplay.Script(80, 24);
+            await DemoAutoplay.PlayAsync(session, script.AsMemory(0, script.Length - 1), 0.1, exited, timeout.Token);
+
+            var g = new DemoGeometry(80, 24);
+            var start = g.Charts(default);
+            var dragged = g.Charts(new ChartsLayout(start.BottomRows + 3, start.BarWidth + 10));
+            await WaitUntilAsync(() =>
+            {
+                // The bottom panels' top border: three rows higher, and the bar chart's corner ten columns right.
+                var border = Text(dragged.Top - 1);
+                return border.StartsWith("┌ Requests/s ", StringComparison.Ordinal)
+                    && border.Length >= dragged.BarWidth && border[dragged.BarWidth - 1] == '┐';
+            }, "the tour's drags to move both chart borders");
+
+            await DemoAutoplay.PlayAsync(session, script.AsMemory(script.Length - 1), 1, exited, timeout.Token);
+            var status = await exited;
+            await output;
+            lock (gate)
+            {
+                if (status.ExitCode != 0 || screen.IsAlternateScreen || !ScreenContains("TUI exited cleanly."))
+                    throw new InvalidOperationException($"Autoplay did not quit cleanly: exit={status.ExitCode}, alternate screen={screen.IsAlternateScreen}.");
+            }
+            Console.WriteLine("PASS (autoplay): the tour's drags land, and its last key quits, exit=0");
+        }
+        finally
+        {
+            timeout.Cancel();
+            try { await output; }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
+        }
+
+        async Task ReadAsync()
+        {
+            await foreach (var chunk in session.ReadOutputAsync(timeout.Token))
+            {
+                lock (gate)
+                    parser.Feed(chunk.Data.Span);
+            }
+        }
+
+        string Text(int row)
+        {
+            lock (gate)
+                return row < screen.Rows ? screen.ViewLine(row).ToText() : string.Empty;
+        }
+
+        bool ScreenContains(string text)
+        {
+            for (var row = 0; row < screen.Rows; row++)
+            {
+                if (screen.ViewLine(row).ToText().Contains(text, StringComparison.Ordinal))
+                    return true;
+            }
+            return false;
+        }
+
+        async Task WaitUntilAsync(Func<bool> condition, string what)
+        {
+            while (!condition())
+            {
+                try { await Task.Delay(20, timeout.Token); }
+                catch (OperationCanceledException)
+                {
+                    var dump = new StringBuilder();
+                    lock (gate)
+                    {
+                        for (var row = 0; row < screen.Rows; row++)
+                            dump.AppendLine(screen.ViewLine(row).ToText());
+                    }
+                    throw new TimeoutException($"Timed out waiting for {what}.\n{dump}");
+                }
+            }
+        }
     }
 
     private static async Task RunScenarioAsync(bool throughHost, string quit)
@@ -209,6 +302,10 @@ internal static class Smoke
             var charts = g.Charts(default);
             await ChangesAsync(() => Slice(4, 7, charts.PlotColumns), "braille plot");
             await ChangesAsync(() => Slice(charts.Top, charts.LoadLeft + 6, charts.SparkLength), "cpu sparkline");
+            // The bar labels and the Load panel's disk row share the last row. ConPTY's repaint moves down to the disk
+            // row with a bare LF, so a host console that also returns to column 1 on LF draws it over the labels.
+            await WaitUntilAsync(() => Slice(charts.PageBottom - 2, 3, 3) == "GET" && Slice(charts.Top + 4, charts.LoadLeft + 1, 4) == "disk",
+                "the bar labels and the disk row to share the bottom row");
             await SendAsync(" ");
             await ExpectAsync("Paused: yes", alternate: true);
             await ExpectFrozenAsync(() => Slice(4, 7, charts.PlotColumns), () => Slice(charts.Top, charts.LoadLeft + 6, charts.SparkLength));

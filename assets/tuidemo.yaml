@@ -1,0 +1,33 @@
+# README demo: the TuiDemo sample's --autoplay tour, recorded with scenetake (https://github.com/guitarrapc/scenetake).
+# Run from the repository root on Linux (WSL works):
+#
+#   scenetake --format svg --max-fps 10 assets/tuidemo.yaml
+#
+# It writes assets/tuidemo.svg, which the README shows, and assets/tuidemo.cast (ignored by git: its header
+# records the local shell). The build runs in `pre`, outside the recording. The TUI animates at 10 frames per
+# second, so --max-fps 10 loses no animation and keeps the SVG about a third smaller. The tour plays the same
+# input every run, so a new recording differs only in animation timing.
+#
+# On Windows the recorder's ConPTY adds a second ConPTY in front of the sample's, and some cells land in the wrong
+# place after the Charts border drags (.github/docs/specs/console.md, TUI sample validation lessons).
+
+title: "MiniPty TuiDemo"
+width: 80
+height: 24
+
+render:
+  window: macos
+
+settings:
+  prompt: "$ "
+  typing-speed: 0.03
+  pre-delay: 0.3
+  post-delay: 1.5
+
+pre:
+  - dotnet build samples/TuiDemo -c Release
+
+steps:
+  - name: A full-screen TUI in a MiniPty session, driven by a script
+    run: dotnet run --project samples/TuiDemo -c Release --no-build -- --autoplay
+    pty: true

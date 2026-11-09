@@ -15,15 +15,7 @@ internal static partial class DemoTui
     {
         Console.InputEncoding = Encoding.UTF8;
         Console.OutputEncoding = Encoding.UTF8;
-        var outputHandle = nint.Zero;
-        uint savedMode = 0;
-        if (OperatingSystem.IsWindows())
-        {
-            outputHandle = GetStdHandle(-11);
-            if (!GetConsoleMode(outputHandle, out savedMode) || !SetConsoleMode(outputHandle, savedMode | 4))
-                throw new Win32Exception(Marshal.GetLastPInvokeError());
-        }
-
+        var vtOutput = VirtualTerminalOutput.Enable();
         var savedControlC = Console.TreatControlCAsInput;
         try
         {
@@ -72,8 +64,7 @@ internal static partial class DemoTui
             Console.Write("\u001b[r\u001b[?1002l\u001b[?1000l\u001b[?1006l\u001b[0m\u001b[?25h\u001b[?1049l");
             Console.Out.Flush();
             Console.TreatControlCAsInput = savedControlC;
-            if (OperatingSystem.IsWindows())
-                SetConsoleMode(outputHandle, savedMode);
+            vtOutput.Dispose();
         }
         Console.Write("TUI exited cleanly.\r\n");
         return 0;
@@ -308,7 +299,48 @@ internal static partial class DemoTui
     }
 
 
-    // Only the child needs to enable Windows VT output; the host uses MiniPty.Console for its own modes.
+    /// <summary>
+    /// Turns on VT output processing for this process's Windows console until disposed; elsewhere it does nothing.
+    /// The child and the autoplay host use it. The interactive host gets both modes from MiniPty.Console's attach.
+    /// </summary>
+    internal readonly struct VirtualTerminalOutput : IDisposable
+    {
+        private const uint EnableVirtualTerminalProcessing = 0x0004;
+        private const uint DisableNewlineAutoReturn = 0x0008;
+
+        private readonly nint _handle;
+        private readonly uint _savedMode;
+
+        private VirtualTerminalOutput(nint handle, uint savedMode)
+        {
+            _handle = handle;
+            _savedMode = savedMode;
+        }
+
+        /// <summary>
+        /// <paramref name="disableNewlineAutoReturn"/> also sets <c>DISABLE_NEWLINE_AUTO_RETURN</c>: a line feed then
+        /// moves down without returning to column 1, as on a VT terminal. A host that copies ConPTY's output needs it,
+        /// because ConPTY moves the cursor down with a bare LF and expects the column to stay. Without it the TuiDemo
+        /// Charts page's <c>disk</c> row was drawn over the bar labels.
+        /// </summary>
+        internal static VirtualTerminalOutput Enable(bool disableNewlineAutoReturn = false)
+        {
+            if (!OperatingSystem.IsWindows())
+                return default;
+            var handle = GetStdHandle(-11);
+            var modes = EnableVirtualTerminalProcessing | (disableNewlineAutoReturn ? DisableNewlineAutoReturn : 0);
+            if (!GetConsoleMode(handle, out var mode) || !SetConsoleMode(handle, mode | modes))
+                throw new Win32Exception(Marshal.GetLastPInvokeError());
+            return new(handle, mode);
+        }
+
+        public void Dispose()
+        {
+            if (_handle != 0)
+                SetConsoleMode(_handle, _savedMode);
+        }
+    }
+
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial nint GetStdHandle(int standardHandle);
 

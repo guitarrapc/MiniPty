@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Text;
 using MiniPty.Internal;
 
 namespace MiniPty.Tests;
@@ -734,11 +735,13 @@ public sealed class PtyOutputCoalescingTests
     /// The tick that serves deadlines fires about every millisecond while a reader waits, where .NET timers do not: on
     /// Windows they fire at the system timer's resolution of about 15.6 ms, and on Linux at the kernel's tick rate, every
     /// 4 ms under a 250 Hz kernel. With them, this test counted 14 ticks in 200 ms on Windows and 48–49 on WSL2. It allows a
-    /// mean interval of 4 ms, for a loaded machine.
+    /// mean interval of 4 ms, for a loaded machine. A stalled runner can starve the tick for part of one window, so the
+    /// test takes the best of a few windows: a coarse timer misses the bound in every one of them.
     /// </summary>
     [Test]
     public async Task TheTickFiresAboutEveryMillisecond()
     {
+        const int Attempts = 5;
         using var deadline = DeadlineOverride.Long();
         var backend = new ManualOutputBackend();
         await using var session = new PtySession(backend);
@@ -749,13 +752,20 @@ public sealed class PtyOutputCoalescingTests
         await Assert.That(PtyOutputCoalesceScheduler.TickSourceForTests)
             .IsEqualTo(OperatingSystem.IsWindows() ? PtyCoalesceTickSource.WaitableTimer : PtyCoalesceTickSource.UnixLoop);
 
-        var ticksBefore = PtyOutputCoalesceScheduler.TicksForTests;
-        var started = Stopwatch.GetTimestamp();
-        await Task.Delay(200);
-        var ticks = PtyOutputCoalesceScheduler.TicksForTests - ticksBefore;
-        var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        var windows = new StringBuilder();
+        var met = false;
+        for (var i = 0; i < Attempts && !met; i++)
+        {
+            var ticksBefore = PtyOutputCoalesceScheduler.TicksForTests;
+            var started = Stopwatch.GetTimestamp();
+            await Task.Delay(200);
+            var ticks = PtyOutputCoalesceScheduler.TicksForTests - ticksBefore;
+            var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            met = ticks * 4.0 >= elapsed;
+            windows.Append(windows.Length == 0 ? "" : ", ").Append($"{ticks} ticks in {elapsed:F0} ms");
+        }
 
-        await Assert.That(ticks * 4.0).IsGreaterThanOrEqualTo(elapsed).Because($"{ticks} ticks in {elapsed:F0} ms");
+        await Assert.That(met).IsTrue().Because(windows.ToString());
         backend.End();
         await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
     }
