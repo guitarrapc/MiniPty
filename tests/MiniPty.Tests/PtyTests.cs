@@ -358,8 +358,8 @@ public sealed class PtyTests
     /// either. An in-box ConPTY before Windows 11 24H2 writes nothing for it until the pseudo-console closes, and the
     /// completion waited for a first read before closing, so <c>cmd /c exit</c> took the whole grace there (1,016 ms of
     /// the default 1 s on windows-2022). The host's frame still arrives, with the close: every measured host writes one.
-    /// There the close waits for the host's exit, and output ends no earlier than its return
-    /// (<c>PtyOutputPumpTests.AFrameTheHostWritesAsASlowCloseReturnsIsDelivered</c>).
+    /// There the close waits for the host's exit, and the drain does not end output before the close returns, or before
+    /// 1 s after it starts if it has not returned by then (<c>PtyOutputPumpTests.AFrameTheHostWritesAsASlowCloseReturnsIsDelivered</c>).
     /// </summary>
     [Test]
     public async Task PtyCompleteAsyncOfAChildThatWritesNothingReturnsBeforeOutputDrainGraceOnWindows()
@@ -2089,8 +2089,9 @@ public sealed class PtyTests
 
                 KillSpawned(spawned);
 
-                // Exit, 100 ms quiet, close, 100 ms quiet, end: well under a second after exit even on a loaded
-                // machine. A leaked handle holds end of output until the ping child exits, about 10 s after it started.
+                // Exit, 100 ms quiet, close, 100 ms quiet, end. On a legacy host the second quiet starts when the close
+                // returns, or 1 s after it starts, so the end still comes well under 2 s after exit. A leaked handle holds
+                // end of output until the ping child exits, about 10 s after it started.
                 await Assert.That(afterExitMs).IsLessThan(2000);
             }
         }

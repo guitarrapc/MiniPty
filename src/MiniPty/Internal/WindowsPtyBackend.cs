@@ -469,15 +469,16 @@ internal static class WindowsPtyBackend
         private bool _disposed;
 
         // The in-box host from before Windows 11 24H2 (no ReleasePseudoConsole), which needs the help described at
-        // OnOutput, AnswerCursorQuery, and DeferOutputClose. Its first output reads go through OnOutput. No other
-        // session's do.
+        // OnOutput, AnswerCursorQuery, CloseOutputTransport, and DeferOutputClose. Its first output reads go through
+        // OnOutput. No other session's do.
         private readonly bool _legacyHost;
         private readonly bool _inheritCursor;
         // How far the legacy host has got, as its output shows (HostStarting, HostAwaitingCursorReport, HostStarted).
         private int _hostPhase;
         // A resize was sent before the legacy host had started, so OnOutput sends the size again.
         private bool _resizedBeforeStart;
-        // The session's pump, whose stop disposal waits for before closing a legacy host's output.
+        // The session's pump. Disposal waits for its stop before closing a legacy host's output, and a legacy host's
+        // close reports its return to it.
         private PtyOutputPump? _pump;
 
         // Input queue and overlapped write state (see InputState), created on the first write. Guarded by lock (this),
@@ -1257,10 +1258,15 @@ internal static class WindowsPtyBackend
             if (_hpcClosed)
                 return;
 
-            // A legacy host's close returns once the host has exited and written what it held; the drain's forced end
-            // counts its quiet from then (CloseWaitsForHost).
+            // A legacy host writes its frame during the close, which returns only once the host has exited. The pump
+            // waits for that return before it ends output (CloseWaitsForHost).
             if (_legacyHost && Volatile.Read(ref _pump) is { } pump)
-                _hpc.ObserveCloseReturn(new CloseReturnObserver(pump));
+            {
+                _hpc.ObserveCloseReturn(pump);
+                // A disposal that ran since the check above has already dropped the pump, and must not miss this one.
+                if (Volatile.Read(ref _disposed))
+                    _hpc.StopObservingCloseReturn();
+            }
 
             CloseTransport(InputOutputEnded);
         }
@@ -1280,8 +1286,8 @@ internal static class WindowsPtyBackend
         public bool CloseSendsHeldOutput => _legacyHost;
 
         /// <summary>
-        /// A legacy host's close waits until the host exits: 2–17 ms on an idle runner, 140–470 ms on a loaded one. The
-        /// close reports its return (<see cref="CloseOutputTransport"/>), and the drain's forced end waits for it.
+        /// A legacy host's close waits until the host exits. It reports its return to the pump
+        /// (<see cref="CloseOutputTransport"/>).
         /// </summary>
         public bool CloseWaitsForHost => _legacyHost;
 
@@ -1309,6 +1315,8 @@ internal static class WindowsPtyBackend
 
             // Queued writes fail now, on the disposing thread, without waiting for a write in flight.
             CloseTransport(InputDisposed);
+            // A close that never returns keeps its wait for good, but not the session's pump.
+            _hpc.StopObservingCloseReturn();
             if (_legacyHost)
                 DeferOutputClose();
             else
@@ -1821,20 +1829,25 @@ internal static class WindowsPtyBackend
     /// of them may wait for a host. A close that waits gets a thread of its own: on the thread pool it would hold a
     /// worker for as long as the host takes to exit, and the drain's ticks and callers' continuations run there. The
     /// out-of-band close and the in-box one from build 26100 return without waiting for the host, so they run on the
-    /// thread pool. Nothing waits for the close either, as that would add a wait only on older builds.
+    /// thread pool. No thread waits for the close. A close that waits for the host reports its return to the session's
+    /// pump instead (<see cref="ObserveCloseReturn"/>), since the host writes its frame during the close.
     /// </remarks>
-    private class SafePseudoConsoleHandle : SafeHandle, IThreadPoolWorkItem
+    private class SafePseudoConsoleHandle : SafeHandle, IThreadPoolWorkItem, IWindowsExitObserver
     {
-        // Told when a close that waits for the host returns; set before the close starts.
-        private IWindowsExitObserver? _closeObserver;
+        // The pump told when a close that waits for the host returns. Set before the close starts. Disposal drops it, so a
+        // close that never returns does not keep the session alive.
+        private PtyOutputPump? _closeReturnPump;
 
         public SafePseudoConsoleHandle(IntPtr value) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(value);
 
         /// <summary>
-        /// Has <paramref name="observer"/> told when a close that waits for the host (<see cref="CloseWaitsForHost"/>)
-        /// returns, which is when the host has exited. Call before the close; a close that does not wait never tells.
+        /// Has <paramref name="pump"/> told when a close that waits for the host (<see cref="CloseWaitsForHost"/>) returns,
+        /// which is when the host has exited. Call before the close. A close that does not wait never tells.
         /// </summary>
-        public void ObserveCloseReturn(IWindowsExitObserver observer) => Volatile.Write(ref _closeObserver, observer);
+        public void ObserveCloseReturn(PtyOutputPump pump) => Interlocked.Exchange(ref _closeReturnPump, pump);
+
+        /// <summary>Stops telling the pump about the close's return. Disposal calls it.</summary>
+        public void StopObservingCloseReturn() => Volatile.Write(ref _closeReturnPump, null);
 
         public override bool IsInvalid => handle == IntPtr.Zero;
 
@@ -1874,8 +1887,13 @@ internal static class WindowsPtyBackend
         {
             ClosePseudoConsole();
             if (CloseWaitsForHost)
-                Volatile.Read(ref _closeObserver)?.OnProcessExited();
+                ReportCloseReturned();
         }
+
+        // The close thread has ended, so the close has returned. WindowsExitWatcher names its callback for a process.
+        void IWindowsExitObserver.OnProcessExited() => ReportCloseReturned();
+
+        private void ReportCloseReturned() => Volatile.Read(ref _closeReturnPump)?.OnTransportCloseReturned();
 
         /// <summary>
         /// Closes on a new thread that runs no managed code, or returns false when the system cannot create one. The
@@ -1884,9 +1902,9 @@ internal static class WindowsPtyBackend
         /// <remarks>
         /// A managed thread keeps its handle and two events after it ends, until a garbage collection, so a close on
         /// one leaves three handles per session behind. The thread starts in <c>ClosePseudoConsole</c> itself and ends
-        /// when the close returns, and its own handle closes at once. The thread runs no managed code to report that
-        /// return, so <see cref="WindowsExitWatcher"/> waits on a duplicate of its handle, which signals as the thread
-        /// ends, as a process handle does: no thread waits for it.
+        /// when the close returns, and its own handle closes at once. Since the thread runs no managed code to report that
+        /// return, <see cref="WindowsExitWatcher"/> watches a duplicate of its handle, which signals as the thread ends.
+        /// That wait holds no thread.
         /// </remarks>
         private bool TryStartCloseThread()
         {
@@ -1894,35 +1912,26 @@ internal static class WindowsPtyBackend
             if (thread == IntPtr.Zero)
                 return false;
 
-            if (Volatile.Read(ref _closeObserver) is { } observer)
-                WatchCloseThread(thread, observer);
+            if (Volatile.Read(ref _closeReturnPump) is not null)
+                WatchCloseThread(thread);
 
             WindowsInterop.CloseHandle(thread);
             return true;
         }
 
-        private static void WatchCloseThread(IntPtr thread, IWindowsExitObserver observer)
+        private void WatchCloseThread(IntPtr thread)
         {
             try
             {
-                WindowsExitWatcher.Register(thread, observer);
+                WindowsExitWatcher.Register(thread, this);
             }
             catch (Exception)
             {
-                // Releasing a handle must not throw. Unwatched, the close counts as returned now, which leaves the drain
-                // counting its quiet from about the request, as it did before it waited for the close.
-                observer.OnProcessExited();
+                // Releasing a handle must not throw. Unwatched, the close counts as done PtyOutputPump.CloseReturnWaitMs
+                // after the request. Reporting a return that has not happened would let the drain end output before the
+                // host's frame.
             }
         }
-    }
-
-    /// <summary>
-    /// Tells a pump that its pseudo-console's close returned (<see cref="PtyOutputPump.OnTransportCloseReturned"/>). It
-    /// observes the close thread through <see cref="WindowsExitWatcher"/>, whose callback is named for a process's exit.
-    /// </summary>
-    private sealed class CloseReturnObserver(PtyOutputPump pump) : IWindowsExitObserver
-    {
-        public void OnProcessExited() => pump.OnTransportCloseReturned();
     }
 
     /// <summary>A pseudo-console created by an out-of-band ConPTY (<see cref="PtyStartInfo.ConPty"/>).</summary>

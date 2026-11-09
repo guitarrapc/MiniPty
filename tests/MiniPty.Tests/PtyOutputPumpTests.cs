@@ -287,12 +287,13 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
-    /// Where the close waits for the transport's host, as build 20348's in-box ConPTY's does, the host writes what it
-    /// holds as it exits, and the close returns then. The end of output that the drain forces counts its quiet from that
-    /// return, so a close slower than the quiet interval still delivers the frame. Counted from the request, a close of
-    /// 140–470 ms on a loaded windows-2022 runner ended output first, and a child that wrote nothing got no output.
+    /// Where the close waits for the transport's host, as an in-box ConPTY's without <c>ReleasePseudoConsole</c> does, the
+    /// host writes its frame during the close. The close here returns three quiet intervals after it starts, so a forced
+    /// end counted from the request would come first and find nothing to read.
     /// </summary>
+    /// <remarks>Timed against the wait, so it runs alone, as the tests paced against <see cref="PacedQuietMs"/> do.</remarks>
     [Test]
+    [NotInParallel]
     public async Task AFrameTheHostWritesAsASlowCloseReturnsIsDelivered()
     {
         // Three quiet intervals: long past the quiet the forced end counted from the request, well inside the wait.
@@ -327,6 +328,101 @@ public sealed class PtyOutputPumpTests
         await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
         // Never earlier: the quiet before the close and the wait for its return both come first.
         await Assert.That(stopwatch.ElapsedMilliseconds).IsGreaterThanOrEqualTo(PtyOutputPump.CloseReturnWaitMs);
+    }
+
+    /// <summary>
+    /// A completion's close timeout shorter than a close that waits for its host does not fail the completion. The close
+    /// here returns 600 ms after it starts and the timeout is 450 ms, so a timeout counted from the request fires, whether
+    /// it is checked while the close is pending or once it is done. Output ends 50 ms after the frame, which gives drain
+    /// ticks time to check the timeout once the close is done. Counted from the return, it leaves 450 ms.
+    /// </summary>
+    /// <remarks>Timed against the close timeout, so it runs alone, as the tests paced against <see cref="PacedQuietMs"/> do.</remarks>
+    [Test]
+    [NotInParallel]
+    public async Task ACloseTimeoutShorterThanASlowCloseDoesNotFailTheCompletion()
+    {
+        var backend = new SlowClosingHostBackend(closeReturnsAfterMs: 600, endsAfterFrameMs: 50);
+        await using var session = new PtySession(backend);
+        await backend.Reading.WaitAsync(Timeout);
+        var completion = session.CompleteAsync(new PtyCompleteOptions
+        {
+            DecodeOutput = false,
+            OutputReaderCloseTimeout = TimeSpan.FromMilliseconds(450),
+        });
+
+        backend.Exit(0);
+
+        var result = await completion.WaitAsync(Timeout);
+        var hasFrame = result.Contains(SlowClosingHostBackend.Frame);
+        await Assert.That(hasFrame).IsTrue();
+    }
+
+    /// <summary>
+    /// A close that returns after <see cref="PtyOutputPump.CloseReturnWaitMs"/> does not move the point it already counted
+    /// as done. Output keeps arriving here, so only the close timeout can end the completion. Counted from the end of the
+    /// wait it fires about 3 s after the close starts, and counted from the late return about 4.5 s.
+    /// </summary>
+    /// <remarks>Paced against the quiet period, so it runs alone (see <see cref="PacedQuietMs"/>).</remarks>
+    [Test]
+    [NotInParallel]
+    public async Task ACloseThatReturnsAfterTheWaitDoesNotPostponeTheCloseTimeout()
+    {
+        const int CloseTimeoutMs = 2000;
+        // After the wait, and before the timeout counted from the wait's end fires.
+        const int ReturnMs = PtyOutputPump.CloseReturnWaitMs + 1500;
+        var backend = new TrickleAfterCloseBackend(closeReturnsAfterMs: ReturnMs);
+        await using var session = new PtySession(backend);
+        await backend.Reading.WaitAsync(Timeout);
+        var completion = session.CompleteAsync(new PtyCompleteOptions
+        {
+            DecodeOutput = false,
+            OutputReaderCloseTimeout = TimeSpan.FromMilliseconds(CloseTimeoutMs),
+        });
+
+        backend.Exit(0);
+
+        await Assert.ThrowsAsync<TimeoutException>(async () => await completion.WaitAsync(Timeout));
+        var afterCloseStarted = Stopwatch.GetElapsedTime(backend.CloseStartedAt).TotalMilliseconds;
+        // A timeout can fire late but never early. So the upper bound sits just short of about 4.5 s, where a late return
+        // would move the done point, and the lower bound just under the right answer, about 3 s. That also rules out
+        // about 2.5 s, where the return would leave the done point at the request.
+        await Assert.That(afterCloseStarted).IsLessThan(ReturnMs + CloseTimeoutMs - 250);
+        await Assert.That(afterCloseStarted).IsGreaterThanOrEqualTo(PtyOutputPump.CloseReturnWaitMs + CloseTimeoutMs - 100);
+    }
+
+    /// <summary>
+    /// Once a close that waits for its host has returned, the forced end counts its quiet from the return. The transport
+    /// here stays open after the frame, as when another process holds the pipe, so only the forced end can end output.
+    /// A pump that ignored the return would hold the end until <see cref="PtyOutputPump.CloseReturnWaitMs"/> after the
+    /// close started, and one quiet interval more.
+    /// </summary>
+    /// <remarks>Timed against the wait, so it runs alone, as the tests paced against <see cref="PacedQuietMs"/> do.</remarks>
+    [Test]
+    [NotInParallel]
+    public async Task OutputHeldOpenEndsOneQuietIntervalAfterASlowCloseReturns()
+    {
+        var backend = new SlowClosingHostBackend(closeReturnsAfterMs: PtyOutputPump.DefaultPostExitQuietMs * 2, holdOpenAfterFrame: true);
+        await using var session = new PtySession(backend);
+        await using var enumerator = session.ReadOutputAsync().GetAsyncEnumerator();
+        var next = enumerator.MoveNextAsync().AsTask();
+        await backend.Reading.WaitAsync(Timeout);
+
+        backend.Exit(0);
+
+        using var output = new MemoryStream();
+        while (await next.WaitAsync(Timeout))
+        {
+            output.Write(enumerator.Current.Data.Span);
+            next = enumerator.MoveNextAsync().AsTask();
+        }
+
+        var endedAt = Stopwatch.GetTimestamp();
+        var hasFrame = output.ToArray().AsSpan().SequenceEqual(SlowClosingHostBackend.Frame);
+        await Assert.That(hasFrame).IsTrue();
+        // Measured from the close's start, which a late return thread cannot move: about 300 ms when the return counts,
+        // and at least the whole wait when it does not.
+        var endedAfterCloseStarted = Stopwatch.GetElapsedTime(backend.CloseStartedAt, endedAt);
+        await Assert.That(endedAfterCloseStarted.TotalMilliseconds).IsLessThan(PtyOutputPump.CloseReturnWaitMs);
     }
 
     /// <summary>
@@ -893,24 +989,29 @@ public sealed class PtyOutputPumpTests
     }
 
     /// <summary>
-    /// A transport whose close waits for its host, as build 20348's in-box ConPTY's does. It sends nothing until the close
-    /// returns, <c>closeReturnsAfterMs</c> after the close starts (never, for <see cref="System.Threading.Timeout.Infinite"/>).
-    /// It then sends the frame the host writes as it exits, and ends.
+    /// A transport whose close waits for its host, as an in-box ConPTY's without <c>ReleasePseudoConsole</c> does. It sends
+    /// nothing until the close returns, <c>closeReturnsAfterMs</c> after the close starts (never, for
+    /// <see cref="System.Threading.Timeout.Infinite"/>). It then sends the frame the host wrote during the close, and ends
+    /// <c>endsAfterFrameMs</c> later, or with <c>holdOpenAfterFrame</c> stays open, as when another process holds the pipe.
     /// </summary>
-    private sealed class SlowClosingHostBackend(int closeReturnsAfterMs) : FakeBackend
+    private sealed class SlowClosingHostBackend(int closeReturnsAfterMs, bool holdOpenAfterFrame = false, int endsAfterFrameMs = 0) : FakeBackend
     {
         private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private PtyOutputPump? _pump;
         private ScriptedOutputDriver? _driver;
         private volatile bool _returned;
+        private long _closeStartedAt;
         // Touched only by the driver's thread.
         private bool _frameSent;
 
-        /// <summary>The frame the host writes as it exits.</summary>
-        public static ReadOnlySpan<byte> Frame => "frame-as-the-host-exits"u8;
+        /// <summary>The frame the host writes during the close.</summary>
+        public static ReadOnlySpan<byte> Frame => "frame-during-the-close"u8;
 
         /// <summary>Completes once the driver thread is inside <see cref="ReadOutput"/>.</summary>
         public Task Reading => _reading.Task;
+
+        /// <summary>The <see cref="Stopwatch"/> timestamp of the close's start, or 0 before it.</summary>
+        public long CloseStartedAt => Volatile.Read(ref _closeStartedAt);
 
         public override bool CloseSendsHeldOutput => true;
 
@@ -924,6 +1025,7 @@ public sealed class PtyOutputPumpTests
 
         public override void CloseOutputTransport()
         {
+            Volatile.Write(ref _closeStartedAt, Stopwatch.GetTimestamp());
             base.CloseOutputTransport();
             if (closeReturnsAfterMs == System.Threading.Timeout.Infinite)
                 return;
@@ -949,24 +1051,90 @@ public sealed class PtyOutputPumpTests
 
             // Stored before the check, so a return after it wakes the wait below.
             Volatile.Write(ref _driver, driver);
-            if (_returned)
-                return SendFrameOnce(buffer);
+            if (_returned && !_frameSent)
+                return SendFrame(buffer);
+
+            // The host has exited, so the pipe breaks unless another process holds it.
+            if (_returned && !holdOpenAfterFrame)
+            {
+                Thread.Sleep(endsAfterFrameMs);
+                return 0;
+            }
 
             _reading.TrySetResult();
             driver.WaitForWake(System.Threading.Timeout.Infinite);
             return -1;
         }
 
-        public override int ReadOutputNow(Span<byte> buffer) => _returned ? SendFrameOnce(buffer) : 0;
+        public override int ReadOutputNow(Span<byte> buffer) => _returned && !_frameSent ? SendFrame(buffer) : 0;
 
-        private int SendFrameOnce(Span<byte> buffer)
+        private int SendFrame(Span<byte> buffer)
         {
-            if (_frameSent)
-                return 0;
-
             _frameSent = true;
             Frame.CopyTo(buffer);
             return Frame.Length;
+        }
+    }
+
+    /// <summary>
+    /// A transport whose close waits for its host and returns <c>closeReturnsAfterMs</c> after it starts. It sends nothing
+    /// until the close, then a byte every 20 ms until disposal, so its reads never go quiet for <see cref="PacedQuietMs"/>
+    /// and the drain never forces the end.
+    /// </summary>
+    private sealed class TrickleAfterCloseBackend(int closeReturnsAfterMs) : FakeBackend
+    {
+        private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private PtyOutputPump? _pump;
+        private long _closeStartedAt;
+
+        /// <summary>Completes once the driver thread is inside <see cref="ReadOutput"/>.</summary>
+        public Task Reading => _reading.Task;
+
+        /// <summary>The <see cref="Stopwatch"/> timestamp of the close's start, or 0 before it.</summary>
+        public long CloseStartedAt => Volatile.Read(ref _closeStartedAt);
+
+        public override int PostExitQuietMs => PacedQuietMs;
+
+        public override bool CloseSendsHeldOutput => true;
+
+        public override bool CloseWaitsForHost => true;
+
+        public override void StartOutput(PtyOutputPump pump)
+        {
+            _pump = pump;
+            base.StartOutput(pump);
+        }
+
+        public override void CloseOutputTransport()
+        {
+            Volatile.Write(ref _closeStartedAt, Stopwatch.GetTimestamp());
+            base.CloseOutputTransport();
+            var pump = _pump!;
+            new Thread(() =>
+            {
+                Thread.Sleep(closeReturnsAfterMs);
+                pump.OnTransportCloseReturned();
+            })
+            {
+                IsBackground = true,
+            }.Start();
+        }
+
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
+        {
+            if (IsDisposed)
+                return 0;
+
+            if (!IsOutputClosed)
+            {
+                _reading.TrySetResult();
+                driver.WaitForWake(System.Threading.Timeout.Infinite);
+                return -1;
+            }
+
+            Thread.Sleep(20);
+            buffer[0] = (byte)'.';
+            return 1;
         }
     }
 

@@ -5,15 +5,15 @@ using System.Runtime.InteropServices;
 namespace MiniPty.Internal;
 
 /// <summary>
-/// Observer of the exits of the ConPTY children this load of MiniPty starts: one Win32 thread-pool wait per child
-/// (<c>SetThreadpoolWait</c>), so observing exit adds no thread per session and never occupies a .NET thread-pool
-/// worker.
+/// Observer of the exits of the ConPTY children this load of MiniPty starts, and of the threads that close legacy
+/// pseudo-consoles: one Win32 thread-pool wait per handle (<c>SetThreadpoolWait</c>), so observing them adds no thread per
+/// session and never occupies a .NET thread-pool worker.
 /// </summary>
 /// <remarks>
-/// Each watched child is tracked through a duplicate of its process handle that the watcher owns and closes when the
-/// child exits. The session can therefore close its own handle at any time without unregistering first. A disposed
-/// session's child is killed, so its wait always completes. The reasons and measurements are in Child exit
-/// observation, <c>.github/docs/references/pty_crossplatform.md</c>.
+/// Each watched handle is a duplicate that the watcher owns and closes when it signals. The session can therefore close
+/// its own handle at any time without unregistering first. A disposed session's child is killed, so its wait always
+/// completes. A close thread's wait completes only when the close returns, which a host that never exits never lets it
+/// do. The reasons and measurements are in Child exit observation, <c>.github/docs/references/pty_crossplatform.md</c>.
 /// </remarks>
 internal static unsafe partial class WindowsExitWatcher
 {
@@ -22,7 +22,7 @@ internal static unsafe partial class WindowsExitWatcher
     /// <summary>
     /// Starts watching <paramref name="processHandle"/>. <paramref name="onExited"/> runs on a native thread-pool
     /// worker once the process exits. The caller keeps ownership of its own handle. A thread's handle signals once too,
-    /// as the thread ends; the thread that closes a legacy pseudo-console is watched that way.
+    /// as the thread ends, which is how the thread that closes a legacy pseudo-console is watched.
     /// </summary>
     internal static void Register(IntPtr processHandle, IWindowsExitObserver onExited)
     {
@@ -47,11 +47,11 @@ internal static unsafe partial class WindowsExitWatcher
     }
 
     /// <summary>
-    /// The wait's callback. With no timeout, a process handle reports only its exit, so <paramref name="waitResult"/>
-    /// is always <c>WAIT_OBJECT_0</c>. The observer reads the exit itself.
+    /// The wait's callback. With no timeout, a process or thread handle reports only that it ended, so
+    /// <paramref name="waitResult"/> is always <c>WAIT_OBJECT_0</c>. A child's observer reads the exit itself.
     /// </summary>
     /// <remarks>
-    /// An exception that left this method would end the process. The observer only records exit and does not throw.
+    /// An exception that left this method would end the process. The observers only record what ended and do not throw.
     /// </remarks>
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     private static void OnProcessSignaled(IntPtr instance, IntPtr context, IntPtr wait, uint waitResult)
@@ -110,7 +110,10 @@ internal static unsafe partial class WindowsExitWatcher
     private static partial bool CloseHandle(IntPtr hObject);
 }
 
-/// <summary>Receives a child exit from <see cref="WindowsExitWatcher"/> on a native thread-pool worker.</summary>
+/// <summary>
+/// Receives the end of a handle <see cref="WindowsExitWatcher"/> watches, a child's exit or a legacy close thread's end,
+/// on a native thread-pool worker.
+/// </summary>
 internal interface IWindowsExitObserver
 {
     void OnProcessExited();
