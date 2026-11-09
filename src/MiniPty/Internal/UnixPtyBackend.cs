@@ -120,6 +120,10 @@ internal static partial class UnixPtyBackend
     private const int StartStageChdir = 1;
     private const int StartStageExec = 2;
 
+    // The bits of minipty_get_input_mode's result (minipty_unix_internal.h, MINIPTY_INPUT_MODE_*).
+    private const int InputModeEcho = 0x1;
+    private const int InputModeCanonical = 0x2;
+
     /// <summary>
     /// The exception for a failed start: a <see cref="System.ComponentModel.Win32Exception"/> whose
     /// <see cref="System.ComponentModel.Win32Exception.NativeErrorCode"/> is the <c>errno</c> a child reported when it
@@ -685,6 +689,29 @@ internal static partial class UnixPtyBackend
                 return processName is "spawn_helper" or "minipty_spawn_helper" or "kernel_task"
                     ? null
                     : processName;
+            }
+        }
+
+        public PtyInputMode? InputMode
+        {
+            get
+            {
+                if (_disposed || IsExitObserved || !TryAcquireMaster(out var master))
+                    return null;
+
+                int mode;
+                try
+                {
+                    mode = minipty_get_input_mode(master);
+                }
+                finally
+                {
+                    ReleaseMaster();
+                }
+
+                return mode < 0
+                    ? null
+                    : new PtyInputMode(Echo: (mode & InputModeEcho) != 0, Canonical: (mode & InputModeCanonical) != 0);
             }
         }
 
@@ -2199,6 +2226,9 @@ internal static partial class UnixPtyBackend
 
     [LibraryImport("minipty_unix")]
     private static unsafe partial int minipty_get_active_process_name(int master, byte* buffer, int bufferLength);
+
+    [LibraryImport("minipty_unix")]
+    private static partial int minipty_get_input_mode(int master);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Winsize

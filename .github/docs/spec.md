@@ -64,6 +64,7 @@ MiniPty.Capture and MiniPty.Terminal use MiniPty's internals but declare MiniPty
 | Persistent transport sample (`ReadOutputAsync` command loop) | [samples/SingleFiles/Interactive.cs](../../samples/SingleFiles/Interactive.cs) |
 | Attach host terminal input to an existing `PtySession` (use case 3) | [Console](specs/console.md) |
 | Exit status with Unix termination signal; `Kill(PtySignal)` | [Core session](specs/core_session.md) |
+| Tell whether a Unix child reads a password (`InputMode`: echo and canonical mode) | [Core session](specs/core_session.md#session-contract) |
 | Run on the out-of-band ConPTY an application supplies on Windows (`PtyStartInfo.ConPty`, `ConPtyLibrary`), with `Clear()` | [Core session](specs/core_session.md#out-of-band-conpty) |
 | What an unanswered `InheritCursor` query looks like on the in-box and out-of-band ConPTY | [Core session](specs/core_session.md#inherited-cursor), [samples/SingleFiles/InheritCursorWait.cs](../../samples/SingleFiles/InheritCursorWait.cs) |
 | Backend PTY for frontend terminals: push facade, flow control, WebSocket and stdio bridges (use case 4) | [Terminal](specs/terminal.md) |

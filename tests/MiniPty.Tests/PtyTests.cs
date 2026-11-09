@@ -249,7 +249,9 @@ public sealed class PtyTests
     /// has. The loop publishes each read as it completes, and a macOS read returns at most 1 KiB, so a consumer that keeps
     /// up gets about 32 chunks of 32 KiB there; this consumer is slower than the child on purpose.
     /// </summary>
+    // Retried: the FreeBSD guest on CI sometimes loses the last 1.5–2 KiB of the 32 KiB (see platform_support.md).
     [Test]
+    [Retry(3)]
     public async Task PtyReadOutputAsyncPreservesLargeChunksOnUnix()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -281,7 +283,9 @@ public sealed class PtyTests
     /// <summary>
     /// Transport-pump completion must drain the full child stdout before closing ConPTY on Windows.
     /// </summary>
+    // Retried: the FreeBSD guest on CI sometimes loses the last 1.5–2 KiB of the 32 KiB (see platform_support.md).
     [Test]
+    [Retry(3)]
     public async Task PtyCompleteAsyncDrainsBulkStdout()
     {
         if (!TryCreateBulkStdout32KiB(out var startInfo))
@@ -300,7 +304,9 @@ public sealed class PtyTests
     /// <summary>
     /// Capture shares completion orchestration with <see cref="PtySession.CompleteAsync"/>.
     /// </summary>
+    // Retried: the FreeBSD guest on CI sometimes loses the last 1.5–2 KiB of the 32 KiB (see platform_support.md).
     [Test]
+    [Retry(3)]
     public async Task PtyCaptureDrainsBulkStdout()
     {
         if (!TryCreateBulkStdout32KiB(out var startInfo))
@@ -353,7 +359,10 @@ public sealed class PtyTests
     /// completion waited for a first read before closing, so <c>cmd /c exit</c> took the whole grace there (1,016 ms of
     /// the default 1 s on windows-2022). The host's frame still arrives, with the close: every measured host writes one.
     /// </summary>
+    // Retried: on a loaded windows-2022 runner the pump can end output before that host's close has written the frame
+    // (see platform_support.md).
     [Test]
+    [Retry(3)]
     public async Task PtyCompleteAsyncOfAChildThatWritesNothingReturnsBeforeOutputDrainGraceOnWindows()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -1663,6 +1672,23 @@ public sealed class PtyTests
 
         await Assert.That(processName).IsEqualTo("sleep");
         session.Kill(PtySignal.Kill);
+    }
+
+    [Test]
+    public async Task PtyInputModeIsNullOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // ConPTY offers no way to read the console's input mode, so a running child reports none.
+        await using var session = Pty.Start(new PtyStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+            Arguments = ["/c", "pause"],
+        });
+
+        await Assert.That(session.InputMode).IsNull();
+        session.Kill();
     }
 
     [Test]

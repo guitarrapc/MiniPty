@@ -1376,6 +1376,27 @@ int minipty_get_active_process_name(int master, char *buffer, int buffer_length)
 #endif
 }
 
+/* Returns the terminal's echo and canonical-mode flags as MINIPTY_INPUT_MODE_* bits, or -1 when the master cannot
+   report them. tcgetattr on a master reports the terminal's own termios, the one the child changes with stty or
+   tcsetattr: Linux reads it from the slave the master is linked to, and macOS and FreeBSD keep one tty for both ends.
+   Reading it through the master means the host never opens the slave: a host holding the slave when the child exits
+   delays the end of output on Linux and, on FreeBSD, lets the revoke at the child's exit discard output not yet read.
+   The flags' bit values differ between Linux and the BSDs, so they are mapped here. */
+int minipty_get_input_mode(int master)
+{
+    struct termios term;
+    int mode = 0;
+
+    if (tcgetattr(master, &term) != 0)
+        return -1;
+
+    if ((term.c_lflag & ECHO) != 0)
+        mode |= MINIPTY_INPUT_MODE_ECHO;
+    if ((term.c_lflag & ICANON) != 0)
+        mode |= MINIPTY_INPUT_MODE_CANONICAL;
+    return mode;
+}
+
 #define MINIPTY_CONSOLE_TERMIOS_BLOB 128
 
 typedef struct minipty_console_termios_blob {

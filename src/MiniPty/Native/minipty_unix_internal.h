@@ -49,6 +49,11 @@ int minipty_set_winsize(
     unsigned short pixel_height);
 int minipty_get_active_process_name(int master, char *buffer, int buffer_length);
 
+/* Bits of minipty_get_input_mode's result. */
+#define MINIPTY_INPUT_MODE_ECHO 0x1
+#define MINIPTY_INPUT_MODE_CANONICAL 0x2
+int minipty_get_input_mode(int master);
+
 int minipty_child_watch_open(int *watch_fd, int *wake_read, int *wake_write);
 int minipty_child_watch_add(int watch_fd, int pidfd, int pid);
 void minipty_child_watch_remove(int watch_fd, int pidfd);

@@ -244,17 +244,21 @@ public sealed class PtyOutputPumpTests
     [Test]
     public async Task CompleteAsyncClosesASilentTransportAtItsGrace()
     {
+        var grace = TimeSpan.FromSeconds(1);
         var backend = new SilentUntilTheCloseBackend(closeSendsHeldOutput: false);
         await using var session = new PtySession(backend);
         await backend.Reading.WaitAsync(Timeout);
-        var completion = session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false, OutputDrainGrace = TimeSpan.FromSeconds(1) });
+        var completion = session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false, OutputDrainGrace = grace });
 
+        var exited = Stopwatch.GetTimestamp();
         backend.Exit(0);
-        // Past the quiet interval three times over, well before the grace.
-        await Task.Delay(PtyOutputPump.DefaultPostExitQuietMs * 3);
-        await Assert.That(backend.IsOutputClosed).IsFalse();
 
         var result = await completion.WaitAsync(Timeout);
+        // When the close came, not whether it had come after a fixed wait: on a loaded CI runner a 300 ms wait overran the
+        // 1 s grace, and the close it found was the grace's. A close on quiet comes one quiet interval after the exit. The
+        // grace's never comes earlier than the grace, apart from the tick count's granularity, which that interval covers.
+        var closedAfter = backend.ClosedAfter(exited);
+        await Assert.That(closedAfter).IsGreaterThanOrEqualTo(grace - TimeSpan.FromMilliseconds(PtyOutputPump.DefaultPostExitQuietMs));
         var hasFrame = result.Contains(SilentUntilTheCloseBackend.Frame);
         await Assert.That(hasFrame).IsTrue();
     }
@@ -798,9 +802,26 @@ public sealed class PtyOutputPumpTests
         private readonly TaskCompletionSource _reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
         // Touched only by the driver's thread.
         private bool _frameSent;
+        private long _closedAt;
 
         /// <summary>The frame the close sends.</summary>
         public static ReadOnlySpan<byte> Frame => "frame-at-close"u8;
+
+        /// <summary>
+        /// How long after <paramref name="start"/>, a <see cref="Stopwatch"/> timestamp, the transport was closed; negative
+        /// when it was never closed.
+        /// </summary>
+        public TimeSpan ClosedAfter(long start)
+        {
+            var closedAt = Volatile.Read(ref _closedAt);
+            return closedAt == 0 ? TimeSpan.MinValue : Stopwatch.GetElapsedTime(start, closedAt);
+        }
+
+        public override void CloseOutputTransport()
+        {
+            Interlocked.CompareExchange(ref _closedAt, Stopwatch.GetTimestamp(), 0);
+            base.CloseOutputTransport();
+        }
 
         /// <summary>Completes once the driver thread is inside <see cref="ReadOutput"/>.</summary>
         public Task Reading => _reading.Task;
@@ -1060,6 +1081,7 @@ public sealed class PtyOutputPumpTests
         public int? ExitSignal => null;
         public PtySize Size => new(80, 24);
         public string? ActiveProcessName => null;
+        public PtyInputMode? InputMode => null;
         public Task<PtyExitStatus> Exited => _exited.Task;
         public bool IsOutputClosed => _closed;
         public bool IsDisposed => _disposed;

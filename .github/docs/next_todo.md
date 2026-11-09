@@ -17,7 +17,7 @@ If an embedder asks:
 - **Getting the path:** it is cheap to read once at spawn. macOS already reads it with `TIOCPTYGNAME`, and Linux and FreeBSD can use `ptsname_r` on the master.
 - **Windows:** ConPTY has no device, so the property is null there, as `ActiveProcessName` is.
 - **Naming:** name it for a path (`TtyPath`). `PtyStartInfo.TerminalName` already means the `TERM` value.
-- **Reading termios:** a caller that wants to read the termios can open this path with `O_NOCTTY` and call `tcgetattr`, so no termios API is needed for that.
+- **Termios:** `InputMode` reads echo and canonical mode through the master. The path is not a way to read more: a caller that opens the slave holds it when the child exits, which on FreeBSD discards output not yet read ([core session lessons](specs/core_session.md#lessons-learned)).
 
 ## Open
 
@@ -33,6 +33,14 @@ On CI's 2-core Windows runner and locally on two logical CPUs, MiniPty's 1 MiB f
 ### FreeBSD floods are handed to their consumer about once per two reads
 
 A consumer that keeps up with a flood waits for the master on its own thread on macOS and Linux, so the loop hands it output about once per wait. FreeBSD has no such wait, so in a 14.5 guest under QEMU a 4 MiB flood took 483 thread-pool hand-offs for 1,061 reads (`AFloodTheConsumerKeepsUpWithIsNotHandedOverOncePerRead` checks only the output there). The macOS wait on a kqueue of the session's own would apply as is, but the rule for when a FreeBSD child counts as streaming, and whether the wait pays off, need measuring on a FreeBSD machine, not under emulation.
+
+### Windows Server 2022: a slow close can lose the host's last frame
+
+The post-exit drain ends output itself once reads have been quiet for 100 ms after it asked for the close. On an in-box ConPTY without `ReleasePseudoConsole` (build 20348), the close waits for the host to exit, 140–470 ms on a loaded runner, and the host writes what it holds as it closes. Output can then end before that frame arrives. For a child that wrote nothing, the frame is all of its output, and a windows-2022 run lost it once (2026-11-09). Counting the quiet from when such a close returns, with a bound for a host that never exits, would keep the frame. No local host has build 20348, so the change can only be checked on CI. The test is retried meanwhile ([platform_support.md](specs/platform_support.md#platform-specific-test-constraints)).
+
+### FreeBSD sometimes loses the end of a 32 KiB burst
+
+In the FreeBSD 14.5 guest on CI, a child that writes 32 KiB with `head -c 32768 /dev/zero` and exits sometimes reaches its consumer without the last 1.5–2 KiB: twice in 40 runs, in two different tests. Two paths can drop what the master has not read when the child exits. One is the tty's last close, if it comes by revoke or its drain stops waiting for the master. The other is the post-exit drain, if the loop reads nothing for 100 ms after the exit while output is still queued. Telling them apart needs a FreeBSD host, or one with KVM, and a probe that records whether output ended by end of file or by MiniPty's close. No local host here has KVM. The tests are retried meanwhile ([platform_support.md](specs/platform_support.md#platform-specific-test-constraints)).
 
 ### macOS floods trail Porta.Pty's default mode when it runs at full speed
 

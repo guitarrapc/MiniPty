@@ -5,10 +5,70 @@ namespace MiniPty.Tests;
 /// <summary>
 /// The termios a Unix child starts with is set by MiniPty at spawn rather than left to the kernel default. The
 /// Linux and macOS defaults lack <c>IUTF8</c>, and without it erasing a multibyte character removes one byte and
-/// leaves invalid UTF-8 on the line the child reads.
+/// leaves invalid UTF-8 on the line the child reads. <see cref="PtySession.InputMode"/> reads two of its flags back
+/// through the master, as the child has changed them.
 /// </summary>
 public sealed class PtyUnixLineDisciplineTests
 {
+    [Test]
+    [Arguments("", true, true)]
+    [Arguments("stty -echo; ", false, true)]
+    [Arguments("stty -icanon; ", true, false)]
+    [Arguments("stty -icanon -echo; ", false, false)]
+    public async Task InputModeReportsTheModeTheChildSet(string stty, bool echo, bool canonical)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        // The child prints the marker only once stty has returned, so the mode is set when the marker arrives. Without
+        // stty it is the termios MiniPty sets at spawn. "stty -echo" alone is how a password prompt reads.
+        await using var session = Pty.Start(new PtyStartInfo
+        {
+            FileName = "sh",
+            Arguments = ["-c", stty + "printf ready; sleep 30"],
+        });
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
+        using var output = new MemoryStream();
+        await ReadUntilAsync(reader, output, "ready"u8.ToArray());
+
+        await Assert.That(session.InputMode).IsEqualTo(new PtyInputMode(echo, canonical));
+        session.Kill(PtySignal.Kill);
+    }
+
+    [Test]
+    public async Task InputModeIsNullOnceTheChildHasExited()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        await using var session = Pty.Start(new PtyStartInfo { FileName = "sh", Arguments = ["-c", "exit 0"] });
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await session.WaitForExitAsync(cts.Token);
+
+        await Assert.That(session.InputMode).IsNull();
+    }
+
+    [Test]
+    public async Task InputModeIsNullAfterDisposal()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        // Disposing again at the end of the test is a no-op; it only matters when an assertion fails first.
+        await using var session = Pty.Start(new PtyStartInfo { FileName = "sh", Arguments = ["-c", "printf ready; sleep 30"] });
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using (var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator())
+        {
+            using var output = new MemoryStream();
+            await ReadUntilAsync(reader, output, "ready"u8.ToArray());
+        }
+
+        await Assert.That(session.InputMode).IsNotNull();
+        await session.DisposeAsync();
+        await Assert.That(session.InputMode).IsNull();
+    }
+
     [Test]
     public async Task CanonicalEraseRemovesAWholeUtf8Character()
     {
