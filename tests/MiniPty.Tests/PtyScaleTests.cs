@@ -67,7 +67,13 @@ public sealed class PtyScaleTests
     /// the loop's readiness report (Unix), and takes a ring only while output is unread. A driver that blocked in the
     /// transport would hold its ring from spawn to end of output, because a blocking read needs its buffer while it waits.
     /// </summary>
+    /// <remarks>
+    /// Retried: the count is process-wide, and once on CI it counted one ring more than before the sessions started, which
+    /// no session of this test held (see platform_support.md). A driver whose idle sessions hold a ring each fails every
+    /// attempt.
+    /// </remarks>
     [Test]
+    [Retry(3)]
     [NotInParallel]
     public async Task IdleSessionsHoldNoOutputBuffer()
     {
