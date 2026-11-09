@@ -46,10 +46,10 @@ try
     switch (role)
     {
         case "pty-host":
-            return await PtyHost.RunAsync(stateDirectory, quiet: args.Contains("--quiet"), exitOnStdinEnd: args.Contains("--exit-on-stdin-end"));
+            return await PtyHost.RunAsync(stateDirectory, exitOnStdinEnd: args.Contains("--exit-on-stdin-end"));
         case "web":
             var port = int.TryParse(Arguments.Get(args, "--port"), out var value) ? value : 5173;
-            await using (var web = await WebServer.StartAsync(stateDirectory, port, WebAccess.LoadOrCreateToken(stateDirectory), quiet: false))
+            await using (var web = await WebServer.StartAsync(stateDirectory, port, WebAccess.LoadOrCreateToken(stateDirectory)))
             {
                 // The address carries the token, so it is printed only to this console, for the user who started the server.
                 Console.Error.WriteLine($"Web server listening on http://localhost:{web.Port}/#token={web.Token} (Ctrl+C to stop; the shells keep running)");
@@ -89,7 +89,7 @@ static class PtyHost
     /// <summary>Asks the client to connect again later: the session still has the connection of a client that is going away.</summary>
     public const WebSocketCloseStatus TryAgainLater = (WebSocketCloseStatus)1013;
 
-    public static async Task<int> RunAsync(string stateDirectory, bool quiet, bool exitOnStdinEnd)
+    public static async Task<int> RunAsync(string stateDirectory, bool exitOnStdinEnd)
     {
         if (!Pty.IsSupported)
         {
@@ -117,8 +117,6 @@ static class PtyHost
 
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.ConfigureKestrel(kestrel => kestrel.ListenUnixSocket(socketPath));
-        if (quiet)
-            builder.Logging.ClearProviders();
 
         await using var app = builder.Build();
         var stopping = app.Lifetime.ApplicationStopping;
@@ -246,7 +244,7 @@ sealed class WebServer : IAsyncDisposable
     public string Token { get; }
 
     /// <summary>Starts the web server on <paramref name="port"/> of localhost, or on an ephemeral port of 127.0.0.1 for 0.</summary>
-    public static async Task<WebServer> StartAsync(string stateDirectory, int port, string token, bool quiet)
+    public static async Task<WebServer> StartAsync(string stateDirectory, int port, string token)
     {
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.ConfigureKestrel(kestrel =>
@@ -256,8 +254,6 @@ sealed class WebServer : IAsyncDisposable
             else
                 kestrel.ListenLocalhost(port);
         });
-        if (quiet)
-            builder.Logging.ClearProviders();
 
         var app = builder.Build();
         var server = new WebServer(app, Path.Combine(stateDirectory, PtyHost.SocketFileName), token);
@@ -675,6 +671,10 @@ static class Arguments
 /// Runs the restart the sample is about, with a client that speaks the page's protocol: a PTY host process, a session
 /// through one web server, that web server stopped mid-session, and the same session through a second one.
 /// </summary>
+/// <remarks>
+/// The smoke reports each step, and both servers log their requests and failures, so a run that stops shows in its log
+/// which step and which request did not finish.
+/// </remarks>
 static class Smoke
 {
     private const string ReadyMarker = "MINIPTY_PTYHOST_READY_5D1E";
@@ -694,12 +694,13 @@ static class Smoke
         try
         {
             await WaitForPtyHostAsync(ptyHost, Path.Combine(stateDirectory, PtyHost.SocketFileName), timeout.Token);
+            Step("the PTY host accepts connections");
             var token = WebAccess.CreateToken();
             Guid sessionId;
             string sessionToken;
             long offset = 0;
 
-            await using (var web = await WebServer.StartAsync(stateDirectory, port: 0, token, quiet: true))
+            await using (var web = await WebServer.StartAsync(stateDirectory, port: 0, token))
             {
                 using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{web.Port}/") };
                 using (var refused = await http.PostAsync("api/sessions", content: null, timeout.Token))
@@ -715,21 +716,28 @@ static class Smoke
                 using var credentials = JsonDocument.Parse(await created.Content.ReadAsStreamAsync(timeout.Token));
                 sessionId = credentials.RootElement.GetProperty("sessionId").GetGuid();
                 sessionToken = credentials.RootElement.GetProperty("authenticationToken").GetString()!;
+                Step("a session started through the web server");
 
                 using var first = await ConnectAsync(web.Port, token, sessionId, sessionToken, offset, timeout.Token);
+                Step("connected to the session");
+                // Only the command's output holds the marker whole: the echo of the typed line has it in two parts. The
+                // echo is no evidence: an echoed line that reaches the terminal's width can be split anywhere, and a
+                // marker split there was never found (bash 3.2 on macOS, whose 10-character prompt put the wrap in it).
+                var (head, tail) = (ReadyMarker[..15], ReadyMarker[16..]);
                 var command = OperatingSystem.IsWindows()
-                    ? $"set MINIPTY_PTYHOST_STATE={StateMarker}&&echo {ReadyMarker}\r\n"
-                    : $"export MINIPTY_PTYHOST_STATE={StateMarker}; printf '{ReadyMarker}\\n'\n";
+                    ? $"set MINIPTY_PTYHOST_STATE={StateMarker}&&echo {head}^_{tail}\r\n"
+                    : $"export MINIPTY_PTYHOST_STATE={StateMarker}; printf '%s_%s\\n' {head} {tail}\n";
                 await first.SendAsync(Encoding.UTF8.GetBytes(command), WebSocketMessageType.Binary, true, timeout.Token);
-                // The typed line is echoed with the marker in it, then the command prints it.
-                offset = await ReadUntilAsync(first, offset, ReadyMarker, expectedOccurrences: 2, timeout.Token);
+                offset = await ReadUntilAsync(first, offset, ReadyMarker, timeout.Token);
+                Step($"the shell answered (offset {offset})");
 
                 // The web server goes away mid-session, as a deploy or a crash takes it; the page sees a dropped connection.
                 await web.DisposeAsync();
                 await WaitForDropAsync(first, timeout.Token);
+                Step("the web server stopped and the connection dropped");
             }
 
-            await using (var web = await WebServer.StartAsync(stateDirectory, port: 0, token, quiet: true))
+            await using (var web = await WebServer.StartAsync(stateDirectory, port: 0, token))
             {
                 var query = OperatingSystem.IsWindows() ? "echo %MINIPTY_PTYHOST_STATE%\r\n" : "printf '%s\\n' \"$MINIPTY_PTYHOST_STATE\"\n";
                 ClientWebSocket second;
@@ -740,16 +748,19 @@ static class Smoke
                     try
                     {
                         // Only the output holds the marker: the echo shows the variable's name.
-                        offset = await ReadUntilAsync(second, offset, StateMarker, expectedOccurrences: 1, timeout.Token);
+                        offset = await ReadUntilAsync(second, offset, StateMarker, timeout.Token);
                         break;
                     }
                     catch (TryAgainLaterException)
                     {
                         // The PTY host had not yet seen the first web server's connection end.
+                        Step("the PTY host still holds the old connection; retrying");
                         second.Dispose();
                         await Task.Delay(100, timeout.Token);
                     }
                 }
+
+                Step("a second web server reached the same shell, with its state");
 
                 using (second)
                 {
@@ -778,6 +789,9 @@ static class Smoke
         }
     }
 
+    /// <summary>Reports each step, so that a run that stops can be read from its log.</summary>
+    private static void Step(string text) => Console.Error.WriteLine($"smoke: {text}");
+
     private static Process StartPtyHost(string stateDirectory)
     {
         // This program again: the published executable, or `dotnet <app>.dll` under `dotnet run`.
@@ -785,7 +799,7 @@ static class Smoke
         var startInfo = new ProcessStartInfo(path) { UseShellExecute = false, RedirectStandardInput = true };
         if (Path.GetFileNameWithoutExtension(path).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
             startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, AppDomain.CurrentDomain.FriendlyName + ".dll"));
-        foreach (var argument in (string[])["pty-host", "--state-dir", stateDirectory, "--quiet", "--exit-on-stdin-end"])
+        foreach (var argument in (string[])["pty-host", "--state-dir", stateDirectory, "--exit-on-stdin-end"])
             startInfo.ArgumentList.Add(argument);
         return Process.Start(startInfo) ?? throw new InvalidOperationException("The PTY host did not start.");
     }
@@ -810,13 +824,25 @@ static class Smoke
         return client;
     }
 
-    /// <summary>Reads output until <paramref name="marker"/> appeared often enough, acknowledging each message as the page does.</summary>
-    private static async Task<long> ReadUntilAsync(ClientWebSocket client, long offset, string marker, int expectedOccurrences, CancellationToken cancellationToken)
+    /// <summary>Reads output until <paramref name="marker"/> appears, acknowledging each message as the page does.</summary>
+    private static async Task<long> ReadUntilAsync(ClientWebSocket client, long offset, string marker, CancellationToken cancellationToken)
     {
         var output = new StringBuilder();
-        while (CountOccurrences(output.ToString(), marker) < expectedOccurrences)
+        while (output.ToString().IndexOf(marker, StringComparison.Ordinal) < 0)
         {
-            var (type, payload) = await ReceiveMessageAsync(client, cancellationToken);
+            (WebSocketMessageType Type, byte[] Payload) message;
+            try
+            {
+                message = await ReceiveMessageAsync(client, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // Says what was missing and what came instead, so a run that times out can be read from its log.
+                var text = output.ToString();
+                throw new TimeoutException($"'{marker}' did not arrive; the output was: {(text.Length > 600 ? text[^600..] : text)}");
+            }
+
+            var (type, payload) = message;
             if (type == WebSocketMessageType.Close)
             {
                 if (client.CloseStatus == PtyHost.TryAgainLater)
@@ -905,14 +931,6 @@ static class Smoke
         }
         while (!result.EndOfMessage);
         return (result.MessageType, message.ToArray());
-    }
-
-    private static int CountOccurrences(string text, string marker)
-    {
-        var count = 0;
-        for (var index = text.IndexOf(marker, StringComparison.Ordinal); index >= 0; index = text.IndexOf(marker, index + marker.Length, StringComparison.Ordinal))
-            count++;
-        return count;
     }
 
     private sealed class TryAgainLaterException : Exception;
