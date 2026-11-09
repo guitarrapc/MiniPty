@@ -105,6 +105,16 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     public string? ActiveProcessName => _backend.ActiveProcessName;
 
     /// <summary>
+    /// Gets how the terminal handles typed input at the moment, or <see langword="null"/> when it cannot be read.
+    /// </summary>
+    /// <remarks>
+    /// Each read asks the terminal once and allocates nothing, so a host can poll it as it polls
+    /// <see cref="ActiveProcessName"/>. It is <see langword="null"/> on Windows, whose pseudo-console offers no way to
+    /// read the console's input mode, once the child has exited, and after disposal. See <see cref="PtyInputMode"/>.
+    /// </remarks>
+    public PtyInputMode? InputMode => _backend.InputMode;
+
+    /// <summary>
     /// Gets the write-only stream connected to the child's standard input (PTY master input).
     /// </summary>
     /// <remarks>

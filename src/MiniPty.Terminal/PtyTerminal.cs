@@ -92,6 +92,12 @@ public sealed class PtyTerminal : IAsyncDisposable
     /// </summary>
     public string? ActiveProcessName => _session.ActiveProcessName;
 
+    /// <summary>
+    /// Gets how the terminal handles typed input at the moment, or <see langword="null"/> on Windows, after exit, and
+    /// after disposal. See <see cref="PtySession.InputMode"/>.
+    /// </summary>
+    public PtyInputMode? InputMode => _session.InputMode;
+
     /// <summary>Gets a value indicating whether the child process has exited.</summary>
     public bool HasExited => _session.HasExited;
 

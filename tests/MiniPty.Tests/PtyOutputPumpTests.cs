@@ -1060,6 +1060,7 @@ public sealed class PtyOutputPumpTests
         public int? ExitSignal => null;
         public PtySize Size => new(80, 24);
         public string? ActiveProcessName => null;
+        public PtyInputMode? InputMode => null;
         public Task<PtyExitStatus> Exited => _exited.Task;
         public bool IsOutputClosed => _closed;
         public bool IsDisposed => _disposed;

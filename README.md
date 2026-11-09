@@ -336,6 +336,19 @@ await using var session = Pty.Start(new PtyStartInfo
 });
 ```
 
+### Password prompts
+
+On Unix, `InputMode` reports whether the terminal echoes what is typed and whether it reads a line at a time. A program that reads a password, such as `sudo` or `ssh`, turns echo off and keeps line input. A host that types for a user, such as an agent or a test script, can check this before it types:
+
+```csharp
+if (session.InputMode is { Echo: false, Canonical: true })
+{
+    // What is typed next will not be shown: ask a person for it, and keep it out of logs.
+}
+```
+
+`InputMode` is null on Windows, whose pseudo-console offers no way to read the input mode, and after the child exits. It sees only this terminal: a password read inside tmux, or on a remote host through ssh, is not reported ([session contract](.github/docs/specs/core_session.md#session-contract)).
+
 ### Metrics
 
 The `MiniPty` meter reports open sessions, start time and failures, output bytes, and stalls caused by a full output buffer. On Unix, it also reports the consumer's native waits for output. Without listeners, MiniPty only tracks the open session count. It takes no timestamps and allocates nothing ([metrics](.github/docs/specs/core_session.md#metrics)).

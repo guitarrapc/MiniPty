@@ -17,7 +17,7 @@ If an embedder asks:
 - **Getting the path:** it is cheap to read once at spawn. macOS already reads it with `TIOCPTYGNAME`, and Linux and FreeBSD can use `ptsname_r` on the master.
 - **Windows:** ConPTY has no device, so the property is null there, as `ActiveProcessName` is.
 - **Naming:** name it for a path (`TtyPath`). `PtyStartInfo.TerminalName` already means the `TERM` value.
-- **Reading termios:** a caller that wants to read the termios can open this path with `O_NOCTTY` and call `tcgetattr`, so no termios API is needed for that.
+- **Termios:** `InputMode` reads echo and canonical mode through the master. The path is not a way to read more: a caller that opens the slave holds it when the child exits, which on FreeBSD discards output not yet read ([core session lessons](specs/core_session.md#lessons-learned)).
 
 ## Open
 

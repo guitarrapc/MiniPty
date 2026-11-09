@@ -34,7 +34,7 @@ Bridging to a browser needs one more layer. The WebSocket protocol has no backpr
 | N10 | `uid` / `gid` on spawn. Switching identity is security-sensitive and outside a minimal PTY library. |
 | N11 | An `encoding` spawn option that decodes output to strings. The library is bytes-first; frontends decode at their boundary with an incremental decoder. |
 | N12 | node-pty `handleFlowControl` (XON/XOFF interception). VS Code throttles with pause/resume plus ACK credit, which `PtyTerminal` and both bridges provide. |
-| N13 | Reading or setting the termios (`portable-pty` reads it). The child changes its own line discipline (`stty`, raw mode), and MiniPty's defaults, such as `IUTF8`, are chosen for correctness ([pty_crossplatform.md](../references/pty_crossplatform.md)). A setter would let a host undo them under a running child. Reading it needs the tty path, which is deferred until an embedder needs it ([next_todo.md](../next_todo.md#a-sessions-tty-path)). |
+| N13 | Setting the termios, or reading all of it (`portable-pty` returns the whole struct). The child changes its own line discipline (`stty`, raw mode), and MiniPty's defaults, such as `IUTF8`, are chosen for correctness ([pty_crossplatform.md](../references/pty_crossplatform.md)). A setter would let a host undo them under a running child. The two flags hosts act on, echo and canonical mode, are read as `InputMode` ([Session contract](core_session.md#session-contract)). |
 | N14 | Delivering a signal on Windows. Windows has no POSIX signals, so `Kill(PtySignal)` terminates the child whatever the signal (`Kill`). A host that wants an interrupt writes Ctrl+C (`0x03`) as input, which ConPTY turns into `CTRL_C_EVENT` for the processes in its console, as a keystroke does. |
 | N15 | `ActiveProcessName` on Windows. A console has no foreground process group to read, and VS Code titles its tabs from its own process-tree lookup, not from node-pty. It stays null there. |
 
@@ -53,7 +53,7 @@ PtyTerminal.Attach(PtySession session, PtyTerminalOptions options)    // transfe
 | `WriteInputAsync` / `SendEof` / `Resize` / `Kill(PtySignal)` | Pass-through to the owned session; callable concurrently with output delivery. Resize accepts optional pixel dimensions. |
 | `Kill()` | SIGHUP on Unix (node-pty default); process termination on Windows. Core `PtySession.Kill()` remains forceful. |
 | `Clear()` | Forwards to `PtySession.Clear()`: clears the console host's buffer on an out-of-band ConPTY (`PtyStartInfo.ConPty`), so the host does not reprint what the frontend has discarded; a safe no-op on the in-box ConPTY and on Unix. Equivalent to node-pty's `clear()`. |
-| `ProcessId` / `Size` / `ActiveProcessName` / `HasExited` / `ExitStatus` | Session state. `ActiveProcessName` is polled by the embedder (typically 200 ms on Unix); no library polling task is created. It is null on Windows, where VS Code derives tab titles from its own process-tree lookup rather than from node-pty. |
+| `ProcessId` / `Size` / `ActiveProcessName` / `InputMode` / `HasExited` / `ExitStatus` | Session state. `ActiveProcessName` and `InputMode` are polled by the embedder (typically 200 ms on Unix); no library polling task is created. Both are null on Windows. VS Code derives tab titles there from its own process-tree lookup rather than from node-pty. |
 | `DisposeAsync` | Stops the pump, ends the child if running (Unix: hang-up, then kill after a grace period; Windows: termination), releases the PTY. |
 
 Design decisions (WHY):

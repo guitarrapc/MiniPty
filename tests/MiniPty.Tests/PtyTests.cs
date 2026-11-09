@@ -1666,6 +1666,23 @@ public sealed class PtyTests
     }
 
     [Test]
+    public async Task PtyInputModeIsNullOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // ConPTY offers no way to read the console's input mode, so a running child reports none.
+        await using var session = Pty.Start(new PtyStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe",
+            Arguments = ["/c", "pause"],
+        });
+
+        await Assert.That(session.InputMode).IsNull();
+        session.Kill();
+    }
+
+    [Test]
     public async Task PtyActiveProcessNameTracksPipelineAfterGroupLeaderExits()
     {
         if (OperatingSystem.IsWindows())

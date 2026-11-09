@@ -45,6 +45,8 @@ internal interface IPtyBackend : IDisposable
     public int? ExitSignal { get; }
     public PtySize Size { get; }
     public string? ActiveProcessName { get; }
+    /// <summary>The terminal's echo and canonical-mode flags; null on Windows, after exit, and after disposal.</summary>
+    public PtyInputMode? InputMode { get; }
     public void Resize(int columns, int rows, int pixelWidth, int pixelHeight);
     /// <summary>
     /// Clears the pseudo-console's screen buffer, for a frontend that has cleared its own display. A no-op where the

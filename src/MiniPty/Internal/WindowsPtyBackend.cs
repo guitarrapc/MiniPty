@@ -980,6 +980,9 @@ internal static class WindowsPtyBackend
 
         public string? ActiveProcessName => null;
 
+        // ConPTY offers no way to read the console's input mode (ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT).
+        public PtyInputMode? InputMode => null;
+
         public void Resize(int columns, int rows, int pixelWidth, int pixelHeight)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
