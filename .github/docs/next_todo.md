@@ -4,10 +4,6 @@
 
 The one-second hang-up grace before the kill (`UnixPtyBackend.DisposeHangupGraceMs`) is fixed. It can become an option if an embedder needs a different one.
 
-### Out-of-process PTY host guidance
-
-A web host that serves untrusted users would run MiniPty in a separate, less privileged process or container and talk to it over `PtyStdioBridge`, as VS Code runs node-pty in its pty host. That gives crash and privilege isolation and lets the web tier restart without ending shells. It is documentation and a sample, not a library change.
-
 ### A session's tty path
 
 node-pty (`ptsName`), `portable-pty` (`tty_name`), and creack/pty (`Name`) expose the path of the terminal's slave device, such as `/dev/pts/3`. No known embedder needs it. Adding a read-only property later breaks nothing, while removing one would.
@@ -45,6 +41,7 @@ On CI's `macos-26` runner (M1 Virtual, 3 vCPUs), MiniPty's 1 MiB flood held 38.9
 - **FreeBSD on a machine of its own, and on arm64.** CI compiles the shim for 14.4 and 15.1 on amd64 and arm64, and runs the suite in a 14.5 amd64 guest under QEMU with a community build of .NET 10 ([Verification](specs/platform_support.md#verification)). Nothing has run on FreeBSD hardware or on arm64, and `scripts/pty-readiness-probe.c`, which checks the readiness behavior `kqueue` was chosen on, has not run on FreeBSD.
 - **Host exit on macOS under NativeAOT.** A host that disposes a session whose child ignores `SIGHUP` and then exits sends the pending kill at exit. On macOS that was probed under CoreCLR and NativeAOT with an earlier version that armed a timer per disposal, not with the current exit-watcher deadline; CI runs the CoreCLR test (`HostExitKillsAChildStillInItsHangupGrace`) there.
 - **An echo during a flood through a bridge** is not tested against the coalescing bound; the tests time the end of a burst only.
+- **The out-of-band ConPTY for an x64 process on ARM64 Windows.** MiniPty's build targets stage the x64 host beside an x64 `conpty.dll`, so an x64 application under emulation on ARM64 runs the emulated x64 host, where the package's own layout would give it the ARM64 one. A 32-bit host on 64-bit Windows starts no console program ([core_session.md](specs/core_session.md#out-of-band-conpty)); whether an emulated x64 host on ARM64 does is not verified, since `windows-11-arm` runs the suite as an arm64 process only.
 - **The output ring's capacity on macOS.** 16, 32, and 64 KiB measured alike on Linux and Windows, so the ring stays at 16 KiB ([platform lessons](specs/platform_support.md#lessons-learned)); macOS was not measured. A macOS master hands out at most 1,024 bytes per read.
 
 ## Rare Test Timeouts Under Heavy Load

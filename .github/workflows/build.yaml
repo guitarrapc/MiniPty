@@ -66,7 +66,7 @@ jobs:
       - name: Publish and run samples (NativeAOT)
         shell: bash
         run: |
-          for sample in Capture Session Observe Interactive ConsoleAttach WebTerminal WebTerminalScale VsCodeTerminalHelper VsCodePersistentBridge; do
+          for sample in Capture Session Observe Interactive ConsoleAttach WebTerminal WebTerminalScale WebTerminalPtyHost VsCodeTerminalHelper VsCodePersistentBridge; do
             out="$RUNNER_TEMP/minipty-${sample}-aot"
             dotnet publish "samples/SingleFiles/${sample}.cs" -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$out"
             exe="$out/${sample}"
@@ -83,7 +83,7 @@ jobs:
               test ! -f "$out/libminipty_unix.a"
               test -f "$out/minipty_spawn_helper"
             fi
-            if [[ "$sample" == WebTerminal || "$sample" == WebTerminalScale || "$sample" == VsCodeTerminalHelper || "$sample" == VsCodePersistentBridge ]]; then
+            if [[ "$sample" == WebTerminal || "$sample" == WebTerminalScale || "$sample" == WebTerminalPtyHost || "$sample" == VsCodeTerminalHelper || "$sample" == VsCodePersistentBridge ]]; then
               "$exe" --smoke
             else
               "$exe"
@@ -130,6 +130,30 @@ jobs:
           else
             "$exe" --smoke
           fi
+
+  # The suite as a 32-bit process on x64 Windows. It is built self-contained, so the runner needs no 32-bit .NET, and
+  # it covers the out-of-band ConPTY host a 32-bit conpty.dll needs on 64-bit Windows (platform_support.md).
+  test-win-x86:
+    name: Test (win-x86)
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    runs-on: windows-2025
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Build the tests for win-x86
+        shell: bash
+        run: dotnet build tests/MiniPty.Tests/MiniPty.Tests.csproj -c Release -r win-x86 --self-contained --artifacts-path artifacts/x86
+      - name: Test as a 32-bit process
+        shell: bash
+        run: artifacts/x86/bin/MiniPty.Tests/release_win-x86/MiniPty.Tests.exe
 
   # musl has no hosted runner, so the suite runs once in an Alpine container, on x64, where the runner can run
   # JavaScript actions inside Alpine. The SDK image is pinned like every other image here (SDK 10.0.403 on Alpine
@@ -387,7 +411,7 @@ jobs:
         run: bash scripts/run-nuget-smoke-in-container.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}" "${{ matrix.image }}"
 
   build-complete:
-    needs: [build, test-musl, test-old-kernel-paths, freebsd-native, test-freebsd, nuget-smoke]
+    needs: [build, test-win-x86, test-musl, test-old-kernel-paths, freebsd-native, test-freebsd, nuget-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

@@ -17,6 +17,7 @@ Before a NativeAOT publish on Linux or macOS, build the native shim for the RID:
 | Record output with the time of each read | [Capture.cs](Capture.cs), [Observe.cs](Observe.cs) | `PtyCapture.RunAsync` |
 | Hand your terminal to a shell or an editor | [ConsoleAttach.cs](ConsoleAttach.cs) | `PtyConsoleInput.Attach` |
 | Serve a terminal to a browser | [WebTerminal.cs](WebTerminal.cs), [WebTerminalScale.cs](WebTerminalScale.cs) | `PtyWebSocketBridge` |
+| Keep the shells running while the web server restarts, and under another account | [WebTerminalPtyHost.cs](WebTerminalPtyHost.cs) | `PtyWebSocketSessionManager` |
 | Watch what sessions cost: start time, output, stalls on a full buffer | [WebTerminalScale.cs](WebTerminalScale.cs) | the `MiniPty` meter |
 | Back a VS Code terminal | [VsCodeTerminalHelper.cs](VsCodeTerminalHelper.cs), [VsCodePersistentBridge.cs](VsCodePersistentBridge.cs) | `PtyStdioBridge`, `PtyWebSocketSessionManager` |
 | See what `InheritCursor` waits for, measure the bridges, check the packages | [InheritCursorWait.cs](InheritCursorWait.cs), [BridgeTraffic.cs](BridgeTraffic.cs), [NuGetSmoke.cs](NuGetSmoke.cs) | tools for MiniPty's own development |
@@ -213,6 +214,31 @@ The bridge authenticates nothing: whoever holds the WebSocket types into the she
 The server prints the token in the URL fragment (`#token=...`), which browsers never send to a server, and the page sends it back as a subprotocol rather than in the URL, so request logs never record it. Copy `LocalAccess`, or put your own authentication in front of `RunAsync`.
 
 The page is embedded in the executable and loads xterm.js from a CDN, so `WebTerminal.cs` publishes with NativeAOT as one file. `WebTerminalScale.cs` also shows what each session costs the host (threads, memory, handles), and `-- bench --sessions 16,64,256` measures it. It reads MiniPty's `MiniPty` meter with a `MeterListener` as well: the page shows open sessions, the average start time, output read, and stalls on a full output buffer, and the bench prints each step's start time and the stalls during its flood ([Metrics](../../.github/docs/specs/core_session.md#metrics)). The bridge coalesces bursts on a timer and never waits for output in native code, so the consumer-wait instrument is left out. Protocol and options: [terminal.md](../../.github/docs/specs/terminal.md#ptywebsocketbridge--frontend-bridge).
+
+## Web terminal with a separate PTY host
+
+[WebTerminalPtyHost.cs](WebTerminalPtyHost.cs) moves the shells out of the web server into a PTY host process of their own. The web server can then restart, for a deploy or after a crash, without ending them, and it can run under another account than the shells.
+
+```text
+browser ──WebSocket──▶ web server ──Unix domain socket──▶ PTY host
+                       signs users in,                     owns the shells
+                       relays frames                       (PtyWebSocketSessionManager)
+```
+
+```bash
+dotnet run samples/SingleFiles/WebTerminalPtyHost.cs -- pty-host   # terminal 1
+dotnet run samples/SingleFiles/WebTerminalPtyHost.cs -- web        # terminal 2: open the http://localhost:5173/#token=... address it prints
+```
+
+Start something that keeps printing (`top`, or `ping -t localhost` on Windows), stop the web server with Ctrl+C, and start it again. The page reconnects, and the output continues with nothing lost or shown twice. Ctrl+C on the PTY host ends every shell.
+
+- **The PTY host owns the shells.** It keeps a `PtyWebSocketSessionManager` behind `POST /sessions` and `GET /sessions/{id}/connect?offset=N`, as [VsCodePersistentBridge.cs](VsCodePersistentBridge.cs) does. The shells run as its account, with its environment, not the web server's. Restarting it ends them, so keep it small.
+- **The web server keeps no state.** The page holds its session's id, token, and the offset of its next output byte, and reconnects with them after a restart; the PTY host replays what the page has not received. The web server needs no MiniPty package: any server that can relay a WebSocket will do.
+- **Relay frames unchanged, and let the page acknowledge.** The web server passes each fragment on as it arrives, close codes included, and never ACKs output itself. Only the page's ACKs make the replay start exactly after what the page has drawn, and they let a slow page hold the shell back, as with a direct connection.
+- **The socket's directory is the access check.** The PTY host listens on a Unix domain socket, never on a port, in a directory only its owner can enter (`$XDG_RUNTIME_DIR` or the temporary directory, or `--state-dir`): whoever can open the socket can start shells. To run the web server under another account, give that account, and no one else, access to the directory and the socket.
+- **Retry until the session is gone.** The page retries a dropped connection every second, including a refusal while the PTY host still holds the old web server's connection (close code 1013). Invalid credentials (1008) or an offset the replay buffer no longer holds (1007) mean the session is gone.
+- **A reload starts a new shell.** The page keeps its session in memory, because a reloaded page could not show the old shell's screen: the PTY host replays the bytes the page has not acknowledged, not a screen. The old shell ends after `DetachedSessionTimeout` (5 minutes).
+- **The access token outlives the web server.** The web server keeps it in the state directory, so a restarted server accepts the page it served before. A real deployment signs users in with cookies or tokens that outlive its process the same way, and checks `Origin` and `Host` as [WebTerminal.cs](WebTerminal.cs) does.
 
 ## VS Code terminal backend
 

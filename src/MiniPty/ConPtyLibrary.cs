@@ -17,8 +17,8 @@ namespace MiniPty;
 /// Windows Terminal carries, as the NuGet package <c>Microsoft.Windows.Console.ConPTY</c>: <c>conpty.dll</c> plus
 /// <c>OpenConsole.exe</c>, one host process per session like the in-box one. MiniPty ships neither file and takes no
 /// dependency on that package. An application that wants the out-of-band implementation references the package itself,
-/// stages the two files in its output (MiniPty's build targets place <c>OpenConsole.exe</c> beside <c>conpty.dll</c>
-/// when the package is referenced), loads them with <see cref="Load"/> or
+/// stages the two files in its output (MiniPty's build targets place <c>OpenConsole.exe</c> where <c>conpty.dll</c>
+/// looks for it when the package is referenced), loads them with <see cref="Load"/> or
 /// <see cref="TryLoadFromApplicationDirectory"/>, and passes the result to <see cref="PtyStartInfo.ConPty"/>. Sessions
 /// without it keep using the in-box ConPTY, so nothing changes for an application that does not opt in.
 /// </para>
@@ -34,6 +34,13 @@ namespace MiniPty;
 /// <c>conhost.exe</c> instead, without an error: the session works, on the implementation the package was taken to
 /// avoid. <see cref="HasConsoleHost"/> reports that probe before the first spawn, so an application can detect a
 /// missing host instead of discovering it from the terminal's behavior.
+/// </para>
+/// <para>
+/// A 32-bit process on 64-bit Windows needs the host of the operating system's architecture, in its subdirectory: the
+/// console programs attached to a 32-bit host there fail to start (<c>STATUS_DLL_INIT_FAILED</c>). With no host at
+/// all, its <c>conpty.dll</c> has no 32-bit <c>conhost.exe</c> to fall back to, and <see cref="Pty.Start"/> throws.
+/// MiniPty's build targets give a 32-bit <c>conpty.dll</c> the hosts of all three architectures in those
+/// subdirectories, as the package lays them out.
 /// </para>
 /// </remarks>
 public sealed unsafe class ConPtyLibrary
@@ -80,7 +87,8 @@ public sealed unsafe class ConPtyLibrary
 
     /// <summary>
     /// Gets the path of the <c>OpenConsole.exe</c> that <c>conpty.dll</c> will launch, or <see langword="null"/> when
-    /// none is where it looks, in which case sessions silently run on the in-box <c>conhost.exe</c>.
+    /// none is where it looks, in which case sessions silently run on the in-box <c>conhost.exe</c> (in a 32-bit
+    /// process on 64-bit Windows, they fail to start).
     /// </summary>
     public string? ConsoleHostPath { get; }
 
@@ -100,7 +108,8 @@ public sealed unsafe class ConPtyLibrary
     /// This loads native code into the process and runs it with the process's own token, like any P/Invoke. Pass only
     /// a path the application controls, such as a file it ships, and never one taken from configuration, the
     /// environment, a command line, or another untrusted source. The DLL also launches the <c>OpenConsole.exe</c>
-    /// beside it, so whoever can write that directory runs code as the application; install the files where the
+    /// beside it or in a subdirectory of its directory, so whoever can write that directory runs code as the
+    /// application; install the files where the
     /// application's own binaries are protected. A path on a network share or removable media is accepted, not
     /// rejected: an application that runs from such a place loads its own code from there too, so the decision is
     /// the application's. The files in Microsoft's package are Authenticode-signed by Microsoft, and an application

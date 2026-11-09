@@ -34,7 +34,7 @@ MiniPty creates a real PTY on each supported OS. See [Backends](#backends) for h
 
 | OS | Architectures | Status |
 |----|---------------|--------|
-| Windows 10 1809+ / Windows 11 / Windows Server 2019+ | x64, arm64 | Supported |
+| Windows 10 1809+ / Windows 11 / Windows Server 2019+ | x64, arm64, x86 (32-bit processes on x64 Windows tested) | Supported |
 | Linux, glibc 2.27+ | x64, arm64 | Supported |
 | Linux, musl 1.2.3+ (Alpine) | x64, arm64 | Supported |
 | macOS 12.0+ | x64, arm64 | Supported |
@@ -288,7 +288,7 @@ MiniPty cannot change either behavior. Terminal emulators on these builds should
 dotnet add package Microsoft.Windows.Console.ConPTY --version 1.25.260930003
 ```
 
-MiniPty's build targets copy `OpenConsole.exe` beside `conpty.dll`. Both run native code with your application's permissions. Store them with the same protection as your application binaries. Update the package to receive security fixes ([details and measurements](.github/docs/specs/core_session.md#out-of-band-conpty)).
+MiniPty's build targets copy `OpenConsole.exe` where `conpty.dll` looks for it: beside it, or, for a 32-bit application, into a subdirectory per Windows architecture, because a 32-bit application on 64-bit Windows needs the 64-bit host. Both run native code with your application's permissions. Store them with the same protection as your application binaries. Update the package to receive security fixes ([details and measurements](.github/docs/specs/core_session.md#out-of-band-conpty)).
 
 ```csharp
 using MiniPty;
@@ -335,6 +335,10 @@ await using var session = Pty.Start(new PtyStartInfo
     },
 });
 ```
+
+### Shells in a process of their own
+
+A web host can keep its shells in a separate PTY host process that owns them with `PtyWebSocketSessionManager`, and relay each browser's WebSocket to it. The web server can then be redeployed or crash without ending the shells: the page reconnects, and the PTY host replays what the page has not received. The PTY host can also run as the shells' own account or in their container, away from the web server's secrets. [WebTerminalPtyHost](samples/SingleFiles/README.md#web-terminal-with-a-separate-pty-host) shows both processes and the relay ([design](.github/docs/specs/terminal.md#shells-in-a-pty-host-of-their-own)).
 
 ### Password prompts
 
@@ -403,6 +407,7 @@ Each guide explains how to build that kind of application with MiniPty.
 | A terminal window on Windows | [WinUiTerminal](samples/WinUiTerminal) | MiniPty |
 | A terminal window on Windows, Linux, and macOS | [AvaloniaTerminal](samples/AvaloniaTerminal) | MiniPty |
 | A terminal in the browser (xterm.js) | [Web terminal](samples/SingleFiles/README.md#web-terminal) | MiniPty.Terminal |
+| A browser terminal whose shells survive a web server restart | [WebTerminalPtyHost](samples/SingleFiles/README.md#web-terminal-with-a-separate-pty-host) | MiniPty.Terminal |
 | A browser terminal with metrics in the Aspire dashboard | [AspireTerminal](samples/AspireTerminal) | MiniPty.Terminal |
 | A VS Code terminal backend | [VsCodeExtension](samples/VsCodeExtension) | MiniPty.Terminal |
 
