@@ -249,7 +249,8 @@ public sealed class PtyTests
     /// has. The loop publishes each read as it completes, and a macOS read returns at most 1 KiB, so a consumer that keeps
     /// up gets about 32 chunks of 32 KiB there; this consumer is slower than the child on purpose.
     /// </summary>
-    // Retried: the FreeBSD guest on CI sometimes loses the last 1.5–2 KiB of the 32 KiB (see platform_support.md).
+    // Retried: when the child exits, FreeBSD discards what the master has not read once a second passes without a read,
+    // so a stop of the I/O loop thread that long in CI's guest loses the end of the 32 KiB (see platform_support.md).
     [Test]
     [Retry(3)]
     public async Task PtyReadOutputAsyncPreservesLargeChunksOnUnix()
@@ -257,7 +258,7 @@ public sealed class PtyTests
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return;
 
-        await using var session = Pty.Start(Spawn("head", ["-c", "32768", "/dev/zero"]));
+        await using var session = Pty.Start(UnixShell(UnixBulk32KiBCommand));
 
         var totalBytes = 0;
         var chunks = 0;
@@ -283,7 +284,8 @@ public sealed class PtyTests
     /// <summary>
     /// Transport-pump completion must drain the full child stdout before closing ConPTY on Windows.
     /// </summary>
-    // Retried: the FreeBSD guest on CI sometimes loses the last 1.5–2 KiB of the 32 KiB (see platform_support.md).
+    // Retried: when the child exits, FreeBSD discards what the master has not read once a second passes without a read,
+    // so a stop of the I/O loop thread that long in CI's guest loses the end of the 32 KiB (see platform_support.md).
     [Test]
     [Retry(3)]
     public async Task PtyCompleteAsyncDrainsBulkStdout()
@@ -304,7 +306,8 @@ public sealed class PtyTests
     /// <summary>
     /// Capture shares completion orchestration with <see cref="PtySession.CompleteAsync"/>.
     /// </summary>
-    // Retried: the FreeBSD guest on CI sometimes loses the last 1.5–2 KiB of the 32 KiB (see platform_support.md).
+    // Retried: when the child exits, FreeBSD discards what the master has not read once a second passes without a read,
+    // so a stop of the I/O loop thread that long in CI's guest loses the end of the 32 KiB (see platform_support.md).
     [Test]
     [Retry(3)]
     public async Task PtyCaptureDrainsBulkStdout()
@@ -2211,6 +2214,10 @@ public sealed class PtyTests
             await Assert.That(result.Contains(marker)).IsTrue();
     }
 
+    // dd, not head: FreeBSD's head starts helper processes that inherit the terminal, and when one outlives head, head's
+    // exit revokes the terminal and discards what the master has not read.
+    private const string UnixBulk32KiBCommand = "dd if=/dev/zero bs=4096 count=8 2>/dev/null";
+
     private static bool TryCreateBulkStdout32KiB(out PtyStartInfo startInfo)
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -2226,7 +2233,7 @@ public sealed class PtyTests
             return true;
         }
 
-        startInfo = Spawn("head", ["-c", "32768", "/dev/zero"]);
+        startInfo = UnixShell(UnixBulk32KiBCommand);
         return true;
     }
 

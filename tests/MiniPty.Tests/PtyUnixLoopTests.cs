@@ -738,6 +738,36 @@ public sealed class PtyUnixLoopTests
     }
 
     /// <summary>
+    /// A child that exits while the ring is full and nobody reads still delivers all its output. The child writes 2 KiB
+    /// more than the ring holds, so the loop parks with the rest still in the terminal, and the consumer starts only once
+    /// the child has exited. FreeBSD discards what the master has not read a second after a session leader's last close,
+    /// so there the loop must read ahead once the child exits. Linux keeps the rest in the master. On macOS the child cannot
+    /// exit before the consumer reads, since its terminal holds less than 2 KiB, so there the test reads at once.
+    /// </summary>
+    [Test]
+    public async Task OutputOfAChildThatExitsWhileTheRingIsFullIsNotLost()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        // The ring parks with between 12 and 16 KiB in it, so 2 to 6 KiB are left in the terminal: within a FreeBSD
+        // terminal's output queue (7,688 bytes at the 38400 baud MiniPty sets), so the child exits. dd, not head: FreeBSD's
+        // head starts helper processes that inherit the terminal, and one that outlives head loses the rest whatever the
+        // loop does.
+        const int Size = PtyOutputPump.Capacity + 2048;
+        await using var session = Pty.Start(Shell($"dd if=/dev/zero bs=2048 count={Size / 2048} 2>/dev/null"));
+        if (!OperatingSystem.IsMacOS())
+            await session.WaitForExitAsync().WaitAsync(Timeout);
+
+        var received = 0;
+        await using var output = session.ReadOutputAsync().GetAsyncEnumerator();
+        while (await output.MoveNextAsync().AsTask().WaitAsync(Timeout))
+            received += output.Current.Data.Length;
+
+        await Assert.That(received).IsEqualTo(Size);
+    }
+
+    /// <summary>
     /// A consumer that pauses many times during a flood, each pause longer than the loop waits before it takes reading
     /// back, has the loop fill the ring and park during each pause; back from a pause it releases its chunk, which wakes
     /// the loop, and ends the park itself when it reads inline before the loop's pass does. Whichever side ends it, the

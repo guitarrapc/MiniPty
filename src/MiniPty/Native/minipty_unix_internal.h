@@ -79,6 +79,7 @@ int minipty_watch_wait_arm(
 int minipty_master_poll(int master, int timeout_us);
 int minipty_master_wait_open(int master);
 int minipty_master_wait(int wait_fd, int timeout_ms);
+int minipty_child_exiting(int pid);
 int minipty_pidfd_open(int pid);
 int minipty_signal_child(int pidfd, int pid, int sig);
 int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_signal);

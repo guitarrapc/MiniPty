@@ -86,6 +86,16 @@ internal static partial class UnixPtyBackend
         private static readonly List<UnixPtyBackendInstance> s_takeovers = [];
         // Times a session joined s_inlineReaders, for tests of where a consumer reads. Guarded by s_lock.
         private static long s_inlineReaderListings;
+        // FreeBSD: sessions this thread parked on a full ring, linked through NextParked. While any is listed, this thread
+        // looks at each about every ParkedLookMs, so that a child that begins to exit meanwhile has its last output read
+        // ahead before the kernel discards it (UnixPtyBackendInstance.ReadAheadIfChildExits). The kernel gives up after a
+        // second without a read, so a look every quarter of it leaves room for a slow pass. Only this thread parks a
+        // session, so the list and the next look's time are this thread's alone.
+        private static UnixPtyBackendInstance? s_parked;
+        private static long s_nextParkedLook;
+        private const int ParkedLookMs = 250;
+        // Parked sessions this look serves, collected first so that serving one never edits the list being walked.
+        private static readonly List<UnixPtyBackendInstance> s_parkedLooks = [];
         // Arms this thread's pass has made and the next wait applies (SetInterestOnLoop), at most one per slot: the slot,
         // the master, its token and its interest. This thread only. A full set has a further arm applied at once.
         private const int ArmCapacity = 8;
@@ -457,6 +467,71 @@ internal static partial class UnixPtyBackend
             s_takeovers.Clear();
         }
 
+        /// <summary>
+        /// FreeBSD: lists <paramref name="session"/>, which this thread just parked on a full ring, so that this thread looks
+        /// at it about every <see cref="ParkedLookMs"/> while it stays parked (<see cref="ServeParked"/>). On this thread,
+        /// whose next wait takes the look's timeout.
+        /// </summary>
+        internal static void WatchParked(UnixPtyBackendInstance session)
+        {
+            if (session.ParkedListed)
+                return;
+
+            if (s_parked is null)
+                s_nextParkedLook = Environment.TickCount64 + ParkedLookMs;
+
+            session.ParkedListed = true;
+            session.NextParked = s_parked;
+            s_parked = session;
+        }
+
+        /// <summary>
+        /// Once every <see cref="ParkedLookMs"/>, serves each listed session that is still parked, which reads ahead if its
+        /// child has begun to exit, and unlists the others. Runs on every pass.
+        /// </summary>
+        private static void ServeParked()
+        {
+            if (s_parked is null)
+                return;
+
+            var now = Environment.TickCount64;
+            if (now < s_nextParkedLook)
+                return;
+
+            s_nextParkedLook = now + ParkedLookMs;
+            UnixPtyBackendInstance? previous = null;
+            var session = s_parked;
+            while (session is not null)
+            {
+                var next = session.NextParked;
+                if (session.IsParkedOnLoop)
+                {
+                    s_parkedLooks.Add(session);
+                    previous = session;
+                }
+                else
+                {
+                    if (previous is null)
+                        s_parked = next;
+                    else
+                        previous.NextParked = next;
+
+                    session.NextParked = null;
+                    session.ParkedListed = false;
+                }
+
+                session = next;
+            }
+
+            if (s_parkedLooks.Count == 0)
+                return;
+
+            foreach (var parked in s_parkedLooks)
+                parked.ServiceOnLoop(0);
+
+            s_parkedLooks.Clear();
+        }
+
         private static ulong MasterToken(int slot, int generation) =>
             MasterTokenBit | ((ulong)(uint)(generation & 0x7FFFFFFF) << 32) | (uint)slot;
 
@@ -626,6 +701,7 @@ internal static partial class UnixPtyBackend
                 ServeHangups();
                 ServeCoalesceTick();
                 ServeInlineReaders();
+                ServeParked();
             }
         }
 
@@ -672,8 +748,9 @@ internal static partial class UnixPtyBackend
 
         /// <summary>
         /// The longest the thread may wait: forever, or the polling interval while any child is polled or hung up, or
-        /// until the earliest hang-up deadline if that comes first, and until the next coalescing tick while the scheduler
-        /// asked for ticks. On this thread, which holds <see cref="s_lock"/>.
+        /// until the earliest hang-up deadline if that comes first. While they apply, it also wakes for the check of inline
+        /// readers, the next look at parked sessions, and the next coalescing tick. On this thread, which holds
+        /// <see cref="s_lock"/>.
         /// </summary>
         private static int WaitTimeoutLocked()
         {
@@ -697,6 +774,13 @@ internal static partial class UnixPtyBackend
 
             if (s_inlineReaders is not null && (timeout == Timeout.Infinite || timeout > InlineReaderCheckMs))
                 timeout = InlineReaderCheckMs;
+
+            if (s_parked is not null)
+            {
+                var untilLook = (int)Math.Clamp(s_nextParkedLook - Environment.TickCount64, 0, ParkedLookMs);
+                if (timeout == Timeout.Infinite || timeout > untilLook)
+                    timeout = untilLook;
+            }
 
             if (!s_coalesceTicking)
                 return timeout;
