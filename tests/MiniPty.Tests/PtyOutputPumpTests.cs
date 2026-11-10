@@ -980,18 +980,22 @@ public sealed class PtyOutputPumpTests
                 return 0;
 
             if (IsOutputClosed)
-            {
-                if (_frameSent)
-                    return 0;
-
-                _frameSent = true;
-                Frame.CopyTo(buffer);
-                return Frame.Length;
-            }
+                return ReadOutputNow(buffer);
 
             _reading.TrySetResult();
             driver.WaitForWake(System.Threading.Timeout.Infinite);
             return -1;
+        }
+
+        // The frame is in the transport from the close on (see FakeBackend.ReadOutputNow).
+        public override int ReadOutputNow(Span<byte> buffer)
+        {
+            if (!IsOutputClosed || _frameSent)
+                return 0;
+
+            _frameSent = true;
+            Frame.CopyTo(buffer);
+            return Frame.Length;
         }
     }
 
@@ -1340,7 +1344,13 @@ public sealed class PtyOutputPumpTests
                 return -1;
             }
 
-            if (_afterClose == 0)
+            return ReadOutputNow(buffer);
+        }
+
+        // The frames after the close are in the transport from the close on (see FakeBackend.ReadOutputNow).
+        public override int ReadOutputNow(Span<byte> buffer)
+        {
+            if (!IsOutputClosed || _afterClose == 0)
                 return 0;
 
             _afterClose--;
@@ -1417,6 +1427,12 @@ public sealed class PtyOutputPumpTests
         /// What the script holds now, without waiting: the driver's only read once the post-exit drain has forced the end
         /// of output. 0 when nothing is left.
         /// </summary>
+        /// <remarks>
+        /// A script whose output is already in the transport, such as a frame sent at the close, returns it here as well
+        /// as from <see cref="ReadOutput"/>, as the platform drivers take what the pipe or the master holds after the
+        /// forced end. Otherwise the output is lost whenever the driver's thread wakes after the forced end: on a loaded
+        /// windows-2022 runner it did not run for a whole quiet interval after the close.
+        /// </remarks>
         public virtual int ReadOutputNow(Span<byte> buffer) => 0;
 
         public virtual void Dispose()
