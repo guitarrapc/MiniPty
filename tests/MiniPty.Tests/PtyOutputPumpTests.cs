@@ -206,13 +206,12 @@ public sealed class PtyOutputPumpTests
         var next = enumerator.MoveNextAsync().AsTask();
         await backend.Reading.WaitAsync(Timeout);
 
-        var stopwatch = Stopwatch.StartNew();
         backend.Exit(0);
 
-        await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
         // Quiet after exit closes the transport, and quiet after the close ends output: two intervals, no OS event.
-        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(ForcedEndBoundMs);
+        await Assert.That(await next.WaitAsync(Timeout)).IsFalse();
         await Assert.That(backend.IsOutputClosed).IsTrue();
+        await Assert.That(session.OutputPump.IsEndOfOutputForced).IsTrue();
     }
 
     /// <summary>
@@ -225,15 +224,14 @@ public sealed class PtyOutputPumpTests
         var backend = new HeldOpenBackend();
         await using var session = new PtySession(backend);
         await backend.Reading.WaitAsync(Timeout);
-        // The close timeout outlasts the bound below, so an end that waited for it cannot pass as the forced end.
-        var completion = session.CompleteAsync(new PtyCompleteOptions { OutputReaderCloseTimeout = TimeSpan.FromMilliseconds(ForcedEndBoundMs * 2) });
+        // A completion that waited for the close timeout would time out the wait below rather than pass as the forced end.
+        var completion = session.CompleteAsync(new PtyCompleteOptions { OutputReaderCloseTimeout = BeyondTheTestTimeout });
 
-        var stopwatch = Stopwatch.StartNew();
         backend.Exit(7);
 
         var result = await completion.WaitAsync(Timeout);
         await Assert.That(result.ExitCode).IsEqualTo(7);
-        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(ForcedEndBoundMs);
+        await Assert.That(session.OutputPump.IsEndOfOutputForced).IsTrue();
     }
 
     /// <summary>
@@ -274,14 +272,12 @@ public sealed class PtyOutputPumpTests
         var backend = new SilentUntilTheCloseBackend(closeSendsHeldOutput: true);
         await using var session = new PtySession(backend);
         await backend.Reading.WaitAsync(Timeout);
-        // The grace outlasts the bound below, so a close at the grace cannot pass as the quiet close.
-        var completion = session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false, OutputDrainGrace = TimeSpan.FromMilliseconds(ForcedEndBoundMs * 2) });
+        // A close that waited for the grace would time out the wait below rather than pass as the quiet close.
+        var completion = session.CompleteAsync(new PtyCompleteOptions { DecodeOutput = false, OutputDrainGrace = BeyondTheTestTimeout });
 
-        var stopwatch = Stopwatch.StartNew();
         backend.Exit(0);
 
         var result = await completion.WaitAsync(Timeout);
-        await Assert.That(stopwatch.ElapsedMilliseconds).IsLessThan(ForcedEndBoundMs);
         var hasFrame = result.Contains(SilentUntilTheCloseBackend.Frame);
         await Assert.That(hasFrame).IsTrue();
     }
@@ -816,11 +812,15 @@ public sealed class PtyOutputPumpTests
     private const int PacedQuietMs = 500;
 
     /// <summary>
-    /// Upper bound for an end that takes two default quiet intervals (about 200 ms) with no OS event. A starved runner
-    /// stretched it past the former 1.5 s bound, so it is wide: it only has to tell the forced end apart from a reader
-    /// that never ends, which hangs until <see cref="Timeout"/> or the close timeout.
+    /// A grace or close timeout that outlasts <see cref="Timeout"/>, for tests that tell the quiet close or the forced end
+    /// apart from the end such a deadline brings: an end that waited for the deadline times the test out.
     /// </summary>
-    private const int ForcedEndBoundMs = 5000;
+    /// <remarks>
+    /// Elapsed-time bounds could not tell them apart. They counted the drain's timer ticks and the test's continuation,
+    /// both on the thread pool, and an end that takes two quiet intervals (about 200 ms) took 5.0–7.7 s in three tests
+    /// in the first 10 s of the parallel suite on windows-2022. That was past a 5 s bound already widened from 1.5 s.
+    /// </remarks>
+    private static readonly TimeSpan BeyondTheTestTimeout = Timeout * 6;
 
     private static T RunUnder<T>(SynchronizationContext context, Func<T> action)
     {
