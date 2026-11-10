@@ -1924,6 +1924,10 @@ internal static partial class UnixPtyBackend
                 if (!_exited && _hangupKillDeadline == 0)
                 {
                     exitObserved = false;
+                    // Under the reap's lock and before the hang-up, which can end the child at once: a reap after this lock
+                    // then records nothing, so exit waits fail instead of reporting the hang-up's status. Recorded after
+                    // the lock, the disposal lost that race to the watcher on FreeBSD under QEMU.
+                    _exitSignal.SetDisposedBeforeExit();
                     SignalLocked(UnixInterop.SigHup);
                     _hangupKillDeadline = Environment.TickCount64 + DisposeHangupGraceMs;
                 }
@@ -1936,7 +1940,6 @@ internal static partial class UnixPtyBackend
             }
             else
             {
-                _exitSignal.SetDisposedBeforeExit();
                 // The master stays open until the watcher reaps the child or kills it after the grace. Closing it hangs
                 // the tty up, which signals the child a second time, and an interactive bash that gets that signal while
                 // it saves its history dies before it hangs up its jobs. Output ends now all the same, and the watcher
