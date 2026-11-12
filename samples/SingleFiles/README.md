@@ -240,17 +240,21 @@ function sendResize() {
 
 ### Read-only terminals
 
-To open a read-only terminal, set `ReadOnly`:
+To open a read-only terminal:
 
-```csharp
-var status = await PtyWebSocketBridge.RunAsync(
-    new PtyStartInfo { FileName = "top", Size = new PtySize(80, 24) },
-    ws.WebSocket,
-    new PtyBridgeOptions { ReadOnly = true },
-    ct);
-```
+1. Set `ReadOnly` on the bridge:
 
-and create the page's terminal with `new Terminal({ disableStdin: true })`, so that typing visibly does nothing. The bridge drops every input frame and still applies resizes and ACKs. The answers xterm.js sends to the program's queries are input too, so a program that waits for one, such as a cursor position report, waits until its own timeout. `ReadOnly` does not replace the checks below: whoever holds the socket sees everything the program prints, and closing it ends the program. The [terminal spec](../../.github/docs/specs/terminal.md#read-only-bridges) has the details.
+   ```csharp
+   var status = await PtyWebSocketBridge.RunAsync(
+       new PtyStartInfo { FileName = "top", Size = new PtySize(80, 24) },
+       ws.WebSocket,
+       new PtyBridgeOptions { ReadOnly = true },
+       ct);
+   ```
+
+2. Create the page's terminal with `new Terminal({ disableStdin: true })`, so that typing visibly does nothing.
+
+The bridge drops every input frame and still applies resizes and ACKs. The answers that xterm.js sends to the program's queries are input too. A program that waits for one, such as a cursor position report, waits until its own timeout. `ReadOnly` does not replace the checks below. Whoever holds the socket sees everything the program prints, and closing the socket ends the program. The [terminal spec](../../.github/docs/specs/terminal.md#read-only-bridges) has the details.
 
 ### Authenticate the connection
 

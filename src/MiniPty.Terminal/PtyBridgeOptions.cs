@@ -54,23 +54,23 @@ public sealed record PtyBridgeOptions
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Use it to open a read-only terminal for someone who must not type into it. The client can still
-    /// resize the terminal, acknowledge output, and close the connection, and it receives output and the <c>exit</c>
-    /// message as usual. Closing the connection still ends the child on <see cref="PtyWebSocketBridge"/> and
+    /// Use it to open a read-only terminal for someone who must not type into it. The client can still resize the
+    /// terminal, acknowledge output, and close the connection. It receives output and the <c>exit</c> message as usual.
+    /// Closing the connection still ends the child on <see cref="PtyWebSocketBridge"/> and
     /// <see cref="PtyStdioBridge"/>.
     /// </para>
     /// <para>
-    /// Input frames are read and discarded, not refused, because a terminal emulator sends some input without a
-    /// keystroke, such as focus and mouse reports. Its answers to the child's queries, such as the cursor position or
-    /// the device attributes, are input too and are dropped, so a child that waits for an answer waits until its own
-    /// timeout. The frontend should also stop taking input (xterm.js <c>disableStdin</c>), so that the user sees that
-    /// the terminal does not take keystrokes.
+    /// The bridge reads input frames and drops them. It does not refuse them, because a terminal emulator sends some
+    /// input without a keystroke, such as focus and mouse reports. The frontend's answers to the child's queries, such
+    /// as the cursor position or the device attributes, are input too. The bridge drops them, so a child that waits for
+    /// an answer waits until its own timeout. The frontend should also stop taking input (xterm.js
+    /// <c>disableStdin</c>), so that the user sees that the terminal does not take keystrokes.
     /// </para>
     /// <para>
-    /// A start with <see cref="PtyStartInfo.InheritCursor"/> is refused with <see cref="ArgumentException"/> on every
-    /// platform: on Windows, ConPTY holds the child until the frontend answers its cursor position query, and that
-    /// answer would be dropped. On <see cref="PtyWebSocketSessionManager"/>, the option applies to every session the
-    /// manager owns.
+    /// Every bridge refuses a start with <see cref="PtyStartInfo.InheritCursor"/> on every platform and throws
+    /// <see cref="ArgumentException"/>. On Windows, ConPTY holds the child until the frontend answers its cursor
+    /// position query, and the bridge would drop that answer. On <see cref="PtyWebSocketSessionManager"/>, the option
+    /// applies to every session the manager owns.
     /// </para>
     /// </remarks>
     public bool ReadOnly { get; init; }
@@ -91,7 +91,7 @@ public sealed record PtyBridgeOptions
         if (ReadOnly && startInfo.InheritCursor)
         {
             throw new ArgumentException(
-                "A read-only bridge cannot start a session that inherits the cursor: the frontend's answer to the cursor position query is input, which the bridge drops, and on Windows the child waits for that answer.",
+                "A read-only bridge cannot start a session that inherits the cursor. The bridge drops the frontend's answer to the cursor position query. On Windows, the child waits for that answer.",
                 nameof(startInfo));
         }
     }

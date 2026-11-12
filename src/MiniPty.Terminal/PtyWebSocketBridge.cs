@@ -278,8 +278,8 @@ public static class PtyWebSocketBridge
 
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
-                    // Fragments arrive in order; each one is raw input and can be written directly. A read-only
-                    // bridge has read it, which keeps control messages and the close behind it flowing, and drops it.
+                    // Fragments arrive in order. Each one is raw input and can be written directly. A read-only bridge
+                    // reads it and drops it, so the control messages and the close behind it still reach this loop.
                     if (result.Count > 0 && !_options.ReadOnly)
                         await WriteInputAsync(terminal, buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
                     continue;

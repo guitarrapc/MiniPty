@@ -151,7 +151,8 @@ public static class PtyStdioBridge
                     continue;
                 }
 
-                // Every payload is read, so the frames behind it stay aligned; a read-only bridge drops input.
+                // Read every payload, so that the frames behind it stay aligned. A read-only bridge drops the input
+                // it reads.
                 var writeInput = type == PtyStdioFrameType.Input && !_options.ReadOnly;
                 while (remaining > 0)
                 {

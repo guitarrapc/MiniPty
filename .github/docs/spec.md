@@ -72,7 +72,7 @@ MiniPty.Capture and MiniPty.Terminal use MiniPty's internals but declare MiniPty
 | Web host serving many sessions: per-session cost dashboard and bench (threads, memory, echo latency, frames per 32 KiB) | [samples/SingleFiles/WebTerminalScale.cs](../../samples/SingleFiles/WebTerminalScale.cs), [Why this engine](references/pty_crossplatform.md#why-this-engine) |
 | VS Code helper sample (length-framed stdio) | [samples/SingleFiles/VsCodeTerminalHelper.cs](../../samples/SingleFiles/VsCodeTerminalHelper.cs) |
 | Authenticated, expiring WebSocket session reconnect with bounded output replay | [Terminal](specs/terminal.md) |
-| Show a program over a bridge without taking the client's input (`PtyBridgeOptions.ReadOnly`) | [Terminal](specs/terminal.md#read-only-bridges) |
+| Open a read-only terminal over a bridge (`PtyBridgeOptions.ReadOnly`) | [Terminal](specs/terminal.md#read-only-bridges) |
 | Real VS Code `Pseudoterminal` and persistent reconnect E2E samples | [samples/VsCodeExtension](../../samples/VsCodeExtension), [samples/SingleFiles/VsCodePersistentBridge.cs](../../samples/SingleFiles/VsCodePersistentBridge.cs) |
 | Drive a session from a GUI thread (WinUI, WPF, …) without blocking it, and WinUI 3 and Avalonia host samples | [Core session](specs/core_session.md#gui-hosts), [samples/WinUiTerminal](../../samples/WinUiTerminal), [samples/AvaloniaTerminal](../../samples/AvaloniaTerminal) |
 

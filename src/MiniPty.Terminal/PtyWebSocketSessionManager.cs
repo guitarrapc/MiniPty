@@ -570,7 +570,7 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
                     return;
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
-                    // A read-only manager has read the input, which keeps the frames behind it flowing, and drops it.
+                    // A read-only manager reads the input and drops it, so the frames behind it still reach this loop.
                     if (result.Count > 0 && !_options.BridgeOptions.ReadOnly)
                         await WriteInputAsync(buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
                     continue;
