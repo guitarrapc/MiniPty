@@ -1206,9 +1206,8 @@ public sealed class PtyWebSocketBridgeTests
     internal const string KeyWaitReady = "KEY_WAIT_READY";
 
     /// <summary>
-    /// The key <see cref="ReadyThenWaitForKeyChild"/> takes. Lower case: ConPTY turns an upper-case letter into a key
-    /// event with Shift down, and <c>choice</c> did not take <c>K</c> sent that way, while it took <c>k</c> and a
-    /// win32-input-mode record of K (2026-11-13, Windows 11 26200).
+    /// The key <see cref="ReadyThenWaitForKeyChild"/> takes. Lower case avoids the Shift key event that ConPTY
+    /// generates for upper-case input, which <c>choice</c> can ignore.
     /// </summary>
     internal const string KeyWaitKey = "k";
 

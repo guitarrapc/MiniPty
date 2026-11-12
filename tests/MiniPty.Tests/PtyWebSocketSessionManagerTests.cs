@@ -263,11 +263,8 @@ public sealed class PtyWebSocketSessionManagerTests
     /// An acknowledgement of output the connection never sent ends the connection with <see cref="InvalidDataException"/>.
     /// </summary>
     /// <remarks>
-    /// The offset is one no output can reach. The test first acknowledged offset 1, counting on nothing having been sent
-    /// yet, and on Windows 11 build 26200 it timed out after 30 s on every run (2026-11-13): ConPTY writes its startup
-    /// sequences (<c>ESC[?9001h ESC[?1004h</c>, 16 bytes) as the child starts, the send loop had sent them before the
-    /// receive loop handled the acknowledgement, and offset 1 was then a valid acknowledgement. Hosted runners passed,
-    /// because there the acknowledgement happened to be handled first. The exact bound, one byte past what was sent, is
+    /// ConPTY can send startup output before the acknowledgement arrives, so a small offset can already be valid.
+    /// This test uses an unreachable offset. The exact bound is checked by
     /// <see cref="PersistentOutputBufferTests.PersistentOutputBufferRejectsAcknowledgementBeyondSentOffset"/>.
     /// </remarks>
     [Test]
