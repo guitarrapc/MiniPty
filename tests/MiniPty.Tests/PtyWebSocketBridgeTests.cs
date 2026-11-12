@@ -1220,15 +1220,16 @@ public sealed class PtyWebSocketBridgeTests
     /// <summary>
     /// Child that prints <see cref="KeyWaitReady"/>, waits three seconds for <see cref="KeyWaitKey"/>, and exits 0 after
     /// printing <see cref="KeyWaitGotKey"/> or <see cref="KeyWaitTimedOut"/>, so a test can show that input did not
-    /// arrive without ending the child itself. Unix bounds the read with the terminal's own timer (noncanonical mode,
-    /// VMIN 0 and VTIME 30 tenths of a second); Windows uses <c>choice</c>, whose errorlevel is 1 for the key and 2 for
+    /// arrive without ending the child itself. Unix uses <c>dd</c> to read one byte with the terminal's own timer
+    /// (noncanonical mode, VMIN 0 and VTIME 30 tenths of a second). The shell's <c>read</c> can keep waiting after
+    /// a zero-byte read. Windows uses <c>choice</c>, whose errorlevel is 1 for the key and 2 for
     /// the default it takes when the wait runs out. On Windows the ready marker is <c>choice</c>'s own prompt, so a test
     /// types only once <c>choice</c> runs, not in the gap between an <c>echo</c> and its start.
     /// </summary>
     internal static PtyStartInfo ReadyThenWaitForKeyChild() =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(WindowsComSpec(), ["/v:on", "/c", $"choice /c KN /t 3 /d N /m {KeyWaitReady} & echo GOT:[!errorlevel!]"])
-            : Spawn("sh", ["-c", $"stty -icanon min 0 time 30; printf '{KeyWaitReady}\\n'; IFS= read -r line; printf 'GOT:[%s]\\n' \"$line\""]);
+            : Spawn("sh", ["-c", $"stty -icanon min 0 time 30; printf '{KeyWaitReady}\\n'; key=$(dd bs=1 count=1 2>/dev/null); printf 'GOT:[%s]\\n' \"$key\""]);
 
     /// <summary>Child that emits a configurable amount of bulk output (256 KiB by default) then exits 0.</summary>
     internal static PtyStartInfo BulkOutputChild(int lineCount = 2048) =>
