@@ -238,7 +238,7 @@ jobs:
   # pinned by hash in the script.
   test-freebsd:
     name: Test FreeBSD (14.5 x64, QEMU)
-    timeout-minutes: 45
+    timeout-minutes: 5
     permissions:
       contents: read
     runs-on: ubuntu-24.04
@@ -411,7 +411,16 @@ jobs:
         run: bash scripts/run-nuget-smoke-in-container.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}" "${{ matrix.image }}"
 
   build-complete:
-    needs: [build, test-win-x86, test-musl, test-old-kernel-paths, freebsd-native, test-freebsd, nuget-smoke]
+    needs:
+      [
+        build,
+        test-win-x86,
+        test-musl,
+        test-old-kernel-paths,
+        freebsd-native,
+        test-freebsd,
+        nuget-smoke,
+      ]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
