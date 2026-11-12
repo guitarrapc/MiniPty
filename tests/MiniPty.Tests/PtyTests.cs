@@ -2323,9 +2323,13 @@ public sealed class PtyTests
             pump.IsProducerFinished || (pump.IsCloseRequested && pump.IsWaitingForFreeSpace);
     }
 
+    /// <summary>
+    /// Polls <see cref="PtySession.HasExited"/> for up to 10 s. A <c>cmd /c exit 0</c> has taken over a second to end
+    /// while the parallel suite starts its children; 1 s was too short for it in a 32-bit run of the suite.
+    /// </summary>
     private static async Task WaitUntilExited(PtySession session)
     {
-        for (var attempt = 0; attempt < 50 && !session.HasExited; attempt++)
+        for (var attempt = 0; attempt < 500 && !session.HasExited; attempt++)
             await Task.Delay(20);
     }
 

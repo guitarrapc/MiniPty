@@ -214,6 +214,18 @@ The browser samples print an address whose fragment carries a 256-bit per-run to
 
 Embedders use `PtyStdioBridge` for helper-process framing or `PtyTerminal` directly for other transports such as SignalR.
 
+### Shells in a PTY host of their own
+
+A web server that is redeployed while shells run, or whose own secrets the shells' users must not reach, keeps the shells out of its process. A PTY host process owns them with `PtyWebSocketSessionManager`, and the web server only signs users in and relays each page's WebSocket to it ([WebTerminalPtyHost.cs](../../../samples/SingleFiles/WebTerminalPtyHost.cs)). VS Code runs node-pty in a pty host process for the same reasons. `PtyStdioBridge` does not fit here: its session ends with its stream, so a web server restart would end the shell.
+
+| Concern | Rule |
+|---|---|
+| Restart | The web server keeps no session state. The page holds its session's id, token, and the offset of its next output byte, and reconnects with them; the PTY host replays from that offset. A web server restart loses nothing while it is back within `DetachedSessionTimeout`. A PTY host restart ends every shell. |
+| Privilege | The PTY host runs as the shells' account or in their container, and the shells inherit its environment. The web server, which parses untrusted HTTP, runs as another account. The two meet at a Unix domain socket, not a port, in a directory only they can enter, because whoever can open the socket can start shells. |
+| Relay | Frames pass unchanged, one fragment at a time, close codes included. The web server must not acknowledge output itself: only the page's acknowledgements make the replay start exactly after what the page has, and they keep a slow page's backpressure on the shell. |
+| Reconnect | A page that reconnects at once can reach the PTY host while it still holds the old web server's connection, which is refused as already connected; the page retries that as a dropped connection. Invalid credentials and an offset the replay buffer no longer holds mean the session is gone for that page. |
+| Reload | A reloaded page starts a new shell. The replay holds the bytes a page has not acknowledged, not a screen (N1), so a new page could not show the old shell's screen. The old shell ends after `DetachedSessionTimeout`. |
+
 ## Failure Behavior (`PtyTerminal`)
 
 | Condition | Behavior |

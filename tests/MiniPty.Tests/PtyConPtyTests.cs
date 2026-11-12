@@ -62,8 +62,17 @@ public sealed class PtyConPtyTests
         await Assert.That(Path.IsPathFullyQualified(library.Path)).IsTrue();
         await Assert.That(library.Path.EndsWith("conpty.dll", StringComparison.OrdinalIgnoreCase)).IsTrue();
         await Assert.That(library.FileVersion.Major).IsGreaterThanOrEqualTo(1);
-        await Assert.That(library.HasConsoleHost).IsTrue().Because($"OpenConsole.exe is staged beside {library.Path}");
-        await Assert.That(library.ConsoleHostPath).IsEqualTo(Path.Combine(Path.GetDirectoryName(library.Path)!, OutOfBandHost));
+        await Assert.That(library.HasConsoleHost).IsTrue().Because($"OpenConsole.exe is staged for {library.Path}");
+
+        // A 64-bit DLL has the host of its own architecture beside it. The 32-bit one has none there: a 32-bit host on
+        // 64-bit Windows starts no console program, so it takes the operating system's host from a subdirectory
+        // (buildTransitive\MiniPty.ConPty.targets).
+        var directory = Path.GetDirectoryName(library.Path)!;
+        var expectedHost = Environment.Is64BitProcess
+            ? Path.Combine(directory, OutOfBandHost)
+            : Path.Combine(directory, OperatingSystemArchitecture(), OutOfBandHost);
+        await Assert.That(library.ConsoleHostPath).IsEqualTo(expectedHost);
+        await Assert.That(File.Exists(Path.Combine(directory, OutOfBandHost))).IsEqualTo(Environment.Is64BitProcess);
 
         // One instance per path, whatever the casing.
         await Assert.That(ReferenceEquals(ConPtyLibrary.Load(library.Path), library)).IsTrue();
@@ -144,6 +153,14 @@ public sealed class PtyConPtyTests
         await Assert.That(library.HasConsoleHost).IsFalse();
         await Assert.That(library.ConsoleHostPath).IsNull();
         await Assert.That(library.FileVersion).IsEqualTo(staged.FileVersion);
+
+        // A 32-bit process on 64-bit Windows has no conhost.exe of its own architecture to fall back to (SysWOW64 holds
+        // none), and there the start fails instead.
+        if (!Environment.Is64BitProcess && Environment.Is64BitOperatingSystem)
+        {
+            Assert.Throws<Win32Exception>(() => Pty.Start(Shell() with { ConPty = library }).Dispose());
+            return;
+        }
 
         await AssertSessionRunsUnderAsync(Shell() with { ConPty = library }, InBoxHost);
     }
@@ -487,6 +504,15 @@ public sealed class PtyConPtyTests
             "conpty.dll is not staged in the test output; the Microsoft.Windows.Console.ConPTY package reference places it under runtimes\\win-<arch>\\native.");
 
     private static PtyStartInfo Shell() => new() { FileName = ComSpec(), Arguments = ["/k"], Size = new(120, 30) };
+
+    /// <summary>The name of the subdirectory <c>conpty.dll</c> looks in after its own directory.</summary>
+    private static string OperatingSystemArchitecture() => RuntimeInformation.OSArchitecture switch
+    {
+        Architecture.X64 => "x64",
+        Architecture.Arm64 => "arm64",
+        Architecture.X86 => "x86",
+        var other => throw new PlatformNotSupportedException($"No ConPTY host for {other}."),
+    };
 
     private static PtyStartInfo WindowsCommand(string command) => new() { FileName = ComSpec(), Arguments = ["/c", command], Size = new(120, 30) };
 

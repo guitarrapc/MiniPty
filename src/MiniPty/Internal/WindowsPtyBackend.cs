@@ -1310,8 +1310,10 @@ internal static class WindowsPtyBackend
             {
                 // The watcher owns a duplicate of the process handle, so the handle below can close at once;
                 // the killed child drains the watcher's slot, and OnProcessExited ignores a disposed session.
-                KillCore();
+                // Recorded before the kill ends the child: a HasExited or ExitCode read on another thread could otherwise
+                // record the exit first, and the exit waits would get its status instead of failing.
                 _exitSignal.SetDisposedBeforeExit();
+                KillCore();
             }
 
             // Queued writes fail now, on the disposing thread, without waiting for a write in flight.
