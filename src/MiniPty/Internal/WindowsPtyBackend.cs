@@ -281,7 +281,14 @@ internal static class WindowsPtyBackend
                 creationFlags |= CreateUnicodeEnvironment;
             }
 
-            if (!WindowsInterop.CreateProcessW(
+            // The child inherits whether the host ignores Ctrl+C; it is created from a host that processes it, so a Ctrl+C
+            // written to the session interrupts it (WindowsHostCtrlC).
+            bool created;
+            var createError = 0;
+            WindowsHostCtrlC.EnterStart();
+            try
+            {
+                created = WindowsInterop.CreateProcessW(
                     applicationName,
                     commandLine,
                     IntPtr.Zero,
@@ -291,10 +298,17 @@ internal static class WindowsPtyBackend
                     environmentBlock,
                     string.IsNullOrWhiteSpace(startInfo.WorkingDirectory) ? null : startInfo.WorkingDirectory,
                     ref startupInfo,
-                    out processInfo))
-            {
-                throw new Win32Exception(Marshal.GetLastPInvokeError(), "CreateProcess failed");
+                    out processInfo);
+                if (!created)
+                    createError = Marshal.GetLastPInvokeError();
             }
+            finally
+            {
+                WindowsHostCtrlC.ExitStart();
+            }
+
+            if (!created)
+                throw new Win32Exception(createError, "CreateProcess failed");
 
             // Nothing uses the primary thread's handle. The process handle moves into a SafeHandle, which exit queries
             // and kills pin while they use it.
