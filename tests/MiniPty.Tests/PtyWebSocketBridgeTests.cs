@@ -163,6 +163,60 @@ public sealed class PtyWebSocketBridgeTests
         await Assert.That(client.BinaryText).Contains("GOT:ROUND_TRIP");
     }
 
+    /// <summary>
+    /// A read-only bridge drops what the client types and goes on handling the frames behind it: the child gets no key
+    /// and ends on its own once its wait runs out, a resize sent after the dropped input is accepted, and the exit
+    /// message follows the output. With a writable bridge the same child gets the key, which shows that its wait is long
+    /// enough to see one.
+    /// </summary>
+    [Test]
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task AReadOnlyBridgeDropsInputAndKeepsTheSession(bool readOnly)
+    {
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var bridgeTask = PtyWebSocketBridge.RunAsync(
+            ReadyThenWaitForKeyChild(),
+            serverSocket,
+            new PtyBridgeOptions { ReadOnly = readOnly },
+            cts.Token);
+        var client = new BridgeTestClient(clientSocket);
+        var clientTask = client.RunToCloseAsync(ackEverything: true, cts.Token);
+
+        await client.WaitForBinaryTextAsync(KeyWaitReady, cts.Token);
+        await client.SendBinaryAsync(KeyWaitKey + Enter, cts.Token);
+        await client.SendTextAsync("{\"type\":\"resize\",\"cols\":100,\"rows\":40}", cts.Token);
+
+        await clientTask;
+        var status = await bridgeTask.WaitAsync(cts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(0);
+        await Assert.That(client.ExitMessage).IsNotNull();
+        await Assert.That(client.BinaryText).Contains(readOnly ? KeyWaitTimedOut : KeyWaitGotKey);
+        await Assert.That(client.BinaryText).DoesNotContain(readOnly ? KeyWaitGotKey : KeyWaitTimedOut);
+    }
+
+    /// <summary>
+    /// A read-only bridge refuses a start that inherits the cursor before it spawns anything: on Windows ConPTY would hold
+    /// the child until the frontend answered its cursor position query, and the bridge drops that answer. The refusal
+    /// holds on every platform, so a host finds the mistake wherever it runs first.
+    /// </summary>
+    [Test]
+    public async Task AReadOnlyBridgeRefusesAStartThatInheritsTheCursor()
+    {
+        var (serverSocket, clientSocket) = CreateSocketPair();
+        using (serverSocket)
+        using (clientSocket)
+        {
+            var startInfo = EchoMarkerChild("NEVER_STARTED") with { InheritCursor = true };
+
+            Assert.Throws<ArgumentException>(() => { _ = PtyWebSocketBridge.RunAsync(startInfo, serverSocket, new PtyBridgeOptions { ReadOnly = true }); });
+            await Assert.That(serverSocket.State).IsEqualTo(WebSocketState.Open);
+        }
+    }
+
     [Test]
     public async Task BridgeResizeControlMessageResizesTerminal()
     {
@@ -1147,6 +1201,35 @@ public sealed class PtyWebSocketBridgeTests
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Spawn(WindowsComSpec(), ["/c", "set /p DUMMY="])
             : Spawn("sh", ["-c", "IFS= read -r _"]);
+
+    /// <summary>What <see cref="ReadyThenWaitForKeyChild"/> prints before it starts waiting for a key.</summary>
+    internal const string KeyWaitReady = "KEY_WAIT_READY";
+
+    /// <summary>
+    /// The key <see cref="ReadyThenWaitForKeyChild"/> takes. Lower case avoids the Shift key event that ConPTY
+    /// generates for upper-case input, which <c>choice</c> can ignore.
+    /// </summary>
+    internal const string KeyWaitKey = "k";
+
+    /// <summary>What <see cref="ReadyThenWaitForKeyChild"/> prints when it got <see cref="KeyWaitKey"/>.</summary>
+    internal static string KeyWaitGotKey => OperatingSystem.IsWindows() ? "GOT:[1]" : "GOT:[k]";
+
+    /// <summary>What <see cref="ReadyThenWaitForKeyChild"/> prints when its wait ran out without a key.</summary>
+    internal static string KeyWaitTimedOut => OperatingSystem.IsWindows() ? "GOT:[2]" : "GOT:[]";
+
+    /// <summary>
+    /// Child that prints <see cref="KeyWaitReady"/>, waits three seconds for <see cref="KeyWaitKey"/>, and exits 0 after
+    /// printing <see cref="KeyWaitGotKey"/> or <see cref="KeyWaitTimedOut"/>, so a test can show that input did not
+    /// arrive without ending the child itself. Unix uses <c>dd</c> to read one byte with the terminal's own timer
+    /// (noncanonical mode, VMIN 0 and VTIME 30 tenths of a second). The shell's <c>read</c> can keep waiting after
+    /// a zero-byte read. Windows uses <c>choice</c>, whose errorlevel is 1 for the key and 2 for
+    /// the default it takes when the wait runs out. On Windows the ready marker is <c>choice</c>'s own prompt, so a test
+    /// types only once <c>choice</c> runs, not in the gap between an <c>echo</c> and its start.
+    /// </summary>
+    internal static PtyStartInfo ReadyThenWaitForKeyChild() =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? Spawn(WindowsComSpec(), ["/v:on", "/c", $"choice /c KN /t 3 /d N /m {KeyWaitReady} & echo GOT:[!errorlevel!]"])
+            : Spawn("sh", ["-c", $"stty -icanon min 0 time 30; printf '{KeyWaitReady}\\n'; key=$(dd bs=1 count=1 2>/dev/null); printf 'GOT:[%s]\\n' \"$key\""]);
 
     /// <summary>Child that emits a configurable amount of bulk output (256 KiB by default) then exits 0.</summary>
     internal static PtyStartInfo BulkOutputChild(int lineCount = 2048) =>

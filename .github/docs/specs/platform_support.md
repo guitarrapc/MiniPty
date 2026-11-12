@@ -40,6 +40,8 @@ CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows. On Windows that incl
 - An AlmaLinux 8 container: glibc 2.28, the oldest glibc .NET 10 supports.
 - Alpine 3.21 containers, for the musl files.
 
+The container smoke makes up to three attempts to download the SDK installer before failing setup. AlmaLinux 8 ships curl 7.61.1, which has no `--retry-all-errors` option, so the script retries failed transfers explicitly. A connection reset during this download is a setup failure before either package smoke runs.
+
 | Check | Why |
 |---|---|
 | TTY detection (`redirected=False`, `isatty`) | Confirms real PTY semantics. |

@@ -25,6 +25,10 @@ public static class PtyStdioBridge
     /// <param name="options">Bridge flow-control and framing limits, or null for defaults.</param>
     /// <param name="cancellationToken">Token that stops the bridge and child.</param>
     /// <returns>The full MiniPty exit status; the emitted exit control uses node-pty exit shape.</returns>
+    /// <exception cref="ArgumentException">
+    /// <see cref="PtyBridgeOptions.ReadOnly"/> is set and <paramref name="startInfo"/> inherits the cursor
+    /// (<see cref="PtyStartInfo.InheritCursor"/>).
+    /// </exception>
     public static Task<PtyExitStatus> RunAsync(
         PtyStartInfo startInfo,
         Stream input,
@@ -42,6 +46,7 @@ public static class PtyStdioBridge
 
         var effectiveOptions = options ?? new PtyBridgeOptions();
         effectiveOptions.Validate();
+        effectiveOptions.ThrowIfCannotServe(startInfo);
         return new StdioSession(input, output, effectiveOptions).RunAsync(startInfo, cancellationToken);
     }
 
@@ -146,11 +151,14 @@ public static class PtyStdioBridge
                     continue;
                 }
 
+                // Read every payload, so that the frames behind it stay aligned. A read-only bridge drops the input
+                // it reads.
+                var writeInput = type == PtyStdioFrameType.Input && !_options.ReadOnly;
                 while (remaining > 0)
                 {
                     var count = (int)Math.Min(remaining, (uint)buffer.Length);
                     await ReadExactlyAsync(buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
-                    if (type == PtyStdioFrameType.Input)
+                    if (writeInput)
                         await WriteInputAsync(terminal, buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
                     remaining -= (uint)count;
                 }

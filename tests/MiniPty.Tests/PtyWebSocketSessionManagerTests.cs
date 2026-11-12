@@ -57,6 +57,59 @@ public sealed class PtyWebSocketSessionManagerTests
         }
     }
 
+    /// <summary>
+    /// A read-only manager drops what the client types, as the one-shot bridge does: the child gets no key and ends on its
+    /// own once its wait runs out, and the client still receives the output and the exit. With a writable manager the
+    /// same child gets the key.
+    /// </summary>
+    [Test]
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task AReadOnlyManagerDropsInputAndKeepsTheSession(bool readOnly)
+    {
+        var options = TestOptions();
+        await using var manager = new PtyWebSocketSessionManager(
+            options with { BridgeOptions = options.BridgeOptions with { ReadOnly = readOnly } });
+        var credentials = manager.CreateSession(PtyWebSocketBridgeTests.ReadyThenWaitForKeyChild());
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var (server, socket) = PtyWebSocketBridgeTests.CreateSocketPair();
+        using (server)
+        using (socket)
+        {
+            var connection = manager.ConnectAsync(
+                credentials.SessionId,
+                credentials.AuthenticationToken,
+                acknowledgedOffset: 0,
+                server,
+                timeout.Token);
+            var client = new PersistentClient(socket);
+            await client.ReceiveUntilAsync(PtyWebSocketBridgeTests.KeyWaitReady, timeout.Token);
+            await client.SendInputAsync(PtyWebSocketBridgeTests.KeyWaitKey + (OperatingSystem.IsWindows() ? "\r" : "\n"), timeout.Token);
+            await client.ReceiveToCloseAsync(timeout.Token);
+            var status = await connection.WaitAsync(timeout.Token);
+
+            await Assert.That(status).IsNotNull();
+            await Assert.That(status!.Value.ExitCode).IsEqualTo(0);
+            var expected = readOnly ? PtyWebSocketBridgeTests.KeyWaitTimedOut : PtyWebSocketBridgeTests.KeyWaitGotKey;
+            var unexpected = readOnly ? PtyWebSocketBridgeTests.KeyWaitGotKey : PtyWebSocketBridgeTests.KeyWaitTimedOut;
+            await Assert.That(client.Output).Contains(expected);
+            await Assert.That(client.Output).DoesNotContain(unexpected);
+        }
+    }
+
+    /// <summary>A read-only manager refuses a session that inherits the cursor and starts nothing.</summary>
+    [Test]
+    public async Task AReadOnlyManagerRefusesASessionThatInheritsTheCursor()
+    {
+        var options = TestOptions();
+        await using var manager = new PtyWebSocketSessionManager(
+            options with { BridgeOptions = options.BridgeOptions with { ReadOnly = true } });
+
+        Assert.Throws<ArgumentException>(() => { _ = manager.CreateSession(MarkerChild("NEVER_STARTED") with { InheritCursor = true }); });
+        await Assert.That(manager.Count).IsEqualTo(0);
+    }
+
     [Test]
     public async Task PersistentSessionBuffersOutputBeforeFirstConnection()
     {
@@ -206,6 +259,14 @@ public sealed class PtyWebSocketSessionManagerTests
         await manager.TerminateAsync(credentials.SessionId, credentials.AuthenticationToken);
     }
 
+    /// <summary>
+    /// An acknowledgement of output the connection never sent ends the connection with <see cref="InvalidDataException"/>.
+    /// </summary>
+    /// <remarks>
+    /// ConPTY can send startup output before the acknowledgement arrives, so a small offset can already be valid.
+    /// This test uses an unreachable offset. The exact bound is checked by
+    /// <see cref="PersistentOutputBufferTests.PersistentOutputBufferRejectsAcknowledgementBeyondSentOffset"/>.
+    /// </remarks>
     [Test]
     public async Task PersistentSessionRejectsAcknowledgementBeyondSentOutput()
     {
@@ -223,7 +284,7 @@ public sealed class PtyWebSocketSessionManagerTests
                 server,
                 timeout.Token);
             await socket.SendAsync(
-                "{\"type\":\"ack\",\"offset\":1}"u8.ToArray(),
+                Encoding.UTF8.GetBytes($"{{\"type\":\"ack\",\"offset\":{long.MaxValue}}}"),
                 WebSocketMessageType.Text,
                 endOfMessage: true,
                 timeout.Token);

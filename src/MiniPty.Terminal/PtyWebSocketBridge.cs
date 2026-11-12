@@ -13,7 +13,7 @@ namespace MiniPty.Terminal;
 /// <para>Protocol:</para>
 /// <list type="bullet">
 /// <item><description>server → client binary: raw PTY output bytes.</description></item>
-/// <item><description>client → server binary: raw input bytes, written to the PTY verbatim.</description></item>
+/// <item><description>client → server binary: raw input bytes, written to the PTY verbatim, or dropped when <see cref="PtyBridgeOptions.ReadOnly"/> is set.</description></item>
 /// <item><description>client → server text: <c>{"type":"resize","cols":120,"rows":30}</c> or <c>{"type":"ack","bytes":131072}</c>.</description></item>
 /// <item><description>server → client text: <c>{"type":"exit","exitCode":0,"signal":15}</c>, sent after the final output frame.</description></item>
 /// </list>
@@ -57,6 +57,10 @@ public static class PtyWebSocketBridge
     /// further frames while it waits to write client input to a child that is not reading its input. So pass a token
     /// that is also canceled when the connection ends, such as ASP.NET Core's <c>HttpContext.RequestAborted</c>.
     /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <see cref="PtyBridgeOptions.ReadOnly"/> is set and <paramref name="startInfo"/> inherits the cursor
+    /// (<see cref="PtyStartInfo.InheritCursor"/>).
+    /// </exception>
     /// <exception cref="InvalidDataException">The client sent a malformed or oversize control message.</exception>
     /// <exception cref="OperationCanceledException">
     /// The bridge was canceled, or the socket was aborted while the bridge was reading from it.
@@ -75,6 +79,7 @@ public static class PtyWebSocketBridge
         ArgumentNullException.ThrowIfNull(webSocket);
         var effectiveOptions = options ?? new PtyBridgeOptions();
         effectiveOptions.Validate();
+        effectiveOptions.ThrowIfCannotServe(startInfo);
 
         return new BridgeSession(webSocket, effectiveOptions).RunAsync(startInfo, cancellationToken);
     }
@@ -273,8 +278,9 @@ public static class PtyWebSocketBridge
 
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
-                    // Fragments arrive in order; each one is raw input and can be written directly.
-                    if (result.Count > 0)
+                    // Fragments arrive in order. Each one is raw input and can be written directly. A read-only bridge
+                    // reads it and drops it, so the control messages and the close behind it still reach this loop.
+                    if (result.Count > 0 && !_options.ReadOnly)
                         await WriteInputAsync(terminal, buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
                     continue;
                 }

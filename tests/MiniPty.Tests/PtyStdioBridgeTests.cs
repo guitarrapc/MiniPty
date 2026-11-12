@@ -46,6 +46,49 @@ public sealed class PtyStdioBridgeTests
     }
 
     /// <summary>
+    /// Input is sent after the child's ready marker. The writable case proves that the child can receive it before
+    /// its wait expires. The control frame after the input detects a payload left unread.
+    /// </summary>
+    [Test]
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task AReadOnlyStdioBridgeDropsInputAndStaysInFrame(bool readOnly)
+    {
+        var key = Encoding.UTF8.GetBytes(PtyWebSocketBridgeTests.KeyWaitKey + (OperatingSystem.IsWindows() ? "\r" : "\n"));
+        var resize = Encoding.UTF8.GetBytes("{\"type\":\"resize\",\"cols\":100,\"rows\":40}");
+        await using var output = new ReadyOutputStream();
+        await using var input = new CancelableInputStream([
+            .. CreateFrame(PtyStdioFrameType.Input, key),
+            .. CreateFrame(PtyStdioFrameType.Control, resize),
+        ], output.Ready);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var status = await PtyStdioBridge.RunAsync(
+            PtyWebSocketBridgeTests.ReadyThenWaitForKeyChild(),
+            input,
+            output,
+            new PtyBridgeOptions { ReadOnly = readOnly },
+            cts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(0);
+        var text = Encoding.UTF8.GetString(JoinPayloads(ParseFrames(output.ToArray()), PtyStdioFrameType.Output));
+        await Assert.That(text).Contains(readOnly ? PtyWebSocketBridgeTests.KeyWaitTimedOut : PtyWebSocketBridgeTests.KeyWaitGotKey);
+        await Assert.That(text).DoesNotContain(readOnly ? PtyWebSocketBridgeTests.KeyWaitGotKey : PtyWebSocketBridgeTests.KeyWaitTimedOut);
+    }
+
+    /// <summary>A read-only stdio bridge refuses a start that inherits the cursor, as the WebSocket bridge does.</summary>
+    [Test]
+    public async Task AReadOnlyStdioBridgeRefusesAStartThatInheritsTheCursor()
+    {
+        await using var input = new CancelableInputStream([]);
+        await using var output = new MemoryStream();
+        var startInfo = EchoMarkerChild("NEVER_STARTED") with { InheritCursor = true };
+
+        Assert.Throws<ArgumentException>(() => { _ = PtyStdioBridge.RunAsync(startInfo, input, output, new PtyBridgeOptions { ReadOnly = true }); });
+        await Assert.That(output.Length).IsEqualTo(0);
+    }
+
+    /// <summary>
     /// A flood goes out in large output frames, as through the WebSocket bridge: the bridge joins reads that arrive in a
     /// burst. 256 KiB stays below the high watermark, so the flood needs no acknowledgement to go through. The test weighs
     /// frames by their bytes, runs on Unix only and alone, and is skipped on a host too slow to flood, for the reasons the
@@ -359,7 +402,39 @@ public sealed class PtyStdioBridgeTests
         }
     }
 
-    private sealed class CancelableInputStream(byte[] prefix) : Stream
+    /// <summary>Releases input only after complete output frames contain the child's ready marker.</summary>
+    private sealed class ReadyOutputStream : MemoryStream
+    {
+        private static readonly byte[] ReadyMarker = Encoding.UTF8.GetBytes(PtyWebSocketBridgeTests.KeyWaitReady);
+        private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly List<byte> _payload = [];
+        private int _nextFrame;
+
+        public Task Ready => _ready.Task;
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            base.Write(buffer.Span);
+            var written = GetBuffer().AsSpan(0, checked((int)Length));
+            while (written.Length - _nextFrame >= 5)
+            {
+                var length = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(written.Slice(_nextFrame + 1, 4)));
+                if (written.Length - _nextFrame - 5 < length)
+                    break;
+
+                if ((PtyStdioFrameType)written[_nextFrame] == PtyStdioFrameType.Output)
+                    _payload.AddRange(written.Slice(_nextFrame + 5, length));
+                _nextFrame += 5 + length;
+            }
+
+            if (CollectionsMarshal.AsSpan(_payload).IndexOf(ReadyMarker) >= 0)
+                _ready.TrySetResult();
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class CancelableInputStream(byte[] prefix, Task? ready = null) : Stream
     {
         private int _offset;
 
@@ -376,6 +451,8 @@ public sealed class PtyStdioBridgeTests
 
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
+            if (ready is not null)
+                await ready.WaitAsync(cancellationToken);
             if (_offset < prefix.Length)
             {
                 var count = Math.Min(buffer.Length, prefix.Length - _offset);
