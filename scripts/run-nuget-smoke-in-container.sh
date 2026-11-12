@@ -46,7 +46,18 @@ cp "$feed_dir"/*.nupkg "$stage/feed/"
 cid="$(docker create "$image" sh -c "
   set -e
   $setup
-  curl -sSfL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+  # AlmaLinux 8's curl predates --retry-all-errors, so retry connection resets explicitly.
+  for attempt in 1 2 3; do
+    if curl -sSfL --connect-timeout 30 --max-time 120 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh; then
+      break
+    fi
+    if [ \"\$attempt\" -eq 3 ]; then
+      echo 'Failed to download dotnet-install.sh after 3 attempts.' >&2
+      exit 1
+    fi
+    echo \"Retrying dotnet-install.sh download after attempt \$attempt.\" >&2
+    sleep 2
+  done
   bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/share/dotnet
   export PATH=/usr/share/dotnet:\$PATH DOTNET_ROOT=/usr/share/dotnet DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
   cd /src
