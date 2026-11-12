@@ -149,11 +149,17 @@ internal static class FloodProbe
             $"{after.Gen0 - before.Gen0}/{after.Gen1 - before.Gen1}/{after.Gen2 - before.Gen2} | {after.PeakWorkingSet / 1048576.0:F0} | {heapMax / 1048576.0:F1} | " +
             $"{before.Threads}->{after.Threads} | {before.Handles}->{after.Handles} |"));
         IoThread.Report(threadsBefore, threadsAfter, Stopwatch.GetElapsedTime(before.Timestamp, after.Timestamp).TotalSeconds);
-        if (expected is { } want && flood.Bytes != want)
+        // macOS writes CR CR LF for some newlines once the reader falls behind, at most one per KiB of its 1 KiB queue
+        // (platform_support.md), so there a read may exceed the expected count by that much; never fall short of it.
+        var extraAllowed = OperatingSystem.IsMacOS() && expected is { } bound ? bound / 1024 : 0;
+        if (expected is { } want && (flood.Bytes < want || flood.Bytes - want > extraAllowed))
         {
-            System.Console.Error.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Read {flood.Bytes} bytes, expected {want}."));
+            System.Console.Error.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Read {flood.Bytes} bytes, expected {want}{(extraAllowed > 0 ? $" to {want + extraAllowed}" : "")}."));
             return 1;
         }
+
+        if (expected is { } read && flood.Bytes > read)
+            System.Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Read {flood.Bytes - read} bytes more than written: CR CR LF from the macOS terminal."));
 
         return 0;
     }
