@@ -235,10 +235,17 @@ Start something that keeps printing (`top`, or `ping -t localhost` on Windows), 
 - **The PTY host owns the shells.** It keeps a `PtyWebSocketSessionManager` behind `POST /sessions` and `GET /sessions/{id}/connect?offset=N`, as [VsCodePersistentBridge.cs](VsCodePersistentBridge.cs) does. The shells run as its account, with its environment, not the web server's. Restarting it ends them, so keep it small.
 - **The web server keeps no state.** The page holds its session's id, token, and the offset of its next output byte, and reconnects with them after a restart; the PTY host replays what the page has not received. The web server needs no MiniPty package: any server that can relay a WebSocket will do.
 - **Relay frames unchanged, and let the page acknowledge.** The web server passes each fragment on as it arrives, close codes included, and never ACKs output itself. Only the page's ACKs make the replay start exactly after what the page has drawn, and they let a slow page hold the shell back, as with a direct connection.
-- **The socket's directory is the access check.** The PTY host listens on a Unix domain socket, never on a port, in a directory only its owner can enter (`$XDG_RUNTIME_DIR` or the temporary directory, or `--state-dir`): whoever can open the socket can start shells. To run the web server under another account, give that account, and no one else, access to the directory and the socket.
+- **The socket's directory is the access check.** The PTY host listens on a Unix domain socket, never on a port, in a directory only its owner can enter (`$XDG_RUNTIME_DIR` or the temporary directory, or `--state-dir`): whoever can open the socket can start shells.
+- **Two accounts share the directory through a group, and only when told to.** To run the web server under another account than the shells, create the directory once: the PTY host's account owns it, a group the web server's account is in shares it, and the mode is 2750. Both roles then take it with `--group-access`. That option accepts a directory its group may enter but not write to, and makes the socket 0660. The setgid bit gives the socket the directory's group on Linux; macOS and FreeBSD do that anyway. Without the option, a directory open to anyone but its owner is refused.
+
+  ```bash
+  sudo install -d -m 2750 -o shells -g webterm /run/minipty-webterminal   # webterm: a group the web server's account is in
+  sudo -u shells ./WebTerminalPtyHost pty-host --state-dir /run/minipty-webterminal --group-access
+  sudo -u web ./WebTerminalPtyHost web --state-dir /run/minipty-webterminal --group-access
+  ```
 - **Retry until the session is gone.** The page retries a dropped connection every second, including a refusal while the PTY host still holds the old web server's connection (close code 1013). Invalid credentials (1008) or an offset the replay buffer no longer holds (1007) mean the session is gone.
 - **A reload starts a new shell.** The page keeps its session in memory, because a reloaded page could not show the old shell's screen: the PTY host replays the bytes the page has not acknowledged, not a screen. The old shell ends after `DetachedSessionTimeout` (5 minutes).
-- **The access token outlives the web server.** The web server keeps it in the state directory, so a restarted server accepts the page it served before. A real deployment signs users in with cookies or tokens that outlive its process the same way, and checks `Origin` and `Host` as [WebTerminal.cs](WebTerminal.cs) does.
+- **The access token outlives the web server.** The web server keeps it in its own account's state directory (the default one, never a shared `--state-dir`), so a restarted server accepts the page it served before. A real deployment signs users in with cookies or tokens that outlive its process the same way, and checks `Origin` and `Host` as [WebTerminal.cs](WebTerminal.cs) does.
 
 ## VS Code terminal backend
 

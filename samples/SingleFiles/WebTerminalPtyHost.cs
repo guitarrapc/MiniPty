@@ -42,14 +42,17 @@ try
         return await Smoke.RunAsync();
 
     var role = args.Length > 0 ? args[0] : null;
-    var stateDirectory = StateDirectory.Resolve(Arguments.Get(args, "--state-dir"));
+    var groupAccess = args.Contains("--group-access");
+    var stateDirectory = StateDirectory.Resolve(Arguments.Get(args, "--state-dir"), groupAccess);
     switch (role)
     {
         case "pty-host":
-            return await PtyHost.RunAsync(stateDirectory, exitOnStdinEnd: args.Contains("--exit-on-stdin-end"));
+            return await PtyHost.RunAsync(stateDirectory, groupAccess, exitOnStdinEnd: args.Contains("--exit-on-stdin-end"));
         case "web":
             var port = int.TryParse(Arguments.Get(args, "--port"), out var value) ? value : 5173;
-            await using (var web = await WebServer.StartAsync(stateDirectory, port, WebAccess.LoadOrCreateToken(stateDirectory)))
+            // The token is the web server's own secret, so it stays in this account's directory, never in a shared one.
+            var token = WebAccess.LoadOrCreateToken(StateDirectory.Resolve(null, groupAccess: false));
+            await using (var web = await WebServer.StartAsync(stateDirectory, port, token))
             {
                 // The address carries the token, so it is printed only to this console, for the user who started the server.
                 Console.Error.WriteLine($"Web server listening on http://localhost:{web.Port}/#token={web.Token} (Ctrl+C to stop; the shells keep running)");
@@ -57,7 +60,7 @@ try
             }
             return 0;
         default:
-            Console.Error.WriteLine("usage: WebTerminalPtyHost (pty-host | web [--port N]) [--state-dir DIR] | --smoke");
+            Console.Error.WriteLine("usage: WebTerminalPtyHost (pty-host | web [--port N]) [--state-dir DIR [--group-access]] | --smoke");
             return 2;
     }
 }
@@ -89,7 +92,7 @@ static class PtyHost
     /// <summary>Asks the client to connect again later: the session still has the connection of a client that is going away.</summary>
     public const WebSocketCloseStatus TryAgainLater = (WebSocketCloseStatus)1013;
 
-    public static async Task<int> RunAsync(string stateDirectory, bool exitOnStdinEnd)
+    public static async Task<int> RunAsync(string stateDirectory, bool groupAccess, bool exitOnStdinEnd)
     {
         if (!Pty.IsSupported)
         {
@@ -125,9 +128,15 @@ static class PtyHost
         app.Map("/sessions/{id}/connect", context => ConnectAsync(context, manager, stopping));
         await app.StartAsync();
 
-        // The directory is already the user's alone; the socket is too, for a deployment that points --state-dir elsewhere.
+        // The socket gets the directory's access: its owner only, or with --group-access also the directory's group, which
+        // is where the web server's account is in a deployment with two accounts. Connecting needs write access.
         if (!OperatingSystem.IsWindows())
-            File.SetUnixFileMode(socketPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        {
+            var mode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            if (groupAccess)
+                mode |= UnixFileMode.GroupRead | UnixFileMode.GroupWrite;
+            File.SetUnixFileMode(socketPath, mode);
+        }
 
         if (exitOnStdinEnd)
             _ = StopAtEndOfInputAsync(app.Lifetime);
@@ -423,13 +432,16 @@ static class Relay
 }
 
 /// <summary>
-/// The directory that holds the PTY host's socket and the web server's access token. Only its owner may enter it, because
-/// whoever can open the socket can start shells as the PTY host's user.
+/// The directory that holds the PTY host's socket. Whoever can open the socket can start shells as the PTY host's user, so
+/// by default only the directory's owner may enter it. The user's own directory, the default, also holds the web server's
+/// access token.
 /// </summary>
 /// <remarks>
 /// The default is per user: <c>$XDG_RUNTIME_DIR</c> on Linux when set, otherwise the temporary directory. To run the two
-/// roles under two accounts, point both at a directory the PTY host's account owns and the web server's account may
-/// enter (a shared group, mode 0750, with the socket 0660), and keep everyone else out.
+/// roles under two accounts, an administrator creates a directory that the PTY host's account owns, in a group that the
+/// web server's account is in, with mode 2750: the group may enter but not replace the socket, and the setgid bit gives
+/// the socket the directory's group on Linux. Both roles then take <c>--state-dir</c> with <c>--group-access</c>, and the
+/// PTY host makes its socket 0660. The access token stays in the web server's own directory.
 /// </remarks>
 static class StateDirectory
 {
@@ -437,8 +449,14 @@ static class StateDirectory
         UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
         | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
 
-    public static string Resolve(string? path)
+    /// <summary>What <c>--group-access</c> allows beyond the owner: the group may list and enter the directory.</summary>
+    private const UnixFileMode GroupEnter = UnixFileMode.GroupRead | UnixFileMode.GroupExecute;
+
+    public static string Resolve(string? path, bool groupAccess)
     {
+        if (groupAccess)
+            return ResolveShared(path);
+
         path ??= Path.Combine(DefaultRoot(), "minipty-webterminal-" + Environment.UserName);
         if (OperatingSystem.IsWindows())
         {
@@ -452,7 +470,26 @@ static class StateDirectory
 
         // /tmp is shared: a directory another user created first, open to others, would hand them the socket.
         if ((File.GetUnixFileMode(path) & OthersAccess) != 0)
-            throw new InvalidOperationException($"{path} must be open to its owner only (chmod 700), or pass --state-dir.");
+            throw new InvalidOperationException($"{path} must be open to its owner only (chmod 700). Pass another --state-dir, or add --group-access to share it with the web server's group (chmod 2750).");
+        return path;
+    }
+
+    /// <summary>
+    /// A directory shared with the web server's group. It must be named and created beforehand: the per-user default stays
+    /// the owner's alone, and an account that is not the owner could not give the directory its group.
+    /// </summary>
+    private static string ResolveShared(string? path)
+    {
+        if (OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("--group-access sets Unix file modes. On Windows, grant the web server's account access to the --state-dir directory instead.");
+        if (path is null)
+            throw new ArgumentException("--group-access needs --state-dir: a directory the PTY host's account owns, shared with the web server's group (chmod 2750).");
+        if (!Directory.Exists(path))
+            throw new DirectoryNotFoundException($"{path} does not exist. Create it owned by the PTY host's account and the web server's group, with chmod 2750.");
+
+        // The group may enter, to open the socket, but not write: a member could otherwise replace the socket with its own.
+        if ((File.GetUnixFileMode(path) & OthersAccess & ~GroupEnter) != 0)
+            throw new InvalidOperationException($"{path} must be closed to others, and its group must not write to it (chmod 2750).");
         return path;
     }
 
@@ -689,7 +726,7 @@ static class Smoke
         }
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
-        var stateDirectory = StateDirectory.Resolve(Path.Combine(Path.GetTempPath(), "minipty-wt-" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(4))));
+        var stateDirectory = StateDirectory.Resolve(Path.Combine(Path.GetTempPath(), "minipty-wt-" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(4))), groupAccess: false);
         using var ptyHost = StartPtyHost(stateDirectory);
         try
         {
