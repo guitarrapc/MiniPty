@@ -639,6 +639,53 @@ public sealed class PtyWindowsOutputDriverTests
         }
     }
 
+    /// <summary>
+    /// Many sessions flooding at once, each in writes of 256 B as ConPTY sends a flood, all get their output whole and in
+    /// order. The one loop then has many sessions' completions queued at a time, and steps that reach their bound ask it
+    /// to come back after the others, which is the path a host with many busy terminals runs.
+    /// </summary>
+    [Test]
+    [NotInParallel]
+    public async Task ManySessionsFloodingAtOnceEachGetTheirOutputInOrder()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        const int Sessions = 24;
+        var expected = Pattern(256 * 1024);
+        var backends = new PipeBackend[Sessions];
+        var sessions = new PtySession[Sessions];
+        var writers = new Thread[Sessions];
+        var readers = new Task<byte[]>[Sessions];
+        try
+        {
+            for (var i = 0; i < Sessions; i++)
+            {
+                backends[i] = new PipeBackend();
+                sessions[i] = new PtySession(backends[i]);
+                readers[i] = ReadAllAsync(sessions[i]);
+            }
+
+            for (var i = 0; i < Sessions; i++)
+                writers[i] = backends[i].WriteOnThread(expected, closeAfter: true, sliceSize: 256);
+
+            var received = await Task.WhenAll(readers).WaitAsync(TimeSpan.FromSeconds(60));
+            for (var i = 0; i < Sessions; i++)
+                await Assert.That(received[i].AsSpan().SequenceEqual(expected)).IsTrue().Because($"session {i} received {received[i].Length} bytes");
+        }
+        finally
+        {
+            foreach (var writer in writers)
+                writer?.Join();
+
+            foreach (var session in sessions)
+            {
+                if (session is not null)
+                    await session.DisposeAsync();
+            }
+        }
+    }
+
     /// <summary>Windows sessions read through I/O completions on the overlapped output pipe.</summary>
     [Test]
     public async Task SessionsReadThroughIoCompletions()
