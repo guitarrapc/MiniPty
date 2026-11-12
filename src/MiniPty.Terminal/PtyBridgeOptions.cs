@@ -1,4 +1,4 @@
-namespace MiniPty.Terminal;
+﻿namespace MiniPty.Terminal;
 
 /// <summary>
 /// Options for terminal WebSocket and stdio bridges, including persistent WebSocket connections.
@@ -54,7 +54,7 @@ public sealed record PtyBridgeOptions
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Use it to show a program to someone who must not type into it, as ttyd does by default. The client can still
+    /// Use it to open a read-only terminal for someone who must not type into it. The client can still
     /// resize the terminal, acknowledge output, and close the connection, and it receives output and the <c>exit</c>
     /// message as usual. Closing the connection still ends the child on <see cref="PtyWebSocketBridge"/> and
     /// <see cref="PtyStdioBridge"/>.
