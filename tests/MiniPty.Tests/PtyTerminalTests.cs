@@ -57,18 +57,31 @@ public sealed class PtyTerminalTests
         await Assert.That(Encoding.UTF8.GetString(buffer.ToArray())).Contains("SLOW_HANDLER_MARKER");
     }
 
+    /// <summary>
+    /// Pause stops delivery, and Resume restarts it until the session completes.
+    /// </summary>
+    /// <remarks>
+    /// After Resume the test bounds silence, not the drain: under a loaded runner ConPTY splits the output into hundreds of
+    /// writes, each a chain of cross-process wake-ups, so the drain takes as long as the runner makes it. A lost wake of the
+    /// pump or of the terminal stops delivery for good, and the silence bound fails it with the state that tells which side
+    /// stopped.
+    /// </remarks>
     [Test]
     public async Task PtyTerminalPauseStopsDeliveryAndResumeRecovers()
     {
         var delivered = 0L;
+        var lastDeliveryTick = 0L;
         var pausedOnFirstChunk = 0;
         var firstHandlerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var firstHandlerRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var terminal = PtyTerminal.Start(PauseFlowTestChild(), new PtyTerminalOptions
+        // Attached rather than started, so a stall can report the session's output state.
+        var session = Pty.Start(PauseFlowTestChild());
+        var terminal = PtyTerminal.Attach(session, new PtyTerminalOptions
         {
             Output = async (data, ct) =>
             {
                 Interlocked.Add(ref delivered, data.Length);
+                Volatile.Write(ref lastDeliveryTick, Environment.TickCount64);
                 if (Interlocked.CompareExchange(ref pausedOnFirstChunk, 1, 0) == 0)
                 {
                     firstHandlerEntered.TrySetResult();
@@ -92,14 +105,50 @@ public sealed class PtyTerminalTests
             await Assert.That(afterPause).IsGreaterThan(0);
             await Assert.That(terminal.HasExited).IsFalse();
 
+            var resumeTick = Environment.TickCount64;
+            Volatile.Write(ref lastDeliveryTick, resumeTick);
             terminal.Resume();
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            var status = await terminal.Completion.WaitAsync(cts.Token);
+            var stall = await WaitWhileDeliveringAsync(terminal.Completion, () => Volatile.Read(ref lastDeliveryTick));
+            if (stall is not null)
+            {
+                var pump = session.OutputPump;
+                Assert.Fail(
+                    $"{stall} after Resume: {Interlocked.Read(ref delivered) - afterPause} bytes delivered in " +
+                    $"{Environment.TickCount64 - resumeTick} ms, child exited: {terminal.HasExited}, unread: {pump.UnreadCount}, " +
+                    $"reader parked on a full ring: {pump.IsWaitingForFreeSpace}, close requested: {pump.IsCloseRequested}, " +
+                    $"output ended: {pump.IsProducerFinished}.");
+            }
 
+            var status = await terminal.Completion;
             await Assert.That(status.ExitCode).IsEqualTo(0);
             await Assert.That(Interlocked.Read(ref delivered)).IsGreaterThan(afterPause);
         }
     }
+
+    /// <summary>
+    /// Waits for <paramref name="completion"/> while output keeps arriving. Returns <see langword="null"/> once it completes,
+    /// or why it gave up: no delivery for <see cref="DeliverySilenceTimeout"/>, or <see cref="DeliveryDrainTimeout"/> in all.
+    /// </summary>
+    private static async Task<string?> WaitWhileDeliveringAsync(Task completion, Func<long> lastDeliveryTick)
+    {
+        var start = Environment.TickCount64;
+        while (await Task.WhenAny(completion, Task.Delay(TimeSpan.FromSeconds(1))) != completion)
+        {
+            var now = Environment.TickCount64;
+            if (now - lastDeliveryTick() > (long)DeliverySilenceTimeout.TotalMilliseconds)
+                return $"No output for {now - lastDeliveryTick()} ms";
+
+            if (now - start > (long)DeliveryDrainTimeout.TotalMilliseconds)
+                return "Output still arriving";
+        }
+
+        return null;
+    }
+
+    // A pump or terminal that lost its wake never delivers again; a drain that is merely slow delivers every few hundred ms.
+    private static readonly TimeSpan DeliverySilenceTimeout = TimeSpan.FromSeconds(30);
+    // Hang bound only: the drain of the pause test took 1–4 s with its suite pinned to two cores of a desktop.
+    private static readonly TimeSpan DeliveryDrainTimeout = TimeSpan.FromSeconds(120);
 
     [Test]
     public async Task PtyTerminalResizeAfterCompletionIsNoOp()
@@ -388,7 +437,9 @@ public sealed class PtyTerminalTests
     /// Windows writes 64 KiB: 16 KiB that nobody read already kept the child from exiting, and every byte more costs
     /// time after resume. Under CPU oversubscription ConPTY drains only about 10 KB/s whatever the line shape (Windows 11
     /// build 26200 with 48 busy processes: 256 KiB took 20–60 s in 512, 128, or 32 lines), and 256 KiB outlasted the
-    /// 30 s on both hosted Windows runners. A Unix pty buffers up to about 64 KB of its own, so Unix keeps 256 KiB.
+    /// 30 s on both hosted Windows runners. 64 KiB still outlasted it on windows-11-arm about once in 50 runs, so the test
+    /// now bounds silence after resume instead of the drain. A Unix pty buffers up to about 64 KB of its own, so Unix keeps
+    /// 256 KiB.
     /// </remarks>
     private static PtyStartInfo PauseFlowTestChild() =>
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
