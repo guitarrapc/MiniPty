@@ -403,6 +403,7 @@ Each guide explains how to build that kind of application with MiniPty.
 | Building | Guide | Package |
 |----------|-------|---------|
 | A tool that runs commands, drives programs, or records their output | [Single-file samples](samples/SingleFiles/README.md) | MiniPty, MiniPty.Capture |
+| A host that reads the screen a program draws, with Ghostty's or another VT engine | [VT engine samples](samples/SingleFiles/README.md#read-the-screen-with-a-vt-engine) | MiniPty |
 | A program that connects your terminal to a shell or editor | [ConsoleAttach.cs](samples/SingleFiles/README.md#hand-your-terminal-to-a-program) | MiniPty.Console |
 | A full-screen TUI in your current terminal | [TuiDemo](samples/TuiDemo) | MiniPty.Console |
 | A terminal window on Windows | [WinUiTerminal](samples/WinUiTerminal) | MiniPty |

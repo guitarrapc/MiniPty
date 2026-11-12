@@ -15,6 +15,7 @@ Before a NativeAOT publish on Linux or macOS, build the native shim for the RID:
 | Run a command and get its output and exit code | [Session.cs](Session.cs) | `Pty.Start`, `CompleteAsync`, `Output`, `SendEof` |
 | Drive a running program: wait for output, answer it, resize | [Interactive.cs](Interactive.cs) | `ReadOutputAsync`, `WriteInputAsync`, `Resize` |
 | Record output with the time of each read | [Capture.cs](Capture.cs), [Observe.cs](Observe.cs) | `PtyCapture.RunAsync` |
+| Read the screen a program draws, with a VT engine beside the session | [VtScreenGhostty.cs](VtScreenGhostty.cs), [VtScreenTerminalEmulation.cs](VtScreenTerminalEmulation.cs) | `ReadOutputAsync`, `WriteInputAsync` |
 | Hand your terminal to a shell or an editor | [ConsoleAttach.cs](ConsoleAttach.cs) | `PtyConsoleInput.Attach` |
 | Serve a terminal to a browser | [WebTerminal.cs](WebTerminal.cs), [WebTerminalScale.cs](WebTerminalScale.cs) | `PtyWebSocketBridge` |
 | Keep the shells running while the web server restarts, and under another account | [WebTerminalPtyHost.cs](WebTerminalPtyHost.cs) | `PtyWebSocketSessionManager` |
@@ -104,6 +105,42 @@ foreach (var chunk in result.GetTextChunks())
 
 - `result.Output` holds all the bytes; `result.Chunks` splits them into reads, in order, with no gaps. `GetTextChunks` gives the same reads as text.
 - Each chunk is one read from the PTY, not one write by the child: the OS can join or split writes.
+
+## Read the screen with a VT engine
+
+MiniPty carries bytes, and a terminal turns them into a screen. [VtScreenGhostty.cs](VtScreenGhostty.cs) and [VtScreenTerminalEmulation.cs](VtScreenTerminalEmulation.cs) give the session's output to a VT engine without a window, so the host can read what the screen shows: the last state of a progress line, or a full-screen program such as `top` or `vim`.
+
+```bash
+dotnet samples/SingleFiles/VtScreenGhostty.cs            # a demo that redraws its lines
+dotnet samples/SingleFiles/VtScreenGhostty.cs -- top     # any program's screen after 2 s (--after <seconds>)
+```
+
+```csharp
+var replies = new ArrayBufferWriter<byte>();
+using var terminal = new Terminal(80, 24, options => options.OnWritePty = reply => replies.Write(reply));
+
+await foreach (var chunk in session.ReadOutputAsync(ct))
+{
+    terminal.VTWrite(chunk.Data.Span);                     // the engine turns the bytes into a screen
+    if (replies.WrittenCount > 0)                          // answers to the program's queries, such as ESC[6n
+    {
+        await session.WriteInputAsync(replies.WrittenMemory, ct);
+        replies.ResetWrittenCount();
+    }
+}
+
+using var text = terminal.CreateFormatter(FormatterFormat.PlainText, options => options.Trim = true);
+Console.WriteLine(text.ToString());                        // the scrollback, then the screen
+```
+
+| Engine | Package | Runs on | Also |
+|---|---|---|---|
+| Ghostty's VT engine (libghostty-vt) | `DeBlasis.GhosttyVt` | win-x64, linux-x64, osx-arm64 | Writes the screen as VT. A page that connects later draws the screen from those bytes instead of from all the output since the start. |
+| A VT engine in C# | `Terminal.Emulation` | every platform MiniPty supports | No native files. |
+
+- A program can ask its terminal a question, such as the cursor position, and wait for the answer. The samples write the engine's answers to the session, because the engine is the only terminal there. When xterm.js is attached too, xterm.js answers: drop the engine's answers, or the program reads two.
+- Both samples publish with NativeAOT. The engine packages are dependencies of these samples only.
+- Put `--` before the program: without it, `dotnet` reads the program's options, such as `-c`, as its own.
 
 ## Hand your terminal to a program
 
