@@ -2,8 +2,12 @@
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using MiniPty.Capture;
+using MiniPty.Terminal;
 using Porta.Pty;
 
 namespace MiniPty.Benchmarks;
@@ -46,7 +50,7 @@ namespace MiniPty.Benchmarks;
 /// </remarks>
 internal static class FloodProbe
 {
-    private static readonly string[] Scenarios = ["sustained", "slow", "echo", "neighbors", "control", "oneshot", "signals"];
+    private static readonly string[] Scenarios = ["sustained", "slow", "echo", "neighbors", "control", "oneshot", "signals", "bridge"];
 
     /// <summary>The line a <c>--program</c> such as <c>yes</c> repeats: 77 characters without <c>%</c>, like the child's.</summary>
     private const string YesLine = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmno";
@@ -81,6 +85,7 @@ internal static class FloodProbe
             "neighbors" => await NeighborsAsync(options),
             "control" => await ControlAsync(options),
             "signals" => await SignalsAsync(options),
+            "bridge" => await BridgeAsync(options),
             _ => await OneShotAsync(options),
         };
     }
@@ -334,6 +339,133 @@ internal static class FloodProbe
         // Fields from the state (field 3) on: ppid 4, pgrp 5, session 6, tty_nr 7, tpgid 8.
         System.Console.WriteLine($"pid {pid} ppid {fields[1]} pgrp {fields[2]} session {fields[3]} tty_nr {fields[4]} tpgid {fields[5]}");
         await flood.DisposeAsync();
+        return 0;
+    }
+
+    /// <summary>
+    /// Keystrokes typed into a flooding session through <see cref="PtyWebSocketBridge"/>, end to end over loopback TCP:
+    /// how long until each echo comes back in the bridge's output frames, how fast the flood goes through, and in how many
+    /// frames. The client acknowledges output every 128 KiB, as the xterm.js flow-control guide does, after
+    /// <c>--ack-delay-ms</c>, which stands in for a browser that renders slower than the flood.
+    /// </summary>
+    private static async Task<int> BridgeAsync(Options options)
+    {
+        const int AckChunk = 128 * 1024;
+        var seconds = options.GetInt("seconds", 5);
+        var ackDelayMs = options.GetInt("ack-delay-ms", 0);
+        // The Windows child reads keys and echoes them only when asked (Flood.cs); a Unix terminal echoes by itself.
+        Environment.SetEnvironmentVariable("MINIPTY_FLOOD_ECHO", "1");
+
+        using var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        listener.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        listener.Listen();
+        using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        var connect = client.ConnectAsync(listener.LocalEndPoint!);
+        using var server = await listener.AcceptAsync();
+        await connect;
+        server.NoDelay = true;
+        using var serverSocket = WebSocket.CreateFromStream(new NetworkStream(server), new WebSocketCreationOptions { IsServer = true });
+        using var clientSocket = WebSocket.CreateFromStream(new NetworkStream(client), new WebSocketCreationOptions { IsServer = false });
+
+        using var stop = new CancellationTokenSource();
+        var bridge = PtyWebSocketBridge.RunAsync(FloodSession.MiniPtyStartInfo(options, 0), serverSocket, cancellationToken: stop.Token);
+
+        // A WebSocket takes one send at a time: acknowledgements and keystrokes share the client's.
+        using var sendLock = new SemaphoreSlim(1, 1);
+        async Task SendAsync(ReadOnlyMemory<byte> payload, WebSocketMessageType type)
+        {
+            await sendLock.WaitAsync();
+            try
+            {
+                await clientSocket.SendAsync(payload, type, endOfMessage: true, CancellationToken.None);
+            }
+            finally
+            {
+                sendLock.Release();
+            }
+        }
+
+        var echo = new EchoTracker();
+        long bytes = 0;
+        long frames = 0;
+        var receive = Task.Run(async () =>
+        {
+            var buffer = new byte[64 * 1024];
+            long unacked = 0;
+            try
+            {
+                while (true)
+                {
+                    var result = await clientSocket.ReceiveAsync(buffer.AsMemory(), CancellationToken.None);
+                    if (result.MessageType == WebSocketMessageType.Close)
+                        return;
+
+                    if (result.MessageType != WebSocketMessageType.Binary)
+                        continue;
+
+                    echo.Scan(buffer.AsSpan(0, result.Count));
+                    Interlocked.Add(ref bytes, result.Count);
+                    if (result.EndOfMessage)
+                        Interlocked.Increment(ref frames);
+
+                    unacked += result.Count;
+                    if (unacked < AckChunk)
+                        continue;
+
+                    if (ackDelayMs > 0)
+                        await Task.Delay(ackDelayMs);
+
+                    var ack = System.Text.Encoding.UTF8.GetBytes(string.Create(CultureInfo.InvariantCulture, $"{{\"type\":\"ack\",\"bytes\":{unacked}}}"));
+                    unacked = 0;
+                    await SendAsync(ack, WebSocketMessageType.Text);
+                }
+            }
+            catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
+            {
+                // The bridge ended the connection.
+            }
+        });
+
+        await Task.Delay(1000);
+        var bytesBefore = Interlocked.Read(ref bytes);
+        var framesBefore = Interlocked.Read(ref frames);
+        var started = Stopwatch.GetTimestamp();
+        var key = new byte[2];
+        key[0] = (byte)'%';
+        var letter = 0;
+        var until = started + seconds * Stopwatch.Frequency;
+        while (Stopwatch.GetTimestamp() < until)
+        {
+            key[1] = (byte)('a' + letter);
+            letter = (letter + 1) % 26;
+            echo.OnSent(key[1], Stopwatch.GetTimestamp());
+            await SendAsync(key.ToArray(), WebSocketMessageType.Binary);
+            await Task.Delay(50);
+        }
+
+        var elapsed = Stopwatch.GetElapsedTime(started).TotalSeconds;
+        var floodBytes = Interlocked.Read(ref bytes) - bytesBefore;
+        var floodFrames = Interlocked.Read(ref frames) - framesBefore;
+        // Echoes of the last keys may still be on their way.
+        await Task.Delay(Math.Max(1000, ackDelayMs * 20));
+        stop.Cancel();
+        try
+        {
+            await bridge.WaitAsync(TimeSpan.FromSeconds(15));
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException or WebSocketException)
+        {
+        }
+
+        clientSocket.Abort();
+        await Task.WhenAny(receive, Task.Delay(5000));
+
+        var latencies = echo.Latencies();
+        System.Console.WriteLine("| ConPTY | ACK delay ms | Flood MiB/s | Frames per 32 KiB | Keys | Echoed | Lost | Echo p50 ms | p90 ms | p99 ms | max ms |");
+        System.Console.WriteLine("|---|---|---|---|---|---|---|---|---|---|---|");
+        System.Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"| {options.ConPty} | {ackDelayMs} | {floodBytes / 1048576.0 / elapsed:F1} | {(floodBytes == 0 ? double.NaN : floodFrames * 32768.0 / floodBytes):F1} | {echo.Sent} | {latencies.Length} | {echo.Lost + echo.Pending} | " +
+            $"{At(latencies, 0.5):F2} | {At(latencies, 0.9):F2} | {At(latencies, 0.99):F2} | {(latencies.Length == 0 ? double.NaN : latencies[^1]):F2} |"));
         return 0;
     }
 
@@ -898,20 +1030,33 @@ internal static class FloodProbe
         {
             var allocated = GC.GetTotalAllocatedBytes(precise: true);
             using var process = Process.GetCurrentProcess();
+            // Each process figure is read on its own: FreeBSD's .NET leaves some of them unsupported, and those read -1.
             return new Snapshot(
                 Stopwatch.GetTimestamp(),
-                process.TotalProcessorTime,
+                Read(() => process.TotalProcessorTime, TimeSpan.Zero),
                 IoThread.Cpu(),
                 GC.CollectionCount(0),
                 GC.CollectionCount(1),
                 GC.CollectionCount(2),
                 allocated,
                 ThreadPool.CompletedWorkItemCount,
-                process.Threads.Count,
-                process.HandleCount,
-                process.WorkingSet64,
-                process.PrivateMemorySize64,
-                process.PeakWorkingSet64);
+                Read(() => process.Threads.Count, -1),
+                Read(() => process.HandleCount, -1),
+                Read(() => process.WorkingSet64, -1L),
+                Read(() => process.PrivateMemorySize64, -1L),
+                Read(() => process.PeakWorkingSet64, -1L));
+        }
+
+        private static T Read<T>(Func<T> read, T unsupported)
+        {
+            try
+            {
+                return read();
+            }
+            catch (Exception ex) when (ex is PlatformNotSupportedException or NotSupportedException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                return unsupported;
+            }
         }
     }
 
