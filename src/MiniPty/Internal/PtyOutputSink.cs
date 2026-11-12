@@ -80,8 +80,9 @@ internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
 
         if (data.Length > _limit - _delivered)
         {
+            // "Ended", not "killed": a child that already exited, or whose session is being disposed, is not killed here.
             Fail(new IOException(
-                $"The child's output exceeded {_limit} bytes, the most this completion collects (PtyCompleteOptions.MaxOutputBytes); the child was killed."));
+                $"The child's output exceeded {_limit} bytes, the most this completion collects (PtyCompleteOptions.MaxOutputBytes); collection stopped and the child was ended."));
             return;
         }
 

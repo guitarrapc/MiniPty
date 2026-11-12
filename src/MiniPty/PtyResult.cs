@@ -82,6 +82,10 @@ public sealed class PtyResult
     /// </summary>
     /// <param name="encoding">Encoding used to decode bytes.</param>
     /// <returns>A string containing the decoded PTY output.</returns>
+    /// <exception cref="OutOfMemoryException">
+    /// The text is longer than a string can be, which a result over about 1 GiB of output can reach; use
+    /// <see cref="GetText"/> instead.
+    /// </exception>
     public string GetTextString(Encoding? encoding = null)
     {
         if (pumpDecodedChars is not null)

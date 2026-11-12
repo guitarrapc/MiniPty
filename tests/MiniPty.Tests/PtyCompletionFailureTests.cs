@@ -111,6 +111,32 @@ public sealed class PtyCompletionFailureTests
         await Assert.That(backend.Kills).IsEqualTo(1);
     }
 
+    /// <summary>
+    /// Through <see cref="PtySession.CompleteAsync"/>: output exactly at the limit is the whole result, and one byte more
+    /// fails the completion, so the limit is inclusive end to end and not only in the sink.
+    /// </summary>
+    [Test]
+    [Arguments(0, false)]
+    [Arguments(1, true)]
+    public async Task TheCompletionCollectsOutputExactlyAtTheLimitAndFailsOneBytePastIt(int extra, bool fails)
+    {
+        const int Limit = 100_000;
+        var backend = new FixedOutputBackend(Limit + extra);
+        await using var session = new PtySession(backend);
+
+        var completion = session.CompleteAsync(new PtyCompleteOptions { MaxOutputBytes = Limit, DecodeOutput = true });
+
+        if (fails)
+        {
+            await Assert.That(async () => await completion.WaitAsync(Timeout)).Throws<IOException>();
+            return;
+        }
+
+        var result = await completion.WaitAsync(Timeout);
+        await Assert.That(result.Output.Length).IsEqualTo(Limit);
+        await Assert.That(result.GetText().Length).IsEqualTo(Limit);
+    }
+
     [Test]
     public async Task TheLimitMustBePositive()
     {
@@ -160,6 +186,28 @@ public sealed class PtyCompletionFailureTests
 
             buffer.Fill((byte)'x');
             return buffer.Length;
+        }
+    }
+
+    /// <summary>A child that writes <paramref name="total"/> bytes of ASCII and then exits on its own.</summary>
+    private sealed class FixedOutputBackend(int total) : PtyOutputPumpTests.FakeBackend
+    {
+        private int _written;
+
+        public override int ReadOutput(Span<byte> buffer, ScriptedOutputDriver driver)
+        {
+            var count = Math.Min(buffer.Length, total - _written);
+            if (count == 0)
+            {
+                if (!HasExited)
+                    Exit(0);
+
+                return 0;
+            }
+
+            buffer[..count].Fill((byte)'x');
+            _written += count;
+            return count;
         }
     }
 
