@@ -446,6 +446,26 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
+    /// Ends the child of a one-shot completion whose output can no longer be collected, so the completion's exit wait
+    /// ends (<see cref="PtyOutputSink"/>). Runs on the thread that delivers output, so it never throws: a child that is
+    /// gone or a session being disposed needs no kill.
+    /// </summary>
+    internal void KillAfterOutputFailure()
+    {
+        if (IsDisposed)
+            return;
+
+        try
+        {
+            _backend.Kill();
+        }
+        catch (Exception)
+        {
+            // The child has exited, or disposal is ending it.
+        }
+    }
+
+    /// <summary>
     /// Sends a signal to the child process without releasing PTY handles.
     /// </summary>
     /// <remarks>
@@ -515,6 +535,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">
     /// <see cref="PtyCompleteOptions.ExitTimeout"/> or output drain timeout was exceeded.
+    /// </exception>
+    /// <exception cref="IOException">
+    /// The output exceeded <see cref="PtyCompleteOptions.MaxOutputBytes"/>, or the output transport failed. The child
+    /// was killed as soon as its output could no longer be collected, and the exception is thrown once its exit is
+    /// observed.
     /// </exception>
     public async Task<PtyResult> CompleteAsync(
         PtyCompleteOptions? options = null,

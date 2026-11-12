@@ -1,4 +1,6 @@
-﻿namespace MiniPty.Internal;
+﻿using System.Runtime.ExceptionServices;
+
+namespace MiniPty.Internal;
 
 /// <summary>
 /// One-shot completion shared by <see cref="PtySession.CompleteAsync"/> and <c>PtyCapture.RunAsync</c>: route
@@ -23,27 +25,41 @@ internal static class PtyCompletion
         ArgumentNullException.ThrowIfNull(sink);
 
         var pump = session.OutputPump;
+        // A sink that fails, past the output limit or otherwise, kills the child, so the exit wait below always ends.
+        sink.Configure(session, options.MaxOutputBytes);
         pump.AttachSink(sink);
         try
         {
             await ApplyInputAsync(session, options, cancellationToken).ConfigureAwait(false);
             var exitCode = await WaitForExitAsync(session, options, cancellationToken).ConfigureAwait(false);
+            ThrowIfFailed(sink);
             // The exit has been observed, so the session's status is set, and it stays readable after disposal.
             var exitStatus = new PtyExitStatus(exitCode, session.ExitStatus?.Signal);
             while (!await sink.WaitForDrainAsync(pump, options.OutputDrainGrace, options.OutputReaderCloseTimeout, cancellationToken).ConfigureAwait(false))
             {
             }
 
+            ThrowIfFailed(sink);
             return exitStatus;
         }
-        catch
+        catch (Exception ex)
         {
             // Output read from here on stays in the ring for whichever consumer comes next. Detaching waits out a
             // write in progress, so the sink's pooled buffers can be returned right after.
             pump.DetachSink(sink);
             sink.Abort();
+            // The sink's failure explains what followed it, such as a write to the stdin of the child it killed.
+            if (sink.Failure is { } failure && !ReferenceEquals(failure, ex))
+                ExceptionDispatchInfo.Throw(failure);
+
             throw;
         }
+    }
+
+    private static void ThrowIfFailed(PtyOutputSink sink)
+    {
+        if (sink.Failure is { } failure)
+            ExceptionDispatchInfo.Throw(failure);
     }
 
     private static async Task ApplyInputAsync(PtySession session, PtyCompleteOptions options, CancellationToken cancellationToken)

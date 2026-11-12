@@ -26,6 +26,15 @@ namespace MiniPty.Internal;
 /// after exit at the latest, and the wait fails with <see cref="TimeoutException"/> when output reading has not
 /// finished <see cref="PtyCompleteOptions.OutputReaderCloseTimeout"/> after the close.
 /// </para>
+/// <para>
+/// <b>Failure.</b> The pump hands output in through <see cref="Deliver"/> and ends it through <see cref="EndOutput"/>.
+/// Output past <see cref="PtyCompleteOptions.MaxOutputBytes"/>, a <see cref="Write"/> that throws, and a transport that
+/// fails all fail the sink once (<see cref="Failure"/>): it gives its buffers back, discards what still arrives, and
+/// kills the child. The completion waits for the child's exit before it drains output, so without the kill a child
+/// blocked on a full terminal, or writing on, would keep that wait open for good: a 2.2 GiB flood once stopped
+/// collecting at 2 GiB, where a buffer's length wrapped, and the completion waited with the child blocked and no error
+/// for as long as it was watched. The completion throws the failure once the exit is observed.
+/// </para>
 /// </remarks>
 internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
 {
@@ -38,6 +47,89 @@ internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
     private long _graceMs = -1;
     private long _closeTimeoutMs = -1;
     private int _timedOut;
+    // Delivery's own state, written only by the thread that delivers output (serialized under the pump lock).
+    private long _limit = Array.MaxLength;
+    private long _delivered;
+    private PtySession? _session;
+    private Exception? _failure;
+
+    /// <summary>
+    /// Bounds the output this sink collects at <paramref name="maxOutputBytes"/> (<see cref="Array.MaxLength"/> at most,
+    /// what one result array holds) and names the session whose child a failure ends. Called before the sink attaches.
+    /// </summary>
+    internal void Configure(PtySession session, int? maxOutputBytes)
+    {
+        _session = session;
+        _limit = Math.Min(maxOutputBytes ?? Array.MaxLength, Array.MaxLength);
+    }
+
+    /// <summary>
+    /// What stopped this sink collecting output, or null: output past the limit (<see cref="IOException"/>), a failed
+    /// <see cref="Write"/>, or the transport's failure. Read by the completion after the exit or the drain wait.
+    /// </summary>
+    internal Exception? Failure => Volatile.Read(ref _failure);
+
+    /// <summary>
+    /// The pump's way in: <see cref="Write"/> while the output stays within the limit and the sink has not failed, and
+    /// otherwise nothing. Never throws. Runs where <see cref="Write"/> runs.
+    /// </summary>
+    internal void Deliver(ReadOnlySpan<byte> data, long timestamp)
+    {
+        if (_failure is not null)
+            return;
+
+        if (data.Length > _limit - _delivered)
+        {
+            Fail(new IOException(
+                $"The child's output exceeded {_limit} bytes, the most this completion collects (PtyCompleteOptions.MaxOutputBytes); the child was killed."));
+            return;
+        }
+
+        _delivered += data.Length;
+        try
+        {
+            Write(data, timestamp);
+        }
+        catch (Exception ex)
+        {
+            Fail(ex);
+        }
+    }
+
+    /// <summary>
+    /// The pump's end of output: fails the sink when the transport failed (<paramref name="error"/>), and otherwise lets
+    /// it finish its streaming state (<see cref="OnOutputEnded"/>). Never throws.
+    /// </summary>
+    internal void EndOutput(Exception? error)
+    {
+        if (error is not null)
+            Fail(error);
+
+        if (_failure is not null)
+            return;
+
+        try
+        {
+            OnOutputEnded();
+        }
+        catch (Exception ex)
+        {
+            Fail(ex);
+        }
+    }
+
+    /// <summary>
+    /// Fails the sink once: records <paramref name="error"/>, gives the buffers back now, since nobody takes the result,
+    /// and kills the child, whose exit the completion waits for. On the thread that delivers output.
+    /// </summary>
+    private void Fail(Exception error)
+    {
+        if (Interlocked.CompareExchange(ref _failure, error, null) is not null)
+            return;
+
+        Abort();
+        _session?.KillAfterOutputFailure();
+    }
 
     /// <summary>
     /// Receives output in order. Runs on the thread that delivers output, or on the attaching thread for output read
@@ -63,9 +155,10 @@ internal abstract class PtyOutputSink : IValueTaskSource<bool>, IPtyOutputWaiter
     }
 
     /// <summary>
-    /// Returns pooled buffers after a failed completion detached the sink; nobody takes its result afterwards. Called
-    /// once neither a write nor <see cref="OnOutputEnded"/> can still be in progress (detaching is serialized with
-    /// both). Idempotent, and safe whether or not <see cref="OnOutputEnded"/> ran, and after it failed part way.
+    /// Returns pooled buffers after a failed completion detached the sink, or when the sink fails itself; nobody takes
+    /// its result afterwards. Called once neither a write nor <see cref="OnOutputEnded"/> can still be in progress
+    /// (detaching is serialized with both, and a failing sink calls it from its own write). Idempotent, and safe whether
+    /// or not <see cref="OnOutputEnded"/> ran, and after it failed part way.
     /// </summary>
     internal virtual void Abort()
     {
