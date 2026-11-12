@@ -133,7 +133,7 @@ The option is off by default because it also ends programs the user started from
 
 ## Ctrl+C
 
-A Ctrl+C (`0x03`) written to the session interrupts the child as the keystroke does in a terminal: on Unix the line discipline sends `SIGINT` to the terminal's foreground process group, and on Windows ConPTY raises `CTRL_C_EVENT` for the processes attached to the pseudo-console. A program that reads its input raw, such as an editor, receives the byte instead. During a flood (2026-11-13, build 26200 and WSL), the child was gone about 2 ms after the write on both ConPTYs, output ended within about 6 ms, and a few KiB arrived after the keystroke.
+A Ctrl+C (`0x03`) written to the session interrupts the child as the keystroke does in a terminal: on Unix the line discipline sends `SIGINT` to the terminal's foreground process group, and on Windows ConPTY raises `CTRL_C_EVENT` for the processes attached to the pseudo-console. A program that reads its input raw, such as an editor, receives the byte instead. During a flood (2026-11-13), the child was gone about 2 ms after the write on both ConPTYs on Windows (build 26200), output ended within about 6 ms, and a few KiB arrived after the keystroke. On Linux (WSL, 40 rounds each) a .NET child was gone after 2.2–3.3 ms at the median and `yes` after 1.2 ms, with 11–28 KiB arriving after it; a third of the rounds took 4–33 ms and let 300–650 KiB through, on Porta.Pty as on MiniPty ([platform lessons](platform_support.md#lessons-learned)).
 
 | Rule | Behavior |
 |---|---|

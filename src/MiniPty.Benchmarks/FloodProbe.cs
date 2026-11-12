@@ -28,7 +28,7 @@ namespace MiniPty.Benchmarks;
 /// <item><term><c>neighbors</c></term><description><c>--floods</c> endless floods beside one quiet session: the quiet
 /// session's keystroke round trip, the floods' total and per-session throughput, and the shared I/O thread's CPU.</description></item>
 /// <item><term><c>control</c></term><description>Ctrl+C, <c>Kill()</c> and disposal of a flooding session: how long until
-/// the child is gone and output ends, and how much output still arrives.</description></item>
+/// the child is gone and output ends, and how much output still arrives. <c>--verbose true</c> prints every round.</description></item>
 /// <item><term><c>oneshot</c></term><description><c>CompleteAsync</c> or <c>PtyCapture.RunAsync</c> on a flood of
 /// <c>--bytes</c> (<c>--api complete|capture</c>, <c>--decode true|false</c>): time, peak memory against the output's
 /// size, chunks.</description></item>
@@ -290,7 +290,14 @@ internal static class FloodProbe
             {
                 var flood = FloodSession.Start(options, 0, echo: null, delayMs: 0);
                 await Task.Delay(500);
-                results.Add(await EndAsync(flood, action));
+                var result = await EndAsync(flood, action);
+                results.Add(result);
+                // --verbose true: every round, to see a distribution the median and maximum hide.
+                if (options.Get("verbose", "false") == "true")
+                {
+                    System.Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                        $"round {action} {round}: gone {result.GoneMs:F1} ms, last byte {result.LastByteMs:F1} ms, reader end {result.ReaderEndMs:F1} ms, {result.KiBAfter:F0} KiB after"));
+                }
             }
 
             string Cell(Func<EndResult, double> value, string format) =>
