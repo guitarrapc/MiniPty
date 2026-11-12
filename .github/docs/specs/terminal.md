@@ -79,7 +79,7 @@ Binary frames carry data; text frames carry JSON control messages. Raw PTY bytes
 | Direction | Frame | Payload | Meaning |
 |---|---|---|---|
 | server → client | Binary | raw PTY output | feed to `term.write(new Uint8Array(data), ackCallback)` |
-| client → server | Binary | raw input bytes | written to the PTY verbatim (keystrokes, paste) |
+| client → server | Binary | raw input bytes | written to the PTY verbatim (keystrokes, paste); dropped when `ReadOnly` is set ([Read-only bridges](#read-only-bridges)) |
 | client → server | Text | `{"type":"resize","cols":120,"rows":30}` | resize the PTY |
 | client → server | Text | `{"type":"ack","bytes":131072}` | flow-control credit: client finished processing N bytes |
 | server → client | Text | `{"type":"exit","exitCode":0,"signal":15}` | child exited; always after the final output frame; `signal` omitted when null |
@@ -100,8 +100,27 @@ Server-side watermark over unacknowledged bytes; ACK credit was chosen over paus
 | `MaxControlMessageSize` | 4 KiB | control JSON bound |
 | `SendExitMessage` | `true` | emit the `exit` control message |
 | `CloseTimeout` | 5 s | bound on close handshakes against dead clients |
+| `ReadOnly` | `false` | drop the client's input; resize, ACK, and close are handled as usual ([Read-only bridges](#read-only-bridges)) |
 
 The client counts binary payload bytes it has fed through `term.write` callbacks and ACKs them; both sides measure the same metric, which the xterm.js guide calls out as mandatory for the stream not to stall.
+
+### Read-only bridges
+
+`ReadOnly` shows a program to a client that must not type into it. All three bridges honor it. On `PtyWebSocketSessionManager` it applies to every session the manager owns, so a host that serves both kinds uses one manager for each.
+
+| From the client | With `ReadOnly` |
+|---|---|
+| Input: a binary WebSocket frame, or a stdio `Input` frame | read and dropped |
+| `resize`, `ack`, unknown control types | handled as usual |
+| Malformed or oversize control message | closes with `PolicyViolation`, as usual |
+| Close | as usual: ends the child on `PtyWebSocketBridge` and `PtyStdioBridge`, detaches on the manager |
+
+- **Input is dropped, not refused.** A terminal emulator sends input without a keystroke, such as focus and mouse reports, so closing the connection on input would end sessions that nobody typed into. Each input frame is still read, so the frames behind it are handled in order and a stdio stream stays aligned on its frame headers.
+- **The frontend's answers to the child's queries are input too.** A child that asks for the cursor position or the device attributes gets no answer and waits until its own timeout. The in-box ConPTY answers those queries itself; Unix and the out-of-band ConPTY forward them to the frontend ([Out-of-band ConPTY](core_session.md#out-of-band-conpty)).
+- **A start that inherits the cursor is refused** with `ArgumentException` from `RunAsync` and `CreateSession`, before anything is spawned. ConPTY holds such a child until the frontend answers its cursor position query, with no bound on the in-box ConPTY ([Inherited cursor](core_session.md#inherited-cursor)), and the bridge would drop the answer. The refusal holds on every platform, although Unix ignores `InheritCursor`, so a host finds the mistake on whichever platform it runs first.
+- **The client still resizes**, as in ttyd: the viewer's window decides the layout. A resize makes the child redraw; it cannot make the child run anything.
+- **It is not access control.** The host still authenticates the connection ([Embedder Pattern](#embedder-pattern-use-case-4)): a read-only client sees everything the child prints, and on the one-shot bridges its close ends the child.
+- The frontend should take no keystrokes either (xterm.js `disableStdin`), so the user sees that typing does nothing.
 
 ### Output frames
 
@@ -252,6 +271,8 @@ A web server that is redeployed while shells run, or whose own secrets the shell
 - Unacknowledged-byte accounting saturates at `long.MaxValue`. Although normal watermarks pause output long before overflow, `HighWatermark = long.MaxValue` is valid and a wrapped negative count would bypass flow control in an extremely long-lived session.
 - ConPTY line submission needs CR — sending `\n` echoes but never completes a `cmd.exe` `set /p` read. Cross-platform clients should send `\r` (xterm.js `onData` already does) and tests must not assert on LF-terminated input.
 - `cmd.exe /c "set /p LINE= & echo %LINE%"` prints the literal `%LINE%` because expansion happens at parse time; interactive-input children in tests need `/v:on` with `!LINE!`.
+- A test that shows input did not arrive needs a child that ends on its own, and a writable run of the same child. The read-only tests use a child that waits three seconds for a key (the terminal's own read timer, VMIN 0 and VTIME 30, on Unix; `choice /t` on Windows) and prints whether one came. The writable run shows that a key sent after the child's ready marker reaches it within that wait, so the read-only run's "no key" is not an artifact of the timing.
+- ConPTY turns an upper-case letter sent as VT text into a key event with Shift down. `choice` ignored `K` sent that way, while it took `k` and a win32-input-mode record of `K`, and `set /p` took `K` (Windows 11 build 26200, 2026-11-13). The first writable run of the read-only test failed on it; a probe that sent each encoding to the same child told the encoding apart from the timing. Tests that type into Windows programs which read key events send lower case.
 - A stdio helper must reserve stdout exclusively for framed protocol bytes. Diagnostics belong on stderr; one accidental text write makes the length stream unrecoverable.
 - `PtyTerminal.Kill()` can use SIGHUP without weakening deterministic cleanup: handler faults use core's forceful `Kill()`, and final disposal goes through `PtySession.Dispose`, which on Unix kills a child that ignores the hang-up after a one-second grace, or at once when the process exits normally. A host ended within the grace by a crash or by a signal it does not cancel never sends that kill. The remedies in the [session contract](core_session.md#session-contract) apply. `Kill(PtySignal.Kill)` before `DisposeAsync` ends such a child at once but skips the hang-up. An interactive shell killed this way cannot resend the hang-up to its jobs, so a running background job keeps running. A host can instead cancel such a signal, hang up each terminal with `Kill()`, await `Completion` with a timeout, dispose the terminal even when the wait times out, and exit normally. The wait gives a shell time to resend the hang-up to its jobs. A host that runs `PtyWebSocketBridge.RunAsync` has no terminal to call these on. It cancels the token it passed, awaits `RunAsync` and catches what it throws, then exits normally, so the kills are sent at exit. An exception that escapes `Main` sends none. On cancellation `RunAsync` hangs up and disposes without waiting for the child to exit.
 - Reliable reconnect requires absolute acknowledgement state. Byte-count credit alone cannot distinguish “rendered but ACK lost” from “never received,” so the persistent protocol pairs each binary message with its stream offset.

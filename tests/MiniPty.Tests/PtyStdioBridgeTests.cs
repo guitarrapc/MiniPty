@@ -46,6 +46,48 @@ public sealed class PtyStdioBridgeTests
     }
 
     /// <summary>
+    /// A read-only stdio bridge reads an input frame's payload and drops it: the child gets no key and ends on its own once
+    /// its wait runs out, and the control frame behind the input is read as a frame, which a payload left unread would turn
+    /// into a malformed header.
+    /// </summary>
+    [Test]
+    public async Task AReadOnlyStdioBridgeDropsInputAndStaysInFrame()
+    {
+        var key = Encoding.UTF8.GetBytes(PtyWebSocketBridgeTests.KeyWaitKey + (OperatingSystem.IsWindows() ? "\r" : "\n"));
+        var resize = Encoding.UTF8.GetBytes("{\"type\":\"resize\",\"cols\":100,\"rows\":40}");
+        await using var input = new CancelableInputStream([
+            .. CreateFrame(PtyStdioFrameType.Input, key),
+            .. CreateFrame(PtyStdioFrameType.Control, resize),
+        ]);
+        await using var output = new MemoryStream();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var status = await PtyStdioBridge.RunAsync(
+            PtyWebSocketBridgeTests.ReadyThenWaitForKeyChild(),
+            input,
+            output,
+            new PtyBridgeOptions { ReadOnly = true },
+            cts.Token);
+
+        await Assert.That(status.ExitCode).IsEqualTo(0);
+        var text = Encoding.UTF8.GetString(JoinPayloads(ParseFrames(output.ToArray()), PtyStdioFrameType.Output));
+        await Assert.That(text).Contains(PtyWebSocketBridgeTests.KeyWaitTimedOut);
+        await Assert.That(text).DoesNotContain(PtyWebSocketBridgeTests.KeyWaitGotKey);
+    }
+
+    /// <summary>A read-only stdio bridge refuses a start that inherits the cursor, as the WebSocket bridge does.</summary>
+    [Test]
+    public async Task AReadOnlyStdioBridgeRefusesAStartThatInheritsTheCursor()
+    {
+        await using var input = new CancelableInputStream([]);
+        await using var output = new MemoryStream();
+        var startInfo = EchoMarkerChild("NEVER_STARTED") with { InheritCursor = true };
+
+        Assert.Throws<ArgumentException>(() => { _ = PtyStdioBridge.RunAsync(startInfo, input, output, new PtyBridgeOptions { ReadOnly = true }); });
+        await Assert.That(output.Length).IsEqualTo(0);
+    }
+
+    /// <summary>
     /// A flood goes out in large output frames, as through the WebSocket bridge: the bridge joins reads that arrive in a
     /// burst. 256 KiB stays below the high watermark, so the flood needs no acknowledgement to go through. The test weighs
     /// frames by their bytes, runs on Unix only and alone, and is skipped on a host too slow to flood, for the reasons the

@@ -238,6 +238,20 @@ function sendResize() {
 - **Send `resize` on open and on every `term.onResize`.** Until then the PTY has the `PtyStartInfo.Size`.
 - **Pass the bytes to `term.write` as they are.** xterm.js reassembles UTF-8 characters split across frames.
 
+### Read-only terminals
+
+To open a read-only terminal, set `ReadOnly`:
+
+```csharp
+var status = await PtyWebSocketBridge.RunAsync(
+    new PtyStartInfo { FileName = "top", Size = new PtySize(80, 24) },
+    ws.WebSocket,
+    new PtyBridgeOptions { ReadOnly = true },
+    ct);
+```
+
+and create the page's terminal with `new Terminal({ disableStdin: true })`, so that typing visibly does nothing. The bridge drops every input frame and still applies resizes and ACKs. The answers xterm.js sends to the program's queries are input too, so a program that waits for one, such as a cursor position report, waits until its own timeout. `ReadOnly` does not replace the checks below: whoever holds the socket sees everything the program prints, and closing it ends the program. The [terminal spec](../../.github/docs/specs/terminal.md#read-only-bridges) has the details.
+
 ### Authenticate the connection
 
 The bridge authenticates nothing: whoever holds the WebSocket types into the shell. Listening on localhost is not enough, because any web page the user visits can open a WebSocket to localhost. The sample's `LocalAccess` class refuses a request unless all three checks pass:

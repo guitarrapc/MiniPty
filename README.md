@@ -235,6 +235,8 @@ Other entry points:
 - `PtyStdioBridge`: length-prefixed frames over stdio, for a helper process such as [VsCodeTerminalHelper.cs](samples/SingleFiles/VsCodeTerminalHelper.cs) behind the [VS Code extension sample](samples/VsCodeExtension).
 - `PtyTerminal`: a node-pty-style push API with pause/resume flow control, for your own transport.
 
+To open read-only terminals, pass `new PtyBridgeOptions { ReadOnly = true }` to any bridge ([read-only terminals](samples/SingleFiles/README.md#read-only-terminals)).
+
 Protocol and bridging details: [terminal.md](.github/docs/specs/terminal.md).
 
 ## Backends

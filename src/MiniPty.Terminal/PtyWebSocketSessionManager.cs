@@ -50,10 +50,15 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
     /// </summary>
     /// <param name="startInfo">Child process launch configuration.</param>
     /// <returns>Opaque session id and bearer token. The token is returned only once.</returns>
+    /// <exception cref="ArgumentException">
+    /// The manager's <see cref="PtyBridgeOptions.ReadOnly"/> is set and <paramref name="startInfo"/> inherits the cursor
+    /// (<see cref="PtyStartInfo.InheritCursor"/>).
+    /// </exception>
     /// <exception cref="InvalidOperationException">The manager reached <see cref="PtyWebSocketSessionManagerOptions.MaxSessions"/>.</exception>
     public PtyBridgeSessionCredentials CreateSession(PtyStartInfo startInfo)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
+        _options.BridgeOptions.ThrowIfCannotServe(startInfo);
         lock (_lock)
         {
             ThrowIfDisposed();
@@ -565,7 +570,8 @@ public sealed class PtyWebSocketSessionManager : IAsyncDisposable
                     return;
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
-                    if (result.Count > 0)
+                    // A read-only manager has read the input, which keeps the frames behind it flowing, and drops it.
+                    if (result.Count > 0 && !_options.BridgeOptions.ReadOnly)
                         await WriteInputAsync(buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
                     continue;
                 }
