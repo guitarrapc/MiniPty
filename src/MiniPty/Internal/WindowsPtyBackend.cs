@@ -1290,6 +1290,13 @@ internal static class WindowsPtyBackend
 
         public int OutputChunkLimit => PtyOutputPump.Capacity;
 
+        /// <summary>
+        /// ConPTY hands a flood over in writes of about 256 B, 20–45 µs apart, so a consumer woken per read cost about 4,000
+        /// thread-pool hand-offs and 140–180 ms of host CPU per MiB, two thirds of it pool threads spinning for the next
+        /// one; joined, the same floods took 24–30 ms per MiB at the same rate (<see cref="IPtyBackend.JoinsOutputBursts"/>).
+        /// </summary>
+        public bool JoinsOutputBursts => true;
+
         public int PostExitQuietMs => PtyOutputPump.DefaultPostExitQuietMs;
 
         /// <summary>

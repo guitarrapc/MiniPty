@@ -3,7 +3,9 @@ using System.Diagnostics;
 namespace MiniPty.Internal;
 
 /// <summary>
-/// Burst coalescing for a consumer that pays per chunk, such as a bridge that sends one message per chunk. While output
+/// Burst coalescing for a consumer that pays per chunk: a bridge that sends one message per chunk, and on Windows every
+/// <see cref="PtySession.ReadOutputAsync"/> consumer, which ConPTY's small writes would wake once each
+/// (<see cref="IPtyBackend.JoinsOutputBursts"/>). While output
 /// arrives in a burst, its reader waits for a larger chunk instead of taking each read as it is published, with a short
 /// bound on the wait. The pump keeps publishing each read as it completes, and only the reader that asked waits.
 /// </summary>
