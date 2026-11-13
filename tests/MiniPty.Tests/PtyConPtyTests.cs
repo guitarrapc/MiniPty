@@ -359,10 +359,27 @@ public sealed class PtyConPtyTests
             ConPty = outOfBand ? Library() : null,
         });
         session.Resize(new(100, 40));
-        var result = await session.CompleteAsync(new PtyCompleteOptions { Input = "go\r" }).WaitAsync(Timeout);
+        await session.WriteInputAsync("go\r");
 
-        await Assert.That(result.ExitCode).IsEqualTo(0);
-        await Assert.That(result.GetText().ToString()).Contains("SIZE:100:40");
+        // Read by hand rather than through a completion, so a child that never answers fails with what it wrote.
+        var output = new StringBuilder();
+        using (var cts = new CancellationTokenSource(Timeout))
+        {
+            try
+            {
+                await foreach (var chunk in session.ReadOutputAsync(cts.Token))
+                    output.Append(Encoding.UTF8.GetString(chunk.Data.Span));
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                // Reported below with what arrived.
+            }
+        }
+
+        var text = output.ToString();
+        await Assert.That(text).Contains("SIZE:100:40").Because($"the child wrote {Escape(text)}");
+        var status = await session.WaitForExitAsync().WaitAsync(Timeout);
+        await Assert.That(status.ExitCode).IsEqualTo(0);
     }
 
     // ---------------------------------------------------------------- Clear
