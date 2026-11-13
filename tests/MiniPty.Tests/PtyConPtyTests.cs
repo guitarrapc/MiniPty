@@ -354,15 +354,34 @@ public sealed class PtyConPtyTests
         await using var session = Pty.Start(new PtyStartInfo
         {
             FileName = powershell,
-            Arguments = ["-NoLogo", "-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null; $s = $Host.UI.RawUI.WindowSize; Write-Output (\"SIZE:{0}:{1}\" -f $s.Width, $s.Height)"],
+            // [Console]::Out, not Write-Output, for which Windows PowerShell loads a module: started by an x64 test process
+            // under emulation on ARM64, with that process's environment, it read the line and then wrote nothing for 30 s.
+            Arguments = ["-NoLogo", "-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null; $s = $Host.UI.RawUI.WindowSize; [Console]::Out.Write((\"SIZE:{0}:{1}\" -f $s.Width, $s.Height))"],
             Size = new(120, 30),
             ConPty = outOfBand ? Library() : null,
         });
         session.Resize(new(100, 40));
-        var result = await session.CompleteAsync(new PtyCompleteOptions { Input = "go\r" }).WaitAsync(Timeout);
+        await session.WriteInputAsync("go\r");
 
-        await Assert.That(result.ExitCode).IsEqualTo(0);
-        await Assert.That(result.GetText().ToString()).Contains("SIZE:100:40");
+        // Read by hand rather than through a completion, so a child that never answers fails with what it wrote.
+        var output = new StringBuilder();
+        using (var cts = new CancellationTokenSource(Timeout))
+        {
+            try
+            {
+                await foreach (var chunk in session.ReadOutputAsync(cts.Token))
+                    output.Append(Encoding.UTF8.GetString(chunk.Data.Span));
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                // Reported below with what arrived.
+            }
+        }
+
+        var text = output.ToString();
+        await Assert.That(text).Contains("SIZE:100:40").Because($"the child wrote {Escape(text)}");
+        var status = await session.WaitForExitAsync().WaitAsync(Timeout);
+        await Assert.That(status.ExitCode).IsEqualTo(0);
     }
 
     // ---------------------------------------------------------------- Clear
@@ -393,9 +412,10 @@ public sealed class PtyConPtyTests
         await WaitForAsync(output, ">");
         await terminal.WriteInputAsync("echo AAAA\r");
         // The command's output and then the next prompt: under CPU oversubscription the prompt arrived only after the
-        // clear, so it, not the next command, was what started at the top (1 of 1 loaded runs).
-        var echoed = await WaitForAsync(output, "AAAA\r\n");
-        await WaitForAsync(output, ">", echoed);
+        // clear, so it, not the next command, was what started at the top (1 of 1 loaded runs). The output is found after
+        // the echoed command, not by its line end, which a host may draw as a cursor position instead of CR LF.
+        var printed = await WaitForAsync(output, "AAAA", await WaitForAsync(output, "echo AAAA"));
+        await WaitForAsync(output, ">", printed);
         int mark;
         lock (output)
             mark = output.Length;
@@ -407,7 +427,7 @@ public sealed class PtyConPtyTests
         await Task.Delay(500);
 
         await terminal.WriteInputAsync("echo BBBB\r");
-        await WaitForAsync(output, "BBBB\r\n");
+        await WaitForAsync(output, "BBBB", await WaitForAsync(output, "echo BBBB", mark));
         string afterClear;
         lock (output)
             afterClear = output.ToString(mark, output.Length - mark);
@@ -431,15 +451,17 @@ public sealed class PtyConPtyTests
         var output = new StringBuilder();
         await ReadUntilAsync(reader, output, ">");
         await session.WriteInputAsync("echo AAAA\r", cancellationToken: cts.Token);
-        var echoed = await ReadUntilAsync(reader, output, "AAAA\r\n");
-        await ReadUntilAsync(reader, output, ">", echoed);
+        // The output is found after the echoed command, not by its line end: from the 2026-11 update on build 26200 the
+        // in-box host draws the move to the next line as a cursor position (ESC[3;1H), where earlier builds send CR LF.
+        var printed = await ReadUntilAsync(reader, output, "AAAA", await ReadUntilAsync(reader, output, "echo AAAA"));
+        await ReadUntilAsync(reader, output, ">", printed);
         var mark = output.Length;
 
         session.Clear();
         await Task.Delay(500);
 
         await session.WriteInputAsync("echo BBBB\r", cancellationToken: cts.Token);
-        await ReadUntilAsync(reader, output, "BBBB\r\n");
+        await ReadUntilAsync(reader, output, "BBBB", await ReadUntilAsync(reader, output, "echo BBBB", mark));
         await Assert.That(output.ToString(mark, output.Length - mark).Contains(CursorHome, StringComparison.Ordinal)).IsFalse();
 
         await session.WriteInputAsync("exit\r", cancellationToken: cts.Token);
@@ -557,7 +579,10 @@ public sealed class PtyConPtyTests
         }
     }
 
-    /// <summary>Reads until <paramref name="text"/> appears at or after <paramref name="start"/>; returns the index past it.</summary>
+    /// <summary>
+    /// Reads until <paramref name="text"/> appears at or after <paramref name="start"/>; returns the index past it. A
+    /// reader canceled by its timeout fails with what arrived, as <see cref="WaitForAsync"/> does.
+    /// </summary>
     private static async Task<int> ReadUntilAsync(IAsyncEnumerator<PtyOutputChunk> reader, StringBuilder output, string text, int start = 0)
     {
         while (true)
@@ -566,7 +591,17 @@ public sealed class PtyConPtyTests
             if (at >= 0)
                 return at + text.Length;
 
-            if (!await reader.MoveNextAsync())
+            bool more;
+            try
+            {
+                more = await reader.MoveNextAsync();
+            }
+            catch (OperationCanceledException exception)
+            {
+                throw new TimeoutException($"'{Escape(text)}' did not arrive; output was {Escape(output.ToString())}", exception);
+            }
+
+            if (!more)
                 throw new InvalidOperationException($"Output ended before '{Escape(text)}': {Escape(output.ToString())}");
 
             output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
