@@ -368,18 +368,22 @@ jobs:
             label: almalinux-8 x64
             rid: linux-x64
             image: almalinux:8@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b
+            sdk-image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e
           - os: ubuntu-24.04-arm
             label: almalinux-8 arm64
             rid: linux-arm64
             image: almalinux:8@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b
+            sdk-image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e
           - os: ubuntu-24.04
             label: alpine-3.21 x64
             rid: linux-musl-x64
             image: alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
+            sdk-image: mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:cc02b814237a76c4735fb6eeee87181597b5e56f2ce458a435e527674d91f4d7
           - os: ubuntu-24.04-arm
             label: alpine-3.21 arm64
             rid: linux-musl-arm64
             image: alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
+            sdk-image: mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:cc02b814237a76c4735fb6eeee87181597b5e56f2ce458a435e527674d91f4d7
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
@@ -408,7 +412,7 @@ jobs:
       - name: Run NuGet smoke sample in a container
         if: ${{ matrix.image }}
         shell: bash
-        run: bash scripts/run-nuget-smoke-in-container.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}" "${{ matrix.image }}"
+        run: bash scripts/run-nuget-smoke-in-container.sh "${MINIPTY_CI_PACKAGE_VERSION}" ./publish "${{ matrix.rid }}" "${{ matrix.image }}" "${{ matrix.sdk-image }}"
 
   build-complete:
     needs:

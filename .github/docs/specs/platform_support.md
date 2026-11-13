@@ -40,7 +40,7 @@ CI runs `tests/MiniPty.Tests` on Linux, macOS, and Windows. On Windows that incl
 - An AlmaLinux 8 container: glibc 2.28, the oldest glibc .NET 10 supports.
 - Alpine 3.21 containers, for the musl files.
 
-The container smoke makes up to three attempts to download the SDK installer before failing setup. AlmaLinux 8 ships curl 7.61.1, which has no `--retry-all-errors` option, so the script retries failed transfers explicitly. A connection reset during this download is a setup failure before either package smoke runs.
+The container smoke copies .NET 10 from a digest-pinned official SDK image of the same architecture and libc. The smoke still runs inside AlmaLinux 8 or Alpine 3.21, so it verifies the target distribution's dependencies. Installer downloads repeatedly failed with empty replies, broken pipes, or timeouts even after three attempts; copying the SDK removes that bootstrap dependency. Package installation and NuGet restore still need the network.
 
 | Check | Why |
 |---|---|
