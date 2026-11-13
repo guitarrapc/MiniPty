@@ -354,7 +354,9 @@ public sealed class PtyConPtyTests
         await using var session = Pty.Start(new PtyStartInfo
         {
             FileName = powershell,
-            Arguments = ["-NoLogo", "-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null; $s = $Host.UI.RawUI.WindowSize; Write-Output (\"SIZE:{0}:{1}\" -f $s.Width, $s.Height)"],
+            // [Console]::Out, not Write-Output, for which Windows PowerShell loads a module: started by an x64 test process
+            // under emulation on ARM64, with that process's environment, it read the line and then wrote nothing for 30 s.
+            Arguments = ["-NoLogo", "-NoProfile", "-Command", "[Console]::In.ReadLine() | Out-Null; $s = $Host.UI.RawUI.WindowSize; [Console]::Out.Write((\"SIZE:{0}:{1}\" -f $s.Width, $s.Height))"],
             Size = new(120, 30),
             ConPty = outOfBand ? Library() : null,
         });
@@ -583,7 +585,17 @@ public sealed class PtyConPtyTests
             if (at >= 0)
                 return at + text.Length;
 
-            if (!await reader.MoveNextAsync())
+            bool more;
+            try
+            {
+                more = await reader.MoveNextAsync();
+            }
+            catch (OperationCanceledException)
+            {
+                throw new InvalidOperationException($"TEMP DIAG timed out before '{Escape(text)}': {Escape(output.ToString())}");
+            }
+
+            if (!more)
                 throw new InvalidOperationException($"Output ended before '{Escape(text)}': {Escape(output.ToString())}");
 
             output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
