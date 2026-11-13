@@ -155,6 +155,31 @@ jobs:
         shell: bash
         run: artifacts/x86/bin/MiniPty.Tests/release_win-x86/MiniPty.Tests.exe
 
+  # The suite as an x64 process on ARM64 Windows, under emulation. A win-x64 build stages the x64 OpenConsole.exe beside
+  # the x64 conpty.dll (buildTransitive/MiniPty.ConPty.targets), so the out-of-band host runs emulated too; the build job
+  # on windows-11-arm runs the suite as an arm64 process only. Built self-contained like test-win-x86's.
+  test-win-x64-on-arm64:
+    name: Test (win-x64 on arm64)
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    runs-on: windows-11-arm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Build the tests for win-x64
+        shell: bash
+        run: dotnet build tests/MiniPty.Tests/MiniPty.Tests.csproj -c Release -r win-x64 --self-contained --artifacts-path artifacts/x64
+      - name: Test as an emulated x64 process
+        shell: bash
+        run: artifacts/x64/bin/MiniPty.Tests/release_win-x64/MiniPty.Tests.exe
+
   # musl has no hosted runner, so the suite runs once in an Alpine container, on x64, where the runner can run
   # JavaScript actions inside Alpine. The SDK image is pinned like every other image here (SDK 10.0.403 on Alpine
   # 3.24 when pinned). build-base compiles the shim; the tests' children need nothing beyond busybox.
@@ -419,6 +444,7 @@ jobs:
       [
         build,
         test-win-x86,
+        test-win-x64-on-arm64,
         test-musl,
         test-old-kernel-paths,
         freebsd-native,

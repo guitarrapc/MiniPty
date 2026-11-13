@@ -151,6 +151,108 @@ public sealed class PtyConsoleHostTests
     }
 
     /// <summary>
+    /// Output ends soon after the console host exits while another process holds the output pipe, so the pipe does not
+    /// break and the drain must end output itself. Before Windows 11 24H2 the in-box close waits until the host exits,
+    /// and the drain counts the close as done when it returns, which the backend learns by watching the close thread
+    /// (Post-exit drain in <c>.github/docs/references/pty_crossplatform.md</c>). Output then ends about 100 ms after the
+    /// host. Without that report the close would count as done only 1 s after the request, about 1.1 s before the end.
+    /// From build 26100 the host exits with its child and the close does not wait, so output ends about 200 ms after
+    /// the host there.
+    /// </summary>
+    /// <remarks>
+    /// This test holds the pipe itself. ConPTY starts its console host with the output pipe's write end as the host's
+    /// standard output, so the test duplicates that handle out of the host, and a marker written through the duplicate
+    /// shows that it is the session's output pipe. A process that inherited the write end while ConPTY started the host
+    /// holds it the same way (<c>PtyTests.PtyWindowsOutputEndsWhileAnotherProcessHoldsTheOutputPipe</c>), but only when
+    /// its start lands in that window.
+    /// </remarks>
+    [Test]
+    [NotInParallel]
+    public async Task OutputEndsSoonAfterTheConsoleHostExitsWhileTheOutputPipeIsHeld()
+    {
+        // The host's process parameters are read at their 64-bit offsets.
+        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
+            return;
+
+        var before = ConsoleHostChildren();
+        var host = IntPtr.Zero;
+        var held = IntPtr.Zero;
+        try
+        {
+            await using var session = Pty.Start(WindowsCommand("echo READY& set /p LINE="));
+            var output = new StringBuilder();
+            using var cts = new CancellationTokenSource(Timeout);
+            await using var reader = session.ReadOutputAsync(cts.Token).GetAsyncEnumerator();
+            await ReadUntilAsync(reader, output, "READY");
+
+            host = OpenConsoleHostStartedSince(before, Synchronize | QueryLimitedInformation | QueryInformation | VmRead | DupHandle);
+            held = DuplicateStandardOutput(host);
+            await Assert.That(GetFileType(held)).IsEqualTo(FileTypePipe);
+            var marker = "HELD_MARKER"u8.ToArray();
+            await Assert.That(WriteFile(held, marker, (uint)marker.Length, out var written, IntPtr.Zero)).IsTrue();
+            await Assert.That(written).IsEqualTo((uint)marker.Length);
+            await ReadUntilAsync(reader, output, "HELD_MARKER");
+
+            await session.WriteInputAsync("x\r");
+            while (await reader.MoveNextAsync())
+                output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
+
+            var endedAt = DateTime.UtcNow.ToFileTimeUtc();
+            await Assert.That(session.OutputPump.IsEndOfOutputForced).IsTrue();
+            await Assert.That(WaitForSingleObject(host, 5_000)).IsEqualTo(WaitObject0);
+            await Assert.That(GetProcessTimes(host, out _, out var hostExitedAt, out _, out _)).IsTrue();
+
+            // The bound sits between the two outcomes on a legacy host (about 0.1 s and 1.1 s less the close's time) and
+            // above the 0.2 s from build 26100. A close that took 0.6 s would put the outcome without the report under it.
+            var afterHostMs = (endedAt - hostExitedAt) / 10_000.0;
+            await Assert.That(afterHostMs).IsLessThan(500)
+                .Because($"output ended {afterHostMs:F0} ms after the console host exited " +
+                    $"(ReleasePseudoConsole: {MiniPty.Internal.WindowsInterop.CanReleasePseudoConsole})");
+        }
+        finally
+        {
+            Close(held);
+            Close(host);
+        }
+    }
+
+    /// <summary>
+    /// Duplicates <paramref name="host"/>'s standard output into this process. The handle value is read from the host's
+    /// process parameters (<c>RTL_USER_PROCESS_PARAMETERS.StandardOutput</c>, through its PEB), at their offsets in a
+    /// 64-bit process.
+    /// </summary>
+    private static IntPtr DuplicateStandardOutput(IntPtr host)
+    {
+        const int PebProcessParameters = 0x20;
+        const int ParametersStandardOutput = 0x28;
+        const int ProcessBasicInformationClass = 0;
+
+        var status = NtQueryInformationProcess(
+            host, ProcessBasicInformationClass, out var basic, Marshal.SizeOf<ProcessBasicInformation>(), out _);
+        if (status != 0)
+            throw new InvalidOperationException($"NtQueryInformationProcess failed with 0x{status:X8}.");
+
+        var parameters = ReadPointer(host, basic.PebBaseAddress + PebProcessParameters);
+        var standardOutput = ReadPointer(host, parameters + ParametersStandardOutput);
+        if (!DuplicateHandle(host, standardOutput, GetCurrentProcess(), out var held, 0, false, DuplicateSameAccess))
+            throw new Win32Exception();
+
+        return held;
+    }
+
+    private static IntPtr ReadPointer(IntPtr process, IntPtr address) =>
+        ReadProcessMemory(process, address, out var value, IntPtr.Size, out _) ? value : throw new Win32Exception();
+
+    private static async Task ReadUntilAsync(IAsyncEnumerator<PtyOutputChunk> reader, StringBuilder output, string marker)
+    {
+        while (output.ToString().IndexOf(marker, StringComparison.Ordinal) < 0)
+        {
+            await Assert.That(await reader.MoveNextAsync()).IsTrue();
+            output.Append(Encoding.UTF8.GetString(reader.Current.Data.Span));
+        }
+    }
+
+    /// <summary>
     /// The conhost.exe processes whose parent is this process: the in-box ConPTY starts a session's console host from
     /// the process that creates the pseudo-console.
     /// </summary>
@@ -269,10 +371,26 @@ public sealed class PtyConsoleHostTests
     };
 
     private const uint Terminate = 0x0001;
+    private const uint VmRead = 0x0010;
+    private const uint DupHandle = 0x0040;
+    private const uint QueryInformation = 0x0400;
     private const uint SuspendResume = 0x0800;
     private const uint QueryLimitedInformation = 0x1000;
     private const uint Synchronize = 0x00100000;
     private const uint WaitObject0 = 0;
+    private const uint DuplicateSameAccess = 0x00000002;
+    private const uint FileTypePipe = 0x0003;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessBasicInformation
+    {
+        public IntPtr ExitStatus;
+        public IntPtr PebBaseAddress;
+        public IntPtr AffinityMask;
+        public IntPtr BasePriority;
+        public IntPtr UniqueProcessId;
+        public IntPtr InheritedFromUniqueProcessId;
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct ProcessEntry
@@ -321,4 +439,31 @@ public sealed class PtyConsoleHostTests
 
     [DllImport("ntdll.dll")]
     private static extern int NtSuspendProcess(IntPtr processHandle);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(
+        IntPtr processHandle, int processInformationClass, out ProcessBasicInformation processInformation,
+        int processInformationLength, out int returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReadProcessMemory(
+        IntPtr hProcess, IntPtr lpBaseAddress, out IntPtr lpBuffer, nint nSize, out nint lpNumberOfBytesRead);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateHandle(
+        IntPtr hSourceProcessHandle, IntPtr hSourceHandle, IntPtr hTargetProcessHandle, out IntPtr lpTargetHandle,
+        uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwOptions);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetFileType(IntPtr hFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WriteFile(
+        IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite, out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
 }
