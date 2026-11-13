@@ -42,8 +42,9 @@ namespace MiniPty.Benchmarks;
 /// <para>
 /// <c>--library minipty|porta|porta-async</c> picks the library (<c>oneshot</c> is MiniPty only), and on Windows
 /// <c>--conpty in-box|out-of-band</c> the ConPTY. <c>--read coalesced</c> reads MiniPty through the bridges' internal
-/// coalescing reader instead of <c>ReadOutputAsync</c>. <c>--program</c> floods with a <c>yes</c>-like program instead
-/// of the benchmark child. On Windows <c>--host-ctrl-c enable</c> makes the probe process Ctrl+C before it starts a
+/// coalescing reader instead of <c>ReadOutputAsync</c>, and <c>--read ui</c> runs the <c>ReadOutputAsync</c> loop on a
+/// thread of its own that runs every continuation, as a UI thread's dispatcher does. <c>--program</c> floods with a
+/// <c>yes</c>-like program instead of the benchmark child. On Windows <c>--host-ctrl-c enable</c> makes the probe process Ctrl+C before it starts a
 /// child, since a host that ignores Ctrl+C passes that on to every child. Each case should run in a process of its own,
 /// since peak memory is the process's.
 /// </para>
@@ -680,7 +681,7 @@ internal static class FloodProbe
 
         internal static FloodSession Start(Options options, long bytes, EchoTracker? echo, int delayMs) =>
             options.ServeLibrary == ServeLibrary.MiniPty
-                ? new MiniPtyFlood(MiniPtyStartInfo(options, bytes), echo, delayMs, options.Get("read", "plain") == "coalesced")
+                ? new MiniPtyFlood(MiniPtyStartInfo(options, bytes), echo, delayMs, options.Get("read", "plain"))
                 : new PortaFlood(options, bytes, echo, delayMs);
 
         internal static PtyStartInfo MiniPtyStartInfo(Options options, long bytes) => new()
@@ -735,24 +736,27 @@ internal static class FloodProbe
     {
         private readonly PtySession _session;
 
-        internal MiniPtyFlood(PtyStartInfo startInfo, EchoTracker? echo, int delayMs, bool coalesced) : base(echo)
+        internal MiniPtyFlood(PtyStartInfo startInfo, EchoTracker? echo, int delayMs, string read) : base(echo)
         {
             _session = Pty.Start(startInfo);
             ProcessId = _session.ProcessId;
-            Consumer = Task.Run(() => ConsumeAsync(delayMs, coalesced));
+            Consumer = read == "ui"
+                ? UiThread.Run(() => ConsumeAsync(delayMs, coalesced: false, onContext: true))
+                : Task.Run(() => ConsumeAsync(delayMs, read == "coalesced", onContext: false));
         }
 
-        private async Task ConsumeAsync(int delayMs, bool coalesced)
+        private async Task ConsumeAsync(int delayMs, bool coalesced, bool onContext)
         {
             try
             {
                 // --read coalesced: the bridges' internal reader, which joins a burst's reads (up to 8 KiB or about 1-2 ms).
+                // --read ui: every continuation comes back to the UI thread, as an await there without ConfigureAwait does.
                 var chunks = coalesced ? _session.ReadOutputCoalescedAsync() : _session.ReadOutputAsync();
-                await foreach (var chunk in chunks.ConfigureAwait(false))
+                await foreach (var chunk in chunks.ConfigureAwait(onContext))
                 {
                     OnChunk(chunk.Data.Span);
                     if (delayMs > 0)
-                        await Task.Delay(delayMs).ConfigureAwait(false);
+                        await Task.Delay(delayMs).ConfigureAwait(onContext);
                 }
             }
             catch (ObjectDisposedException)
@@ -876,6 +880,42 @@ internal static class FloodProbe
             Kill();
             _connection.Dispose();
             return default;
+        }
+    }
+
+    /// <summary>
+    /// A thread that runs every callback posted to its <see cref="SynchronizationContext"/>, one at a time, as a UI
+    /// thread's dispatcher does, so a consumer started on it resumes there after each wait (<c>--read ui</c>).
+    /// </summary>
+    private sealed class UiThread : SynchronizationContext
+    {
+        private readonly System.Collections.Concurrent.BlockingCollection<(SendOrPostCallback Callback, object? State)> _queue = new();
+
+        public override void Post(SendOrPostCallback d, object? state) => _queue.Add((d, state));
+
+        public override void Send(SendOrPostCallback d, object? state) => throw new NotSupportedException();
+
+        /// <summary>Starts <paramref name="body"/> on a new UI thread, which ends with it.</summary>
+        internal static Task Run(Func<Task> body)
+        {
+            var context = new UiThread();
+            var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var thread = new Thread(() =>
+            {
+                SetSynchronizationContext(context);
+                var task = body();
+                _ = task.ContinueWith(static (t, state) => ((UiThread)state!)._queue.CompleteAdding(), context, TaskScheduler.Default);
+                foreach (var (callback, state) in context._queue.GetConsumingEnumerable())
+                    callback(state);
+
+                if (task.Exception is { } error)
+                    done.SetException(error.InnerExceptions);
+                else
+                    done.SetResult();
+            })
+            { IsBackground = true, Name = "flood-probe-ui" };
+            thread.Start();
+            return done.Task;
         }
     }
 

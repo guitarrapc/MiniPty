@@ -450,6 +450,12 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// ends (<see cref="PtyOutputSink"/>). Runs on the thread that delivers output, so it never throws: a child that is
     /// gone or a session being disposed needs no kill.
     /// </summary>
+    /// <remarks>
+    /// It runs under the pump's lock, and on Windows the kill can be what first finds the child exited, so the exit is
+    /// then recorded on this thread: the exit waits complete asynchronously, and the pump's exit step
+    /// (<see cref="PtyOutputPump.OnChildExited"/>) only sets a flag and schedules the drain. That step must not take
+    /// the pump's lock or run output delivery.
+    /// </remarks>
     internal void KillAfterOutputFailure()
     {
         if (IsDisposed)
