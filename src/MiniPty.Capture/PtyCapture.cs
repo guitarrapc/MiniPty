@@ -37,6 +37,10 @@ public static class PtyCapture
     /// </exception>
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">Exit or output drain timeout was exceeded.</exception>
+    /// <exception cref="IOException">
+    /// The output exceeded <see cref="PtyCompleteOptions.MaxOutputBytes"/>, or the output transport failed; the child was
+    /// killed.
+    /// </exception>
     public static async Task<PtyCaptureResult> RunAsync(
         PtyStartInfo startInfo,
         PtyCaptureOptions? options = null,

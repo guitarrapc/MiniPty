@@ -155,6 +155,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <summary>The session's <see cref="ReadOutputAsync"/> enumerator, once one was created. For tests.</summary>
     internal PtyOutputReader? OutputReader => _outputReader;
 
+    /// <summary>Whether <see cref="ReadOutputAsync"/> joins a burst's reads on this session's transport (<see cref="IPtyBackend.JoinsOutputBursts"/>).</summary>
+    internal bool JoinsOutputBursts => _backend.JoinsOutputBursts;
+
     internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
     /// <summary>
@@ -183,6 +186,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// UI thread's input and rendering. Elsewhere, such as on the thread pool, buffered chunks keep completing
     /// synchronously.
     /// </para>
+    /// <para>
+    /// On Windows, output that arrives in a burst, such as a flood or a large repaint, is joined into larger chunks: in
+    /// a burst a chunk is handed out once 8 KiB is unread, or about 1–2 ms after <c>MoveNextAsync</c> asked. ConPTY sends
+    /// a flood in pieces of about 256 B, and taking each one as it arrived cost the consumer a thread-pool wake per piece.
+    /// Output outside a burst, such as a keystroke's echo after idle, is handed out at once. On Unix every chunk is handed
+    /// out as it is read.
+    /// </para>
     /// <para>Normal PTY EOF completes the sequence after all available output is drained.</para>
     /// </remarks>
     /// <exception cref="InvalidOperationException">Another output reader is already active.</exception>
@@ -198,7 +208,8 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
-    /// <see cref="ReadOutputAsync"/> for a consumer that pays per chunk, such as a bridge that sends one message per chunk.
+    /// <see cref="ReadOutputAsync"/> for a consumer that pays per chunk, such as a bridge that sends one message per chunk,
+    /// on every platform; on Windows <see cref="ReadOutputAsync"/> joins bursts by these rules itself.
     /// While output arrives in a burst, a chunk waits until 8 KiB is unread or a shared tick serves its deadline, so a flood
     /// goes out in fewer, larger chunks. That is up to about 2 ms after the read asked, on Windows too, whose tick runs on
     /// a high-resolution timer (<see cref="PtyOutputCoalescing.MaxDelayMs"/>). Output outside a burst, such as a keystroke
@@ -435,6 +446,32 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     }
 
     /// <summary>
+    /// Ends the child of a one-shot completion whose output can no longer be collected, so the completion's exit wait
+    /// ends (<see cref="PtyOutputSink"/>). Runs on the thread that delivers output, so it never throws: a child that is
+    /// gone or a session being disposed needs no kill.
+    /// </summary>
+    /// <remarks>
+    /// It runs under the pump's lock, and on Windows the kill can be what first finds the child exited, so the exit is
+    /// then recorded on this thread: the exit waits complete asynchronously, and the pump's exit step
+    /// (<see cref="PtyOutputPump.OnChildExited"/>) only sets a flag and schedules the drain. That step must not take
+    /// the pump's lock or run output delivery.
+    /// </remarks>
+    internal void KillAfterOutputFailure()
+    {
+        if (IsDisposed)
+            return;
+
+        try
+        {
+            _backend.Kill();
+        }
+        catch (Exception)
+        {
+            // The child has exited, or disposal is ending it.
+        }
+    }
+
+    /// <summary>
     /// Sends a signal to the child process without releasing PTY handles.
     /// </summary>
     /// <remarks>
@@ -504,6 +541,11 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     /// <exception cref="TimeoutException">
     /// <see cref="PtyCompleteOptions.ExitTimeout"/> or output drain timeout was exceeded.
+    /// </exception>
+    /// <exception cref="IOException">
+    /// The output exceeded <see cref="PtyCompleteOptions.MaxOutputBytes"/>, or the output transport failed. The child
+    /// was killed as soon as its output could no longer be collected, and the exception is thrown once its exit is
+    /// observed.
     /// </exception>
     public async Task<PtyResult> CompleteAsync(
         PtyCompleteOptions? options = null,
@@ -642,9 +684,13 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     internal void ReleaseOutputConsumer(int consumer) =>
         Interlocked.CompareExchange(ref _outputReaderActive, OutputConsumerNone, consumer);
 
+    /// <summary>
+    /// Creates the session's reader: one that can coalesce where <see cref="ReadOutputAsync"/> joins bursts (Windows), and
+    /// the plain one, which carries no coalescing state, elsewhere.
+    /// </summary>
     private PtyOutputReader CreateOutputReader()
     {
-        var created = new PtyOutputReader(this, _pump);
+        var created = JoinsOutputBursts ? new PtyCoalescingOutputReader(this, _pump) : new PtyOutputReader(this, _pump);
         return Interlocked.CompareExchange(ref _outputReader, created, null) ?? created;
     }
 

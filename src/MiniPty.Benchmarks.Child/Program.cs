@@ -13,6 +13,18 @@ if (args is ["--serve", var serveBytes])
     return Serve.Run(floodBytes);
 }
 
+if (args is ["--flood", var floodBytesArg])
+{
+    // Flood probe (MiniPty.Benchmarks --flood-probe): printable lines as fast as the terminal takes them (Flood.cs).
+    if (!long.TryParse(floodBytesArg, NumberStyles.None, CultureInfo.InvariantCulture, out var floodBytes))
+    {
+        Console.Error.WriteLine("Usage: MiniPty.Benchmarks.Child --flood <bytes, 0 for no end>");
+        return 2;
+    }
+
+    return Flood.Run(floodBytes);
+}
+
 if (args is ["--burst", var burstBytesArg, var burstIntervalArg, var burstCountArg])
 {
     // Burst probe (MiniPty.Benchmarks --burst-probe): a burst of printable bytes at an interval, then exit.

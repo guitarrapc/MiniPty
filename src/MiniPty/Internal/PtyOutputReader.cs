@@ -7,7 +7,7 @@ namespace MiniPty.Internal;
 /// <summary>
 /// <see cref="PtySession.ReadOutputAsync"/>: one enumerator per session, reused by every enumeration, that hands
 /// out ring slots in place. A session's first coalescing read replaces it with a <see cref="PtyCoalescingOutputReader"/>,
-/// which serves the enumerations after it.
+/// which serves the enumerations after it; a session whose transport joins bursts starts with one.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -26,8 +26,9 @@ namespace MiniPty.Internal;
 /// An enumeration started through <see cref="PtySession.ReadOutputCoalescedAsync"/>, an internal mode the bridges use
 /// through <c>PtyTerminal</c>, waits for a larger chunk while output arrives in a burst, instead of taking each read as it
 /// is published, until a deadline that <see cref="PtyOutputCoalesceScheduler"/> serves (<see cref="PtyOutputCoalescing"/>).
-/// Only such an enumeration coalesces. One started through <see cref="PtySession.ReadOutputAsync"/> does not, even when
-/// a coalescing reader serves it.
+/// On a transport that joins bursts (<see cref="IPtyBackend.JoinsOutputBursts"/>: ConPTY), one started through
+/// <see cref="PtySession.ReadOutputAsync"/> coalesces too, and the session's reader is a coalescing one from the start.
+/// Elsewhere such an enumeration does not, even when a coalescing reader serves it.
 /// </para>
 /// <para>
 /// A chunk is the unread part of one ring slot, valid until the next <c>MoveNextAsync</c>, which releases the
@@ -73,7 +74,14 @@ internal class PtyOutputReader :
     public PtyOutputChunk Current => _current;
 
     public IAsyncEnumerator<PtyOutputChunk> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-        Begin(default, cancellationToken, coalesce: false);
+        Begin(default, cancellationToken, coalesce: JoinsBursts);
+
+    /// <summary>
+    /// Whether a <see cref="PtySession.ReadOutputAsync"/> enumeration coalesces: where the transport joins bursts
+    /// (<see cref="IPtyBackend.JoinsOutputBursts"/>), whose session always creates a reader that can. On Unix a coalescing
+    /// reader a bridge created still serves a later plain enumeration plainly.
+    /// </summary>
+    private bool JoinsBursts => this is PtyCoalescingOutputReader && _session.JoinsOutputBursts;
 
     /// <summary>
     /// Starts an enumeration, coalescing bursts when <paramref name="coalesce"/> is set. Failures surface from the first
@@ -363,7 +371,7 @@ internal class PtyOutputReader :
     internal sealed class WithToken(PtyOutputReader reader, CancellationToken readToken) : IAsyncEnumerable<PtyOutputChunk>
     {
         public IAsyncEnumerator<PtyOutputChunk> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-            reader.Begin(readToken, cancellationToken, coalesce: false);
+            reader.Begin(readToken, cancellationToken, coalesce: reader.JoinsBursts);
     }
 
     /// <summary>An enumeration that could not start; it fails from its first <c>MoveNextAsync</c>.</summary>

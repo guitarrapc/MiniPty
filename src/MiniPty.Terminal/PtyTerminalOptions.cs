@@ -35,7 +35,8 @@ public sealed class PtyTerminalOptions
     /// Gets whether output that arrives in a burst is joined into larger chunks, each taken once 8 KiB is unread or once a
     /// shared tick serves its deadline, up to about 2 ms after it was asked for. Output outside a burst, such as a keystroke
     /// echo, is pushed at once. Set by the bridges, whose cost grows with the number of messages they send
-    /// (<c>PtySession.ReadOutputCoalescedAsync</c>).
+    /// (<c>PtySession.ReadOutputCoalescedAsync</c>). On Windows output is joined this way without it, as
+    /// <c>PtySession.ReadOutputAsync</c> joins bursts there for every consumer.
     /// </summary>
     internal bool CoalesceBursts { get; init; }
 }

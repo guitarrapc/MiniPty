@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # Runs run-nuget-smoke.sh inside a container, for Linux distributions the hosted runners do not provide: the oldest
 # glibc .NET 10 supports (an RHEL 8-compatible image) and Alpine, which needs the musl files. The container installs
-# the .NET 10 SDK and the NativeAOT prerequisites, then runs the same smoke as the runners: the packed packages under
-# `dotnet run`, then a NativeAOT publish for the runtime identifier.
+# NativeAOT prerequisites and copies the .NET 10 SDK from an SDK image, then runs the same smoke as the runners:
+# the packed packages under `dotnet run`, then a NativeAOT publish for the runtime identifier.
 #
-# The image must be of the host's architecture. Files go in with `docker cp`, which needs nothing inside the image.
+# Both images must be of the host's architecture and use the same libc. Files go in with `docker cp`, which needs
+# nothing inside the image. Copying the SDK avoids installer and SDK downloads through the target's older tools.
 #
-# Usage: run-nuget-smoke-in-container.sh <package-version> <nupkg-directory> <runtime-identifier> <image>
+# Usage: run-nuget-smoke-in-container.sh <package-version> <nupkg-directory> <runtime-identifier> <image> <sdk-image>
 set -euo pipefail
 
-usage="Usage: run-nuget-smoke-in-container.sh <package-version> <nupkg-directory> <runtime-identifier> <image>"
+usage="Usage: run-nuget-smoke-in-container.sh <package-version> <nupkg-directory> <runtime-identifier> <image> <sdk-image>"
 version="${1:?$usage}"
 feed_dir="${2:?$usage}"
 rid="${3:?$usage}"
 image="${4:?$usage}"
+sdk_image="${5:?$usage}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
+# Git Bash would rewrite the container paths below into Windows paths.
+export MSYS_NO_PATHCONV=1
 
 case "$image" in
   alpine*)
@@ -32,8 +36,10 @@ esac
 
 stage="$(mktemp -d)"
 cid=""
+sdk_cid=""
 cleanup() {
   [[ -n "$cid" ]] && docker rm -f "$cid" >/dev/null 2>&1 || true
+  [[ -n "$sdk_cid" ]] && docker rm -f "$sdk_cid" >/dev/null 2>&1 || true
   rm -rf "$stage"
 }
 trap cleanup EXIT
@@ -46,22 +52,16 @@ cp "$feed_dir"/*.nupkg "$stage/feed/"
 cid="$(docker create "$image" sh -c "
   set -e
   $setup
-  # AlmaLinux 8's curl predates --retry-all-errors, so retry connection resets explicitly.
-  for attempt in 1 2 3; do
-    if curl -sSfL --connect-timeout 30 --max-time 120 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh; then
-      break
-    fi
-    if [ \"\$attempt\" -eq 3 ]; then
-      echo 'Failed to download dotnet-install.sh after 3 attempts.' >&2
-      exit 1
-    fi
-    echo \"Retrying dotnet-install.sh download after attempt \$attempt.\" >&2
-    sleep 2
-  done
-  bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/share/dotnet
   export PATH=/usr/share/dotnet:\$PATH DOTNET_ROOT=/usr/share/dotnet DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
   cd /src
   bash scripts/run-nuget-smoke.sh '$version' feed '$rid'
 ")"
-docker cp "$stage/." "$cid:/src"
+stage_docker="$stage"
+if command -v cygpath >/dev/null 2>&1; then
+  stage_docker="$(cygpath -w "$stage")"
+fi
+docker cp "$stage_docker/." "$cid:/src"
+sdk_cid="$(docker create "$sdk_image")"
+# Stream Docker's archive directly between stopped containers; no target tools or host SDK are used.
+docker cp "$sdk_cid:/usr/share/dotnet" - | docker cp - "$cid:/usr/share"
 docker start -a "$cid"

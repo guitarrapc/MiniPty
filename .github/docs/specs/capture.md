@@ -20,7 +20,7 @@ PtyCaptureResult result = await PtyCapture.RunAsync(startInfo, options);
 // result.GetTextChunks() - PtyCaptureTextChunk(TimeSpan Time, ReadOnlyMemory<char> Text)
 ```
 
-- `PtyCaptureOptions.Completion` wraps `PtyCompleteOptions`.
+- `PtyCaptureOptions.Completion` wraps `PtyCompleteOptions`, so `MaxOutputBytes` bounds a capture as it bounds `CompleteAsync` ([Output limit](completion.md#output-limit)). Each chunk adds its time and slice to the result: 17,500 chunks for a 64 MiB flood on Windows, and 81,000–84,000 for 256 MiB on Linux.
 - `PtyCaptureOptions.TimeProvider` supplies the clock for chunk timestamps. Default is `TimeProvider.System`.
 - Each chunk's `Time` is the elapsed time from session start, immediately after `Pty.Start`, to the completion of the read that produced it. With `TimeProvider.System` the read's own timestamp is used; another provider is asked when the read is delivered, which is the same moment for output read after capture attached. Output read before capture attached is timestamped on delivery; a read that completed before the origin counts as zero. Chunk times never decrease: a read already in flight when capture attached is delivered after that earlier output and takes its time.
 - The session is disposed when `RunAsync` completes. Disposal ends the child if it is still running (see [Core session](core_session.md)).

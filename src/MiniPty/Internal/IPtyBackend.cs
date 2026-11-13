@@ -90,6 +90,15 @@ internal interface IPtyBackend : IDisposable
     /// </summary>
     public int OutputChunkLimit { get; }
     /// <summary>
+    /// Whether <see cref="PtySession.ReadOutputAsync"/> joins the reads of a burst into larger chunks, as the bridges'
+    /// reads do (<see cref="PtyOutputCoalescing"/>). True for ConPTY: it hands a flood over in writes of about 256 B, and
+    /// output is never read on the consumer's thread there, so a consumer that keeps up would otherwise be woken on a
+    /// thread-pool thread once per write. False on Unix, where such a consumer reads a flood on its own thread instead,
+    /// and joining would hand the reads back to the I/O loop. Scripted backends keep the default, so their tests see each
+    /// read.
+    /// </summary>
+    public bool JoinsOutputBursts => false;
+    /// <summary>
     /// Output silence, in milliseconds, that the post-exit drain takes to mean the transport has nothing more:
     /// counted after child exit before the transport is closed, and again after the close before output is ended
     /// without it. Platform backends return <see cref="PtyOutputPump.DefaultPostExitQuietMs"/>; a scripted backend

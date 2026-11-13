@@ -633,7 +633,7 @@ See [spec.md](../spec.md) → Verification. `tests/MiniPty.Tests` exercises:
 
 | Area | Features |
 |---|---|
-| **Near term** | Ctrl-C (`\x03` write), capture tuning (chunk size) |
+| **Near term** | Capture tuning (chunk size) |
 | **Later** | Long-lived interactive sessions, disk spill for huge captures |
 
 ## NativeAOT Interop

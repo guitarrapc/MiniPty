@@ -392,7 +392,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
                 // Output published before the sink attached goes first, so the sink sees output in order. The span just
                 // read is not published, so the next read reuses it.
                 DrainRingInto(sink);
-                sink.Write(_ring!.AsSpan(start, length), timestamp);
+                sink.Deliver(_ring!.AsSpan(start, length), timestamp);
                 return;
             }
         }
@@ -430,7 +430,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
         {
             var head = _head;
             var length = Math.Min(count, Capacity - head);
-            sink.Write(_ring!.AsSpan(head, length), timestamp: 0);
+            sink.Deliver(_ring!.AsSpan(head, length), timestamp: 0);
             _head = Advance(head, length);
             Interlocked.Add(ref _count, -length);
             drained = true;
@@ -457,7 +457,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
                 try
                 {
                     DrainRingInto(sink);
-                    sink.OnOutputEnded();
+                    sink.EndOutput(_error);
                 }
                 catch (Exception ex)
                 {
@@ -717,7 +717,7 @@ internal sealed class PtyOutputPump : IValueTaskSource
             {
                 // The pump is done, so this thread has the ring to itself.
                 DrainRingInto(sink);
-                sink.OnOutputEnded();
+                sink.EndOutput(_error);
                 return;
             }
         }

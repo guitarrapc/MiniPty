@@ -944,6 +944,67 @@ public sealed class PtyOutputCoalescingTests
     }
 
     /// <summary>
+    /// A plain <c>ReadOutputAsync</c> joins bursts where the transport does: on ConPTY, from the session's first read, and
+    /// on Unix never, where a consumer that keeps up reads a flood on its own thread.
+    /// </summary>
+    [Test]
+    public async Task ReadOutputAsyncJoinsBurstsOnlyOnATransportThatDoes()
+    {
+        if (!Pty.IsSupported)
+            return;
+
+        var startInfo = OperatingSystem.IsWindows()
+            ? new PtyStartInfo { FileName = "cmd.exe", Arguments = ["/c", "echo joined"] }
+            : new PtyStartInfo { FileName = "sh", Arguments = ["-c", "echo joined"] };
+        await using var session = Pty.Start(startInfo);
+        await foreach (var _ in session.ReadOutputAsync())
+        {
+        }
+
+        await Assert.That(session.JoinsOutputBursts).IsEqualTo(OperatingSystem.IsWindows());
+        await Assert.That(session.OutputReader is PtyCoalescingOutputReader).IsEqualTo(OperatingSystem.IsWindows());
+    }
+
+    /// <summary>
+    /// On Windows a plain <c>ReadOutputAsync</c> joins a flood. ConPTY sends it in pieces of about 256 B, and a consumer
+    /// that keeps up, as this one does, took each piece on its own before: about 4,000 per MiB, each a thread-pool wake,
+    /// and 210–270 B per chunk on average. Joined, a chunk holds what arrives within about 1–2 ms, up to 8 KiB, so at
+    /// 1 MB/s or more it averages over 1 KiB. A slower host is skipped: there even joined chunks stay small.
+    /// </summary>
+    [Test]
+    public async Task OnWindowsReadOutputAsyncJoinsAFlood()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        await using var session = Pty.Start(new PtyStartInfo
+        {
+            FileName = "cmd.exe",
+            CommandLine = $"/s /c \"{WindowsFloodFile.TypeCommand(2000, 200)}\"",
+            Size = new PtySize(220, 24),
+        });
+        long bytes = 0;
+        var chunks = 0;
+        long first = 0;
+        long last = 0;
+        await foreach (var chunk in session.ReadOutputAsync(cts.Token))
+        {
+            last = Stopwatch.GetTimestamp();
+            if (first == 0)
+                first = last;
+
+            bytes += chunk.Data.Length;
+            chunks++;
+        }
+
+        var bytesPerMillisecond = bytes / Math.Max(Stopwatch.GetElapsedTime(first, last).TotalMilliseconds, double.Epsilon);
+        var summary = $"{bytes} bytes in {chunks} chunks at {bytesPerMillisecond / 1000:F2} MB/s";
+        Skip.Unless(bytesPerMillisecond >= 1024, $"The flood came at less than 1 MB/s, where even joined chunks stay small ({summary}).");
+        await Assert.That(bytes / (double)chunks).IsGreaterThanOrEqualTo(1024).Because(summary);
+    }
+
+    /// <summary>
     /// Takes a chunk of the burst size, and returns the next read, which must then be a coalescing wait: the reader is in
     /// a burst, nothing is unread, and, unless the real tick may already have served it, the wait has a deadline.
     /// </summary>

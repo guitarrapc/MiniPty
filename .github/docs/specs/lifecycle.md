@@ -165,6 +165,7 @@ EOF staging advances on a per-session 100 ms timer, so it gives the child time t
 | Session disposed while output streaming | `ObjectDisposedException`. |
 | `ExitTimeout` exceeded (`CompleteAsync` / capture) | `TimeoutException`. |
 | Output drain or reader close timeout (one-shot) | `TimeoutException`. |
+| Output past `MaxOutputBytes`, or output that cannot be collected (one-shot) | The child is killed, then `IOException` ([Output limit](completion.md#output-limit)). |
 
 MiniPty does not fall back to pipe redirect when PTY creation fails.
 
@@ -205,6 +206,7 @@ Every session, on every platform, guarantees:
 - **Unix PTY master fds cannot be half-closed.** Closing the master ends both read and write, so `SendEof()` writes EOT instead.
 - **Canonical EOT is not kernel EOF on Unix.** One EOT on a non-empty line buffer delivers buffered bytes but does not end input; a submitted line or a second EOT may be needed.
 - **Output drain after child exit needs bounded waits on one-shot paths.** `OutputDrainGrace` and `OutputReaderCloseTimeout` prevent hung readers without dropping ordinary slow flushes. Persistent `ReadOutputAsync` and `Output` do not use those timeouts.
+- **A one-shot path that stops collecting output must end the child, or its exit wait never ends.** The completion waits for exit before it drains, and a child whose output nobody reads blocks on a full terminal. A 2.2 GiB flood stopped being collected at 2 GiB, where the collecting buffer's `int` length wrapped and its write threw on the I/O loop, which ended that session's output; the child then blocked, and `CompleteAsync` waited with no error for as long as it was watched (90 s). Measuring was what found it: no test wrote that much. Any failure to collect now kills the child and is thrown once the exit is observed, and `MaxOutputBytes` bounds the memory below the 2 GiB a result can hold ([Output limit](completion.md#output-limit)).
 - **Kill/drain tests need an observed-output synchronization point and a child that cannot time out naturally.** Fixed delays can expire before a loaded CI worker schedules the reader or completes `fork`/`exec`; conversely, a time-limited child can exit before a starved reader resumes, so the test never reaches `Kill()`. Have the child emit readiness and then block on stdin, observe readiness from the active output enumeration, then kill and continue that same enumeration to EOF.
 - **Cancel semantics differ by use case.** Waiting cancellation does not kill; one-shot completion defaults to killing when canceled.
 - **Do not queue `CompleteAsync` behind active output reads.** Fail fast with `InvalidOperationException` so read, wait, and completion cannot deadlock inside hidden session queues.

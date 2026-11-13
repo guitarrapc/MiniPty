@@ -37,6 +37,33 @@ public sealed record PtyCompleteOptions
     public bool DecodeOutput { get; init; } = true;
 
     /// <summary>
+    /// Gets or sets the most output, in bytes, that the completion collects.
+    /// </summary>
+    /// <value>
+    /// <see langword="null"/> (default) — as much as one result can hold, <see cref="Array.MaxLength"/> bytes, just
+    /// under 2 GiB; a larger value means the same. Past the limit the child is killed and the completion fails with
+    /// <see cref="IOException"/>, so a child that writes without end cannot grow the result without bound. Until the result
+    /// is built, collected output takes about twice its size in memory with <see cref="DecodeOutput"/> off and about six
+    /// times with it on (the bytes and the decoded text, then each merged into the result). The default still lets a run
+    /// take several GiB before it fails, so set a lower value for a child whose output you do not control, or where memory
+    /// is tight.
+    /// </value>
+    /// <exception cref="ArgumentOutOfRangeException">The value is zero or negative.</exception>
+    public int? MaxOutputBytes
+    {
+        get => _maxOutputBytes;
+        init
+        {
+            if (value is { } bytes)
+                ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+
+            _maxOutputBytes = value;
+        }
+    }
+
+    private readonly int? _maxOutputBytes;
+
+    /// <summary>
     /// Gets or sets a value indicating whether <see cref="PtySession.SendEof"/> is called after
     /// <see cref="Input"/> is written.
     /// </summary>
