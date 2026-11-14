@@ -6,7 +6,7 @@
 
 # MiniPty
 
-A cross-platform, NativeAOT-ready pseudo-terminal (PTY) library for .NET that hosts thousands of shells per process for browsers, editors, and AI agents. MiniPty.Terminal adds flow control for xterm.js and VS Code, and lets browsers reconnect without losing output.
+A cross-platform, NativeAOT-ready pseudo-terminal (PTY) library for .NET that hosts thousands of shells per process for browsers, editors, and AI agents.
 
 **Motivation**
 
@@ -14,14 +14,12 @@ I needed a PTY library for high-performance NativeAOT projects. MiniPty provides
 
 ## Features
 
-- NativeAOT ready: no winpty, and no helper process running beside a session ([what ships per platform](#native-files))
-- Cross-platform: Windows, Linux, and macOS (FreeBSD: [experimental](#platforms))
-- Scaling: Scales to thousands of sessions. An idle session holds no thread and no output buffer.
-- Terminal frontends: connect a session to xterm.js over WebSocket, with reconnect and replay, or to VS Code over stdio ([MiniPty.Terminal](#miniptyterminal))
-- Bounded output memory: each session uses a 16 KiB buffer, and on FreeBSD up to about 23 KiB more for output its child left at exit, until that output is read. A slow consumer pauses the child instead of increasing memory use.
-- Allocation-free steady state: reading chunks, writing input, and waiting for exit allocate nothing after the first call.
-- Safe signal delivery: on Linux 5.2 and later, `clone` returns a pidfd with the child. Signals use this handle, avoiding PIDs that another process can reuse ([details](.github/docs/references/pty_crossplatform.md#child-exit-observation)).
-- Metrics: the `MiniPty` meter reports open sessions, start time, output bytes, and stalls. Without listeners, it takes no timestamps and allocates nothing ([metrics](#metrics)).
+- [NativeAOT ready](#native-files): No dependencies, no winpty, and no helper process running beside a session.
+- [Cross-platform](#platforms): Windows, Linux, and macOS (FreeBSD is experimental)
+- [Scaling](#scaling): Scales to thousands of sessions. Low cpu/memory overhead for idle sessions.
+- Allocation-free steady state: Reading chunks, writing input, and waiting for exit allocate nothing after the first call.
+- Safe signal, file descriptor handling: Handles signals and file descriptors safely, avoiding issues with PID reuse and ensuring proper cleanup.
+- [Metrics](#metrics): Meters report open sessions, start time, output bytes, and stalls.
 
 **Not supported**
 
