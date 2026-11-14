@@ -319,6 +319,36 @@ await using var session = Pty.Start(new PtyStartInfo
 });
 ```
 
+### Signals and descriptors
+
+The child gets only its terminal and default signal handling, even while other threads start processes. Your process keeps its own signal handlers ([child setup](.github/docs/references/pty_crossplatform.md#child-setup)). If other code in your process reaps every child (`waitpid(-1, ...)`), `ExitCode` is 0.
+
+```csharp
+await using var session = Pty.Start(new PtyStartInfo { FileName = "sleep", Arguments = ["60"] });
+session.Kill(PtySignal.Terminate); // Linux 5.2+: sent through the child's pidfd, never to a reused PID
+
+var status = await session.WaitForExitAsync();
+Console.WriteLine(status.ExitCode);        // 143 = 128 + SIGTERM
+Console.WriteLine(status.Signal);          // 15, or null when the child exits by itself (even with 143)
+Console.WriteLine(status.NodePtyExitCode); // 0, as node-pty reports a signal
+```
+
+| Signal | Number | `ExitCode` | Typical cause |
+|---|---|---|---|
+| `SIGHUP` | 1 | 129 | Disposal, `Kill(PtySignal.Hangup)` |
+| `SIGINT` | 2 | 130 | Ctrl+C (`0x03`) written to the session, `Kill(PtySignal.Interrupt)` |
+| `SIGQUIT` | 3 | 131 | Ctrl+\\ (`0x1C`) written to the session, `Kill(PtySignal.Quit)` |
+| `SIGABRT` | 6 | 134 | `abort()` in the child |
+| `SIGKILL` | 9 | 137 | `Kill()`, `Kill(PtySignal.Kill)`, disposal when the child still runs 1 s after `SIGHUP` |
+| `SIGUSR1` | 10 (Linux), 30 (macOS, FreeBSD) | 138, 158 | `Kill(PtySignal.User1)` |
+| `SIGSEGV` | 11 | 139 | Invalid memory access in the child |
+| `SIGUSR2` | 12 (Linux), 31 (macOS, FreeBSD) | 140, 159 | `Kill(PtySignal.User2)` |
+| `SIGPIPE` | 13 | 141 | A write to a closed pipe or socket |
+| `SIGTERM` | 15 | 143 | `Kill(PtySignal.Terminate)` |
+
+> [!TIP]
+> Windows `Signal` is always null, and `Kill` ends the child with exit code 1.
+
 ### Environment for shared hosts
 
 A web host's environment contains connection strings and cloud credentials that its shells should not receive. `InheritEnvironment = false` gives the child only the required environment: `SystemRoot` on Windows, and `TERM` on Unix. Additional variables reach the child only through `Environment`. Pass the variables your shells need explicitly ([spawn environment](.github/docs/specs/core_session.md#spawn-environment)).
