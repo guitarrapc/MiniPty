@@ -11,7 +11,7 @@
     <!-- Tests -->
     <PackageVersion Include="Porta.Pty" Version="2.2.3" />
     <PackageVersion Include="Microsoft.Testing.Platform" Version="2.0.2" />
-    <PackageVersion Include="TUnit" Version="1.12.111" />
+    <PackageVersion Include="TUnit" Version="1.77.0" />
     <!--
       Out-of-band ConPTY (conpty.dll + OpenConsole.exe) for the Windows tests and samples only. MiniPty itself ships no
       binary and takes no dependency: an application supplies the package and opts in with PtyStartInfo.ConPty. This is
