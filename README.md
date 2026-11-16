@@ -167,7 +167,13 @@ using MiniPty;
 var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh";
 
 // Run a command for its result: CompleteAsync drains the output and waits for exit.
-await using (var run = Pty.Start(new PtyStartInfo { FileName = shell, Arguments = [OperatingSystem.IsWindows() ? "/c" : "-c", "echo hello"] }))
+// KillProcessTree also ends what the command started when the session ends, so nothing outlives the result.
+await using (var run = Pty.Start(new PtyStartInfo
+{
+    FileName = shell,
+    Arguments = [OperatingSystem.IsWindows() ? "/c" : "-c", "echo hello"],
+    KillProcessTree = true,
+}))
 {
     var result = await run.CompleteAsync();
     Console.WriteLine($"exit={result.ExitCode}: {PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText).Trim()}");

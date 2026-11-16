@@ -222,9 +222,10 @@ static PtyStartInfo CreateEchoStartInfo()
     {
         WorkingDirectory = Environment.CurrentDirectory,
         Size = new PtySize(100, 30),
-        // Windows: when the session ends, end everything the command started too, even programs in a console of their
-        // own. Use it for commands run for their result (build steps, test runners, tool calls); leave it off for
-        // interactive terminals, where a window the user opened should outlive the tab. Ignored on Unix.
+        // When the session ends, end everything the command started too: on Windows even programs in a console of their
+        // own, on Unix everything in the command's process group, nohup included. Use it for commands run for their
+        // result (build steps, test runners, tool calls); leave it off for interactive terminals, where a window or a
+        // job the user started should outlive the tab.
         KillProcessTree = true,
     };
 }
