@@ -23,6 +23,11 @@
   --code-keyword: #8b2fc9;
   --term-bg: #0f1216;
   --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 10%);
+  --header-shadow: 0 8px 24px rgb(26 35 50 / 7%);
+  --title-glow: 0 0 20px rgb(47 111 222 / 20%);
+  --badge-fg: #1d4fb5;
+  --badge-bg: rgb(47 111 222 / 10%);
+  --badge-border: rgb(47 111 222 / 35%);
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color-scheme: light;
@@ -53,6 +58,11 @@
     --code-string: #e8a27a;
     --code-keyword: #c792ea;
     --shadow: none;
+    --header-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+    --title-glow: 0 0 28px rgb(91 147 245 / 42%);
+    --badge-fg: #b8d4ff;
+    --badge-bg: rgb(91 147 245 / 14%);
+    --badge-border: rgb(91 147 245 / 45%);
     color-scheme: dark;
   }
 }
@@ -81,6 +91,11 @@
   --code-string: #e8a27a;
   --code-keyword: #c792ea;
   --shadow: none;
+  --header-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+  --title-glow: 0 0 28px rgb(91 147 245 / 42%);
+  --badge-fg: #b8d4ff;
+  --badge-bg: rgb(91 147 245 / 14%);
+  --badge-border: rgb(91 147 245 / 45%);
   color-scheme: dark;
 }
 
@@ -100,40 +115,80 @@ a { color: var(--accent); }
 
 .muted { color: var(--muted); font-weight: 400; }
 
+/* The header bar, after the seiton playground's: the title, the version, and the tagline in the middle, and a line and
+   a soft shadow under the bar. A narrow page stacks the links under the tagline. From 1200 px they sit on the right, in
+   a column at least as wide as they are; the same width on the left keeps the title in the middle. At 960 px, columns
+   without that minimum squeezed the links into a narrow stack over the tagline. */
 .top {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 26px 24px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--header-shadow);
+  text-align: center;
 }
 
-/* On a phone, the links go under the title, so the title stays on one line. */
-.top-row {
+@media (min-width: 1200px) {
+  .top {
+    display: grid;
+    grid-template-columns: minmax(240px, 1fr) auto minmax(240px, 1fr);
+    align-items: center;
+    gap: 16px 24px;
+  }
+  .top-head { grid-column: 2; }
+  .top-links { grid-column: 3; justify-self: end; }
+}
+
+.top-head { min-width: 0; }
+
+.title-row {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 4px 16px;
+  justify-content: center;
+  gap: 6px 14px;
 }
 
 .title {
   margin: 0;
-  font-size: 34px;
-  font-weight: 750;
+  font-size: clamp(30px, 14px + 1.65vw, 44px);
+  font-weight: 700;
   line-height: 1.15;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.035em;
   white-space: nowrap;
 }
 
 .title a { color: var(--text); text-decoration: none; }
-.title span { color: var(--accent); }
+.title span { color: var(--accent); font-weight: 800; text-shadow: var(--title-glow); }
 
-.top-links { display: flex; flex: none; gap: 16px; font-size: 14px; }
+/* The MiniPty version that made the recordings, from their environment; hidden until a recording loads. */
+.version-badge {
+  padding: 0.28em 0.78em 0.32em;
+  border: 1px solid var(--badge-border);
+  border-radius: 999px;
+  background: var(--badge-bg);
+  color: var(--badge-fg);
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+  text-decoration: none;
+}
+
+.version-badge:hover { filter: brightness(1.06); }
+
+.top-links { display: flex; flex: none; flex-wrap: wrap; justify-content: center; gap: 4px 16px; font-size: 14px; }
 
 .lede {
-  max-width: 90ch;
-  margin: 8px 0 16px;
+  max-width: 92ch;
+  margin: 8px auto 0;
   color: var(--muted);
   font-size: 16px;
+  font-weight: 500;
 }
 
 main {
@@ -732,15 +787,61 @@ main {
   font-size: 13px;
 }
 
+/* One centered row, as in the seiton playground: the GitHub mark, the copyright, and the color theme button, with a
+   narrow "|" between them. */
 .foot {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 8px 24px 40px;
+  margin-top: 12px;
+  padding: 18px 24px 22px;
+  border-top: 1px solid var(--border);
   color: var(--muted);
   font-size: 13px;
+  text-align: center;
 }
 
-.foot p { max-width: 110ch; }
+.foot-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px clamp(9px, 2.25vw, 17px);
+  margin: 0;
+}
+
+.foot-sep { line-height: 1; opacity: 0.9; user-select: none; }
+
+.repo-mark { display: inline-flex; border-radius: 6px; color: var(--muted); line-height: 0; }
+.repo-mark:hover { color: var(--accent); }
+.repo-mark svg { width: 19px; height: 19px; }
+
+.theme-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  padding: 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.theme-btn:hover { background: var(--surface-2); }
+
+.theme-btn svg {
+  display: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.theme-btn[data-theme-mode="system"] .theme-system,
+.theme-btn[data-theme-mode="light"] .theme-light,
+.theme-btn[data-theme-mode="dark"] .theme-dark { display: block; }
 
 @media (max-width: 1000px) {
   .stage, .below { grid-template-columns: minmax(0, 1fr); }
@@ -751,13 +852,21 @@ main {
 
 /* A phone: the title, two lines of lede, the scene bar, the play button, and the terminal fit the first screen. */
 @media (max-width: 640px) {
-  .top { padding-top: 18px; }
+  .top { gap: 6px; margin-bottom: 14px; padding-top: 14px; padding-bottom: 12px; }
   .top, main, .foot { padding-left: 16px; padding-right: 16px; }
+  .title-row { gap: 4px 10px; }
+  .version-badge { font-size: 12px; }
+
+  /* The copyright wraps on a phone, and a "|" left at a line end looks broken. So the copyright takes the first line,
+     and the GitHub mark and the theme button share the second. */
+  .foot-sep { display: none; }
+  .foot-copy { flex-basis: 100%; order: -1; }
+  .foot-row { column-gap: 20px; }
   .use-grid, .why-grid, .stats { grid-template-columns: minmax(0, 1fr); }
   .stats { gap: 12px; }
   .stat .num { font-size: 36px; }
   .title { font-size: 26px; }
-  .lede { margin-bottom: 12px; font-size: 15px; line-height: 1.45; }
+  .lede { margin-top: 4px; font-size: 15px; line-height: 1.45; }
   .lede-more { display: none; }
   .clock { margin-left: 0; }
 

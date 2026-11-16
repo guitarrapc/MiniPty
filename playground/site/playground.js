@@ -74,6 +74,10 @@ const ICONS = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+// The color theme the footer button stores: index.html's head reads the same key (see wireTheme).
+const THEME_KEY = "minipty-playground-color-mode";
+const THEMES = ["system", "light", "dark"];
 const decoder = new TextDecoder("utf-8");
 
 const state = {
@@ -109,6 +113,7 @@ let metrics = null;   // the terminal's cell size and window frame, in unscaled 
 main();
 
 async function main() {
+  wireTheme();
   let index;
   try {
     const response = await fetch("recordings/index.json", { cache: "no-cache" });
@@ -242,6 +247,7 @@ async function selectScene(sceneId) {
   $("notice").textContent = env.os === "Windows" ? state.scene.windowsNotice : state.scene.unixNotice;
   $("term-title").textContent = env.os === "Windows" ? "Windows PowerShell" : "bash";
   $("env-line").textContent = environmentLine(env);
+  showVersion(env.miniPty);
   document.title = `${state.scene.title} · MiniPty Playground`;
   layoutDesk();
   $("desk").scrollLeft = 0;
@@ -906,6 +912,64 @@ function environmentLine(env) {
     parts.push(`${env.conPty.kind} ConPTY ${env.conPty.version}`);
   parts.push(env.recordedAt);
   return parts.join(" · ");
+}
+
+// The header badge names the MiniPty release that made the recordings: "1.7.0+0123abc" shows as v1.7.0. It links to
+// the releases list, not to a tag, because a build after a version bump records a version that has no release yet.
+function showVersion(version) {
+  const badge = $("version-badge");
+  const release = /^\d+\.\d+\.\d+/.exec(version ?? "")?.[0];
+  badge.hidden = !release;
+  if (!release)
+    return;
+  badge.textContent = `v${release}`;
+  badge.title = `The recordings were made with MiniPty ${version}`;
+  badge.setAttribute("aria-label", `MiniPty v${release}, the version of the recordings. Open the releases on GitHub.`);
+}
+
+// ---------------------------------------------------------------- color theme
+
+// The footer button cycles System, Light, and Dark, as the seiton playground's does. The choice is kept in this
+// browser; the script in index.html's head applies it before the page draws, and System follows the OS again.
+// THEME_KEY and THEMES are at the top of the file: main() runs before the constants down here are set.
+
+function storedTheme() {
+  try {
+    const mode = localStorage.getItem(THEME_KEY);
+    return mode === "light" || mode === "dark" ? mode : "system";
+  } catch {
+    return "system";
+  }
+}
+
+function showTheme(mode) {
+  const button = $("theme-btn");
+  button.dataset.themeMode = mode;
+  const name = mode[0].toUpperCase() + mode.slice(1);
+  button.setAttribute("aria-label", `Color theme: ${name}. Click to cycle: System, Light, Dark.`);
+}
+
+function wireTheme() {
+  // The mode lives here too, so the button still cycles when storage is blocked.
+  let current = storedTheme();
+  showTheme(current);
+  $("theme-btn").addEventListener("click", () => {
+    const mode = THEMES[(THEMES.indexOf(current) + 1) % THEMES.length];
+    current = mode;
+    if (mode === "system")
+      document.documentElement.removeAttribute("data-theme");
+    else
+      document.documentElement.setAttribute("data-theme", mode);
+    try {
+      if (mode === "system")
+        localStorage.removeItem(THEME_KEY);
+      else
+        localStorage.setItem(THEME_KEY, mode);
+    } catch {
+      // Storage is blocked: the choice lasts until the page reloads.
+    }
+    showTheme(mode);
+  });
 }
 
 function showEmpty() {

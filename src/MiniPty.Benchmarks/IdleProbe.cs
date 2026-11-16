@@ -106,13 +106,13 @@ internal static class IdleProbe
         var privateMiB = OperatingSystem.IsWindows()
             ? string.Create(CultureInfo.InvariantCulture, $"{baseline.PrivateBytes / 1048576.0:F1}->{idle.PrivateBytes / 1048576.0:F1}")
             : "n/a";
-        System.Console.WriteLine("| Library | Sessions | Start all (s) | All prompts (s) | Threads | Pool threads | Handles | Working set (MiB) | Private (MiB) | GC heap (MiB) | Idle CPU (ms/s) | Idle work items/s | Idle alloc (B) | Dispose all (s) |");
-        System.Console.WriteLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+        System.Console.WriteLine("| Library | Sessions | Start all (s) | All prompts (s) | Threads | Pool threads | Handles | Working set (MiB) | Private (MiB) | GC heap (MiB) | Pinned heap (MiB) | Idle CPU (ms/s) | Idle work items/s | Idle alloc (B) | Dispose all (s) |");
+        System.Console.WriteLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
         System.Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"| {library} | {sessions} | {startSeconds:F1} | {(allRead ? shownSeconds.ToString("F1", CultureInfo.InvariantCulture) : $"{shown} shown in {readySeconds}")} | " +
             $"{baseline.Threads}->{idle.Threads} | {baseline.PoolThreads}->{idle.PoolThreads} | {baseline.Handles}->{idle.Handles} | " +
             $"{baseline.WorkingSet / 1048576.0:F1}->{idle.WorkingSet / 1048576.0:F1} | {privateMiB} | " +
-            $"{baseline.Heap / 1048576.0:F2}->{idle.Heap / 1048576.0:F2} | " +
+            $"{baseline.Heap / 1048576.0:F2}->{idle.Heap / 1048576.0:F2} | {baseline.PinnedHeap / 1048576.0:F2}->{idle.PinnedHeap / 1048576.0:F2} | " +
             $"{quiet.CpuMs / idleSeconds:F1}->{waiting.CpuMs / idleSeconds:F1} | {quiet.WorkItems / (double)idleSeconds:F1}->{waiting.WorkItems / (double)idleSeconds:F1} | " +
             $"{quiet.Allocated}->{waiting.Allocated} | {disposeSeconds:F1} |"));
 
@@ -138,6 +138,7 @@ internal static class IdleProbe
                 ("WorkingSetGrowthMiB", Invariant((idle.WorkingSet - baseline.WorkingSet) / 1048576.0, Signed)),
                 ("PrivateGrowthMiB", OperatingSystem.IsWindows() ? Invariant((idle.PrivateBytes - baseline.PrivateBytes) / 1048576.0, Signed) : ""),
                 ("HeapGrowthMiB", Invariant((idle.Heap - baseline.Heap) / 1048576.0, Signed)),
+                ("PinnedHeapGrowthMiB", Invariant((idle.PinnedHeap - baseline.PinnedHeap) / 1048576.0, "+0.00;-0.00;0.00")),
                 ("QuietCpuMsPerSec", Invariant(quiet.CpuMs / idleSeconds, "F1")),
                 ("IdleCpuMsPerSec", Invariant(waiting.CpuMs / idleSeconds, "F1")),
                 ("QuietWorkItemsPerSec", Invariant(quiet.WorkItems / (double)idleSeconds, "F1")),
@@ -265,8 +266,35 @@ internal static class IdleProbe
             library == ServeLibrary.MiniPty ? new MiniPtyIdle() : new PortaIdle(library == ServeLibrary.PortaPtyAsyncIo);
 
         /// <summary>Ends every session, each library's way.</summary>
+        /// <remarks>
+        /// MiniPty's disposals start together, since each one only awaits. Porta.Pty's <c>Dispose</c> blocks the thread
+        /// that calls it, about 350 ms per session on the macOS runner, where 900 of them one after another took 317 s.
+        /// So 32 threads of the probe's own end those sessions; the thread pool would add threads for them too slowly.
+        /// </remarks>
         internal static void DisposeAll(IdleSession[] open)
         {
+            if (open.Length != 0 && open[0] is PortaIdle)
+            {
+                var next = -1;
+                var workers = new Thread[Math.Min(32, open.Length)];
+                for (var w = 0; w < workers.Length; w++)
+                {
+                    workers[w] = new Thread(() =>
+                    {
+                        int i;
+                        while ((i = Interlocked.Increment(ref next)) < open.Length)
+                            open[i].Dispose();
+                    })
+                    { IsBackground = true, Name = "idle probe disposal" };
+                    workers[w].Start();
+                }
+
+                foreach (var worker in workers)
+                    worker.Join();
+
+                return;
+            }
+
             var disposals = new Task[open.Length];
             for (var i = 0; i < open.Length; i++)
                 disposals[i] = open[i].DisposeAsync();
@@ -390,7 +418,13 @@ internal static class IdleProbe
         }
     }
 
-    private readonly record struct Snapshot(int Threads, int PoolThreads, int Handles, long WorkingSet, long PrivateBytes, long Heap)
+    /// <summary>The process after a full collection.</summary>
+    /// <remarks>
+    /// <see cref="PinnedHeap"/> is the pinned object heap, where MiniPty's 16 KiB output rings live: the managed heap of a
+    /// MiniPty host grew by 7.1 MiB on the 4-CPU Windows runner and by 1.2 MiB on a 32-CPU machine (also with 4 CPUs set
+    /// from the start), and this figure tells rings that its pool kept from other growth.
+    /// </remarks>
+    private readonly record struct Snapshot(int Threads, int PoolThreads, int Handles, long WorkingSet, long PrivateBytes, long Heap, long PinnedHeap)
     {
         internal static Snapshot Take()
         {
@@ -410,7 +444,8 @@ internal static class IdleProbe
                 Read(() => process.HandleCount, -1),
                 Read(() => process.WorkingSet64, -1L),
                 Read(() => process.PrivateMemorySize64, -1L),
-                heap);
+                heap,
+                collection.GenerationInfo[4].SizeAfterBytes);
         }
 
         private static T Read<T>(Func<T> read, T unsupported)
