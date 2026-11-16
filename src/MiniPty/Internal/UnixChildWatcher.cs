@@ -180,7 +180,7 @@ internal static partial class UnixPtyBackend
                 // subscribed after the first Pty.Start, which runs after this class's, or from another thread during exit.
                 if (s_exiting)
                 {
-                    child.KillAfterHangup();
+                    _ = child.KillAfterHangup();
                     return;
                 }
 
@@ -194,9 +194,35 @@ internal static partial class UnixPtyBackend
         }
 
         /// <summary>
+        /// Reaps <paramref name="child"/> on this thread's next pass: its zombie was kept for its process group's kill
+        /// (<see cref="PtyStartInfo.KillProcessTree"/>), which has been sent, and its registration has already reported.
+        /// </summary>
+        internal static void RequestReap(UnixPtyBackendInstance child)
+        {
+            lock (s_lock)
+            {
+                if (RequestReapLocked(child))
+                    WakeLocked();
+            }
+        }
+
+        /// <summary>Adds a registered child to the polled set. Caller holds <see cref="s_lock"/>.</summary>
+        private static bool RequestReapLocked(UnixPtyBackendInstance child)
+        {
+            if (!s_children.TryGetValue(child.ProcessId, out var registered) || registered != child)
+                return false;
+
+            if (!s_polled.Contains(child.ProcessId))
+                s_polled.Add(child.ProcessId);
+
+            return true;
+        }
+
+        /// <summary>
         /// Kills every hung-up child now, and makes later disposals kill at once. A deadline that has not passed when
         /// the process exits would otherwise never be acted on, and a child that ignores the hang-up would outlive
-        /// its host.
+        /// its host. With <see cref="PtyStartInfo.KillProcessTree"/> every child's process group is killed too, disposed or
+        /// not, as a Windows job ends with its host.
         /// </summary>
         private static void OnProcessExit()
         {
@@ -205,9 +231,11 @@ internal static partial class UnixPtyBackend
                 s_exiting = true;
                 // Same lock order as the reap: this lock, then the child's pid lock.
                 foreach (var child in s_hangups)
-                    child.KillAfterHangup();
+                    _ = child.KillAfterHangup();
 
                 s_hangups.Clear();
+                foreach (var child in s_children.Values)
+                    child.KillTreeAsHostExits();
             }
         }
 
@@ -818,7 +846,10 @@ internal static partial class UnixPtyBackend
                         continue;
                     }
 
-                    child.KillAfterHangup();
+                    // A zombie kept for the group's kill is reaped on the next pass, which the polled set makes come soon.
+                    if (child.KillAfterHangup())
+                        _ = RequestReapLocked(child);
+
                     s_hangups.RemoveAt(i);
                 }
             }
@@ -902,17 +933,24 @@ internal static partial class UnixPtyBackend
                 if (pidfd >= 0 && pidfd != child.Pidfd)
                     return;
 
-                if (child.TryReapExitedChild())
+                switch (child.TryReapExitedChild())
                 {
-                    s_children.Remove(pid);
-                    s_polled.Remove(pid);
-                    s_hangups.Remove(child);
-                    ReleaseLocked(child);
-                }
-                else if (!s_polled.Contains(pid))
-                {
-                    // Reported but not yet reapable: keep checking until the reap succeeds.
-                    s_polled.Add(pid);
+                    case ChildReapState.Reaped:
+                        s_children.Remove(pid);
+                        s_polled.Remove(pid);
+                        s_hangups.Remove(child);
+                        ReleaseLocked(child);
+                        break;
+                    case ChildReapState.Held:
+                        // Exited and reported, its zombie kept for its group's kill, which asks for the reap again
+                        // (RequestReap). Its pidfd stays open for that reap; the registration has reported once.
+                        s_polled.Remove(pid);
+                        break;
+                    default:
+                        // Reported but not yet reapable: keep checking until the reap succeeds.
+                        if (!s_polled.Contains(pid))
+                            s_polled.Add(pid);
+                        break;
                 }
             }
         }

@@ -2,15 +2,17 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using MiniPty.Internal;
 using static MiniPty.Tests.PtyBaselineTests;
 
 namespace MiniPty.Tests;
 
 /// <summary>
-/// <see cref="PtyStartInfo.KillProcessTree"/>: on Windows the child runs in a kill-on-close job, so disposal,
-/// <see cref="PtySession.Kill()"/>, and the end of the host process end every process the child started, including one
-/// in a console of its own. Without the option such a descendant outlives the session
-/// (<see cref="PtyBaselineTests.TeardownEndsOnlyTheDescendantsOnTheTerminal"/>). Unix ignores the option.
+/// <see cref="PtyStartInfo.KillProcessTree"/>: disposal, <see cref="PtySession.Kill()"/>, and the end of the host process
+/// end every process the child started. On Windows the child runs in a kill-on-close job, which also reaches a descendant
+/// in a console of its own. On Unix the signals go to the child's process group, which also reaches a descendant started
+/// with <c>nohup</c>, and the child's zombie is kept until the group is killed. Without the option such a descendant
+/// outlives the session (<see cref="PtyBaselineTests.TeardownEndsOnlyTheDescendantsOnTheTerminal"/>).
 /// </summary>
 public sealed class PtyKillProcessTreeTests
 {
@@ -25,9 +27,6 @@ public sealed class PtyKillProcessTreeTests
     [NotInParallel(DescendantsGroup)]
     public async Task DisposeEndsEveryDescendant()
     {
-        if (!OperatingSystem.IsWindows())
-            return;
-
         int[] descendants = [];
         try
         {
@@ -51,9 +50,6 @@ public sealed class PtyKillProcessTreeTests
     [NotInParallel(DescendantsGroup)]
     public async Task KillEndsEveryDescendant()
     {
-        if (!OperatingSystem.IsWindows())
-            return;
-
         int[] descendants = [];
         try
         {
@@ -62,7 +58,9 @@ public sealed class PtyKillProcessTreeTests
 
             session.Kill();
 
-            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(1);
+            // TerminateJobObject's code on Windows, 128 + SIGKILL on Unix.
+            var killed = OperatingSystem.IsWindows() ? 1 : 137;
+            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(killed);
             await AssertAllEndedAsync(descendants);
         }
         finally
@@ -73,7 +71,9 @@ public sealed class PtyKillProcessTreeTests
 
     /// <summary>
     /// The session owns the tree until it is disposed: after the child exits by itself, a descendant in a console of its
-    /// own keeps running, and disposal or <see cref="PtySession.Kill()"/> then ends it.
+    /// own (Windows) or started with <c>nohup</c> (Unix) keeps running, and disposal or <see cref="PtySession.Kill()"/>
+    /// then ends it. On Unix the child's exit is reported at once, while its zombie is kept until the group's kill and
+    /// then reaped.
     /// </summary>
     [Test]
     [NotInParallel(DescendantsGroup)]
@@ -81,9 +81,6 @@ public sealed class PtyKillProcessTreeTests
     [Arguments(false)]
     public async Task ADescendantOfAChildThatExitedRunsUntilTeardown(bool dispose)
     {
-        if (!OperatingSystem.IsWindows())
-            return;
-
         int[] descendants = [];
         try
         {
@@ -91,13 +88,17 @@ public sealed class PtyKillProcessTreeTests
             await using (session)
             {
                 descendants = await pids;
+                var child = session.ProcessId;
                 await EndChildAsync(session);
                 await ReadAllTextAsync(session).WaitAsync(Timeout);
                 await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).ExitCode).IsEqualTo(0);
 
-                // Past the post-exit drain, which closes the pseudo-console; the job stays open.
+                // Past the post-exit drain, which closes the pseudo-console (Windows) or the master (Unix); the job or
+                // the group stays.
                 await Task.Delay(1500);
                 await Assert.That(IsRunning(descendants[0])).IsTrue();
+                if (!OperatingSystem.IsWindows())
+                    await Assert.That(Exists(child)).IsTrue().Because("the child's zombie keeps its process group's id");
 
                 if (dispose)
                     await session.DisposeAsync().AsTask().WaitAsync(Timeout);
@@ -105,6 +106,8 @@ public sealed class PtyKillProcessTreeTests
                     session.Kill();
 
                 await AssertAllEndedAsync(descendants);
+                if (!OperatingSystem.IsWindows())
+                    await Assert.That(await WaitUntilAsync(() => !Exists(child), Timeout)).IsTrue().Because("the kept zombie is reaped");
             }
         }
         finally
@@ -114,9 +117,10 @@ public sealed class PtyKillProcessTreeTests
     }
 
     /// <summary>
-    /// The end of the host process ends the tree, whether the host exits without disposing the session or is killed:
-    /// the kernel closes the job's only handle either way. The host also runs inside a job of its own, so the session's
-    /// job is nested, as it is under CI runners and editors.
+    /// The end of the host process ends the tree. On Windows the host may exit without disposing the session or be
+    /// killed: the kernel closes the job's only handle either way. The host also runs inside a job of its own, so the
+    /// session's job is nested, as it is under CI runners and editors. On Unix only a host that exits does, since a killed
+    /// process runs no code: MiniPty kills the group from the process's exit event.
     /// </summary>
     [Test]
     [NotInParallel(DescendantsGroup)]
@@ -124,13 +128,14 @@ public sealed class PtyKillProcessTreeTests
     [Arguments("killed")]
     public async Task HostEndEndsEveryDescendant(string mode)
     {
-        if (!OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsWindows() && mode != "exit")
             return;
 
         int[] processes = [];
         try
         {
-            using var host = Process.Start(new ProcessStartInfo(TestExecutable)
+            var hostPath = OperatingSystem.IsWindows() ? TestExecutable : Path.Combine(AppContext.BaseDirectory, "MiniPty.Tests");
+            using var host = Process.Start(new ProcessStartInfo(hostPath)
             {
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
@@ -180,12 +185,12 @@ public sealed class PtyKillProcessTreeTests
     }
 
     /// <summary>
-    /// Unix ignores the option: disposal hangs the child up as without it, so a descendant in the terminal's foreground
-    /// process group ends, and one started with <c>nohup</c> keeps running.
+    /// Unix: <see cref="PtySession.Kill(PtySignal)"/> signals the child's process group, so <c>SIGTERM</c> ends a
+    /// descendant started with <c>nohup</c> together with the child.
     /// </summary>
     [Test]
     [NotInParallel(DescendantsGroup)]
-    public async Task UnixIgnoresIt()
+    public async Task KillWithASignalReachesTheGroup()
     {
         if (OperatingSystem.IsWindows())
             return;
@@ -193,23 +198,24 @@ public sealed class PtyKillProcessTreeTests
         int[] descendants = [];
         try
         {
-            var session = StartWithDescendants(OnTerminalAndDetached, out var pids, killProcessTree: true);
-            await using (session)
-            {
-                descendants = await pids;
-                await session.DisposeAsync().AsTask().WaitAsync(Timeout);
-            }
+            await using var session = StartWithDescendants([Descendant.Detached], out var pids, killProcessTree: true);
+            descendants = await pids;
 
-            await Assert.That(await WaitUntilAsync(() => !IsRunning(descendants[0]), Timeout)).IsTrue();
-            // Past the disposal's one-second grace kill, which reaches only the child in any case.
-            await Task.Delay(1500);
-            await Assert.That(IsRunning(descendants[1])).IsTrue();
+            session.Kill(PtySignal.Terminate);
+
+            await Assert.That((await session.WaitForExitAsync().WaitAsync(Timeout)).Signal).IsEqualTo(15);
+            await AssertAllEndedAsync(descendants);
         }
         finally
         {
             KillAll(descendants);
         }
     }
+
+    /// <summary>Unix: whether <paramref name="pid"/> exists, a zombie included.</summary>
+    private static bool Exists(int pid) => UnixInterop.kill(pid, 0) == 0 || Marshal.GetLastPInvokeError() != Esrch;
+
+    private const int Esrch = 3;
 
     private static async Task AssertAllEndedAsync(int[] processes)
     {
@@ -229,20 +235,23 @@ public sealed class PtyKillProcessTreeTests
     [ModuleInitializer]
     internal static void RunAsTreeHostWhenAsked()
     {
-        if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable(TreeHostVariable) is { } mode)
+        if (Environment.GetEnvironmentVariable(TreeHostVariable) is { } mode)
             Environment.Exit(RunTreeHost(mode));
     }
 
     /// <summary>
-    /// Joins a job of its own, starts a session with the option whose child starts both descendants, writes
+    /// Joins a job of its own (Windows), starts a session with the option whose child starts both descendants, writes
     /// <c>PIDS child onTerminal detached</c>, and then ends as <paramref name="mode"/> says without disposing the session:
-    /// <c>exit</c> returns normally, <c>killed</c> terminates this process.
+    /// <c>exit</c> returns normally, <c>killed</c> terminates this process (Windows).
     /// </summary>
     private static int RunTreeHost(string mode)
     {
-        var outer = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
-        if (outer == IntPtr.Zero || !AssignProcessToJobObject(outer, new IntPtr(-1)))
-            return 2;
+        if (OperatingSystem.IsWindows())
+        {
+            var outer = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
+            if (outer == IntPtr.Zero || !AssignProcessToJobObject(outer, new IntPtr(-1)))
+                return 2;
+        }
 
         var pidFile = NewPidFilePath();
         var session = Pty.Start(DescendantsChild(OnTerminalAndDetached, pidFile) with { KillProcessTree = true });
@@ -261,7 +270,7 @@ public sealed class PtyKillProcessTreeTests
         System.Console.Out.Flush();
         GC.KeepAlive(session);
 
-        if (mode == "killed")
+        if (mode == "killed" && OperatingSystem.IsWindows())
             TerminateProcess(new IntPtr(-1), 9);
 
         return 0;

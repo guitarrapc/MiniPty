@@ -758,6 +758,82 @@ int minipty_signal_child(int pidfd, int pid, int sig)
     return kill(pid, sig);
 }
 
+static void minipty_set_exit(int exited, int code_or_signal, int *exit_code, int *term_signal);
+
+/*
+ * waitid with WNOWAIT, which reports a child's exit and leaves the child waitable: through the pidfd where the kernel
+ * can wait on one (Linux 5.4 and later), and by pid otherwise. Returns 0 with *info filled, whose si_pid stays 0 while
+ * the child runs, or -1 with errno set: ECHILD when the child is no longer an unreaped child of this process.
+ */
+static int minipty_wait_nowait(int pidfd, int pid, siginfo_t *info)
+{
+    int result;
+
+#if defined(__linux__)
+    if (pidfd >= 0) {
+        do {
+            memset(info, 0, sizeof(*info));
+            result = waitid((idtype_t)P_PIDFD, (id_t)pidfd, info, WEXITED | WNOHANG | WNOWAIT);
+        } while (result < 0 && errno == EINTR);
+
+        /* Kernels before 5.4 have no P_PIDFD and wait by pid. */
+        if (result == 0 || errno != EINVAL)
+            return result;
+    }
+#else
+    (void)pidfd;
+#endif
+
+    do {
+        memset(info, 0, sizeof(*info));
+        result = waitid(P_PID, (id_t)pid, info, WEXITED | WNOHANG | WNOWAIT);
+    } while (result < 0 && errno == EINTR);
+
+    return result;
+}
+
+int minipty_signal_group(int pidfd, int pid, int sig)
+{
+    siginfo_t info;
+
+    /*
+     * The child leads its session and its process group (setsid when it starts), so the group's id is the child's pid,
+     * and its descendants start in that group. The id names this group only while the child is unreaped: the child, or
+     * its zombie, keeps the pid, and with it the group id, from being given to a new process. So the signal is sent only
+     * while the child is still this process's unreaped child. MiniPty keeps the zombie of a child whose tree it must end
+     * until the group has had its kill (UnixPtyBackendInstance.TryReapExitedChild). A descendant that moved to a group of
+     * its own (a job of a job-control shell, or a daemon) is not in the group.
+     */
+    if (minipty_wait_nowait(pidfd, pid, &info) != 0)
+        return -1;
+
+    return killpg(pid, sig);
+}
+
+int minipty_peek_child_exit(int pidfd, int pid, int *exit_code, int *term_signal)
+{
+    siginfo_t info;
+
+    if (minipty_wait_nowait(pidfd, pid, &info) != 0)
+        return -1;
+
+    if (info.si_pid == 0)
+        return 0;
+
+    switch (info.si_code) {
+    case CLD_EXITED:
+        minipty_set_exit(1, info.si_status, exit_code, term_signal);
+        return 1;
+    case CLD_KILLED:
+    case CLD_DUMPED:
+        minipty_set_exit(0, info.si_status, exit_code, term_signal);
+        return 1;
+    default:
+        /* Darwin's waitid reports a stopped child too, even with only WEXITED. A stop is not an exit. */
+        return 0;
+    }
+}
+
 static void minipty_set_exit(int exited, int code_or_signal, int *exit_code, int *term_signal)
 {
     if (exited) {

@@ -16,7 +16,7 @@ I needed a PTY library for high-performance NativeAOT projects. MiniPty provides
 
 - [NativeAOT ready](#native-files): No dependencies, no winpty, and no helper process running beside a session.
 - [Cross-platform](#platforms): Windows, Linux, and macOS (FreeBSD is experimental)
-- [Scaling](#scaling): Scales to thousands of sessions. 1,000 idle shells use no thread per shell and no CPU, and add 7.9 MiB to the host process.
+- [Scaling](#performance): Scales to thousands of sessions. 1,000 idle shells use no thread per shell and no CPU, and add 6.4 MiB (Linux) to 10.3 MiB (Windows) to the host process.
 - Allocation-free steady state: Reading chunks, writing input, and waiting for exit allocate nothing after the first call.
 - Safe signal, file descriptor handling: Handles signals and file descriptors safely, avoiding issues with PID reuse and ensuring proper cleanup.
 - [Metrics](#metrics): Meters report open sessions, start time, output bytes, and stalls.
@@ -114,7 +114,7 @@ PtyStartupHostMemoryBenchmarks measures session start in a large host with the s
 
 <!-- benchmark:startup-host-memory:end -->
 
-Scaling is what MiniPty performs efficiently. Threads in the host process stay at 13 to 17 from 0 to 3,000 idle shells, while a thread per shell would need more than 3,000.
+Scaling is what MiniPty performs efficiently. On Linux, threads in the host process go from 9 to 11 with 3,000 idle shells. A thread per shell would need more than 3,000.
 
 ![image](https://raw.githubusercontent.com/guitarrapc/MiniPty/main/assets/scaling-threads.svg)
 
@@ -140,7 +140,7 @@ The idle probe ran after the benchmarks in [run 43832148088](https://github.com/
 - Sessions is 1,000 on Linux and Windows. Linux also runs MiniPty with 3,000. macOS allows at most 999 PTYs on the whole machine (`kern.tty.ptmx_max`, 511 by default). So the workflow sets the limit to 999 and runs 900 sessions there.
 - Threads counts all the threads of the process, before the first session and with all sessions open. MiniPty adds no thread per session. Its few more threads are thread-pool threads from the start of the sessions.
 - All prompts shown is the time from the first start until the last session shows its prompt. With its default options, Porta.Pty serves each pending `ReadAsync` on a thread-pool thread, as its `UseAsyncIo` documentation says. On Linux and macOS it also starts a watcher thread for each child. The pool adds threads slowly, so most sessions had not shown a prompt when the probe stopped waiting. With `UseAsyncIo = true`, Porta.Pty holds no thread per session either. MiniPty needs no such option ([Coming from Porta.Pty](#coming-from-portapty)).
-- `Working set` and `Managed heap` are the growth of the host process. On Windows each session also has a console host process (`conhost.exe`) beside the shell, which the table does not count. In a local run with 3,000 sessions on Windows, the machine had about 13 GB less free memory, most of it in those processes.
+- `Working set` and `Managed heap` are the growth of the host process. On Windows each session also has a console host process (`conhost.exe`) beside the shell, which the table does not count. On the Windows runner, most of MiniPty's managed heap is 16 KiB output buffers. MiniPty rents one while output waits, and its pool keeps the ones that the prompts used at the same time (`PinnedHeapGrowthMiB` in the probe's report). In a local run with 3,000 sessions on Windows, the machine had about 13 GB less free memory, most of it in those processes.
 
 To confirm on your machine, run the following command. Use `--library porta` or `--library porta-async` to measure Porta.Pty.
 
@@ -167,7 +167,13 @@ using MiniPty;
 var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh";
 
 // Run a command for its result: CompleteAsync drains the output and waits for exit.
-await using (var run = Pty.Start(new PtyStartInfo { FileName = shell, Arguments = [OperatingSystem.IsWindows() ? "/c" : "-c", "echo hello"] }))
+// KillProcessTree also ends what the command started when the session ends, so nothing outlives the result.
+await using (var run = Pty.Start(new PtyStartInfo
+{
+    FileName = shell,
+    Arguments = [OperatingSystem.IsWindows() ? "/c" : "-c", "echo hello"],
+    KillProcessTree = true,
+}))
 {
     var result = await run.CompleteAsync();
     Console.WriteLine($"exit={result.ExitCode}: {PtyOutput.ToDisplayText(result.GetText(), PtyOutputDisplayMode.PlainText).Trim()}");
@@ -300,7 +306,7 @@ MiniPty uses the Unix backend through `libminipty_unix.so`. Building MiniPty fro
 - **Keep reading output.** An unread PTY fills its buffer and blocks the child. `ReadOutputAsync`, `CompleteAsync`, and the `Output` stream all drain it.
 - **`CompleteAsync` and `PtyCapture.RunAsync` keep all output in memory.** They take about six times the output's size until the result is built (about twice with `DecodeOutput = false`). For a child whose output you do not control, set `PtyCompleteOptions.MaxOutputBytes`: past it the child is killed and the call throws `IOException` ([Output limit](.github/docs/specs/completion.md#output-limit)).
 - **A chunk is not one write of the child.** It is the output waiting when you read. On Windows `ReadOutputAsync` joins a burst, such as a flood or a large repaint, into chunks of up to 8 KiB, handed out at most about 2 ms after the read asked, so a flood wakes your reader a few times per 32 KiB instead of once per ConPTY piece of about 256 B. A keystroke's echo after idle is handed out at once ([Backpressure](.github/docs/specs/core_session.md#backpressure)).
-- **Disposal ends the child.** Windows terminates it. Unix sends `SIGHUP` so a shell can save its history, then kills the child if it does not exit within one second ([Session contract](.github/docs/specs/core_session.md#session-contract)).
+- **Disposal ends the child.** Windows terminates it. Unix sends `SIGHUP` so a shell can save its history, then kills the child if it does not exit within one second ([Session contract](.github/docs/specs/core_session.md#session-contract)). To end what the child started too, see [Process tree](#process-tree).
 - **`Environment` overlays the parent's.** A null value removes a variable. On Unix, `TerminalName` sets `TERM`, which defaults to `xterm-256color` ([Spawn environment](.github/docs/specs/core_session.md#spawn-environment)). To keep your process's variables out of the child, see [Environment for shared hosts](#environment-for-shared-hosts).
 - **MiniPty is not a sandbox.** The child runs with your permissions. If a program name, path, or argument comes from untrusted input, read [Untrusted program names and paths](.github/docs/specs/core_session.md#untrusted-program-names-and-paths) and [Batch files](.github/docs/specs/core_session.md#batch-files-windows) first.
 
@@ -338,20 +344,25 @@ if (conpty is { HasConsoleHost: false })
 await using var session = Pty.Start(new PtyStartInfo { FileName = "cmd.exe", ConPty = conpty });
 ```
 
-### Windows options
+### Process tree
 
-`KillProcessTree = true` ends all processes the child started, including programs with their own console. This applies on disposal, on kill, and when your process crashes. Enable it for commands whose results you collect, such as CI steps, test runners, and agent tool calls. Leave it disabled for interactive terminals where a user-opened window (`code .`) should outlive the tab ([process tree](.github/docs/specs/core_session.md#process-tree)).
+`KillProcessTree = true` ends every process the child started, not only the child. Enable it for commands whose results you collect, such as CI steps, test runners, and agent tool calls. Leave it disabled for interactive terminals where a program that the user started (`code .`) should outlive the tab ([process tree](.github/docs/specs/core_session.md#process-tree)).
 
-`InheritCursor = true` preserves the frontend's screen contents instead of letting ConPTY clear them. The frontend must answer ConPTY's cursor position query, or the child waits ([inherited cursor](.github/docs/specs/core_session.md#inherited-cursor)). Unix ignores both options.
+- **Windows:** the child runs in a job. Disposal, `Kill`, and the end of your process close the job, also when your process crashes. This also ends programs with their own console.
+- **Unix:** disposal, `Kill`, and a normal exit of your process signal the child's process group, so a descendant started with `nohup` ends too. MiniPty does not reach a descendant that moves to a process group of its own, for example a job of an interactive shell. A crash of your process ends nothing. After the child exits, MiniPty keeps its zombie until it kills the group, so no other process can get the group's id.
 
 ```csharp
 await using var session = Pty.Start(new PtyStartInfo
 {
-    FileName = "cmd.exe",
-    Arguments = ["/c", "npm test"],
+    FileName = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",
+    Arguments = OperatingSystem.IsWindows() ? ["/c", "npm test"] : ["-c", "npm test"],
     KillProcessTree = true,
 });
 ```
+
+### Windows options
+
+`InheritCursor = true` preserves the frontend's screen contents instead of letting ConPTY clear them. The frontend must answer ConPTY's cursor position query, or the child waits ([inherited cursor](.github/docs/specs/core_session.md#inherited-cursor)). Unix ignores it.
 
 ### Signals and descriptors
 
@@ -503,9 +514,7 @@ dotnet publish samples/SingleFiles/Session.cs -c Release -r linux-x64 --self-con
 
 ## Coming from Porta.Pty
 
-[Porta.Pty](https://github.com/tomlm/Porta.Pty) 2.2.3 and MiniPty do the same core work. Both start a real PTY on Windows, Linux, and macOS, and both work with NativeAOT. Both report the signal that ended the child, and both can start a child without the parent's environment. Speed depends on the runner, and neither library leads on all of them ([Performance](#performance)).
-
-Each Porta.Pty call and its MiniPty equivalent:
+[Porta.Pty](https://github.com/tomlm/Porta.Pty) and MiniPty do the same core work. Both start a real PTY on Windows, Linux, and macOS, and both work with NativeAOT. Both report the signal that ended the child, and both can start a child without the parent's environment. Speed depends on the runner, and neither library leads on all of them ([Performance](#performance)).
 
 | Porta.Pty | MiniPty |
 |---|---|
@@ -518,11 +527,12 @@ Each Porta.Pty call and its MiniPty equivalent:
 | `InheritEnvironment` | `InheritEnvironment` |
 | `WriterStream.WriteAsync` and `FlushAsync` | `WriteInputAsync(bytes)` or `WriteInputAsync(text)` |
 | `ReaderStream.ReadAsync(buffer)` | `await foreach (var chunk in session.ReadOutputAsync())`, or the `Output` stream |
-| `UseAsyncIo = true` | Not needed. A session that waits for output holds no thread on every OS. |
+| `UseAsyncIo = true`, `SupportsCancellableRead` | Not needed. On every OS a session that waits for output holds no thread, and you can cancel `ReadOutputAsync` with its token. |
 | `Resize(cols, rows)` | `Resize(new PtySize(cols, rows))` |
-| `ProcessExited`, `ExitCode`, `ExitSignal` | `await WaitForExitAsync()` or `ExitStatus`, with `ExitCode` and `Signal` |
+| `ProcessExited`, `ExitCode`, `ExitSignal`, `HasExited` | `await WaitForExitAsync()`, `HasExited`, or `ExitStatus`, with `ExitCode` and `Signal` |
 | `WaitForExit(ms)` | `WaitForExitAsync(cancellationToken)` |
 | `Kill()` | `Kill()`, or `Kill(PtySignal.Terminate)` and the other signals on Unix |
+| `KillAsync(entireProcessTree, grace)` | Disposal sends `SIGHUP` on Unix, then `SIGKILL` after one second. For another grace, call `Kill(PtySignal.Hangup)`, wait, and call `Kill()`. To end the whole tree, set `KillProcessTree = true` at start: `Kill()` and disposal then end the tree, on Unix through the child's process group ([Process tree](#process-tree)). |
 | `Pid` | `ProcessId` |
 | `Dispose()` | `await DisposeAsync()` or `Dispose()` |
 | The out-of-band ConPTY, used when it is present | [Add the package](#out-of-band-conpty-for-windows) and set `ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()`. Without `ConPty`, MiniPty uses the in-box ConPTY. |

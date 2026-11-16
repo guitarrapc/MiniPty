@@ -82,6 +82,8 @@ int minipty_master_wait(int wait_fd, int timeout_ms);
 int minipty_child_exiting(int pid);
 int minipty_pidfd_open(int pid);
 int minipty_signal_child(int pidfd, int pid, int sig);
+int minipty_signal_group(int pidfd, int pid, int sig);
+int minipty_peek_child_exit(int pidfd, int pid, int *exit_code, int *term_signal);
 int minipty_reap_child(int pidfd, int pid, int block, int *exit_code, int *term_signal);
 
 int minipty_set_nonblocking(int fd);

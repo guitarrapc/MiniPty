@@ -117,7 +117,7 @@ static (PtyStartInfo StartInfo, TimeSpan SnapshotAfter) ParseArguments(string[] 
         FileName = rest[0],
         Arguments = rest[1..].ToArray(),
         Size = new PtySize(Columns, Rows),
-        KillProcessTree = true, // Windows: also end what the program started, when the session ends
+        KillProcessTree = true, // Also end what the program started, when the session ends
     }, after);
 }
 

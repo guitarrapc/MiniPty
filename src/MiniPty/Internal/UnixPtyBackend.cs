@@ -96,7 +96,7 @@ internal static partial class UnixPtyBackend
         try
         {
             PtyStartTestHook.Run(PtyStartStage.Spawned, pid);
-            return new UnixPtyBackendInstance(master, slave, pid, pidfd, size);
+            return new UnixPtyBackendInstance(master, slave, pid, pidfd, size, startInfo.KillProcessTree);
         }
         catch
         {
@@ -209,6 +209,22 @@ internal static partial class UnixPtyBackend
         public void Dispose() => FreeUtf8Allocations(_owned);
     }
 
+    /// <summary>What <see cref="UnixPtyBackendInstance.TryReapExitedChild"/> found.</summary>
+    private enum ChildReapState
+    {
+        /// <summary>The child runs, or its exit could not be read yet.</summary>
+        Running,
+
+        /// <summary>
+        /// The child has exited and its exit is reported, but its zombie is kept until its process group has had its kill
+        /// (<see cref="PtyStartInfo.KillProcessTree"/>).
+        /// </summary>
+        Held,
+
+        /// <summary>The child is reaped.</summary>
+        Reaped,
+    }
+
     private sealed class UnixPtyBackendInstance : IPtyBackend, IPtyOutputDriver, IPtyInputQueue, IValueTaskSource<int>
     {
         // _loopPhase: how the watcher's loop reads this session, when it does.
@@ -253,6 +269,15 @@ internal static partial class UnixPtyBackend
         private Timer? _eofTimer;
         // Zero until Dispose hangs up a running child. Written under _pidLock.
         private long _hangupKillDeadline;
+        // PtyStartInfo.KillProcessTree: the child's signals go to its process group, which the child leads, and the watcher
+        // keeps the child's zombie until the group has had its kill (_groupKilled), so the group id cannot be given to a new
+        // process meanwhile (minipty_signal_group).
+        private readonly bool _killProcessTree;
+        // Whether the child has exited and its exit is recorded (_exited), but its zombie is kept for the group's kill.
+        // Written under _pidLock.
+        private bool _reapHeld;
+        // Whether the child's process group has had SIGKILL, after which the zombie need not be kept. Written under _pidLock.
+        private bool _groupKilled;
         // Whether the master's output wakes the watcher while a disposal's hang-up keeps it open. Read and written only
         // under the watcher's lock.
         private bool _outputWatched;
@@ -418,13 +443,14 @@ internal static partial class UnixPtyBackend
 
         private bool HasReadAhead => _readAhead is not null;
 
-        public UnixPtyBackendInstance(int master, int slave, int pid, int pidfd, PtySize size)
+        public UnixPtyBackendInstance(int master, int slave, int pid, int pidfd, PtySize size, bool killProcessTree)
         {
             _master = master;
             _slave = slave;
             _pid = pid;
             _pidfd = pidfd;
             _size = size;
+            _killProcessTree = killProcessTree;
             // Non-blocking, so a write takes what the tty input queue accepts and never blocks its caller. The loop
             // reads only after the master reports readable. A read that still finds nothing waits again.
             if (UnixInterop.minipty_set_nonblocking(master) != 0)
@@ -799,32 +825,79 @@ internal static partial class UnixPtyBackend
 
         public void Kill()
         {
+            bool reap;
             lock (_pidLock)
             {
-                if (_disposed || _exited)
+                if (_disposed || !IsSignalableLocked)
                     return;
 
-                KillCore();
+                reap = KillCore();
             }
+
+            if (reap)
+                ChildWatcher.RequestReap(this);
         }
 
         public void Kill(PtySignal signal)
         {
             // Validate before the disposed/exited guards so misuse always throws.
             var nativeSignal = MapSignal(signal);
+            var reap = false;
             lock (_pidLock)
             {
-                if (_disposed || _exited)
+                if (_disposed || !IsSignalableLocked)
                     return;
 
                 // Fire-and-forget like KillCore; ESRCH after a racing exit is benign.
-                SignalLocked(nativeSignal);
+                if (nativeSignal == UnixInterop.SigKill)
+                    reap = KillCore();
+                else
+                    SignalTreeLocked(nativeSignal);
             }
+
+            if (reap)
+                ChildWatcher.RequestReap(this);
         }
 
-        private void KillCore()
+        /// <summary>
+        /// Whether a signal can still reach the child, or with <see cref="PtyStartInfo.KillProcessTree"/> its process
+        /// group: the child is not yet reaped. Caller holds <see cref="_pidLock"/>.
+        /// </summary>
+        private bool IsSignalableLocked => !_exited || _reapHeld;
+
+        /// <summary>
+        /// Sends <c>SIGKILL</c> to the child, or with <see cref="PtyStartInfo.KillProcessTree"/> to its process group once.
+        /// Caller holds <see cref="_pidLock"/> and has checked <see cref="IsSignalableLocked"/>.
+        /// </summary>
+        /// <returns>Whether the zombie kept for the group's kill can now be reaped.</returns>
+        private bool KillCore()
         {
-            SignalLocked(UnixInterop.SigKill);
+            if (!_killProcessTree)
+            {
+                SignalLocked(UnixInterop.SigKill);
+                return false;
+            }
+
+            if (!_groupKilled)
+            {
+                _ = UnixInterop.minipty_signal_group(_pidfd, _pid, UnixInterop.SigKill);
+                // Also when the child is already gone: a group that cannot be signaled safely keeps nothing from the reap.
+                _groupKilled = true;
+            }
+
+            return _reapHeld;
+        }
+
+        /// <summary>
+        /// Signals the child, or with <see cref="PtyStartInfo.KillProcessTree"/> its process group. Caller holds
+        /// <see cref="_pidLock"/> and has checked <see cref="IsSignalableLocked"/>.
+        /// </summary>
+        private void SignalTreeLocked(int signal)
+        {
+            if (_killProcessTree)
+                _ = UnixInterop.minipty_signal_group(_pidfd, _pid, signal);
+            else
+                SignalLocked(signal);
         }
 
         /// <summary>
@@ -1914,13 +1987,15 @@ internal static partial class UnixPtyBackend
             // the end of output.
             CloseInput(InputDisposed);
             var exitObserved = true;
+            var reapHeld = false;
             lock (_pidLock)
             {
                 // A hang-up rather than a kill, so a shell can save its history and run its exit hooks. It is sent
                 // explicitly because the master close, which also hangs the tty up, waits until the child is gone
                 // (below), and does not hang it up at all while another process holds a copy of the master. The
                 // deadline is set under the lock, so a racing second Dispose finds it and schedules no other kill, and
-                // a reap that takes the lock after it closes the master.
+                // a reap that takes the lock after it closes the master. With KillProcessTree the child's whole process
+                // group gets the hang-up, and the kill after the grace.
                 if (!_exited && _hangupKillDeadline == 0)
                 {
                     exitObserved = false;
@@ -1928,8 +2003,15 @@ internal static partial class UnixPtyBackend
                     // then records nothing, so exit waits fail instead of reporting the hang-up's status. Recorded after
                     // the lock, the disposal lost that race to the watcher on FreeBSD under QEMU.
                     _exitSignal.SetDisposedBeforeExit();
-                    SignalLocked(UnixInterop.SigHup);
+                    SignalTreeLocked(UnixInterop.SigHup);
                     _hangupKillDeadline = Environment.TickCount64 + DisposeHangupGraceMs;
+                }
+                else if (_reapHeld && _hangupKillDeadline == 0)
+                {
+                    // KillProcessTree, and the child exited before the disposal: its zombie was kept for this. When the child
+                    // exited, the system hung up the terminal's foreground process group, so what is left of the group
+                    // ignored that, and gets the kill at once.
+                    reapHeld = KillCore();
                 }
             }
 
@@ -1937,6 +2019,8 @@ internal static partial class UnixPtyBackend
             if (exitObserved)
             {
                 CloseTransport();
+                if (reapHeld)
+                    ChildWatcher.RequestReap(this);
             }
             else
             {
@@ -1954,19 +2038,38 @@ internal static partial class UnixPtyBackend
         internal long HangupKillDeadline => _hangupKillDeadline;
 
         /// <summary>Sends the kill that backs a disposal's hang-up. Called only by <see cref="ChildWatcher"/>.</summary>
-        internal void KillAfterHangup()
+        /// <returns>Whether the zombie kept for the group's kill can now be reaped (see <see cref="TryReapExitedChild"/>).</returns>
+        internal bool KillAfterHangup()
         {
             // Under the reap's lock, so a child the watcher has already reaped is skipped and its released pid is
-            // never signaled.
+            // never signaled. With KillProcessTree the child's zombie, kept since its exit, still holds the group's id.
+            var reap = false;
             lock (_pidLock)
             {
-                if (!_exited)
-                    KillCore();
+                if (IsSignalableLocked)
+                    reap = KillCore();
             }
 
             // Also when the kill finds no child to end, so the master a disposal left open lasts no longer than the grace.
             UnwatchOutput();
             CloseMaster();
+            return reap;
+        }
+
+        /// <summary>
+        /// Kills the child's process group as the host process exits, with <see cref="PtyStartInfo.KillProcessTree"/>, so the
+        /// tree ends with the host as a Windows job does. Called only by <see cref="ChildWatcher"/>, under its lock.
+        /// </summary>
+        internal void KillTreeAsHostExits()
+        {
+            if (!_killProcessTree)
+                return;
+
+            lock (_pidLock)
+            {
+                if (IsSignalableLocked)
+                    _ = KillCore();
+            }
         }
 
         /// <summary>
@@ -2016,37 +2119,76 @@ internal static partial class UnixPtyBackend
         /// <summary>
         /// Reaps the child when it has exited. Called only by <see cref="ChildWatcher"/>, the sole reaper.
         /// </summary>
-        /// <returns><see langword="true"/> once the child has been reaped.</returns>
-        internal bool TryReapExitedChild()
+        /// <remarks>
+        /// With <see cref="PtyStartInfo.KillProcessTree"/> the exit is recorded and reported when the child exits, but the
+        /// child's zombie is kept until its process group has had its kill (disposal, <see cref="Kill()"/>, or the host's
+        /// exit): the zombie holds the pid, and with it the group's id, so the group can be signaled until then without
+        /// reaching a process that got the id later. A later call reaps it.
+        /// </remarks>
+        internal ChildReapState TryReapExitedChild()
         {
+            var held = false;
             lock (_pidLock)
             {
+                if (_reapHeld)
+                    return TryReapHeldLocked();
+
                 if (_exited)
-                    return true;
+                    return ChildReapState.Reaped;
 
-                // Through the pidfd where there is one (Linux 5.4 and later), so a pid that another child of the host
-                // gets after the pidfd was opened never hands this session that child's exit.
-                var reaped = UnixInterop.minipty_reap_child(_pidfd, _pid, 0, out var exitCode, out var termSignal);
-                if (reaped == 0)
-                    return false;
+                int found;
+                int exitCode;
+                int termSignal;
+                if (_killProcessTree && !_groupKilled)
+                {
+                    found = UnixInterop.minipty_peek_child_exit(_pidfd, _pid, out exitCode, out termSignal);
+                    held = found > 0;
+                }
+                else
+                {
+                    // Through the pidfd where there is one (Linux 5.4 and later), so a pid that another child of the host
+                    // gets after the pidfd was opened never hands this session that child's exit.
+                    found = UnixInterop.minipty_reap_child(_pidfd, _pid, 0, out exitCode, out termSignal);
+                }
 
-                if (reaped > 0)
+                if (found == 0)
+                    return ChildReapState.Running;
+
+                if (found > 0)
                 {
                     _exitCode = exitCode;
                     _termSignal = termSignal;
                 }
                 else if (Marshal.GetLastPInvokeError() != UnixInterop.ECHILD)
                 {
-                    return false;
+                    return ChildReapState.Running;
                 }
 
                 // ECHILD: something outside MiniPty reaped the child, so its status is lost; report exit 0.
+                _reapHeld = held;
                 Volatile.Write(ref _exited, true);
             }
 
             CloseMasterIfHungUp();
             _exitSignal.TrySetExited(new PtyExitStatus(_exitCode, _termSignal != 0 ? _termSignal : null));
-            return true;
+            return held ? ChildReapState.Held : ChildReapState.Reaped;
+        }
+
+        /// <summary>
+        /// Reaps the zombie kept for the group's kill once the group has had it. Its exit was recorded and reported when
+        /// the child exited. Caller holds <see cref="_pidLock"/>.
+        /// </summary>
+        private ChildReapState TryReapHeldLocked()
+        {
+            if (!_groupKilled)
+                return ChildReapState.Held;
+
+            var reaped = UnixInterop.minipty_reap_child(_pidfd, _pid, 0, out _, out _);
+            if (reaped == 0 || (reaped < 0 && Marshal.GetLastPInvokeError() != UnixInterop.ECHILD))
+                return ChildReapState.Held;
+
+            _reapHeld = false;
+            return ChildReapState.Reaped;
         }
 
         /// <summary>
@@ -2058,6 +2200,8 @@ internal static partial class UnixPtyBackend
         {
             lock (_pidLock)
             {
+                // A kept zombie that code outside MiniPty reaped no longer holds the group's id: no signal goes to it.
+                _reapHeld = false;
                 if (_exited)
                     return;
 

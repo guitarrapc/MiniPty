@@ -40,7 +40,7 @@ The terminal window sits on a desk. The desk has the size of the largest termina
 
 The desk does not scale the terminal text below 9.5 px. At that size, 80 columns are wider than a phone. So on a phone, the desk puts the window at its left edge and scrolls sideways inside its frame. The page does not scroll sideways. When the desk fit a 375 px phone, the text was 5.4 px, and nobody could read it.
 
-"Why MiniPty" starts with three measured numbers for 1,000 idle shells. They are 0 threads per shell, 7.9 MiB of host memory, and 0 ms of CPU per second. They come from the idle probe in the root README's [Scaling](../README.md#scaling) section, so update the two together. The numbers are HTML, not an image, so they take the page's dark colors and stack on a phone. The README shows the thread count as a chart (`assets/scaling-threads.svg`). Its line is flat beside a dashed line for a thread per shell, which shows the difference without the name of another library. A chart of memory alone was not used: it had nothing to compare with, and its longest bar made the memory look large.
+"Why MiniPty" starts with three measured numbers for 1,000 idle shells. They are 0 threads per shell, 6.4 MiB of host memory, and 0 ms of CPU per second. They come from the Linux rows of the scaling table in the root README's [Performance](../README.md#performance) section. The benchmark workflow writes that table from CI, so update the two together. The numbers are HTML, not an image, so they take the page's dark colors and stack on a phone. The README shows the thread count as a chart (`assets/scaling-threads.svg`). Its line is flat beside a dashed line for a thread per shell, which shows the difference without the name of another library. A chart of memory alone was not used: it had nothing to compare with, and its longest bar made the memory look large.
 
 Below the numbers, four cards show what MiniPty does for an app:
 
@@ -49,7 +49,7 @@ Below the numbers, four cards show what MiniPty does for an app:
 - browser terminals that survive a web server restart
 - thousands of shells in one process
 
-Each one is a feature that Porta.Pty 2.2.3 does not have, but the page names no other library. An earlier card named Porta.Pty, and it was too direct. The page does not list the process tree kill on Windows, because Porta.Pty also has it. The link in the password item plays that scene from a Linux or macOS recording, because `InputMode` is null on Windows.
+Each one is a feature that Porta.Pty does not have, but the page names no other library. Porta.Pty holds no thread per session only with `UseAsyncIo`, so the card on thousands of shells claims the default, not the ability. An earlier card named Porta.Pty, and it was too direct. The page does not list the process tree kill, because Porta.Pty also has it. The link in the password item plays that scene from a Linux or macOS recording, because `InputMode` is null on Windows.
 
 "Use MiniPty" shows the package, the samples, and [scenetake](https://github.com/guitarrapc/scenetake) for people who want to record their own CLI. MiniPty does not write recording files. scenetake writes `.cast`, SVG, and MP4 files, and uses MiniPty for its `pty: true` steps.
 
