@@ -56,11 +56,11 @@ Your application needs these files in addition to the MiniPty assembly. The pack
 
 <!-- benchmark:run:start -->
 
-The numbers below are from [run 42335813387](https://github.com/guitarrapc/MiniPty/actions/runs/42335813387) on 2026-11-07, with .NET 10.0.14 on GitHub Actions hosted runners:
+The numbers below are from [run 43832148088](https://github.com/guitarrapc/MiniPty/actions/runs/43832148088) on 2026-11-16, with .NET 10.0.15 on GitHub Actions hosted runners:
 
-- Linux (`ubuntu-24.04`): AMD EPYC 7763 2.61GHz, 1 CPU, 4 logical and 2 physical cores
+- Linux (`ubuntu-24.04`): Intel Xeon 6975P-C 2.84GHz, 1 CPU, 4 logical and 2 physical cores
 - macOS (`macos-26`): Apple M1 (Virtual), 1 CPU, 3 logical and 3 physical cores
-- Windows (`windows-2025`): AMD EPYC 9V45 2.60GHz, 1 CPU, 4 logical and 2 physical cores
+- Windows (`windows-2025`): INTEL XEON PLATINUM 8573C 2.30GHz, 1 CPU, 4 logical and 2 physical cores
 
 <!-- benchmark:run:end -->
 
@@ -70,10 +70,10 @@ The numbers below are from [run 42335813387](https://github.com/guitarrapc/MiniP
 
 | Runner | `ConPty` | `MiniPty` P50 / P95 | `PortaPty` P50 / P95 | Allocated (`MiniPty` / `PortaPty`) |
 |--------|----------|---------------------|----------------------|------------------------------------|
-| Linux | none | 95.34 μs / 121.92 μs | 105.71 μs / 131.84 μs | 0 B / 680 B |
-| macOS | none | 34.17 μs / 61.25 μs | 38.73 μs / 132.57 μs | 0 B / 680 B |
-| Windows | out-of-band | 110.05 μs / 131.0 μs | 109.50 μs / 134.4 μs | 0 B / 376 B |
-| Windows | in-box | 11,933.70 μs / 22,455.0 μs | 10,998.50 μs / 22,009.2 μs | 0 B / 160 B |
+| Linux | none | 53.75 μs / 85.93 μs | 54.05 μs / 90.26 μs | 0 B / 680 B |
+| macOS | none | 52.71 μs / 287.28 μs | 38.23 μs / 71.72 μs | 0 B / 680 B |
+| Windows | out-of-band | 215.8 μs / 317.3 μs | 202.9 μs / 237.8 μs | 0 B / 376 B |
+| Windows | in-box | 11,835.1 μs / 21,266.8 μs | 14,304.4 μs / 21,819.4 μs | 0 B / 0 B |
 
 <!-- benchmark:latency:end -->
 
@@ -83,10 +83,10 @@ The numbers below are from [run 42335813387](https://github.com/guitarrapc/MiniP
 
 | Runner | `ConPty` | `MiniPty` MiB/s | `PortaPty` MiB/s | Allocated (`MiniPty` / `PortaPty`) |
 |--------|----------|-----------------|------------------|------------------------------------|
-| Linux | none | 216.3 | 192.2 | 0 B / 72889 B |
-| macOS | none | 58.7 | 83.9 | 0 B / 492200 B |
-| Windows | out-of-band | 7.1 | 7.7 | 12 B / 884802 B |
-| Windows | in-box | 6.3 | 6.5 | 12 B / 120 B |
+| Linux | none | 398.8 | 407.6 | 0 B / 65679 B |
+| macOS | none | 57.1 | 74.7 | 0 B / 492200 B |
+| Windows | out-of-band | 4.8 | 5.1 | 0 B / 884757 B |
+| Windows | in-box | 3.8 | 4.3 | 548 B / 53 B |
 
 <!-- benchmark:throughput:end -->
 
@@ -96,9 +96,9 @@ The numbers below are from [run 42335813387](https://github.com/guitarrapc/MiniP
 
 | Runner | `Session_Exit0_WaitForExit` Mean / Allocated | `Session_Echo_Bytes` Mean / Allocated |
 |--------|----------------------------------------------|---------------------------------------|
-| Linux | 858.0 μs / 1.27 KB | 879.1 μs / 1.78 KB |
-| macOS | 5.606 ms / 1.27 KB | 8.376 ms / 1.79 KB |
-| Windows | 11.88 ms / 1.25 KB | 16.61 ms / 1.86 KB |
+| Linux | 509.1 μs / 1.29 KB | 525.8 μs / 1.84 KB |
+| macOS | 6.222 ms / 1.3 KB | 8.361 ms / 1.84 KB |
+| Windows | 17.33 ms / 1.26 KB | 20.66 ms / 1.9 KB |
 
 <!-- benchmark:startup:end -->
 
@@ -108,9 +108,9 @@ PtyStartupHostMemoryBenchmarks measures session start in a large host with the s
 
 | Runner | `HostResidentMiB` 0: Mean / Allocated | `HostResidentMiB` 2048: Mean / Allocated |
 |--------|---------------------------------------|------------------------------------------|
-| Linux | 852.0 μs / 1.27 KB | 852.1 μs / 1.27 KB |
-| macOS | 5.472 ms / 1.27 KB | 5.523 ms / 1.27 KB |
-| Windows | 13.41 ms / 1.25 KB | 12.95 ms / 1.25 KB |
+| Linux | 508.1 μs / 1.29 KB | 511.2 μs / 1.29 KB |
+| macOS | 6.193 ms / 1.3 KB | 6.383 ms / 1.3 KB |
+| Windows | 18.97 ms / 1.3 KB | 19.25 ms / 1.26 KB |
 
 <!-- benchmark:startup-host-memory:end -->
 
@@ -120,22 +120,20 @@ Scaling is what MiniPty performs efficiently. Threads in the host process stay a
 
 <!-- benchmark:scaling:start -->
 
-These numbers are from one local run on 2026-11-16. The next full benchmark run replaces them with the numbers from CI.
-
-- Windows: AMD Ryzen 9 7950X3D, 32 logical CPUs, Windows 11, .NET 10.0.15
-- Linux: WSL 2 with Ubuntu 24.04 on the same machine, 8 logical CPUs, .NET 10.0.15
-- macOS was not measured.
+The idle probe ran after the benchmarks in [run 43832148088](https://github.com/guitarrapc/MiniPty/actions/runs/43832148088), on the same runners:
 
 | Runner | Library | Sessions | All prompts shown | Threads | Working set | Managed heap | Idle CPU | Idle allocations |
 |--------|---------|----------|-------------------|---------|-------------|--------------|----------|------------------|
-| Windows | `MiniPty` | 1,000 | 18.1 s | 14 → 17 | +7.9 MiB | +1.2 MiB | 0 ms/s | 64 B |
-| Windows | `MiniPty` | 3,000 | 39.4 s | 14 → 13 | +21.1 MiB | +3.4 MiB | 0 ms/s | 0 B |
-| Windows | `PortaPty` | 1,000 | 230 of 1,000 after 180 s | 14 → 282 | +70.0 MiB | +6.0 MiB | 0 ms/s | 31,800 B |
-| Windows | `PortaPty`, `UseAsyncIo` | 1,000 | 12.2 s | 17 → 33 | +58.2 MiB | +6.0 MiB | 0 ms/s | 0 B |
-| Linux | `MiniPty` | 1,000 | 0.4 s | 14 → 15 | +6.3 MiB | +1.0 MiB | 0 ms/s | 0 B |
-| Linux | `MiniPty` | 3,000 | 1.1 s | 14 → 16 | +12.7 MiB | +2.9 MiB | 0 ms/s | 0 B |
-| Linux | `PortaPty` | 1,000 | 288 of 1,000 after 180 s | 14 → 1,347 | +88.5 MiB | +5.7 MiB | 1.7 ms/s | 51,024 B |
-| Linux | `PortaPty`, `UseAsyncIo` | 1,000 | 1.5 s | 16 → 16 | +59.8 MiB | +5.0 MiB | 0 ms/s | 0 B |
+| Linux | `MiniPty` | 1000 | 0.4 s | 9 → 11 | +6.4 MiB | +1.2 MiB | 0.0 ms/s | 0 B |
+| Linux | `MiniPty` | 3000 | 1.2 s | 9 → 11 | +12.9 MiB | +2.9 MiB | 0.0 ms/s | 0 B |
+| Linux | `PortaPty` | 1000 | 196 of 1000 after 120 s | 9 → 1255 | +120.4 MiB | +5.6 MiB | 2.0 ms/s | 53640 B |
+| Linux | `PortaPty`, `UseAsyncIo` | 1000 | 1.7 s | 11 → 13 | +95.1 MiB | +5.0 MiB | 0.0 ms/s | 0 B |
+| macOS | `MiniPty` | 900 | 5.5 s | 12 → 13 | +3.2 MiB | +0.9 MiB | 0.1 ms/s | 0 B |
+| macOS | `PortaPty` | 900 | 237 of 900 after 120 s | 13 → 1195 | +48.7 MiB | +5.2 MiB | 7.5 ms/s | 65960 B |
+| macOS | `PortaPty`, `UseAsyncIo` | 900 | 15.6 s | 14 → 14 | +21.2 MiB | +4.4 MiB | 0.1 ms/s | 0 B |
+| Windows | `MiniPty` | 1000 | 7.4 s | 12 → 19 | +10.3 MiB | +4.6 MiB | 0.0 ms/s | 0 B |
+| Windows | `PortaPty` | 1000 | 132 of 1000 after 120 s | 12 → 185 | +62.7 MiB | +5.9 MiB | 0.0 ms/s | 26488 B |
+| Windows | `PortaPty`, `UseAsyncIo` | 1000 | 8.8 s | 13 → 35 | +92.3 MiB | +6.0 MiB | 0.0 ms/s | 0 B |
 
 <!-- benchmark:scaling:end -->
 
