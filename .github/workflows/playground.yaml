@@ -1,0 +1,115 @@
+name: Playground
+
+# The playground is a static page that replays recordings of real PTY sessions (playground/README.md). Each runner
+# records the scenes with playground/Record.cs, the pages job collects the recordings and rebuilds index.json, and
+# the deploy job publishes playground/site to GitHub Pages. A pull request records and builds the site but does not
+# deploy it.
+
+concurrency:
+  group: playground-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "playground/**"
+      - "src/MiniPty/**"
+      - ".github/workflows/playground.yaml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "playground/**"
+      - ".github/workflows/playground.yaml"
+  workflow_dispatch:
+
+jobs:
+  record:
+    name: Record (${{ matrix.rid }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            rid: linux-x64
+          - os: macos-26
+            rid: osx-arm64
+          # Records with the in-box ConPTY and with the out-of-band ConPTY from the package.
+          - os: windows-2025
+            rid: win-x64
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      # Record.cs names each environment from the OS and the architecture (linux-x64, macos-arm64, windows-x64-inbox,
+      # windows-x64-oob). The pages job writes index.json for all of them, so the one from this runner is removed.
+      - name: Record the scenes
+        shell: bash
+        run: |
+          dotnet playground/Record.cs --out "$RUNNER_TEMP/playground-recordings"
+          rm -f "$RUNNER_TEMP/playground-recordings/index.json"
+      - name: Upload the recordings
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: playground-recordings-${{ matrix.rid }}
+          path: ${{ runner.temp }}/playground-recordings/
+          retention-days: 1
+          if-no-files-found: error
+
+  pages:
+    name: Build the site
+    needs: [record]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Download the recordings
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: playground-recordings-*
+          path: playground/site/recordings
+          merge-multiple: true
+      - name: Write index.json
+        shell: bash
+        run: dotnet playground/Record.cs --index-only
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: playground/site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: [pages]
+    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -467,6 +467,42 @@ Publish with NativeAOT using the same flags as CI. On Linux and macOS, first run
 dotnet publish samples/SingleFiles/Session.cs -c Release -r linux-x64 --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None
 ```
 
+## Coming from Porta.Pty
+
+[Porta.Pty](https://github.com/tomlm/Porta.Pty) 2.2.3 and MiniPty do the same core work. Both start a real PTY on Windows, Linux, and macOS, and both work with NativeAOT. Both report the signal that ended the child, and both can start a child without the parent's environment. Speed depends on the runner, and neither library leads on all of them ([Performance](#performance)).
+
+Each Porta.Pty call and its MiniPty equivalent:
+
+| Porta.Pty | MiniPty |
+|---|---|
+| `await PtyProvider.SpawnAsync(options, ct)` | `Pty.Start(startInfo)`, which returns at once |
+| `PtyOptions.App`, `CommandLine` | `PtyStartInfo.FileName`, `Arguments` |
+| `VerbatimCommandLine = true` | `CommandLine`, a command line that MiniPty does not escape (Windows only) |
+| `Cols`, `Rows` | `Size = new PtySize(cols, rows)` |
+| `Cwd` | `WorkingDirectory` |
+| `Environment`: an empty value removes a variable | `Environment`: a null value removes a variable |
+| `InheritEnvironment` | `InheritEnvironment` |
+| `WriterStream.WriteAsync` and `FlushAsync` | `WriteInputAsync(bytes)` or `WriteInputAsync(text)` |
+| `ReaderStream.ReadAsync(buffer)` | `await foreach (var chunk in session.ReadOutputAsync())`, or the `Output` stream |
+| `UseAsyncIo = true` | Not needed. A session that waits for output holds no thread on every OS. |
+| `Resize(cols, rows)` | `Resize(new PtySize(cols, rows))` |
+| `ProcessExited`, `ExitCode`, `ExitSignal` | `await WaitForExitAsync()` or `ExitStatus`, with `ExitCode` and `Signal` |
+| `WaitForExit(ms)` | `WaitForExitAsync(cancellationToken)` |
+| `Kill()` | `Kill()`, or `Kill(PtySignal.Terminate)` and the other signals on Unix |
+| `Pid` | `ProcessId` |
+| `Dispose()` | `await DisposeAsync()` or `Dispose()` |
+| The out-of-band ConPTY, used when it is present | [Add the package](#out-of-band-conpty-for-windows) and set `ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()`. Without `ConPty`, MiniPty uses the in-box ConPTY. |
+
+MiniPty also has these features:
+
+- [`InputMode`](#password-prompts) shows when a program on Unix turns off echo for a password.
+- `CompleteAsync` and [`MiniPty.Capture`](#miniptycapture) run a command for its result.
+- [`MiniPty.Terminal`](#miniptyterminal) connects a session to a browser or an editor terminal, and reconnects with replay.
+- [`MiniPty.Console`](#miniptyconsole) attaches the host terminal to a session.
+- The [`MiniPty` meter](#metrics) reports open sessions, start time, output bytes, and stalls.
+
+The [playground](https://guitarrapc.github.io/MiniPty/) replays real sessions with each MiniPty call, such as the `InputMode` change at a password prompt.
+
 ## Development
 
 Use `dotnet` for local development, debugging, or publishing.

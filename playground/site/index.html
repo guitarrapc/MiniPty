@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniPty Playground</title>
+<meta name="description" content="MiniPty lets a .NET app run a shell or a CLI tool in a PTY, a terminal without a window. Watch recorded sessions with each call to MiniPty.">
+<!-- The link card on X, Reddit, Zenn, and other sites. Crawlers need absolute URLs. ../og.html makes og.png. -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="MiniPty">
+<meta property="og:title" content="MiniPty Playground">
+<meta property="og:description" content="MiniPty lets a .NET app run a shell or a CLI tool in a PTY, a terminal without a window. Watch recorded sessions with each call to MiniPty.">
+<meta property="og:url" content="https://guitarrapc.github.io/MiniPty/">
+<meta property="og:image" content="https://guitarrapc.github.io/MiniPty/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="A terminal that runs ls and reads a password, beside the MiniPty call for each key and each chunk of output">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<link rel="stylesheet" href="playground.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-row">
+    <h1 class="title"><a href="./">MiniPty <span>Playground</span></a></h1>
+    <nav class="top-links" aria-label="Links">
+      <a href="#why">Why MiniPty</a>
+      <a href="https://github.com/guitarrapc/MiniPty">GitHub</a>
+    </nav>
+  </div>
+  <p class="lede">MiniPty lets a .NET app run a shell or a CLI tool in a PTY, a terminal without a window. The app types keys and reads the screen, as a person does.<span class="lede-more"> Each scene replays a recorded session and shows each call to MiniPty.</span></p>
+</header>
+
+<main>
+  <section id="empty" class="empty" hidden>
+    <h2>No recordings yet</h2>
+    <p>To record on this machine, run <code>dotnet playground/Record.cs</code>. Then run <code>dotnet playground/Serve.cs</code> to serve the site.</p>
+  </section>
+
+  <div class="stage">
+    <section class="left" aria-label="Terminal">
+      <!-- The scenes play as a sequence: the bar names the current one, and the arrows and the list move between them. -->
+      <div class="scene-bar">
+        <button id="prev-scene" class="btn icon" type="button" aria-label="Previous scene"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 2.5 5 8l5.5 5.5"/></svg></button>
+        <label class="scene-pick">
+          <span id="scene-count" class="scene-count"></span>
+          <select id="scene-select" aria-label="Scene"></select>
+        </label>
+        <button id="next-scene" class="btn icon" type="button" aria-label="Next scene"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 2.5 11 8l-5.5 5.5"/></svg></button>
+      </div>
+
+      <div id="action" class="action">
+        <span id="action-kicker" class="kicker">Next</span>
+        <span id="action-what" class="action-what"></span>
+        <button id="play" class="btn primary play" type="button"></button>
+      </div>
+
+      <div class="desk-wrap">
+        <div id="desk" class="desk">
+          <div id="desk-inner" class="desk-inner">
+            <div id="window" class="window">
+              <div class="titlebar">
+                <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span id="term-title" class="term-title">shell</span>
+                <span id="term-size" class="term-size">80 × 22</span>
+              </div>
+              <div id="terminal"></div>
+            </div>
+          </div>
+        </div>
+        <span class="zoom-hint" aria-hidden="true">Scroll sideways ⇆</span>
+      </div>
+
+      <div class="transport">
+        <button id="restart" class="btn" type="button">Restart</button>
+        <label class="toggle" title="Play each scene without stops, then go on to the next scene"><input id="autoplay" type="checkbox"> Autoplay</label>
+        <div class="seg" role="group" aria-label="Speed">
+          <button type="button" data-speed="0.25">0.25×</button>
+          <button type="button" data-speed="1" class="on">1×</button>
+          <button type="button" data-speed="3">3×</button>
+        </div>
+        <span id="clock" class="clock">0 ms</span>
+      </div>
+      <div id="progress" class="progress" title="Click to go to a point in the scene"><div id="progress-fill" class="progress-fill"></div></div>
+
+      <!-- Where the scene was recorded: a playback setting, like the speed. -->
+      <div class="recorded">
+        <div class="setting">
+          <span class="setting-label">Recorded on</span>
+          <div id="os-seg" class="seg" role="group" aria-label="Recorded on"></div>
+        </div>
+        <div id="variant" class="setting" hidden>
+          <span id="variant-label" class="setting-label"></span>
+          <div id="variant-seg" class="seg" role="group"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="right" aria-label="MiniPty">
+      <div class="pane-label">MiniPty <span class="muted">what the app writes and reads</span></div>
+      <p id="scene-summary" class="scene-summary"></p>
+      <div class="counters">
+        <div class="counter"><span class="c-label">WriteInputAsync</span><b id="c-writes">0</b><span id="c-writes-bytes" class="c-sub">0 B</span></div>
+        <div class="counter"><span class="c-label">ReadOutputAsync</span><b id="c-chunks">0</b><span id="c-chunks-bytes" class="c-sub">0 B</span></div>
+        <div class="counter"><span class="c-label">InputMode</span><b id="c-mode">—</b><span id="c-mode-sub" class="c-sub"></span></div>
+        <div class="counter"><span class="c-label">ExitStatus</span><b id="c-exit">running</b><span id="c-exit-sub" class="c-sub"></span></div>
+      </div>
+      <ol id="log" class="log" aria-live="off"></ol>
+    </section>
+  </div>
+
+  <div class="below">
+    <section class="panel code-panel">
+      <div class="pane-label">The code <span class="muted">the line that handles each event lights up</span></div>
+      <pre id="code" class="code"></pre>
+      <p class="code-key"><span class="api">Blue names</span> are MiniPty. <span class="ui">terminal</span> is your UI, not part of MiniPty. Code that runs: <a href="https://github.com/guitarrapc/MiniPty/blob/main/samples/SingleFiles/README_MiniPty.cs"><code>README_MiniPty.cs</code></a> starts, writes, resizes, and reads. <a href="https://github.com/guitarrapc/MiniPty/blob/main/samples/SingleFiles/WebTerminal.cs"><code>WebTerminal.cs</code></a> is a browser terminal.</p>
+    </section>
+    <section class="panel">
+      <div class="pane-label">What happens</div>
+      <p id="notice" class="notice"></p>
+      <div id="detail" class="detail"></div>
+      <p id="env-line" class="env-line"></p>
+    </section>
+  </div>
+
+  <!-- What MiniPty does for an app. Each item is a feature that the other .NET PTY libraries do not have, but the page
+       names no other library. -->
+  <section id="why" class="use" aria-labelledby="why-title">
+    <h2 id="why-title">Why MiniPty</h2>
+    <div class="use-grid why-grid">
+      <article class="panel use-card">
+        <h3>Knows when a program asks for a password</h3>
+        <p>On Linux and macOS, <code>InputMode</code> shows when <code>sudo</code> or <code>ssh</code> turns off echo for a password. An agent or a test script can stop there, ask a person, and keep the password out of its logs.</p>
+        <p class="links"><a href="#scene=password" data-scene="password" data-unix>Play the password scene</a> · <a href="https://github.com/guitarrapc/MiniPty#password-prompts">Password prompts</a></p>
+      </article>
+      <article class="panel use-card">
+        <h3>Gets a command's result in one call</h3>
+        <p><code>CompleteAsync</code> returns the output and the exit code. <code>MiniPty.Capture</code> also gives the time of each chunk. <code>MaxOutputBytes</code> ends a command that prints too much.</p>
+        <p class="links"><a href="https://github.com/guitarrapc/MiniPty/blob/main/samples/SingleFiles/README.md#run-a-command-for-its-result">Run a command for its result</a></p>
+      </article>
+      <article class="panel use-card">
+        <h3>Browser terminals that survive a restart</h3>
+        <p><code>PtyWebSocketBridge.RunAsync</code> connects a shell to xterm.js in one call. When the shells run in a PTY host of their own, a web server restart does not end them. The page reconnects and gets the output it missed.</p>
+        <p class="links"><a href="https://github.com/guitarrapc/MiniPty/blob/main/samples/SingleFiles/README.md#web-terminal">Web terminal</a> · <a href="https://github.com/guitarrapc/MiniPty/blob/main/samples/SingleFiles/README.md#web-terminal-with-a-separate-pty-host">Separate PTY host</a></p>
+      </article>
+      <article class="panel use-card">
+        <h3>Thousands of shells in one process</h3>
+        <p>A session that waits for output holds no thread. Reads, writes, and waits allocate nothing after the first call. So a web server or an agent host can keep thousands of shells open.</p>
+        <p class="links"><a href="https://github.com/guitarrapc/MiniPty#performance">Performance</a></p>
+      </article>
+    </div>
+  </section>
+
+  <section id="use" class="use" aria-labelledby="use-title">
+    <h2 id="use-title">Use MiniPty</h2>
+    <div class="use-grid">
+      <article class="panel use-card">
+        <h3>Add it to your app</h3>
+        <p>Start a shell or a CLI in a real PTY, type into it, and read its screen. MiniPty runs on .NET 10 on Windows, Linux, and macOS, and works with NativeAOT.</p>
+        <pre class="cmd"><code>dotnet add package MiniPty</code></pre>
+        <p class="links"><a href="https://github.com/guitarrapc/MiniPty#quick-start">Quick start</a> · <a href="https://www.nuget.org/packages/MiniPty">NuGet</a></p>
+      </article>
+      <article class="panel use-card">
+        <h3>Build a terminal or an agent tool</h3>
+        <p>Samples show a browser terminal with xterm.js, a VS Code terminal, and a desktop terminal window. Other samples run commands and drive programs, as an AI agent does.</p>
+        <p class="links"><a href="https://github.com/guitarrapc/MiniPty#samples">Samples</a></p>
+      </article>
+      <article class="panel use-card">
+        <h3>Record your CLI for a README or a post</h3>
+        <p><a href="https://github.com/guitarrapc/scenetake">scenetake</a> runs a YAML scenario and records it as an asciinema <code>.cast</code>, an animated SVG, or an MP4. Its <code>pty: true</code> steps run through MiniPty. It also comes as a .NET tool and as a binary.</p>
+        <pre class="cmd"><code>npm install -g scenetake</code></pre>
+      </article>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <p><a href="https://github.com/guitarrapc/MiniPty/blob/main/playground/Record.cs"><code>playground/Record.cs</code></a> made these recordings. It types into a real shell through MiniPty and saves each byte with its time. This page only replays the recordings. It does not run a PTY or connect to a server.
+  For a live shell, clone the repository and run <a href="https://github.com/guitarrapc/MiniPty/blob/main/samples/SingleFiles/WebTerminal.cs"><code>samples/SingleFiles/WebTerminal.cs</code></a> with <code>dotnet</code>.</p>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="playground.js"></script>
+</body>
+</html>

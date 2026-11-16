@@ -1,0 +1,760 @@
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --border: #dde1e7;
+  --text: #1b1f24;
+  --muted: #5f6b7a;
+  --accent: #2f6fde;
+  --accent-ink: #ffffff;
+  --accent-soft: #e3ecfc;
+  --in: #c2410c;
+  --out: #2f7d4f;
+  --event: #8a5a00;
+  --mode: #7c3aed;
+  --exit: #b42318;
+  --hot: #fff1b8;
+  --tok-csi: #2f6fde;
+  --tok-osc: #8a4fd8;
+  --tok-ctl: #c2410c;
+  --tok-esc: #0f766e;
+  --code-comment: #6b7785;
+  --code-string: #a3441b;
+  --code-keyword: #8b2fc9;
+  --term-bg: #0f1216;
+  --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 10%);
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1014;
+    --surface: #151a20;
+    --surface-2: #1d232b;
+    --border: #2a323c;
+    --text: #e3e7ec;
+    --muted: #93a0b0;
+    --accent: #5b93f5;
+    --accent-ink: #0d1014;
+    --accent-soft: #1c2a40;
+    --in: #f59e5b;
+    --out: #5cc085;
+    --event: #e3b341;
+    --mode: #b794f6;
+    --exit: #f07167;
+    --hot: #4a4120;
+    --tok-csi: #7aa7f7;
+    --tok-osc: #b794f6;
+    --tok-ctl: #f59e5b;
+    --tok-esc: #4fd1c5;
+    --code-comment: #7d8896;
+    --code-string: #e8a27a;
+    --code-keyword: #c792ea;
+    --shadow: none;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0d1014;
+  --surface: #151a20;
+  --surface-2: #1d232b;
+  --border: #2a323c;
+  --text: #e3e7ec;
+  --muted: #93a0b0;
+  --accent: #5b93f5;
+  --accent-ink: #0d1014;
+  --accent-soft: #1c2a40;
+  --in: #f59e5b;
+  --out: #5cc085;
+  --event: #e3b341;
+  --mode: #b794f6;
+  --exit: #f07167;
+  --hot: #4a4120;
+  --tok-csi: #7aa7f7;
+  --tok-osc: #b794f6;
+  --tok-ctl: #f59e5b;
+  --tok-esc: #4fd1c5;
+  --code-comment: #7d8896;
+  --code-string: #e8a27a;
+  --code-keyword: #c792ea;
+  --shadow: none;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 var(--sans);
+}
+
+code, pre { font-family: var(--mono); }
+
+a { color: var(--accent); }
+
+.muted { color: var(--muted); font-weight: 400; }
+
+.top {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 26px 24px 6px;
+}
+
+/* On a phone, the links go under the title, so the title stays on one line. */
+.top-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+}
+
+.title {
+  margin: 0;
+  font-size: 34px;
+  font-weight: 750;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.title a { color: var(--text); text-decoration: none; }
+.title span { color: var(--accent); }
+
+.top-links { display: flex; flex: none; gap: 16px; font-size: 14px; }
+
+.lede {
+  max-width: 90ch;
+  margin: 8px 0 16px;
+  color: var(--muted);
+  font-size: 16px;
+}
+
+main {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0 24px 24px;
+}
+
+.empty h2 { margin: 14px 0 4px; font-size: 22px; }
+
+/* The scene bar: the current scene, its place in the sequence, and the arrows. The list opens the OS's own picker,
+   which suits a phone better than a row of buttons. */
+.scene-bar {
+  display: flex;
+  gap: 8px;
+  height: 44px;
+  margin-bottom: 10px;
+  scroll-margin-top: 12px; /* a "Why MiniPty" link scrolls the scene bar to the top */
+}
+
+.btn.icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  padding: 0;
+  border-radius: 10px;
+}
+
+.btn.icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.btn:disabled { opacity: 0.35; cursor: default; }
+.btn:disabled:hover { background: var(--surface); }
+
+.scene-pick {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding-left: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.scene-pick:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.scene-pick::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 15px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+.scene-count { flex: none; color: var(--muted); font: 600 13px var(--mono); }
+
+.scene-pick select {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 36px 0 0;
+  overflow: hidden;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: 650 17px var(--sans);
+  text-overflow: ellipsis;
+  cursor: pointer;
+  appearance: none;
+}
+
+/* Where the scene was recorded, under the progress bar: a playback setting, like the speed. */
+.recorded {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin-top: 10px;
+}
+
+.setting { display: inline-flex; align-items: center; gap: 8px; }
+.setting[hidden] { display: none; }
+.setting-label { color: var(--muted); font-size: 13px; }
+
+.scene-summary { margin: 0 0 10px; font-size: 14px; }
+
+/* The terminal column and the MiniPty column keep one ratio at every width, and so do the code and the notes below
+   them. The log takes the terminal column's height (contain: size keeps its rows from growing the stage). */
+.stage, .below {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 18px;
+}
+
+.left { min-width: 0; }
+
+.right {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  contain: size;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.pane-label {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+/* The desk is sized for the largest terminal any scene uses and scales with the column (playground.js sets the
+   aspect ratio and the scale). A resize moves the window's edges on the desk, never the layout around it. */
+.desk {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle, var(--border) 1px, transparent 1.2px) 0 0 / 18px 18px,
+    var(--surface-2);
+}
+
+.desk-inner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  transform-origin: 0 0;
+}
+
+/* A column too narrow for readable text, as on a phone: the desk keeps a readable scale and scrolls sideways. The
+   window starts at the left edge, where the prompt and the typed text are. */
+.left.zoomed .desk { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; }
+.left.zoomed .desk-inner { justify-content: flex-start; }
+
+.desk-wrap { position: relative; }
+
+/* Until the reader scrolls the desk once. */
+.zoom-hint {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgb(15 18 22 / 82%);
+  color: #e3e7ec;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.left.zoomed:not(.scrolled) .zoom-hint { display: block; }
+
+.window {
+  flex: none;
+  border-radius: 10px;
+  background: var(--term-bg);
+  box-shadow: var(--shadow);
+  outline: 2px solid transparent;
+  transition: outline-color 0.6s;
+}
+
+.window.flash { outline-color: var(--event); transition: none; }
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid #222a33;
+  color: #93a0b0;
+  font: 12px var(--mono);
+}
+
+.dots { display: inline-flex; gap: 6px; }
+.dots i { width: 10px; height: 10px; border-radius: 50%; background: #3a434e; }
+.term-title { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+.term-size {
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: #1f262f;
+  color: #e3e7ec;
+  font-weight: 600;
+  transition: background 0.6s, color 0.6s;
+}
+
+.window.flash .term-size { background: #e3b341; color: #1b1f24; transition: none; }
+
+#terminal { padding: 8px 10px; }
+
+#terminal .xterm-viewport { scrollbar-width: none; }
+#terminal .xterm-viewport::-webkit-scrollbar { display: none; }
+
+/* One line, so a long command never changes the column's height. It sits above the terminal, so the play button is
+   in the first screen on a laptop and on a phone. */
+.action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  margin-bottom: 10px;
+  padding: 0 8px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.action.waiting { border-color: var(--accent); background: var(--accent-soft); }
+
+.kicker {
+  flex: none;
+  min-width: 4.2em;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.action-what {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chip {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--surface-2);
+  font: 13px var(--mono);
+}
+
+.action.waiting .chip { background: var(--surface); }
+.chip .rest { opacity: 0.35; }
+
+.key {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--surface);
+  font: 12px/18px var(--mono);
+}
+
+.key.rest { opacity: 0.35; }
+
+.hint { color: var(--muted); font-size: 13px; }
+
+.btn {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn:hover { background: var(--surface-2); }
+
+.btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.btn.primary:hover { filter: brightness(1.08); }
+
+.btn.play {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  max-width: 45%;
+  padding: 7px 14px;
+}
+
+.btn.play svg { flex: none; width: 12px; height: 12px; fill: currentColor; }
+/* Every click goes to the button itself, so a new icon or label between the press and the release does not drop it. */
+.btn.play svg, .btn.play span { pointer-events: none; }
+.btn.play span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+.transport {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 14px;
+}
+
+.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.seg button {
+  padding: 5px 10px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.seg button:last-child { border-right: 0; }
+.seg button.on { background: var(--surface-2); color: var(--text); font-weight: 600; }
+
+.clock {
+  margin-left: auto;
+  color: var(--muted);
+  font: 13px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress {
+  position: relative;
+  height: 14px;
+  margin-top: 8px;
+  border-radius: 7px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: 7px;
+  background: var(--accent-soft);
+}
+
+.progress .tick {
+  position: absolute;
+  top: 2px;
+  width: 3px;
+  height: 10px;
+  margin-left: -1px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.right { container-type: inline-size; }
+
+.counters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* Four counters need about 480px before their names are cut off. */
+@container (max-width: 480px) {
+  .counters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.counter {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.c-label { overflow: hidden; color: var(--muted); font: 10.5px var(--mono); white-space: nowrap; text-overflow: ellipsis; }
+.counter b { overflow: hidden; font: 600 16px var(--mono); white-space: nowrap; text-overflow: ellipsis; }
+/* The note can take two lines: "never reported after DisposeAsync" is wider than a counter on a phone and on a laptop. */
+.c-sub { color: var(--muted); font-size: 12px; line-height: 1.3; }
+
+.log {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  font: 12.5px/1.45 var(--mono);
+  list-style: none;
+}
+
+.log li {
+  display: grid;
+  grid-template-columns: 62px 18px minmax(0, 1fr);
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.log li:hover { background: var(--surface-2); }
+.log li.latest { background: var(--hot); }
+
+.log .t { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.log .arrow { font-weight: 700; text-align: center; }
+.log .body { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.log .api { font-weight: 600; }
+.log .size { color: var(--muted); }
+
+.log li.in .arrow, .log li.in .api { color: var(--in); }
+.log li.out .arrow, .log li.out .api { color: var(--out); }
+.log li.event .arrow, .log li.event .api { color: var(--event); }
+.log li.mode .arrow, .log li.mode .api { color: var(--mode); }
+.log li.exit .arrow, .log li.exit .api { color: var(--exit); }
+
+.log li.user {
+  display: block;
+  margin: 8px 0 3px;
+  padding: 3px 8px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0;
+  background: var(--accent-soft);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: normal;
+}
+
+.log li.user .chip { background: var(--surface); font-size: 12px; font-weight: 400; }
+.log li.user .key { font-weight: 400; }
+
+.log li.more { color: var(--muted); }
+
+.below { margin-top: 18px; }
+
+.panel {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.code {
+  margin: 0;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.code .line {
+  display: block;
+  padding: 0 6px;
+  border-radius: 3px;
+  transition: background-color 0.9s;
+}
+
+.code .line.hot { background: var(--hot); transition: none; }
+.code .line.tagged { box-shadow: inset 2px 0 var(--border); }
+.code .c { color: var(--code-comment); }
+.code .s { color: var(--code-string); }
+.code .k { color: var(--code-keyword); }
+
+/* MiniPty's names stand out. The reader's own UI (terminal) is muted, so nobody looks for it in MiniPty. */
+.code .api, .code-key .api { color: var(--accent); font-weight: 650; }
+.code .ui, .code-key .ui { color: var(--muted); font-style: italic; }
+.code-key .ui { font-family: var(--mono); }
+
+.code-key {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.notice { margin: 0 0 10px; }
+
+.detail {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 13px;
+}
+
+.detail h3 { margin: 0 0 4px; font-size: 13px; }
+.detail .tokens { margin: 0; font: 12px/1.65 var(--mono); white-space: pre-wrap; word-break: break-all; }
+.detail .hint { margin: 0; }
+
+.env-line { margin: 10px 0 0; color: var(--muted); font-size: 12.5px; }
+
+.tok-csi, .tok-osc, .tok-ctl, .tok-esc {
+  padding: 0 3px;
+  margin: 0 1px;
+  border-radius: 3px;
+  background: var(--surface);
+  font-size: 0.92em;
+}
+
+.log .tok-csi, .log .tok-osc, .log .tok-ctl, .log .tok-esc { background: var(--surface-2); }
+
+.tok-csi { color: var(--tok-csi); }
+.tok-osc { color: var(--tok-osc); }
+.tok-ctl { color: var(--tok-ctl); }
+.tok-esc { color: var(--tok-esc); }
+
+.use { margin-top: 30px; scroll-margin-top: 16px; }
+
+.use h2 {
+  margin: 0 0 12px;
+  font-size: 22px;
+  letter-spacing: -0.01em;
+}
+
+.use-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.why-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.use-card { display: flex; flex-direction: column; }
+.use-card h3 { margin: 0 0 6px; font-size: 16px; }
+.use-card p { margin: 0 0 10px; font-size: 14px; }
+.use-card .links { margin: auto 0 0; }
+
+.cmd {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border-radius: 7px;
+  background: var(--term-bg);
+  color: #d7dce2;
+  font-size: 13px;
+}
+
+.foot {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 8px 24px 40px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.foot p { max-width: 110ch; }
+
+@media (max-width: 1000px) {
+  .stage, .below { grid-template-columns: minmax(0, 1fr); }
+  .right { contain: none; height: 560px; }
+  .use-grid { grid-template-columns: minmax(0, 1fr); }
+  .why-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* A phone: the title, two lines of lede, the scene bar, the play button, and the terminal fit the first screen. */
+@media (max-width: 640px) {
+  .top { padding-top: 18px; }
+  .top, main, .foot { padding-left: 16px; padding-right: 16px; }
+  .use-grid, .why-grid { grid-template-columns: minmax(0, 1fr); }
+  .title { font-size: 26px; }
+  .lede { margin-bottom: 12px; font-size: 15px; line-height: 1.45; }
+  .lede-more { display: none; }
+  .clock { margin-left: 0; }
+
+  /* The longest scene name, "Resize the window", fits from 360 px. The select keeps 16 px text, because iOS zooms
+     the page into a select with smaller text. */
+  .btn.icon { width: 40px; }
+  .scene-pick { gap: 8px; padding-left: 12px; }
+  .scene-pick::after { right: 12px; }
+  .scene-pick select { padding-right: 28px; font-size: 16px; font-weight: 600; }
+
+  /* Beside the label and the play button, only about 130 px is left for the action, and most commands were cut off.
+     So the action gets a row of its own under them. The row is two lines high for every action, so the terminal does
+     not move from one step to the next. */
+  .action {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "kicker play" "what what";
+    row-gap: 2px;
+    height: auto;
+    padding: 6px 6px 8px 12px;
+  }
+  .kicker { grid-area: kicker; }
+  .btn.play { grid-area: play; max-width: none; }
+  .action-what {
+    grid-area: what;
+    min-height: calc(2 * 1.45em);
+    overflow: visible;
+    line-height: 1.45;
+    white-space: normal;
+  }
+}
+
+/* A phone narrower than 360 px: the scene name gets the space of the count. The list and the arrows still show the
+   place of the scene. */
+@media (max-width: 359px) {
+  .scene-count { display: none; }
+}

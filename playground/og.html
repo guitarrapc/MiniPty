@@ -1,0 +1,73 @@
+<!doctype html>
+<!-- The link card for X, Reddit, Zenn, and other sites (site/og.png, 1200 × 630). The text comes from the Linux
+     recordings of "Run a command" and "Type a password". To make og.png again, see README.md. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MiniPty Playground card</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    display: flex;
+    flex-direction: column;
+    width: 1200px;
+    height: 630px;
+    overflow: hidden;
+    padding: 44px 56px 40px;
+    background: #0d1014;
+    color: #e3e7ec;
+    font-family: "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { margin: 0; font-size: 68px; font-weight: 750; line-height: 1.05; letter-spacing: -0.02em; }
+  h1 span { color: #5b93f5; }
+  .sub { margin: 14px 0 34px; color: #93a0b0; font-size: 28px; }
+  .row { display: flex; gap: 24px; }
+  .term, .log {
+    border: 1px solid #2a323c;
+    border-radius: 14px;
+    font-family: "Cascadia Mono", Consolas, monospace;
+  }
+  .term { flex: none; background: #0f1216; }
+  .bar { display: flex; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #222a33; }
+  .bar i { width: 12px; height: 12px; border-radius: 50%; background: #3a434e; }
+  pre { margin: 0; padding: 14px 18px; color: #d7dce2; font: 18.5px/1.6 "Cascadia Mono", Consolas, "Yu Gothic UI", monospace; }
+  .p { color: #8ae234; font-weight: 700; }
+  .d { color: #729fcf; font-weight: 700; }
+  .x { color: #8ae234; font-weight: 700; }
+  .log { flex: 1; min-width: 0; padding: 16px 18px; background: #151a20; font-size: 18px; line-height: 1.85; }
+  .foot { display: flex; align-items: center; justify-content: space-between; margin-top: auto; color: #93a0b0; font-size: 24px; }
+  .foot code { padding: 6px 14px; border: 1px solid #2a323c; border-radius: 10px; color: #e3e7ec; font: 23px "Cascadia Mono", Consolas, monospace; }
+  .log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .in { color: #f59e5b; font-weight: 700; }
+  .out { color: #5cc085; font-weight: 700; }
+  .mode { color: #b794f6; font-weight: 700; }
+  .m { color: #93a0b0; }
+  .hot { margin: 4px -8px 0; padding: 0 8px; border-radius: 6px; background: #4a4120; }
+</style>
+</head>
+<body>
+  <h1>MiniPty <span>Playground</span></h1>
+  <p class="sub">Real PTY sessions, replayed with each call to MiniPty</p>
+  <div class="row">
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i></div>
+<pre><span class="p">demo</span>:<span class="d">~/project</span>$ ls
+README.md  <span class="x">build.sh</span>  <span class="d">docs</span>  notes.txt  numbers.txt  <span class="d">src</span>
+<span class="p">demo</span>:<span class="d">~/project</span>$ echo "こんにちは MiniPty"
+こんにちは MiniPty
+<span class="p">demo</span>:<span class="d">~/project</span>$ read -s -p 'Password: ' pw
+Password: </pre>
+    </div>
+    <div class="log">
+      <div><span class="in">→ WriteInputAsync</span> l</div>
+      <div><span class="out">← ReadOutputAsync</span> <span class="m">1 B</span> l</div>
+      <div><span class="in">→ WriteInputAsync</span> s</div>
+      <div><span class="in">→ WriteInputAsync</span> ⏎ Enter</div>
+      <div><span class="out">← ReadOutputAsync</span> <span class="m">96 B</span> README.md …</div>
+      <div class="hot"><span class="mode">◆ InputMode</span> Echo off, line input on</div>
+    </div>
+  </div>
+  <div class="foot"><code>dotnet add package MiniPty</code><span>.NET · Windows, Linux, macOS · NativeAOT</span></div>
+</body>
+</html>

@@ -416,3 +416,6 @@ _pack_probe_linux/
 minipty_spawn_helper
 # scenetake writes a cast beside each scenario; the README shows the SVG (assets/tuidemo.yaml)
 /assets/*.cast
+
+# Playground recordings: CI records them for GitHub Pages; local ones are for previewing
+playground/site/recordings/
