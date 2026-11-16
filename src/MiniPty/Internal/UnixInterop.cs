@@ -88,6 +88,23 @@ internal static partial class UnixInterop
     internal static partial int minipty_signal_child(int pidfd, int pid, int signal);
 
     /// <summary>
+    /// Sends <paramref name="signal"/> to the process group of a child of this process, which the child leads, so its
+    /// id is <paramref name="pid"/>. Sent only while the child is still this process's unreaped child (checked through
+    /// <paramref name="pidfd"/> when it is not negative), because only the child or its zombie keeps the group id from
+    /// being given to a new process. Returns 0 when the signal was sent, and -1 when the child is gone.
+    /// </summary>
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_signal_group(int pidfd, int pid, int signal);
+
+    /// <summary>
+    /// Reads a child's exit without reaping it, so its zombie keeps its pid and process group id. Returns 1 with the exit
+    /// code (128 plus the signal for a signaled child) and the terminating signal (0 for none), 0 while the child runs,
+    /// and -1 on failure, with ECHILD when code outside MiniPty already reaped it.
+    /// </summary>
+    [LibraryImport("minipty_unix", SetLastError = true)]
+    internal static partial int minipty_peek_child_exit(int pidfd, int pid, out int exitCode, out int termSignal);
+
+    /// <summary>
     /// Reaps a child of this process once it has exited: through <paramref name="pidfd"/> when it is not negative and
     /// the kernel can wait on a pidfd (Linux 5.4 and later), and otherwise by <paramref name="pid"/>. A nonzero
     /// <paramref name="block"/> waits for the exit. Returns 1 with the exit code (128 plus the signal for a signaled

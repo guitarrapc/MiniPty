@@ -171,13 +171,14 @@ MiniPty does not fall back to pipe redirect when PTY creation fails.
 
 ## Descendants
 
-By default MiniPty ends only the child. What disposal, or the child's own exit, does to the processes the child started follows from the terminal:
+By default MiniPty ends only the child. What disposal, or the child's own exit, does to the processes the child started follows from the terminal, unless `KillProcessTree` is set:
 
 | Platform | Descendant ends | Descendant keeps running |
 |---|---|---|
 | Unix | One in the terminal's foreground process group: when the child (the session leader) exits, the system hangs that group up. That includes a command that a shell without job control, such as `sh -c`, runs with `&`. A background job of a shell with job control, such as an interactive one, ends too when the shell resends the hang-up to its jobs before it exits. | One that ignores `SIGHUP` (`nohup`), was disowned, or started its own session. A running background job of a shell with job control that exits without resending the hang-up, such as one ended by `Kill()`, by the grace kill before it has done so, or an interactive bash that exits on its own, unless it is a login shell with `huponexit` set. |
 | Windows | One attached to the pseudo-console: closing it, at disposal or by the post-exit drain, ends every attached process. | One in a console of its own, or a GUI process. Also one still starting when the pseudo-console closes: a process attaches during its own startup, after `CreateProcess` has returned, and one that finds the pseudo-console closed never attaches. |
 | Windows, `KillProcessTree` | Every one, whatever its console: at `Dispose`, at `Kill`, and when the host process ends in any way, including a crash ([Process tree](core_session.md#process-tree)). | None, except while the session lives: the child's own exit leaves the tree running until disposal. |
+| Unix, `KillProcessTree` | Every one still in the child's process group, a `nohup` one included. They end at `Dispose` (the group's hang-up, then its kill after the grace), at `Kill`, and when the host process exits normally ([Process tree](core_session.md#process-tree)). | One in a process group of its own, such as a job of a shell with job control or a daemon. Every one when the host crashes or gets `SIGKILL`. The child's own exit leaves the group running until disposal. |
 
 A surviving descendant belongs to the host from then on. It never holds end of output: output ends shortly after the child exits even while a descendant keeps the terminal open (see [Drain, kill, and disposal](#drain-kill-and-disposal)).
 

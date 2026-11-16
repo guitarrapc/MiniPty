@@ -433,7 +433,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// Terminates the child process without releasing PTY handles.
     /// </summary>
     /// <remarks>
-    /// Uses <c>TerminateProcess</c> on Windows and <c>SIGKILL</c> on Unix.
+    /// Uses <c>TerminateProcess</c> on Windows and <c>SIGKILL</c> on Unix. With
+    /// <see cref="PtyStartInfo.KillProcessTree"/> it ends every process the child started too: the job on Windows, and
+    /// the child's process group on Unix, also after the child itself has exited.
     /// Call <see cref="Dispose"/> afterward to release resources. A kill that races disposal on another thread ends
     /// the child, throws <see cref="ObjectDisposedException"/>, or returns without signaling because disposal has
     /// begun. In the last two cases disposal ends the child as <see cref="Dispose"/> describes.
@@ -478,8 +480,9 @@ public sealed class PtySession : IAsyncDisposable, IDisposable, IPtyExitListener
     /// On Unix the mapped native signal is delivered to the child, through its pidfd on Linux when the kernel provides
     /// one. No signal is sent once MiniPty has reaped the child. Without a pidfd, MiniPty cannot tell the child from
     /// another child of the host that got its pid after other code reaped it. The child may handle or ignore
-    /// catchable signals, so termination is not guaranteed. On Windows the signal is advisory and the child is
-    /// terminated unconditionally, because Windows has no POSIX signals.
+    /// catchable signals, so termination is not guaranteed. With <see cref="PtyStartInfo.KillProcessTree"/> the signal
+    /// goes to the child's process group instead, also after the child itself has exited. On Windows the signal is
+    /// advisory and the child is terminated unconditionally, because Windows has no POSIX signals.
     /// Call <see cref="Dispose"/> afterward to release resources.
     /// </remarks>
     /// <param name="signal">Signal to deliver.</param>
