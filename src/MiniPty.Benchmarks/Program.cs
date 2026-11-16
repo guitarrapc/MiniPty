@@ -8,8 +8,15 @@
 //   dotnet run -c Release --project src/MiniPty.Benchmarks -- --filter *Startup*
 //   dotnet run -c Release --project src/MiniPty.Benchmarks -- --burst-probe [sessions] [bytes] [interval ms] [bursts]
 //   dotnet run -c Release --project src/MiniPty.Benchmarks -- --flood-probe <sustained|slow|echo|neighbors|control|oneshot> [--option value ...]
+//   dotnet run -c Release --project src/MiniPty.Benchmarks -- --idle-probe [--library minipty|porta|porta-async] [--sessions N] [--idle-seconds N]
 if (args.Length > 0 && args[0] == "--burst-probe")
     return await MiniPty.Benchmarks.BurstProbe.RunAsync(args[1..]);
+
+if (args.Length > 0 && args[0] == "--idle-probe")
+{
+    // Exit outright, as the flood probe does: Porta.Pty can leave a foreground thread behind.
+    Environment.Exit(MiniPty.Benchmarks.IdleProbe.Run(args[1..]));
+}
 
 if (args.Length > 0 && args[0] == "--flood-probe")
 {

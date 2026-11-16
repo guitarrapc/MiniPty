@@ -16,7 +16,7 @@ I needed a PTY library for high-performance NativeAOT projects. MiniPty provides
 
 - [NativeAOT ready](#native-files): No dependencies, no winpty, and no helper process running beside a session.
 - [Cross-platform](#platforms): Windows, Linux, and macOS (FreeBSD is experimental)
-- [Scaling](#scaling): Scales to thousands of sessions. Low cpu/memory overhead for idle sessions.
+- [Scaling](#scaling): Scales to thousands of sessions. 1,000 idle shells use no thread per shell and no CPU, and add 7.9 MiB to the host process.
 - Allocation-free steady state: Reading chunks, writing input, and waiting for exit allocate nothing after the first call.
 - Safe signal, file descriptor handling: Handles signals and file descriptors safely, avoiding issues with PID reuse and ensuring proper cleanup.
 - [Metrics](#metrics): Meters report open sessions, start time, output bytes, and stalls.
@@ -113,6 +113,35 @@ PtyStartupHostMemoryBenchmarks measures session start in a large host with the s
 | Windows | 13.41 ms / 1.25 KB | 12.95 ms / 1.25 KB |
 
 <!-- benchmark:startup-host-memory:end -->
+
+Scaling is what MiniPty performs efficiently. Threads in the host process stay at 13 to 17 from 0 to 3,000 idle shells, while a thread per shell would need more than 3,000.
+
+![image](https://raw.githubusercontent.com/guitarrapc/MiniPty/main/assets/scaling-threads.svg)
+
+- Windows: AMD Ryzen 9 7950X3D, 32 logical CPUs, Windows 11, .NET 10.0.15
+- Linux: WSL 2 with Ubuntu 24.04 on the same machine, 8 logical CPUs, .NET 10.0.15
+- macOS was not measured.
+
+| Runner | Library | Sessions | All prompts shown | Threads | Working set | Managed heap | Idle CPU | Idle allocations |
+|--------|---------|----------|-------------------|---------|-------------|--------------|----------|------------------|
+| Windows | `MiniPty` | 1,000 | 18.1 s | 14 → 17 | +7.9 MiB | +1.2 MiB | 0 ms/s | 64 B |
+| Windows | `MiniPty` | 3,000 | 39.4 s | 14 → 13 | +21.1 MiB | +3.4 MiB | 0 ms/s | 0 B |
+| Windows | `PortaPty` | 1,000 | 230 of 1,000 after 180 s | 14 → 282 | +70.0 MiB | +6.0 MiB | 0 ms/s | 31,800 B |
+| Windows | `PortaPty`, `UseAsyncIo` | 1,000 | 12.2 s | 17 → 33 | +58.2 MiB | +6.0 MiB | 0 ms/s | 0 B |
+| Linux | `MiniPty` | 1,000 | 0.4 s | 14 → 15 | +6.3 MiB | +1.0 MiB | 0 ms/s | 0 B |
+| Linux | `MiniPty` | 3,000 | 1.1 s | 14 → 16 | +12.7 MiB | +2.9 MiB | 0 ms/s | 0 B |
+| Linux | `PortaPty` | 1,000 | 288 of 1,000 after 180 s | 14 → 1,347 | +88.5 MiB | +5.7 MiB | 1.7 ms/s | 51,024 B |
+| Linux | `PortaPty`, `UseAsyncIo` | 1,000 | 1.5 s | 16 → 16 | +59.8 MiB | +5.0 MiB | 0 ms/s | 0 B |
+
+- Threads counts all the threads of the process, before the first session and with all sessions open. MiniPty adds no thread per session. Its few more threads are thread-pool threads from the start of the sessions. In two other runs of 1,000 sessions on Windows, the count ended at 14 and 16.
+- All prompts shown is the time from the first start until the last session shows its prompt. With its default options, Porta.Pty serves each pending `ReadAsync` on a thread-pool thread, as its `UseAsyncIo` documentation says. On Linux it also starts a watcher thread for each child. The pool adds threads slowly, so most sessions had not shown a prompt after 180 seconds. With `UseAsyncIo = true`, Porta.Pty holds no thread per session either. MiniPty needs no such option ([Coming from Porta.Pty](#coming-from-portapty)).
+- `Working set` and `Managed heap` are the growth of the host process. On Windows each session also has a console host process (`conhost.exe`) beside the shell, which the table does not count. At 3,000 sessions the machine had about 13 GB less free memory, most of it in those processes.
+
+To confirm on your machine, run the following command. Use `--library porta` or `--library porta-async` to measure Porta.Pty.
+
+```bash
+dotnet run -c Release --project src/MiniPty.Benchmarks -- --idle-probe --library minipty --sessions 1000
+```
 
 ## Quick start
 

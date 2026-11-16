@@ -682,6 +682,41 @@ main {
 
 .why-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
+/* The measured numbers at the top of Why MiniPty, as HTML rather than an image, so they take the page's colors and
+   stack on a phone. */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 14px 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.stat .num {
+  color: var(--accent);
+  font-size: 44px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.stat .num small { margin-left: 6px; font-size: 18px; font-weight: 600; letter-spacing: 0; }
+.stat .what { margin-top: 4px; font-size: 15px; font-weight: 600; }
+.stat .note { color: var(--muted); font-size: 13px; }
+.stats-source { margin: 8px 0 18px; color: var(--muted); font-size: 12px; }
+
 .use-card { display: flex; flex-direction: column; }
 .use-card h3 { margin: 0 0 6px; font-size: 16px; }
 .use-card p { margin: 0 0 10px; font-size: 14px; }
@@ -718,7 +753,9 @@ main {
 @media (max-width: 640px) {
   .top { padding-top: 18px; }
   .top, main, .foot { padding-left: 16px; padding-right: 16px; }
-  .use-grid, .why-grid { grid-template-columns: minmax(0, 1fr); }
+  .use-grid, .why-grid, .stats { grid-template-columns: minmax(0, 1fr); }
+  .stats { gap: 12px; }
+  .stat .num { font-size: 36px; }
   .title { font-size: 26px; }
   .lede { margin-bottom: 12px; font-size: 15px; line-height: 1.45; }
   .lede-more { display: none; }

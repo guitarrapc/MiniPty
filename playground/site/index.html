@@ -124,9 +124,16 @@
   </div>
 
   <!-- What MiniPty does for an app. Each item is a feature that the other .NET PTY libraries do not have, but the page
-       names no other library. -->
+       names no other library. The numbers come from the README's Scaling table (idle probe, 2026-11-16): update both
+       together. -->
   <section id="why" class="use" aria-labelledby="why-title">
     <h2 id="why-title">Why MiniPty</h2>
+    <ul class="stats" aria-label="1,000 idle shells in one process">
+      <li class="stat"><b class="num">0</b><span class="what">threads per shell</span><span class="note">One I/O loop reads all 1,000 shells</span></li>
+      <li class="stat"><b class="num">+7.9<small>MiB</small></b><span class="what">host memory for 1,000 shells</span><span class="note">About 8 KiB per shell</span></li>
+      <li class="stat"><b class="num">0<small>ms/s</small></b><span class="what">CPU while the shells wait</span><span class="note">And 0 B allocated per keystroke</span></li>
+    </ul>
+    <p class="stats-source">Measured with 1,000 idle shells on Windows 11 and .NET 10, host process only. The keystroke figure comes from the CI latency benchmark. <a href="https://github.com/guitarrapc/MiniPty#scaling">How it was measured</a></p>
     <div class="use-grid why-grid">
       <article class="panel use-card">
         <h3>Knows when a program asks for a password</h3>
@@ -146,7 +153,7 @@
       <article class="panel use-card">
         <h3>Thousands of shells in one process</h3>
         <p>A session that waits for output holds no thread. Reads, writes, and waits allocate nothing after the first call. So a web server or an agent host can keep thousands of shells open.</p>
-        <p class="links"><a href="https://github.com/guitarrapc/MiniPty#performance">Performance</a></p>
+        <p class="links"><a href="https://github.com/guitarrapc/MiniPty#scaling">Scaling</a> · <a href="https://github.com/guitarrapc/MiniPty#performance">Performance</a></p>
       </article>
     </div>
   </section>

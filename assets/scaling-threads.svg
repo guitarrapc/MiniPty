@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="380" viewBox="0 0 800 380" role="img" aria-label="Threads in the host process: 14 with no shell, 14 with 100 idle shells, 17 with 1,000, and 13 with 3,000. A thread per shell would need more than 3,000.">
+  <title>The thread count stays flat</title>
+  <!--
+    The README's Scaling chart, from the idle probe run of 2026-11-16 (Windows 11, .NET 10): update it with the README table.
+    The card has its own background, so it reads on a light or a dark page; it takes dark colors when the viewer's system
+    is dark. Plot: x 96..752 for 0..3,000 shells, y 310..110 for 0..3,000 threads.
+  -->
+  <style>
+    text { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+    .card { fill: #ffffff; stroke: #d1d9e0; }
+    .t { font-size: 24px; font-weight: 700; fill: #1f2328; }
+    .sub, .ax, .ref, .foot { fill: #59636e; }
+    .sub { font-size: 14px; }
+    .ax { font-size: 12px; }
+    .ref { font-size: 13px; }
+    .foot { font-size: 12px; }
+    .pt { font-size: 13px; font-weight: 700; fill: #2f6fde; }
+    .call { font-size: 16px; font-weight: 700; fill: #2f6fde; }
+    .grid { stroke: #e7eaef; stroke-width: 1; }
+    .axis { stroke: #c9d1db; stroke-width: 1; }
+    .refline { stroke: #9aa5b3; stroke-width: 2; stroke-dasharray: 6 6; }
+    .line { fill: none; stroke: #2f6fde; stroke-width: 3; stroke-linejoin: round; }
+    .dot { fill: #2f6fde; }
+    @media (prefers-color-scheme: dark) {
+      .card { fill: #151b23; stroke: #3d444d; }
+      .t { fill: #f0f6fc; }
+      .sub, .ax, .ref, .foot { fill: #9198a1; }
+      .pt, .call { fill: #5b93f5; }
+      .grid { stroke: #262c36; }
+      .axis { stroke: #3d444d; }
+      .refline { stroke: #656c76; }
+      .line { stroke: #5b93f5; }
+      .dot { fill: #5b93f5; }
+    }
+  </style>
+  <rect class="card" x="0.5" y="0.5" width="799" height="379" rx="12"/>
+  <text x="32" y="52" class="t">The thread count stays flat</text>
+  <text x="32" y="78" class="sub">Threads in the host process as idle shells are added (Windows 11, measured).</text>
+
+  <line x1="96" y1="110" x2="752" y2="110" class="grid"/>
+  <line x1="96" y1="176.7" x2="752" y2="176.7" class="grid"/>
+  <line x1="96" y1="243.3" x2="752" y2="243.3" class="grid"/>
+  <line x1="96" y1="310" x2="752" y2="310" class="axis"/>
+  <text x="84" y="114" class="ax" text-anchor="end">3,000</text>
+  <text x="84" y="180.7" class="ax" text-anchor="end">2,000</text>
+  <text x="84" y="247.3" class="ax" text-anchor="end">1,000</text>
+  <text x="84" y="314" class="ax" text-anchor="end">0</text>
+  <text x="96" y="332" class="ax" text-anchor="middle">0</text>
+  <text x="314.7" y="332" class="ax" text-anchor="middle">1,000</text>
+  <text x="533.3" y="332" class="ax" text-anchor="middle">2,000</text>
+  <text x="752" y="332" class="ax" text-anchor="end">3,000 shells</text>
+
+  <line x1="96" y1="309.1" x2="752" y2="109.1" class="refline"/>
+  <text x="380" y="196" class="ref" transform="rotate(-16.96 380 196)">a thread per shell, for scale</text>
+
+  <polyline points="96,309.1 117.9,309.1 314.7,308.9 752,309.1" class="line"/>
+  <circle cx="96" cy="309.1" r="4.5" class="dot"/>
+  <circle cx="117.9" cy="309.1" r="4.5" class="dot"/>
+  <circle cx="314.7" cy="308.9" r="4.5" class="dot"/>
+  <circle cx="752" cy="309.1" r="4.5" class="dot"/>
+  <text x="92" y="295" class="pt" text-anchor="middle">14</text>
+  <text x="122" y="295" class="pt" text-anchor="middle">14</text>
+  <text x="314.7" y="295" class="pt" text-anchor="middle">17</text>
+  <text x="752" y="295" class="pt" text-anchor="middle">13</text>
+  <text x="440" y="270" class="call">MiniPty: 13 threads at 3,000 shells</text>
+
+  <text x="32" y="362" class="foot">Measured 2026-11-16 with MiniPty's idle probe, .NET 10. Linux (WSL 2): 14 → 16 threads at 3,000 shells.</text>
+</svg>
