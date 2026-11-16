@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       benchmark:
-        description: "Benchmark filter"
+        description: "Benchmark filter (* also runs the idle probe; IdleProbe runs the idle probe alone)"
         required: true
         default: "*"
         type: choice
@@ -20,6 +20,7 @@ on:
           - "*PtyOutputBenchmarks*"
           - "*PtyCaptureDisplayBenchmarks*"
           - "*PtyMetricsBenchmarks*"
+          - "IdleProbe"
       windows:
         description: "Windows runner (windows-2022 measures the in-box ConPTY without ReleasePseudoConsole; the README takes windows-2025 only)"
         required: true
@@ -45,7 +46,7 @@ jobs:
           - os: macos-26
             artifact-suffix: macos
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -61,13 +62,45 @@ jobs:
         id: benchmark
         shell: bash
         run: |
-          dotnet run -c Release --no-build --no-launch-profile --project ./src/MiniPty.Benchmarks/MiniPty.Benchmarks.csproj -- --filter "${FILTER}"
+          if [[ "${FILTER}" != "IdleProbe" ]]; then
+            dotnet run -c Release --no-build --no-launch-profile --project ./src/MiniPty.Benchmarks/MiniPty.Benchmarks.csproj -- --filter "${FILTER}"
+          fi
           echo "result=success" >> "$GITHUB_OUTPUT"
         env:
           FILTER: ${{ inputs.benchmark }}
       - name: Check benchmark result
         if: ${{ steps.benchmark.outputs.result != 'success' }}
         run: exit 1
+
+      # What idle shells cost the host process: the README's Scaling table. Each library runs in a process of its own,
+      # after the benchmarks, so it measures the same runner. The CSV goes beside the BenchmarkDotNet reports, where the
+      # artifact and the README update pick it up.
+      - name: idle probe
+        if: ${{ inputs.benchmark == '*' || inputs.benchmark == 'IdleProbe' }}
+        shell: bash
+        run: |
+          results=BenchmarkDotNet.Artifacts/results
+          mkdir -p "${results}"
+          report="${results}/MiniPty.Benchmarks.IdleProbe-report.csv"
+          sessions=1000
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            # macOS allows kern.tty.ptmx_max PTYs on the whole machine: 511 by default, 999 at most, set by root.
+            sudo sysctl -w kern.tty.ptmx_max=999
+            sessions=900
+          fi
+
+          probe() {
+            dotnet run -c Release --no-build --no-launch-profile --project ./src/MiniPty.Benchmarks/MiniPty.Benchmarks.csproj -- \
+              --idle-probe --library "$1" --sessions "$2" --ready-seconds 120 --report "${report}" | tee -a "${RUNNER_TEMP}/idle-probe.md"
+          }
+          probe minipty "${sessions}"
+          probe porta "${sessions}"
+          probe porta-async "${sessions}"
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            # Thousands of sessions where the runner has the memory for them: on Windows each one also starts a console
+            # host process, and macOS caps PTYs below 1,000.
+            probe minipty 3000
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f #v7.0.0
@@ -95,6 +128,13 @@ jobs:
             echo "$content" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
           done
+
+          if [[ -f "${RUNNER_TEMP}/idle-probe.md" ]]; then
+            echo "## IdleProbe" >> "$GITHUB_STEP_SUMMARY"
+            # Each probe prints a heading line and a table; a blank line keeps the heading out of the table.
+            awk '/^Idle probe:/ { print ""; print $0; print ""; next } { print }' "${RUNNER_TEMP}/idle-probe.md" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   update-readme:
     name: update README benchmark tables

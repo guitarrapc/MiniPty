@@ -8,7 +8,7 @@ namespace MiniPty.Benchmarks;
 
 /// <summary>
 /// What many idle shells cost the process that hosts them: an opt-in probe, not a BenchmarkDotNet benchmark.
-/// <c>dotnet run -c Release --project src/MiniPty.Benchmarks -- --idle-probe [--library minipty|porta|porta-async] [--sessions N] [--idle-seconds N] [--ready-seconds N]</c>.
+/// <c>dotnet run -c Release --project src/MiniPty.Benchmarks -- --idle-probe [--library minipty|porta|porta-async] [--sessions N] [--idle-seconds N] [--ready-seconds N] [--report path.csv]</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -32,6 +32,10 @@ namespace MiniPty.Benchmarks;
 /// thread-pool thread: with Porta.Pty's default options every pending read holds one, and the pool adds threads
 /// slowly. Sessions that have shown no output after <c>--ready-seconds</c> are reported, and the measurement is taken
 /// anyway, since that delay is part of what a host sees.
+/// </para>
+/// <para>
+/// <c>--report</c> appends the run to a CSV file as well. The benchmark workflow writes it beside the BenchmarkDotNet
+/// reports, and the README's Scaling table comes from it.
 /// </para>
 /// </remarks>
 internal static class IdleProbe
@@ -111,7 +115,80 @@ internal static class IdleProbe
             $"{baseline.Heap / 1048576.0:F2}->{idle.Heap / 1048576.0:F2} | " +
             $"{quiet.CpuMs / idleSeconds:F1}->{waiting.CpuMs / idleSeconds:F1} | {quiet.WorkItems / (double)idleSeconds:F1}->{waiting.WorkItems / (double)idleSeconds:F1} | " +
             $"{quiet.Allocated}->{waiting.Allocated} | {disposeSeconds:F1} |"));
+
+        var report = Option(args, "report", "");
+        if (report.Length != 0)
+        {
+            AppendReport(report,
+            [
+                ("Method", serveLibrary.ToString()),
+                ("Sessions", Invariant(sessions)),
+                ("ReadySeconds", Invariant(readySeconds)),
+                ("StartSeconds", Invariant(startSeconds, "F1")),
+                ("PromptsShown", Invariant(shown)),
+                ("PromptsSeconds", Invariant(shownSeconds, "F1")),
+                ("ThreadsBefore", Invariant(baseline.Threads)),
+                ("ThreadsAfter", Invariant(idle.Threads)),
+                ("PoolThreadsBefore", Invariant(baseline.PoolThreads)),
+                ("PoolThreadsAfter", Invariant(idle.PoolThreads)),
+                ("HandlesBefore", Invariant(baseline.Handles)),
+                ("HandlesAfter", Invariant(idle.Handles)),
+                ("WorkingSetBeforeMiB", Invariant(baseline.WorkingSet / 1048576.0, "F1")),
+                ("WorkingSetAfterMiB", Invariant(idle.WorkingSet / 1048576.0, "F1")),
+                ("WorkingSetGrowthMiB", Invariant((idle.WorkingSet - baseline.WorkingSet) / 1048576.0, Signed)),
+                ("PrivateGrowthMiB", OperatingSystem.IsWindows() ? Invariant((idle.PrivateBytes - baseline.PrivateBytes) / 1048576.0, Signed) : ""),
+                ("HeapGrowthMiB", Invariant((idle.Heap - baseline.Heap) / 1048576.0, Signed)),
+                ("QuietCpuMsPerSec", Invariant(quiet.CpuMs / idleSeconds, "F1")),
+                ("IdleCpuMsPerSec", Invariant(waiting.CpuMs / idleSeconds, "F1")),
+                ("QuietWorkItemsPerSec", Invariant(quiet.WorkItems / (double)idleSeconds, "F1")),
+                ("IdleWorkItemsPerSec", Invariant(waiting.WorkItems / (double)idleSeconds, "F1")),
+                ("QuietAllocatedBytes", Invariant(quiet.Allocated)),
+                ("IdleAllocatedBytes", Invariant(waiting.Allocated)),
+                ("DisposeSeconds", Invariant(disposeSeconds, "F1")),
+                ("Os", RuntimeInformation.OSDescription),
+                ("Runtime", RuntimeInformation.FrameworkDescription),
+                ("LogicalCpus", Invariant(Environment.ProcessorCount)),
+            ]);
+        }
+
         return 0;
+    }
+
+    // A growth keeps its sign, so a cell reads "+7.9" or "-0.3" as written.
+    private const string Signed = "+0.0;-0.0;0.0";
+
+    private static string Invariant(long value) => value.ToString(CultureInfo.InvariantCulture);
+
+    private static string Invariant(double value, string format) => value.ToString(format, CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Appends one row to the CSV report of <c>--report</c>, with a header line when the file is new. The row starts with a
+    /// Method column, as a BenchmarkDotNet CSV report does, so <c>scripts/UpdateReadmeBenchmarks.cs</c> reads it with the
+    /// parser it uses for those reports. A field with a comma or a quote is quoted, and a quote in it is doubled.
+    /// </summary>
+    private static void AppendReport(string path, (string Name, string Value)[] fields)
+    {
+        var text = new System.Text.StringBuilder();
+        if (!File.Exists(path) || new FileInfo(path).Length == 0)
+        {
+            for (var i = 0; i < fields.Length; i++)
+                text.Append(i == 0 ? "" : ",").Append(fields[i].Name);
+            text.Append('\n');
+        }
+
+        for (var i = 0; i < fields.Length; i++)
+        {
+            var value = fields[i].Value;
+            if (i != 0)
+                text.Append(',');
+            if (value.Contains(',') || value.Contains('"'))
+                text.Append('"').Append(value.Replace("\"", "\"\"", StringComparison.Ordinal)).Append('"');
+            else
+                text.Append(value);
+        }
+
+        text.Append('\n');
+        File.AppendAllText(path, text.ToString());
     }
 
     /// <summary>What the process does over an idle window in which the probe only sleeps.</summary>

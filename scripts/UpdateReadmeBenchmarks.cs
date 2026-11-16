@@ -12,8 +12,10 @@
 //
 //     <!-- benchmark:<name>:start -->  ...  <!-- benchmark:<name>:end -->
 //
-// The prose around the markers is left alone. The benchmark workflow runs this after a full run and commits the
-// result; run it locally on a downloaded run the same way:
+// The prose around the markers is left alone. The Scaling table comes from the idle probe's CSV report
+// (MiniPty.Benchmarks.IdleProbe-report.csv), which the workflow writes beside the BenchmarkDotNet reports; it starts with a
+// Method column, so the same parser reads it. The benchmark workflow runs this after a full run and commits the result;
+// run it locally on a downloaded run the same way:
 //
 //     gh run download <run id> -D <dir>
 //     dotnet run scripts/UpdateReadmeBenchmarks.cs -- --artifacts <dir> --run-url https://github.com/<owner>/<repo>/actions/runs/<run id>
@@ -125,6 +127,14 @@ static class BenchmarkTables
     // src/MiniPty.Benchmarks); the tables quote the whole runner.
     private static readonly (string Column, string Value) WholeRunner = ("Job", "AllCpus");
 
+    // The idle probe's libraries in table order (its Method column), with the names the README gives them.
+    private static readonly (string Method, string Name)[] IdleLibraries =
+    [
+        ("MiniPty", "`MiniPty`"),
+        ("PortaPty", "`PortaPty`"),
+        ("PortaPtyAsyncIo", "`PortaPty`, `UseAsyncIo`"),
+    ];
+
     public static List<(string Name, List<string> Lines)> Build(Options options)
     {
         var runtimes = new SortedSet<string>(StringComparer.Ordinal);
@@ -133,6 +143,7 @@ static class BenchmarkTables
         var throughput = new List<string[]>();
         var startup = new List<string[]>();
         var startupHostMemory = new List<string[]>();
+        var scaling = new List<string[]>();
 
         foreach (var runner in Runners)
         {
@@ -187,6 +198,33 @@ static class BenchmarkTables
                 $"{empty["Mean"]} / {empty["Allocated"]}",
                 $"{large["Mean"]} / {large["Allocated"]}",
             ]);
+
+            report = Report.Load(ReportPath(results, "IdleProbe", ".csv"));
+            foreach (var (method, name) in IdleLibraries)
+            {
+                var rows = report.Rows.FindAll(row => row["Method"] == method);
+                if (rows.Count == 0)
+                    throw new InvalidDataException($"No {method} row in {report.Path}.");
+
+                // A runner can run a library at more than one size (Linux also runs MiniPty with 3,000 sessions).
+                rows.Sort((a, b) => Sessions(a).CompareTo(Sessions(b)));
+                foreach (var row in rows)
+                {
+                    scaling.Add([
+                        runner.Name,
+                        name,
+                        row["Sessions"],
+                        row["PromptsShown"] == row["Sessions"]
+                            ? $"{row["PromptsSeconds"]} s"
+                            : $"{row["PromptsShown"]} of {row["Sessions"]} after {row["ReadySeconds"]} s",
+                        $"{row["ThreadsBefore"]} → {row["ThreadsAfter"]}",
+                        $"{row["WorkingSetGrowthMiB"]} MiB",
+                        $"{row["HeapGrowthMiB"]} MiB",
+                        $"{row["IdleCpuMsPerSec"]} ms/s",
+                        $"{row["IdleAllocatedBytes"]} B",
+                    ]);
+                }
+            }
         }
 
         var run = new List<string>
@@ -196,6 +234,13 @@ static class BenchmarkTables
         };
         run.AddRange(machines);
 
+        var idle = new List<string>
+        {
+            $"The idle probe ran after the benchmarks in [run {options.RunId}]({options.RunUrl}), on the same runners:",
+            "",
+        };
+        idle.AddRange(Table(["Runner", "Library", "Sessions", "All prompts shown", "Threads", "Working set", "Managed heap", "Idle CPU", "Idle allocations"], scaling));
+
         return
         [
             ("run", run),
@@ -203,8 +248,14 @@ static class BenchmarkTables
             ("throughput", Table(["Runner", "`ConPty`", "`MiniPty` MiB/s", "`PortaPty` MiB/s", "Allocated (`MiniPty` / `PortaPty`)"], throughput)),
             ("startup", Table(["Runner", "`Session_Exit0_WaitForExit` Mean / Allocated", "`Session_Echo_Bytes` Mean / Allocated"], startup)),
             ("startup-host-memory", Table(["Runner", "`HostResidentMiB` 0: Mean / Allocated", "`HostResidentMiB` 2048: Mean / Allocated"], startupHostMemory)),
+            ("scaling", idle),
         ];
     }
+
+    private static int Sessions(Row row) =>
+        int.TryParse(row["Sessions"], NumberStyles.None, CultureInfo.InvariantCulture, out var sessions)
+            ? sessions
+            : throw new InvalidDataException($"Sessions is not a count: '{row["Sessions"]}'.");
 
     private static string ReportPath(string results, string benchmark, string suffix)
     {

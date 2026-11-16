@@ -118,6 +118,10 @@ Scaling is what MiniPty performs efficiently. Threads in the host process stay a
 
 ![image](https://raw.githubusercontent.com/guitarrapc/MiniPty/main/assets/scaling-threads.svg)
 
+<!-- benchmark:scaling:start -->
+
+These numbers are from one local run on 2026-11-16. The next full benchmark run replaces them with the numbers from CI.
+
 - Windows: AMD Ryzen 9 7950X3D, 32 logical CPUs, Windows 11, .NET 10.0.15
 - Linux: WSL 2 with Ubuntu 24.04 on the same machine, 8 logical CPUs, .NET 10.0.15
 - macOS was not measured.
@@ -133,9 +137,12 @@ Scaling is what MiniPty performs efficiently. Threads in the host process stay a
 | Linux | `PortaPty` | 1,000 | 288 of 1,000 after 180 s | 14 → 1,347 | +88.5 MiB | +5.7 MiB | 1.7 ms/s | 51,024 B |
 | Linux | `PortaPty`, `UseAsyncIo` | 1,000 | 1.5 s | 16 → 16 | +59.8 MiB | +5.0 MiB | 0 ms/s | 0 B |
 
-- Threads counts all the threads of the process, before the first session and with all sessions open. MiniPty adds no thread per session. Its few more threads are thread-pool threads from the start of the sessions. In two other runs of 1,000 sessions on Windows, the count ended at 14 and 16.
-- All prompts shown is the time from the first start until the last session shows its prompt. With its default options, Porta.Pty serves each pending `ReadAsync` on a thread-pool thread, as its `UseAsyncIo` documentation says. On Linux it also starts a watcher thread for each child. The pool adds threads slowly, so most sessions had not shown a prompt after 180 seconds. With `UseAsyncIo = true`, Porta.Pty holds no thread per session either. MiniPty needs no such option ([Coming from Porta.Pty](#coming-from-portapty)).
-- `Working set` and `Managed heap` are the growth of the host process. On Windows each session also has a console host process (`conhost.exe`) beside the shell, which the table does not count. At 3,000 sessions the machine had about 13 GB less free memory, most of it in those processes.
+<!-- benchmark:scaling:end -->
+
+- Sessions is 1,000 on Linux and Windows. Linux also runs MiniPty with 3,000. macOS allows at most 999 PTYs on the whole machine (`kern.tty.ptmx_max`, 511 by default). So the workflow sets the limit to 999 and runs 900 sessions there.
+- Threads counts all the threads of the process, before the first session and with all sessions open. MiniPty adds no thread per session. Its few more threads are thread-pool threads from the start of the sessions.
+- All prompts shown is the time from the first start until the last session shows its prompt. With its default options, Porta.Pty serves each pending `ReadAsync` on a thread-pool thread, as its `UseAsyncIo` documentation says. On Linux and macOS it also starts a watcher thread for each child. The pool adds threads slowly, so most sessions had not shown a prompt when the probe stopped waiting. With `UseAsyncIo = true`, Porta.Pty holds no thread per session either. MiniPty needs no such option ([Coming from Porta.Pty](#coming-from-portapty)).
+- `Working set` and `Managed heap` are the growth of the host process. On Windows each session also has a console host process (`conhost.exe`) beside the shell, which the table does not count. In a local run with 3,000 sessions on Windows, the machine had about 13 GB less free memory, most of it in those processes.
 
 To confirm on your machine, run the following command. Use `--library porta` or `--library porta-async` to measure Porta.Pty.
 
