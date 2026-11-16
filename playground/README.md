@@ -49,7 +49,7 @@ Below the numbers, four cards show what MiniPty does for an app:
 - browser terminals that survive a web server restart
 - thousands of shells in one process
 
-Each one is a feature that Porta.Pty 2.2.3 does not have, but the page names no other library. An earlier card named Porta.Pty, and it was too direct. The page does not list the process tree kill on Windows, because Porta.Pty also has it. The link in the password item plays that scene from a Linux or macOS recording, because `InputMode` is null on Windows.
+Each one is a feature that Porta.Pty does not have, but the page names no other library. Porta.Pty holds no thread per session only with `UseAsyncIo`, so the card on thousands of shells claims the default, not the ability. An earlier card named Porta.Pty, and it was too direct. The page does not list the process tree kill, because Porta.Pty also has it. The link in the password item plays that scene from a Linux or macOS recording, because `InputMode` is null on Windows.
 
 "Use MiniPty" shows the package, the samples, and [scenetake](https://github.com/guitarrapc/scenetake) for people who want to record their own CLI. MiniPty does not write recording files. scenetake writes `.cast`, SVG, and MP4 files, and uses MiniPty for its `pty: true` steps.
 

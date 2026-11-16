@@ -514,9 +514,7 @@ dotnet publish samples/SingleFiles/Session.cs -c Release -r linux-x64 --self-con
 
 ## Coming from Porta.Pty
 
-[Porta.Pty](https://github.com/tomlm/Porta.Pty) 2.2.3 and MiniPty do the same core work. Both start a real PTY on Windows, Linux, and macOS, and both work with NativeAOT. Both report the signal that ended the child, and both can start a child without the parent's environment. Speed depends on the runner, and neither library leads on all of them ([Performance](#performance)).
-
-Each Porta.Pty call and its MiniPty equivalent:
+[Porta.Pty](https://github.com/tomlm/Porta.Pty) and MiniPty do the same core work. Both start a real PTY on Windows, Linux, and macOS, and both work with NativeAOT. Both report the signal that ended the child, and both can start a child without the parent's environment. Speed depends on the runner, and neither library leads on all of them ([Performance](#performance)).
 
 | Porta.Pty | MiniPty |
 |---|---|
@@ -529,12 +527,12 @@ Each Porta.Pty call and its MiniPty equivalent:
 | `InheritEnvironment` | `InheritEnvironment` |
 | `WriterStream.WriteAsync` and `FlushAsync` | `WriteInputAsync(bytes)` or `WriteInputAsync(text)` |
 | `ReaderStream.ReadAsync(buffer)` | `await foreach (var chunk in session.ReadOutputAsync())`, or the `Output` stream |
-| `UseAsyncIo = true` | Not needed. A session that waits for output holds no thread on every OS. |
+| `UseAsyncIo = true`, `SupportsCancellableRead` | Not needed. On every OS a session that waits for output holds no thread, and you can cancel `ReadOutputAsync` with its token. |
 | `Resize(cols, rows)` | `Resize(new PtySize(cols, rows))` |
-| `ProcessExited`, `ExitCode`, `ExitSignal` | `await WaitForExitAsync()` or `ExitStatus`, with `ExitCode` and `Signal` |
+| `ProcessExited`, `ExitCode`, `ExitSignal`, `HasExited` | `await WaitForExitAsync()`, `HasExited`, or `ExitStatus`, with `ExitCode` and `Signal` |
 | `WaitForExit(ms)` | `WaitForExitAsync(cancellationToken)` |
 | `Kill()` | `Kill()`, or `Kill(PtySignal.Terminate)` and the other signals on Unix |
-| `KillAsync(entireProcessTree: true)` | Set `KillProcessTree = true` at start. `Kill()` and disposal then end the tree. On Unix they signal the child's process group, and disposal sends `SIGHUP` first ([Process tree](#process-tree)). |
+| `KillAsync(entireProcessTree, grace)` | Disposal sends `SIGHUP` on Unix, then `SIGKILL` after one second. For another grace, call `Kill(PtySignal.Hangup)`, wait, and call `Kill()`. To end the whole tree, set `KillProcessTree = true` at start: `Kill()` and disposal then end the tree, on Unix through the child's process group ([Process tree](#process-tree)). |
 | `Pid` | `ProcessId` |
 | `Dispose()` | `await DisposeAsync()` or `Dispose()` |
 | The out-of-band ConPTY, used when it is present | [Add the package](#out-of-band-conpty-for-windows) and set `ConPty = ConPtyLibrary.TryLoadFromApplicationDirectory()`. Without `ConPty`, MiniPty uses the in-box ConPTY. |
