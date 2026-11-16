@@ -6,19 +6,16 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- Targets -->
-    <PackageVersion Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" />
-
+    <PackageVersion Include="Microsoft.Windows.Console.ConPTY" Version="1.25.261109001" />
     <!-- Tests -->
-    <PackageVersion Include="Porta.Pty" Version="2.2.3" />
-    <PackageVersion Include="Microsoft.Testing.Platform" Version="2.0.2" />
-    <PackageVersion Include="TUnit" Version="1.12.111" />
+    <PackageVersion Include="Porta.Pty" Version="2.2.4" />
+    <PackageVersion Include="TUnit" Version="1.85.7" />
     <!--
       Out-of-band ConPTY (conpty.dll + OpenConsole.exe) for the Windows tests and samples only. MiniPty itself ships no
       binary and takes no dependency: an application supplies the package and opts in with PtyStartInfo.ConPty. This is
       the version MiniPty is verified against; bumping it runs the out-of-band tests in CI.
     -->
-
     <!-- Benchmark -->
-    <PackageVersion Include="BenchmarkDotNet" Version="0.15.6" />
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
   </ItemGroup>
 </Project>
